@@ -54,7 +54,7 @@ CREATE INGESTOR kafka_notifications
   FROM KAFKA kafka_main
   TOPIC notifications
   OFFSET BY CONSUMER GROUP nervix_consumer
-  MODE ACK SEQUENTIAL
+  MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   DECODE USING notification_codec
   TO notifications
     INHERIT ALL
@@ -124,8 +124,8 @@ output, the branch, and declared materialized state, but not `input` or `message
 CREATE WINDOW PROCESSOR device_summary
   FROM device_measurements
   FILTER WHERE input.value >= 0.0
-  WIDTH 5m
-  STEP 1m
+  WIDTH 5m DURATION
+  STEP 1m DURATION
   BRANCHED BY by_device
   TO device_windows
     SET device_id = branch.device_id,

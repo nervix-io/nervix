@@ -7,7 +7,7 @@ Nervix separates internal runtime schema from wire schema.
 An internal schema describes the typed runtime record:
 
 ```nspl
-CREATE [IF NOT EXISTS] SCHEMA notification (
+CREATE IF NOT EXISTS SCHEMA notification (
   user_id U32,
   created_at DATETIME,
   payload STRING OPTIONAL,
@@ -49,7 +49,7 @@ Wire schemas are either `STRICT` or `LOOSE`. Strict wire schemas reject payload 
 JSON wire schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] WIRE JSON SCHEMA notification_wire MODE STRICT (
+CREATE IF NOT EXISTS WIRE JSON SCHEMA notification_wire MODE STRICT (
   user_id integer,
   created_at string,
   payload string OPTIONAL
@@ -59,7 +59,7 @@ CREATE [IF NOT EXISTS] WIRE JSON SCHEMA notification_wire MODE STRICT (
 CBOR wire schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] WIRE CBOR SCHEMA notification_wire MODE LOOSE (
+CREATE IF NOT EXISTS WIRE CBOR SCHEMA notification_wire MODE LOOSE (
   user_id integer,
   created_at string,
   payload string OPTIONAL
@@ -69,7 +69,7 @@ CREATE [IF NOT EXISTS] WIRE CBOR SCHEMA notification_wire MODE LOOSE (
 AVRO wire schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] WIRE AVRO SCHEMA notification_wire MODE STRICT (
+CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
   user_id LONG,
   created_at STRING,
   payload STRING OPTIONAL
@@ -169,7 +169,7 @@ be recreated against the current schema.
 A codec maps one transport payload format to one internal schema.
 
 ```nspl
-CREATE [IF NOT EXISTS] CODEC notification_codec
+CREATE IF NOT EXISTS CODEC notification_codec
   FROM WIRE JSON SCHEMA notification_wire
   TO SCHEMA notification;
 ```
@@ -178,7 +178,7 @@ Schemaful codecs are type-strict. A JSON `string` wire field does not implicitly
 into an internal `DATETIME` field. Declare the wire conversion explicitly:
 
 ```nspl
-CREATE [IF NOT EXISTS] CODEC notification_codec
+CREATE IF NOT EXISTS CODEC notification_codec
   FROM WIRE JSON SCHEMA notification_wire
   TO SCHEMA notification
   ENCODE created_at AS RFC3339;
@@ -192,12 +192,12 @@ JAQ transformations. An ingestion transformation decodes the resulting JSON obje
 internal schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] CODEC notification_cbor
+CREATE IF NOT EXISTS CODEC notification_cbor
   FROM CBOR
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS ON INGESTION '.';
 
-CREATE [IF NOT EXISTS] CODEC notification_xml
+CREATE IF NOT EXISTS CODEC notification_xml
   FROM XML
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS
@@ -207,7 +207,7 @@ CREATE [IF NOT EXISTS] CODEC notification_xml
 Protobuf codecs compile `.proto` files from an uploaded resource, decode or encode the selected message with `prost-reflect`, and use JAQ to translate between the protobuf JSON view and the internal schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] CODEC notification_proto
+CREATE IF NOT EXISTS CODEC notification_proto
   FROM PROTOBUF
   USING RESOURCE proto_bundle VERSION 1
   CONFIG {'file' = 'notification.proto', 'include' = '.'}
@@ -243,7 +243,7 @@ JAQ-backed codecs must declare a JAQ transform. The concise
 Nervix embeds and summarizes the Nervix-specific boundary:
 
 ```nspl
-CREATE [IF NOT EXISTS] CODEC notification_codec
+CREATE IF NOT EXISTS CODEC notification_codec
   FROM JSON
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS

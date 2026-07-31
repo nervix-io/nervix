@@ -24,13 +24,15 @@ BEGIN;
 CREATE CODEC partner_order_codec
   FROM JSON
   TO SCHEMA order_record
-  WITH JAQ TRANSFORMATIONS ON INGESTION '{
+  WITH JAQ TRANSFORMATIONS ON INGESTION $jaq$
+  {
     order_id: .order.id,
     customer: .order.customer,
     status: .order.state,
     amount: .totals.amount,
     quantity: .totals.quantity
-  }';
+  }
+  $jaq$;
 ```
 
 The explicit `ON INGESTION` direction means this codec decodes but cannot encode. A bidirectional

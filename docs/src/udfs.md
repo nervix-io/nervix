@@ -25,7 +25,7 @@ described on this page, not part of the Roto standard library.
 
 ## Declaration
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] UDF <name>
   WITH ROTO_0_11
   ARGS (<argument> <type> [OPTIONAL], ...)
@@ -74,12 +74,12 @@ builtins, and other call sites:
 
 ```nspl
 CREATE JUNCTION scoring FROM raw_events
+  UNBRANCHED
   TO scored_events
     SET band = udf::risk_band(message.score)
     WHERE udf::risk_band(message.score) != 'normal'
     FLUSH IMMEDIATE
-    ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG;
+    ON MESSAGE ERROR LOG;
 ```
 
 The NSPL compiler validates exact arity and types when the consuming model is created. Use an

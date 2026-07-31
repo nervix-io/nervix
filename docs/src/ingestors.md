@@ -8,12 +8,12 @@ A typical ingestor:
 CREATE BRANCH by_user
   SCHEMA user_branch TTL 5m;
 
-CREATE [IF NOT EXISTS] INGESTOR kafka_notifications
+CREATE IF NOT EXISTS INGESTOR kafka_notifications
   FROM KAFKA kafka_main
   TOPIC notifications
   OFFSET BY CONSUMER GROUP nervix_consumer
   INSTANCES 1
-  MODE ACK SEQUENTIAL
+  MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   DECODE USING notification_codec
   TIMESTAMP NOW
   TO notifications
@@ -61,7 +61,7 @@ flush policy.
 
 `ALTER INGESTOR` applies one or more comma-separated operations in written order:
 
-```nspl
+```nspl,ignore
 ALTER INGESTOR <ingestor>
     SET FROM <full source clause>
   | SET DECODE USING <codec>
@@ -125,7 +125,7 @@ Ingestors may declare an optional arrival filter and per-route construction clau
 CREATE BRANCH by_tenant
   SCHEMA tenant_branch TTL 5m;
 
-CREATE [IF NOT EXISTS] INGESTOR notifications_in
+CREATE IF NOT EXISTS INGESTOR notifications_in
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
   DECODE USING notification_codec
   FILTER WHERE input.active
@@ -213,7 +213,7 @@ The same captured source envelope remains available while a supported ingestor c
 Header values are non-sensitive strings and do not propagate through relays unless explicitly
 assigned to schema-backed fields:
 
-```nspl
+```nspl,ignore
 SET route = read_header(lower(input.route_header))
 WHERE read_header("tenant") = output.tenant
 ```
@@ -227,7 +227,7 @@ For outbound ingestor clients, TLS is configured on the `CLIENT`, not on the `IN
 
 General pattern:
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE <kind>
   MOUNT <tls_resource>
@@ -253,7 +253,7 @@ Transport-specific schemes and keys:
 Example Kafka TLS client:
 
 ```nspl
-CREATE [IF NOT EXISTS] CLIENT kafka_tls
+CREATE IF NOT EXISTS CLIENT kafka_tls
   TYPE KAFKA
   MOUNT dev_tls
   CONFIG {
@@ -266,7 +266,7 @@ CREATE [IF NOT EXISTS] CLIENT kafka_tls
 Example HTTP TLS client:
 
 ```nspl
-CREATE [IF NOT EXISTS] CLIENT http_tls
+CREATE IF NOT EXISTS CLIENT http_tls
   TYPE HTTP
   MOUNT dev_tls
   CONFIG {
@@ -281,7 +281,7 @@ CREATE [IF NOT EXISTS] CLIENT http_tls
 
 ### HTTP Client Polling
 
-```nspl
+```nspl,ignore
 FROM HTTP <client> EVERY <duration>
 ```
 
@@ -290,7 +290,7 @@ FROM HTTP <client> EVERY <duration>
 
 ### Kafka
 
-```nspl
+```nspl,ignore
 FROM KAFKA <client>
 TOPIC <topic>
 OFFSET BY CONSUMER GROUP <group>|DOMAIN
@@ -314,7 +314,7 @@ Offset recovery details:
 
 ### Pulsar
 
-```nspl
+```nspl,ignore
 FROM PULSAR <client>
 TOPIC <topic>
 SUBSCRIPTION <subscription>
@@ -336,7 +336,7 @@ Pulsar TLS currently supports server trust configuration only. Nervix does not y
 
 ### RabbitMQ
 
-```nspl
+```nspl,ignore
 FROM RABBITMQ <client>
 QUEUE <queue>
 INSTANCES <count>
@@ -345,7 +345,7 @@ MODE ACK SEQUENTIAL
 
 ### Redis Pub/Sub
 
-```nspl
+```nspl,ignore
 FROM REDIS PUBSUB <client>
 CHANNEL <channel>
 MODE NO_ACK SEQUENTIAL
@@ -353,7 +353,7 @@ MODE NO_ACK SEQUENTIAL
 
 ### MQTT
 
-```nspl
+```nspl,ignore
 FROM MQTT <client>
 TOPIC <topic-filter>
 [INSTANCES <count>]
@@ -376,7 +376,7 @@ Delivery constraints:
 
 ### NATS
 
-```nspl
+```nspl,ignore
 FROM NATS <client>
 SUBJECT <subject>
 QUEUE GROUP <queue_group>
@@ -389,14 +389,14 @@ are mandatory; use `INSTANCES 1` for a single queue member.
 
 ### ZeroMQ
 
-```nspl
+```nspl,ignore
 FROM ZEROMQ <client>
 MODE NO_ACK SEQUENTIAL
 ```
 
 ### SQS
 
-```nspl
+```nspl,ignore
 FROM SQS <client>
 QUEUE <queue>
 INSTANCES <count>
@@ -405,7 +405,7 @@ MODE ACK SEQUENTIAL
 
 ### Prometheus
 
-```nspl
+```nspl,ignore
 FROM PROMETHEUS <client>
 QUERY '<promql>'
 EVERY <duration>
@@ -415,7 +415,7 @@ Prometheus samples are flattened into JSON before codec decoding.
 
 ### HTTP Endpoints
 
-```nspl
+```nspl,ignore
 FROM ENDPOINT <endpoint> MODE NO_ACK SEQUENTIAL
 ```
 
@@ -426,14 +426,14 @@ Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and 
 TLS is configured on the VHOST itself:
 
 ```nspl
-CREATE [IF NOT EXISTS] VHOST edge api.example.com, ws.example.com
+CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
   WITH TLS tls_bundle;
 ```
 
 or with an explicit pinned resource version:
 
 ```nspl
-CREATE [IF NOT EXISTS] VHOST edge api.example.com, ws.example.com
+CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
   WITH TLS tls_bundle VERSION 3;
 ```
 
@@ -445,7 +445,7 @@ The referenced resource bundle must contain:
 
 ### WebSocket Clients
 
-```nspl
+```nspl,ignore
 FROM WEBSOCKETS <client> MODE NO_ACK SEQUENTIAL
 ```
 

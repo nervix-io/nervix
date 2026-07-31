@@ -24,7 +24,7 @@ Set-only output-construction routes have no `message` or `input`.
 Assume the input record contains `x = 2` and `untouched = 9`. Both fields are required `I64`.
 This route constructs an output with `x`, `copied_untouched`, and other required fields:
 
-```nspl
+```nspl,ignore
 INHERIT x
 SET x = message.x + 3,
     copied_untouched = message.untouched,

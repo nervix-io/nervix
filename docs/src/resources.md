@@ -13,7 +13,7 @@ A resource is an uploaded directory tree that is stored and replicated across th
 
 Resources are managed in two phases:
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] RESOURCE <name>;
 UPLOAD RESOURCE <name> VERSION '<local_directory>';
 DESCRIBE RESOURCE <name>;
@@ -67,20 +67,20 @@ Client configs can mount a resource version into a temporary directory at runtim
 
 Declare the mount directly on the client:
 
-```nspl
+```nspl,ignore
 MOUNT <resource_name>
 ```
 
 Inside other client config values, Nervix renders values with a lightweight Jinja-like template language. The mounted resource path is exposed as a template variable named after the mounted resource:
 
-```nspl
+```nspl,ignore
 {{ <resource_name> }}
 ```
 
 Example:
 
 ```nspl
-CREATE [IF NOT EXISTS] CLIENT kafka_tls
+CREATE IF NOT EXISTS CLIENT kafka_tls
   TYPE KAFKA
   MOUNT dev_tls
   CONFIG {
@@ -103,10 +103,10 @@ The general pattern for TLS-enabled external clients is:
 Example:
 
 ```nspl
-CREATE [IF NOT EXISTS] RESOURCE dev_tls;
+CREATE IF NOT EXISTS RESOURCE dev_tls;
 UPLOAD RESOURCE dev_tls VERSION './tls/dev';
 
-CREATE [IF NOT EXISTS] CLIENT redis_tls
+CREATE IF NOT EXISTS CLIENT redis_tls
   TYPE REDIS
   MOUNT dev_tls
   CONFIG {

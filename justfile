@@ -124,9 +124,14 @@ lint: build-web-console proto-lint
 audit:
     cargo audit
 
-validate: fmt lint validate-skill
+validate: fmt lint validate-skill validate-nspl-docs
 
-validate-ci: fmt-check lint validate-skill
+validate-ci: fmt-check lint validate-skill validate-nspl-docs
+
+# Parse every runnable NSPL block in the documentation directly through the parser crate. Syntax
+# synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.
+validate-nspl-docs:
+    cargo test -p nervix-nspl --test documentation -- --nocapture
 
 test-docs:
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"

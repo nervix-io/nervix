@@ -3,7 +3,7 @@
 These functions are available in structured NSPL expressions on ingestors, processors, routes,
 and emitters:
 
-```nspl
+```nspl,ignore
 [INHERIT ...]
 [SET <field> = <expr>, ...]
 [WHERE <expr>]
@@ -54,7 +54,7 @@ for the WASM isolation and memory boundary.
 
 NSPL provides three self-delimited conditional forms:
 
-```nspl
+```nspl,ignore
 IF <bool-condition> THEN <result> ELSE <result> END
 
 CASE
@@ -190,7 +190,7 @@ Regular-expression functions take `STRING` arguments and use Rust regex syntax.
 
 ## Example
 
-```nspl
+```nspl,ignore
 INHERIT ALL EXCEPT raw
 SET normalized = lower(trim(input.raw)),
     observed_at = now(),

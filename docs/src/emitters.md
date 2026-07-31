@@ -5,7 +5,7 @@ Emitters publish relay records to external systems.
 A typical emitter:
 
 ```nspl
-CREATE [IF NOT EXISTS] EMITTER kafka_notifications
+CREATE IF NOT EXISTS EMITTER kafka_notifications
   FROM notifications
   COLLECT FOR 10ms MAX BATCH SIZE 1MiB
   TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
@@ -80,7 +80,7 @@ Branch identity still collapses only after successful publication.
 
 `ALTER EMITTER` applies one or more comma-separated operations in written order:
 
-```nspl
+```nspl,ignore
 ALTER EMITTER <emitter>
     ADD FROM <relay> [WHERE <expr>]
   | DROP FROM <relay>
@@ -125,12 +125,12 @@ Codec emitters are transforming routes. They begin with an empty codec-schema pa
 explicit inheritance and ordered assignment:
 
 ```nspl
-CREATE [IF NOT EXISTS] EMITTER kafka_notifications
+CREATE IF NOT EXISTS EMITTER kafka_notifications
   FROM notifications
   TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
   INHERIT ALL EXCEPT raw, secret
-  INHERIT secret LEAK SENSITIVE
-  SET normalized = lower(input.raw)
+  SET secret = leak_sensitive(input.secret),
+      normalized = lower(input.raw)
   WHERE output.active
   INVOKE write_header("tenant", input.tenant),
          write_header("route", output.normalized)
@@ -150,7 +150,7 @@ explicit `INHERIT field LEAK SENSITIVE`, even when the codec target field is als
 
 Database and object-store direct emitters construct external name-keyed mappings:
 
-```nspl
+```nspl,ignore
 VALUES {
   "tenant" = input.tenant,
   "normalized" = lower(input.action),
@@ -202,7 +202,7 @@ Emitter TLS is configured on the referenced `CLIENT` exactly the same way as ing
 
 Common pattern:
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE <kind>
   MOUNT <tls_resource>
@@ -230,7 +230,7 @@ Transport-specific expectations:
 Example Kafka TLS emitter client:
 
 ```nspl
-CREATE [IF NOT EXISTS] CLIENT kafka_tls
+CREATE IF NOT EXISTS CLIENT kafka_tls
   TYPE KAFKA
   MOUNT dev_tls
   CONFIG {
@@ -244,7 +244,7 @@ CREATE [IF NOT EXISTS] CLIENT kafka_tls
 
 ### Kafka
 
-```nspl
+```nspl,ignore
 TO KAFKA <client> TOPIC <topic>
 ON MESSAGE ERROR LOG
 ON GENERAL ERROR LOG
@@ -253,7 +253,7 @@ FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
 
 ### Pulsar
 
-```nspl
+```nspl,ignore
 TO PULSAR <client> TOPIC <topic>
 ```
 
@@ -269,37 +269,37 @@ Pulsar TLS currently supports server trust configuration only. Nervix does not y
 
 ### RabbitMQ
 
-```nspl
+```nspl,ignore
 TO RABBITMQ <client> QUEUE <queue>
 ```
 
 ### Redis Pub/Sub
 
-```nspl
+```nspl,ignore
 TO REDIS PUBSUB <client> CHANNEL <channel>
 ```
 
 ### MQTT
 
-```nspl
+```nspl,ignore
 TO MQTT <client> TOPIC <topic>
 ```
 
 ### NATS
 
-```nspl
+```nspl,ignore
 TO NATS <client> SUBJECT <subject>
 ```
 
 ### ZeroMQ
 
-```nspl
+```nspl,ignore
 TO ZEROMQ <client>
 ```
 
 ### SQS
 
-```nspl
+```nspl,ignore
 TO SQS <client> QUEUE <queue>
 ```
 
@@ -389,7 +389,7 @@ Postgres emitters use `VALUES` expressions and insert batches with `INSERT ... S
 
 Postgres emitters may include an insert conflict policy before `WITH MAX BATCH`:
 
-```nspl
+```nspl,ignore
 ON CONFLICT ("postgres_user_id") DO UPDATE
 ON CONFLICT ("postgres_user_id") DO NOTHING
 ON CONFLICT DO NOTHING
@@ -430,7 +430,7 @@ MySQL emitters use `VALUES` expressions and insert batches with a multi-row `INS
 
 MySQL emitters may include an insert conflict policy before `WITH MAX BATCH`:
 
-```nspl
+```nspl,ignore
 ON CONFLICT DO UPDATE
 ON CONFLICT DO NOTHING
 ```
@@ -470,7 +470,7 @@ MongoDB emitters use `VALUES` expressions and insert batches with `insert_many`.
 
 MongoDB emitters may include an insert conflict policy before `WITH MAX BATCH`:
 
-```nspl
+```nspl,ignore
 ON CONFLICT ("mongodb_user_id") DO UPDATE
 ON CONFLICT ("mongodb_user_id") DO NOTHING
 ```
@@ -616,7 +616,7 @@ JAQ-native codecs can reshape outbound payloads with `ON EMITTING` before writin
 format:
 
 ```nspl
-CREATE [IF NOT EXISTS] CODEC notification_codec
+CREATE IF NOT EXISTS CODEC notification_codec
   FROM JSON
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS ON EMITTING '{payload: .}';
