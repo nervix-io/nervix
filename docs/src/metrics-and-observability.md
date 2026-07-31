@@ -31,7 +31,7 @@ lifecycle metrics identify the declared branch, not the concrete key.
 Graph metric series use these labels:
 
 - `domain`: owning domain
-- `target_kind`: runtime target kind, such as `RELAY`, `INGESTOR`, `DEDUPLICATOR`, `REINGESTOR`, `WINDOW_PROCESSOR`, `EMITTER`, or `LOOKUP`
+- `target_kind`: runtime target kind, such as `RELAY`, `INGESTOR`, `JUNCTION`, `DEDUPLICATOR`, `REINGESTOR`, `WINDOW_PROCESSOR`, `EMITTER`, or `LOOKUP`
 - `target`: relay or node name
 - `physical_node_id`: Nervix cluster node where the metric was observed
 - `direction`: `received` or `sent`
@@ -97,6 +97,7 @@ Prometheus receives raw values only. The `/metrics` endpoint is encoded by the P
 ```nspl
 DESCRIBE RELAY notifications WHERE (user_id = 42);
 DESCRIBE INGESTOR kafka_notifications;
+DESCRIBE JUNCTION route_notifications;
 DESCRIBE DEDUPLICATOR dedup_txns;
 DESCRIBE REINGESTOR repartition_notifications;
 DESCRIBE WINDOW PROCESSOR latency_window;

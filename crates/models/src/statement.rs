@@ -45,6 +45,7 @@ pub enum Statement {
     DescribeResource(DescribeResource),
     DescribeLookup(DescribeLookup),
     DescribeEndpoint(DescribeEndpoint),
+    DescribeJunction(DescribeJunction),
     DescribeDeduplicator(DescribeDeduplicator),
     DescribeReingestor(DescribeReingestor),
     DescribeCorrelator(DescribeCorrelator),
@@ -93,6 +94,7 @@ impl Statement {
             | Self::DescribeResource(_)
             | Self::DescribeLookup(_)
             | Self::DescribeEndpoint(_)
+            | Self::DescribeJunction(_)
             | Self::DescribeDeduplicator(_)
             | Self::DescribeReingestor(_)
             | Self::DescribeCorrelator(_)
@@ -432,6 +434,11 @@ pub struct DescribeResource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DescribeLookup {
+    pub name: Identifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribeJunction {
     pub name: Identifier,
 }
 

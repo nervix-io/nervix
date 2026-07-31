@@ -136,6 +136,9 @@ When authoring a graph, provide:
 4. A short verification sequence using the relevant `SHOW`, `DESCRIBE`, lookup, or subscription
    commands.
 
+Use `DESCRIBE JUNCTION <junction>;` when the verification should include a junction's stored
+routing contract, scheduled placement, and local edge metrics.
+
 Before returning the configuration, trace every reference to its declaration and check schema,
 branch, construction, flush, error, sensitivity, transaction, and external-provisioning contracts.
 If the public docs do not establish a requested capability, say it is not documented as supported

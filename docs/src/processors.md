@@ -135,6 +135,10 @@ CREATE JUNCTION route_notifications
     ON MESSAGE ERROR LOG;
 ```
 
+`DESCRIBE JUNCTION <junction>` reports the stored inputs, branch and attachment contracts, route
+summaries, scheduled owner and replicas, and local incoming and outgoing edge metrics when those
+metrics exist.
+
 ### Altering Junctions
 
 `ALTER JUNCTION` accepts comma-separated operations and applies them in written order. Input,
