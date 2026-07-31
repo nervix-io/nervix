@@ -2311,6 +2311,9 @@ impl RawTestSession {
                 Some(proto::SessionResponse {
                     event: Some(Event::Domains(_)),
                 }) => {}
+                Some(proto::SessionResponse {
+                    event: Some(Event::Cluster(_)),
+                }) => {}
                 Some(proto::SessionResponse { event: None }) => {}
                 None => {
                     return Err(io::Error::other(
@@ -2357,6 +2360,9 @@ impl RawTestSession {
                         })
                         | Some(proto::SessionResponse {
                             event: Some(Event::Domains(_)),
+                        })
+                        | Some(proto::SessionResponse {
+                            event: Some(Event::Cluster(_)),
                         })
                         | Some(proto::SessionResponse {
                             event: Some(Event::Result(_)),
@@ -2408,6 +2414,9 @@ impl RawTestSession {
                         })
                         | Some(proto::SessionResponse {
                             event: Some(Event::Domains(_)),
+                        })
+                        | Some(proto::SessionResponse {
+                            event: Some(Event::Cluster(_)),
                         })
                         | Some(proto::SessionResponse {
                             event: Some(Event::Result(_)),

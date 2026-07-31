@@ -106,6 +106,12 @@ message DomainList {
   bool response_to_request = 2;
 }
 
+message ClusterSummary {
+  uint64 running_domains = 1;
+  uint64 nodes = 2;
+  uint64 relays = 3;
+}
+
 message UploadResourceStart {
   string name = 1;
   uint64 total_bytes = 2;
@@ -145,5 +151,6 @@ message SessionResponse {
     ServerEvent server = 4;
     DomainSnapshot snapshot = 5;
     DomainList domains = 6;
+    ClusterSummary cluster = 7;
   }
 }

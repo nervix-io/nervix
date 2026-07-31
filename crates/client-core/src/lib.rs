@@ -765,7 +765,8 @@ async fn start_session(
                 }
                 #[cfg(not(feature = "autocomplete"))]
                 Some(proto::session_response::Event::Suggest(_)) => {}
-                Some(proto::session_response::Event::Snapshot(_)) => {}
+                Some(proto::session_response::Event::Snapshot(_))
+                | Some(proto::session_response::Event::Cluster(_)) => {}
                 None => {}
             }
         }

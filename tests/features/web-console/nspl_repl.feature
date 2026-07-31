@@ -331,6 +331,33 @@ Feature: Web console NSPL REPL
     And selector ".metrics-strip" does not exist
     And selector ".summary-metrics" contains "0B"
 
+  Scenario: Web console sidebar reports live cluster totals
+    Given a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA cluster_counter_event ( value STRING );
+      CREATE RELAY cluster_counter_source SCHEMA cluster_counter_event UNBRANCHED;
+      CREATE RELAY cluster_counter_sink SCHEMA cluster_counter_event UNBRANCHED;
+      CREATE JUNCTION cluster_counter_forwarder
+        FROM cluster_counter_source
+        UNBRANCHED
+        TO cluster_counter_sink
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".cluster-row:has-text('running')" contains "0"
+    And selector ".cluster-row:has-text('nodes')" contains "1"
+    And selector ".cluster-row:has-text('relays')" contains "2"
+    When these NSPL commands are executed on the leader node
+      """
+      START;
+      """
+    Then selector ".cluster-row:has-text('running')" contains "1"
+
   Scenario: Web console renders a branched correlator graph without overlaying the REPL
     Given a 1 node nervix cluster is started
     When these NSPL commands are executed on the leader node

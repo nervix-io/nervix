@@ -2731,6 +2731,12 @@ pub struct ActiveGraph {
     indices: HashMap<RegistryKey, NodeIndex>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DataflowGraphCounts {
+    pub nodes: usize,
+    pub relays: usize,
+}
+
 #[cfg(feature = "testing")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerMode {
@@ -2766,6 +2772,32 @@ impl ActiveGraph {
 
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()
+    }
+
+    pub fn dataflow_graph_counts(&self) -> DataflowGraphCounts {
+        let mut nodes = HashSet::<String>::default();
+        let mut relays = HashSet::<String>::default();
+        for node in self
+            .graph
+            .node_weights()
+            .filter(|node| node.is_dataflow_node())
+        {
+            if let ModelKind::Relay = node.kind {
+                relays.insert(node.dataflow_id());
+            } else {
+                nodes.insert(node.dataflow_id());
+            }
+            if let Some(client) = node.dataflow_source_client_node() {
+                nodes.insert(client.id);
+            }
+            if let Some(client) = node.dataflow_sink_client_node() {
+                nodes.insert(client.id);
+            }
+        }
+        DataflowGraphCounts {
+            nodes: nodes.len(),
+            relays: relays.len(),
+        }
     }
 
     pub fn edges(&self) -> Vec<(Identifier, Identifier, EdgeKind)> {
@@ -9535,7 +9567,9 @@ mod tests {
 
     #[cfg(feature = "testing")]
     use super::SchedulerMode;
-    use super::{ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange};
+    use super::{
+        DataflowGraphCounts, ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange,
+    };
 
     fn temp_db_path() -> PathBuf {
         let nanos = SystemTime::now()
@@ -15239,10 +15273,17 @@ mod tests {
             )
             .expect("deduplicator graph should succeed");
 
-        let dataflow_graph = registry
+        let graph = registry
             .active_graph(&domain)
-            .expect("graph should be installed")
-            .to_dataflow_graph(domain.as_str());
+            .expect("graph should be installed");
+        assert_eq!(
+            graph.dataflow_graph_counts(),
+            DataflowGraphCounts {
+                nodes: 3,
+                relays: 2,
+            }
+        );
+        let dataflow_graph = graph.to_dataflow_graph(domain.as_str());
 
         let node_ids = dataflow_graph
             .nodes
