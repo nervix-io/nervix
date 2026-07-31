@@ -152,12 +152,6 @@ pub(super) enum BranchedProcessorOperationSpec {
     },
 }
 
-impl BranchedProcessorOperationSpec {
-    pub(super) fn supports_entity_handoff(&self) -> bool {
-        !matches!(self, Self::WasmProcessor { .. })
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct BranchedProcessorOutputsSpec {
     pub(super) routes: Vec<BranchedProcessorOutputSpec>,

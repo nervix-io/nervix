@@ -25,7 +25,9 @@ pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
 };
 pub use names::{Domain, Identifier, NameError};
-pub use quiesce::{DynamicModelUpdate, ModelChangeAspect, ModelChangeAspects, QuiesceLevel};
+pub use quiesce::{
+    DynamicModelUpdate, ModelChangeAspect, ModelChangeAspects, QuiesceLevel, StatePurge,
+};
 pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteDecodedRecord,
     RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
@@ -45,12 +47,12 @@ pub use statement::{
     AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterEmitter,
     AlterEmitterError, AlterEmitterOperation, AlterGenerator, AlterGeneratorError,
     AlterGeneratorOperation, AlterIngestor, AlterIngestorError, AlterIngestorOperation,
-    AlterJunction, AlterJunctionError, AlterJunctionOperation, AlterProcessorError,
-    AlterProcessorOperation, AlterReingestor, AlterReingestorError, AlterRelay, AlterRelayError,
-    AlterRelayOperation, AlterReorderer, AlterReordererError, AlterReordererOperation,
-    AzureBlobConfigEntry, BranchEviction, BranchSelection, ClickHouseConfigEntry,
-    ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule,
-    CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CordonNode,
+    AlterJunction, AlterJunctionError, AlterProcessorError, AlterProcessorOperation,
+    AlterReingestor, AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation,
+    AlterReorderer, AlterReordererError, AlterReordererOperation, AzureBlobConfigEntry,
+    BranchEviction, BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping,
+    ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+    CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CordonNode,
     CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,

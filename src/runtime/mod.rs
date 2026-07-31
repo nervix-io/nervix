@@ -202,7 +202,9 @@ pub(crate) use state_store::{
     RuntimeStateStore,
 };
 use test_hooks::EmitterFaultMode;
-pub use test_hooks::{EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks};
+pub use test_hooks::{
+    EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks, SchedulePublicationFaultInjector,
+};
 use tls::RustlsClientConfigSource;
 use wasm_state::ReplicatedWasmProcessorState;
 pub(crate) use websocket_signaling::WebsocketSignalingSession;
@@ -2365,20 +2367,11 @@ pub(crate) struct StateSyncAck {
 }
 
 #[derive(Debug, Clone)]
-struct ActiveDomainAlter {
-    level: Arc<RwLock<nervix_models::QuiesceLevel>>,
-}
+struct ActiveDomainAlter;
 
 pub(crate) struct DomainAlterGuard {
     domain: Domain,
     active_domain_alters: Arc<DashMap<Domain, ActiveDomainAlter, RandomState>>,
-    level: Arc<RwLock<nervix_models::QuiesceLevel>>,
-}
-
-impl DomainAlterGuard {
-    pub(crate) fn set_level(&self, level: nervix_models::QuiesceLevel) {
-        *self.level.write() = level;
-    }
 }
 
 impl Drop for DomainAlterGuard {
@@ -2419,6 +2412,7 @@ pub struct Runtime {
     events: broadcast::Sender<RuntimeEvent>,
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
+    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,
@@ -5162,46 +5156,15 @@ impl RelayProcessorNode {
                         }
                         return;
                     }
-                    let input_schema = match relay_schema_for_runtime(
-                        &branch.runtime,
-                        &branch.domain,
-                        match self.input_relays.first() {
-                            Some(input_relay) => input_relay,
-                            None => {
-                                for (_, context) in std::mem::take(ack_map) {
-                                    context.acks.no_ack(format!(
-                                        "wasm processor '{}' has no input relays",
-                                        self.processor.as_str()
-                                    ));
-                                }
-                                return;
-                            }
-                        },
-                    ) {
-                        Ok(schema) => schema,
-                        Err(error) => {
-                            for (_, context) in std::mem::take(ack_map) {
-                                context.acks.no_ack(error.clone());
-                            }
-                            return;
-                        }
+                    let Some(schemas) = wasm_guest_call_schemas(
+                        branch,
+                        &self.processor,
+                        &self.input_relays,
+                        output_routes,
+                        ack_map,
+                    ) else {
+                        return;
                     };
-                    let mut output_schemas = Vec::with_capacity(output_routes.routes.len());
-                    for output in &output_routes.routes {
-                        match relay_schema_for_runtime(
-                            &branch.runtime,
-                            &branch.domain,
-                            &output.relay,
-                        ) {
-                            Ok(schema) => output_schemas.push((output.relay.clone(), schema)),
-                            Err(error) => {
-                                for (_, context) in std::mem::take(ack_map) {
-                                    context.acks.no_ack(error.clone());
-                                }
-                                return;
-                            }
-                        }
-                    }
                     let output_key = branch.key.clone();
                     for timeout in due_timeouts {
                         let outputs = match instance.on_timeout(timeout.handle).await {
@@ -5233,8 +5196,8 @@ impl RelayProcessorNode {
                                 error_policies: &self.error_policies,
                                 output_routes,
                                 input_relays: &self.input_relays,
-                                input_schema: &input_schema,
-                                output_schemas: &output_schemas,
+                                input_schema: &schemas.input,
+                                output_schemas: &schemas.outputs,
                                 key: &output_key,
                                 dispatch_error: "failed to forward timeout output",
                             },
@@ -5266,6 +5229,87 @@ impl RelayProcessorNode {
                     }
                 }
             }
+        })
+    }
+
+    /// Asks a WASM guest to release the output it is still buffering, because the host is
+    /// quiescing this branch for a handoff or shutdown.
+    ///
+    /// Native processors buffer inside runtime-owned route state that the caller force-flushes
+    /// directly; a guest owns its own buffering, so the host has to ask before it can conclude the
+    /// branch has drained.
+    fn flush_guest_buffers<'a>(
+        &'a mut self,
+        graph: &'a SharedActiveGraph,
+        branch: &'a mut BranchRuntime,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let RelayProcessorOperationNode::WasmProcessor {
+                output_routes,
+                instance,
+                ack_map,
+                ..
+            } = &mut self.operation
+            else {
+                return;
+            };
+            let Some(instance) = instance.as_mut() else {
+                return;
+            };
+            if output_routes.routes.is_empty() {
+                return;
+            }
+            let Some(schemas) = wasm_guest_call_schemas(
+                branch,
+                &self.processor,
+                &self.input_relays,
+                output_routes,
+                ack_map,
+            ) else {
+                return;
+            };
+            let outputs = match instance.flush().await {
+                Ok(outputs) => outputs,
+                Err(error) => {
+                    let reason = format!(
+                        "wasm processor '{}' failed quiesce flush: {}",
+                        self.processor.as_str(),
+                        error
+                    );
+                    branch.runtime.handle_general_error_for_acks(
+                        &branch.domain,
+                        self.kind.as_str(),
+                        &self.processor,
+                        &self.error_policies,
+                        ack_map.values().map(|context| &context.acks),
+                        reason,
+                    );
+                    ack_map.clear();
+                    return;
+                }
+            };
+            if outputs.is_empty() {
+                return;
+            }
+            let output_key = branch.key.clone();
+            let _ = dispatch_wasm_output_envelopes(
+                WasmOutputContext {
+                    graph,
+                    branch,
+                    node_kind: self.kind.as_str(),
+                    processor: &self.processor,
+                    error_policies: &self.error_policies,
+                    output_routes,
+                    input_relays: &self.input_relays,
+                    input_schema: &schemas.input,
+                    output_schemas: &schemas.outputs,
+                    key: &output_key,
+                    dispatch_error: "failed to forward quiesce flush output",
+                },
+                outputs,
+                ack_map,
+            )
+            .await;
         })
     }
 
@@ -5310,6 +5354,58 @@ impl RelayProcessorNode {
             .chain(self.operation.output_routes().next_flush())
             .min()
     }
+}
+
+/// The exact relay schemas one WASM guest call encodes against.
+struct WasmGuestCallSchemas {
+    input: Arc<CompiledSchema>,
+    outputs: Vec<(Identifier, Arc<CompiledSchema>)>,
+}
+
+/// Resolves the input and output relay schemas a WASM guest call needs. Returns `None` after
+/// NACKing everything the branch is holding when the graph can no longer describe them.
+fn wasm_guest_call_schemas(
+    branch: &BranchRuntime,
+    processor: &Identifier,
+    input_relays: &[Identifier],
+    output_routes: &RelayProcessorOutputsNode,
+    ack_map: &mut WasmAckMap,
+) -> Option<WasmGuestCallSchemas> {
+    let Some(input_relay) = input_relays.first() else {
+        for (_, context) in std::mem::take(ack_map) {
+            context.acks.no_ack(format!(
+                "wasm processor '{}' has no input relays",
+                processor.as_str()
+            ));
+        }
+        return None;
+    };
+    let input_schema = match relay_schema_for_runtime(&branch.runtime, &branch.domain, input_relay)
+    {
+        Ok(schema) => schema,
+        Err(error) => {
+            for (_, context) in std::mem::take(ack_map) {
+                context.acks.no_ack(error.clone());
+            }
+            return None;
+        }
+    };
+    let mut output_schemas = Vec::with_capacity(output_routes.routes.len());
+    for output in &output_routes.routes {
+        match relay_schema_for_runtime(&branch.runtime, &branch.domain, &output.relay) {
+            Ok(schema) => output_schemas.push((output.relay.clone(), schema)),
+            Err(error) => {
+                for (_, context) in std::mem::take(ack_map) {
+                    context.acks.no_ack(error.clone());
+                }
+                return None;
+            }
+        }
+    }
+    Some(WasmGuestCallSchemas {
+        input: input_schema,
+        outputs: output_schemas,
+    })
 }
 
 fn wasm_instance_next_deadline(
@@ -6091,6 +6187,7 @@ impl BranchRuntime {
                 continue;
             };
             processor.flush_all_collected_inputs(graph, self).await;
+            processor.flush_guest_buffers(graph, self).await;
             let current = graph.load_full();
             processor.refresh(
                 &self.runtime,

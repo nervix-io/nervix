@@ -105,6 +105,10 @@ impl Processor for EvenRowFilter {
         self.flush_pending(ctx)
     }
 
+    fn flush(&mut self, ctx: &mut GuestContext<'_>) -> Result<(), GuestError> {
+        self.flush_pending(ctx)
+    }
+
     fn save_state(&self) -> Vec<u8> {
         let pending = self
             .pending

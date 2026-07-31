@@ -242,19 +242,40 @@ wasm-processor-rust-guest:
         --release
     test -s examples/wasm-processors/rust-guest/target/wasm32-unknown-unknown/release/nervix_wasm_processor_rust_guest.wasm
 
+# DB-IP publishes one City Lite build per month, so the current month is tried first and the
+# previous one is the fallback for the days before a new build appears.
 download-datalake-dbip:
     #!/usr/bin/env bash
     set -euo pipefail
-    url="https://download.db-ip.com/free/dbip-city-lite-2026-06.mmdb.gz"
-    destination="examples/datalake/geo-wasm-guest/dbip-city-lite-2026-06.mmdb.gz"
+    destination="examples/datalake/geo-wasm-guest/dbip-city-lite.mmdb.gz"
     if [[ -s "${destination}" ]]; then
         exit 0
     fi
+    year="$(date -u +%Y)"
+    month="$(date -u +%m)"
+    months=()
+    for _ in 1 2; do
+        months+=("${year}-${month}")
+        if [[ "${month}" == "01" ]]; then
+            year="$((10#${year} - 1))"
+            month="12"
+        else
+            month="$(printf '%02d' "$((10#${month} - 1))")"
+        fi
+    done
     mkdir -p "$(dirname "${destination}")"
     tmp="$(mktemp "${destination}.tmp.XXXXXX")"
     trap 'rm -f "${tmp}"' EXIT
-    curl -L --proto '=https' --tlsv1.2 -sSf "${url}" -o "${tmp}"
-    mv "${tmp}" "${destination}"
+    for release in "${months[@]}"; do
+        url="https://download.db-ip.com/free/dbip-city-lite-${release}.mmdb.gz"
+        if curl -L --proto '=https' --tlsv1.2 -sSf "${url}" -o "${tmp}"; then
+            echo "downloaded DB-IP City Lite ${release}"
+            mv "${tmp}" "${destination}"
+            exit 0
+        fi
+    done
+    echo "no DB-IP City Lite build available for ${months[*]}" >&2
+    exit 1
 
 wasm-datalake-geo-guest: download-datalake-dbip
     #!/usr/bin/env bash

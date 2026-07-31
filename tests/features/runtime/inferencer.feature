@@ -125,7 +125,7 @@ Feature: Inferencer resources
     Examples:
       | cluster_size | replica_count | vector_type   | score_type    | model_file        | input_tensor | output_tensor | input_dimensions | output_dimensions | tensor_type       | expected_error                       |
       | 1            | 0             | ARRAY<F32, 3> | ARRAY<F32, 1> | simple_score.onnx | features     | score         | 3                | 1                 | DENSE TENSOR<F32> | incompatible shape                   |
-      | 1            | 0             | ARRAY<F32, 2> | ARRAY<F32, 1> | simple_score.onnx | features     | score         | 1, 2             | 1                 | DENSE TENSOR<F32> | incompatible shape                   |
+      | 1            | 0             | ARRAY<F32, 2> | ARRAY<F32, 1> | simple_score.onnx | features     | score         | 1, 2             | 1                 | DENSE TENSOR<F32> | incompatible schema relationship     |
       | 1            | 0             | ARRAY<F64, 2> | ARRAY<F32, 1> | simple_score.onnx | features     | score         | 2                | 1                 | DENSE TENSOR<F32> | incompatible schema relationship     |
       | 1            | 0             | ARRAY<F32, 2> | ARRAY<F32, 2> | f64_score.onnx    | features     | score         | 2                | 2                 | DENSE TENSOR<F32> | incompatible element type            |
       | 1            | 0             | ARRAY<F32, 2> | ARRAY<F32, 1> | simple_score.onnx | missing      | score         | 2                | 1                 | DENSE TENSOR<F32> | missing ONNX input tensor 'missing'  |

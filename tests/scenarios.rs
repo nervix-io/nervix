@@ -2147,6 +2147,7 @@ fn malformed_output_wasm_fixture() -> &'static [u8] {
         global.set $emitted
         i32.const 0)
       (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+      (func (export "nervix_flush") (result i32) (i32.const 0))
       (func (export "nervix_read_emit") (result i32)
         global.get $emitted
         if (result i32)
@@ -2198,6 +2199,7 @@ fn uninitialized_output_wasm_fixture(output_relay: &str) -> Vec<u8> {
             global.set $emitted
             i32.const 0)
           (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+          (func (export "nervix_flush") (result i32) (i32.const 0))
           (func (export "nervix_read_emit") (result i32)
             global.get $emitted
             if (result i32)
@@ -2232,6 +2234,7 @@ fn trapping_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_process_batch") (param i32 i32) (result i32)
         unreachable)
       (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+      (func (export "nervix_flush") (result i32) (i32.const 0))
       (func (export "nervix_read_emit") (result i32) (i32.const 0))
       (func (export "nervix_dump_state") (result i32) (i32.const 0))
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
@@ -2488,6 +2491,14 @@ async fn then_last_authentication_attempts_take_at_least(
         min_duration,
         elapsed
     );
+}
+
+#[when(expr = "the next schedule publication for domain {string} fails")]
+async fn when_next_schedule_publication_fails(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .cluster()
+        .fail_next_schedule_publication_on_all_nodes(&domain);
 }
 
 #[when(expr = "emitter {string} enters fault mode")]
