@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use ahash::RandomState;
 use dashmap::DashMap;
-use nervix_models::Identifier;
+use nervix_models::{Domain, Identifier};
 use tokio::sync::broadcast;
 use triomphe::Arc;
 
@@ -16,6 +16,13 @@ pub struct IngestorFaultInjector {
     ingestors: DashMap<String, (), RandomState>,
 }
 
+/// Fails the next schedule publication for a domain so tests can observe how a committed model
+/// mutation recovers when the new schedule never reaches the cluster.
+#[derive(Debug, Default)]
+pub struct SchedulePublicationFaultInjector {
+    domains: DashMap<String, (), RandomState>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EmitterFaultMode {
     Fail,
@@ -26,6 +33,7 @@ pub(super) enum EmitterFaultMode {
 pub struct RuntimeTestHooks {
     pub emitter_faults: Arc<EmitterFaultInjector>,
     pub ingestor_faults: Arc<IngestorFaultInjector>,
+    pub schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
     pub domain_drain_timeout: Option<Duration>,
     pub entity_gate_deadline: Option<Duration>,
@@ -44,6 +52,7 @@ impl Default for RuntimeTestHooks {
         Self {
             emitter_faults: Arc::default(),
             ingestor_faults: Arc::default(),
+            schedule_publication_faults: Arc::default(),
             branch_instance_expiration_scan_interval: None,
             domain_drain_timeout: None,
             entity_gate_deadline: None,
@@ -73,6 +82,20 @@ impl IngestorFaultInjector {
     pub(super) fn is_failed(&self, ingestor: &Identifier) -> bool {
         self.ingestors
             .contains_key(&ingestor.as_str().to_ascii_lowercase())
+    }
+}
+
+impl SchedulePublicationFaultInjector {
+    pub fn fail_next_publication(&self, domain: &str) {
+        self.domains.insert(domain.to_ascii_lowercase(), ());
+    }
+
+    /// Consumes an armed fault so the rollback republication that follows a failed publication can
+    /// still reach the cluster.
+    pub(crate) fn take_armed_fault(&self, domain: &Domain) -> bool {
+        self.domains
+            .remove(&domain.as_str().to_ascii_lowercase())
+            .is_some()
     }
 }
 

@@ -3,35 +3,34 @@ use std::fmt::{Display, Formatter};
 use crate::{
     AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
-    AlterJunctionOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
-    AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
-    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
-    AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection,
-    ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding, CodecEncodingRule,
-    CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
-    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, EmitSink,
-    EndpointIngestMode, EndpointType, Expression, FieldScope, GcsConfigEntry, GeneralErrorPolicy,
-    HttpConfigEntry, IcebergCatalog, Identifier, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
-    Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-    Literal, MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry,
-    NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry,
-    PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
-    RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry,
-    SchemaField, SentryConfigEntry, SqsConfigEntry, SqsIngestMode, UnaryOperator,
-    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaDefinition,
-    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
+    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+    AlterWireSchemaOperation, AssignmentTargetScope, AvroType, AzureBlobConfigEntry,
+    BinaryOperator, BranchEviction, BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping,
+    CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecWireFormat,
+    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
+    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
+    CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+    CreateWireSchema, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
+    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
+    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
+    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
+    NatsConfigEntry, NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
+    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
+    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RetryPolicy,
+    RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry, SqsConfigEntry,
+    SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
+    WireSchemaDefinition, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
@@ -485,7 +484,7 @@ impl AlterJunction {
         let operations = self
             .operations
             .iter()
-            .map(alter_junction_operation_to_nspl)
+            .map(alter_processor_operation_to_nspl)
             .collect::<Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
         Ok(format!(
@@ -1742,73 +1741,6 @@ fn schema_field_to_nspl(field: &SchemaField) -> Result<String, CanonicalNsplErro
         optional_suffix(field.optional),
         sensitive_suffix(field.sensitive)
     ))
-}
-
-fn alter_junction_operation_to_nspl(
-    operation: &AlterJunctionOperation,
-) -> Result<String, CanonicalNsplError> {
-    match operation {
-        AlterJunctionOperation::AddFrom {
-            relay,
-            where_clause,
-        } => Ok(format!(
-            "ADD FROM {}{}",
-            relay.as_str(),
-            where_clause
-                .as_ref()
-                .map(|expression| Ok(format!(" WHERE {}", expression_to_nspl(expression)?)))
-                .transpose()?
-                .unwrap_or_default()
-        )),
-        AlterJunctionOperation::DropFrom { relay } => Ok(format!("DROP FROM {}", relay.as_str())),
-        AlterJunctionOperation::AlterFromSetWhere {
-            relay,
-            where_clause,
-        } => Ok(format!(
-            "ALTER FROM {} SET WHERE {}",
-            relay.as_str(),
-            expression_to_nspl(where_clause)?
-        )),
-        AlterJunctionOperation::AlterFromDropWhere { relay } => {
-            Ok(format!("ALTER FROM {} DROP WHERE", relay.as_str()))
-        }
-        AlterJunctionOperation::SetCollect { policy } => {
-            Ok(format!("SET {}", collect_policy_to_nspl(policy)))
-        }
-        AlterJunctionOperation::DropCollect => Ok("DROP COLLECT".to_string()),
-        AlterJunctionOperation::SetFilterWhere { where_clause } => Ok(format!(
-            "SET FILTER WHERE {}",
-            expression_to_nspl(where_clause)?
-        )),
-        AlterJunctionOperation::DropFilterWhere => Ok("DROP FILTER WHERE".to_string()),
-        AlterJunctionOperation::SetMode { mode } => Ok(format!("SET {}", mode.as_ref())),
-        AlterJunctionOperation::SetBranching { branching } => {
-            Ok(format!("SET {}", branch_selection_to_nspl(branching)))
-        }
-        AlterJunctionOperation::AddMaterializedState { dependency } => Ok(format!(
-            "ADD MATERIALIZED STATE {} {}",
-            dependency.relay.as_str(),
-            materialized_state_policy_to_nspl(&dependency.policy)?
-        )),
-        AlterJunctionOperation::DropMaterializedState { relay } => {
-            Ok(format!("DROP MATERIALIZED STATE {}", relay.as_str()))
-        }
-        AlterJunctionOperation::AlterMaterializedState { relay, policy } => Ok(format!(
-            "ALTER MATERIALIZED STATE {} SET {}",
-            relay.as_str(),
-            materialized_state_policy_to_nspl(policy)?
-        )),
-        AlterJunctionOperation::AddRoute { route } => {
-            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
-        }
-        AlterJunctionOperation::DropRoute { relay } => {
-            Ok(format!("DROP ROUTE TO {}", relay.as_str()))
-        }
-        AlterJunctionOperation::ReplaceRoute { route } => Ok(format!(
-            "REPLACE ROUTE {}",
-            processor_output_to_nspl(route)?
-        )),
-    }
 }
 
 fn alter_deduplicator_operation_to_nspl(

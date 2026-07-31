@@ -33,6 +33,20 @@ pub trait Processor: Sized {
         Ok(())
     }
 
+    /// Releases everything the processor is still holding because the host is quiescing this
+    /// branch, either to hand it to a replacement node or to shut it down.
+    ///
+    /// Emit every buffered output envelope through [`GuestContext::emit`]. Any input the
+    /// processor keeps beyond this call stays unacknowledged until the branch resumes, so a
+    /// processor that buffers input has to emit it here rather than wait for more. State that
+    /// survives the handoff belongs in [`Processor::save_state`], which the host calls next.
+    ///
+    /// The default is correct only for processors that never buffer between calls.
+    fn flush(&mut self, ctx: &mut GuestContext<'_>) -> Result<(), GuestError> {
+        let _ = ctx;
+        Ok(())
+    }
+
     /// Serializes processor-owned state. The bytes are persisted opaquely
     /// inside the guest snapshot and handed back to [`Processor::restore`].
     fn save_state(&self) -> Vec<u8> {

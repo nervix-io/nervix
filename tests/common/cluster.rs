@@ -28,7 +28,10 @@ use nervix_server::SchedulerMode;
 use nervix_server::{
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
-    runtime::{DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks},
+    runtime::{
+        DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks,
+        SchedulePublicationFaultInjector,
+    },
 };
 use parking_lot::Mutex;
 use proto::{
@@ -1075,6 +1078,12 @@ impl Cluster {
         }
     }
 
+    pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
+        for handle in self.nodes.values() {
+            handle.fail_next_schedule_publication(domain);
+        }
+    }
+
     pub(crate) fn fail_ingestor_on_all_nodes(&self, ingestor: &str) {
         for handle in self.nodes.values() {
             handle.fail_ingestor(ingestor);
@@ -1478,6 +1487,7 @@ struct NodeHandle {
     config: TestClusterConfig,
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
+    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     failure: Arc<Mutex<Option<String>>>,
     task: Option<JoinHandle<()>>,
     shutdown: Option<CancellationToken>,
@@ -1491,12 +1501,14 @@ impl NodeHandle {
     ) -> Self {
         let emitter_faults = runtime_test_hooks.emitter_faults.clone();
         let ingestor_faults = runtime_test_hooks.ingestor_faults.clone();
+        let schedule_publication_faults = runtime_test_hooks.schedule_publication_faults.clone();
         Self {
             spec,
             runtime_test_hooks,
             config,
             emitter_faults,
             ingestor_faults,
+            schedule_publication_faults,
             failure: Arc::new(Mutex::new(None)),
             task: None,
             shutdown: None,
@@ -1702,6 +1714,11 @@ impl NodeHandle {
 
     fn clear_ingestor_fault(&self, ingestor: &str) {
         self.ingestor_faults.clear_ingestor(ingestor);
+    }
+
+    fn fail_next_schedule_publication(&self, domain: &str) {
+        self.schedule_publication_faults
+            .fail_next_publication(domain);
     }
 }
 
@@ -2270,7 +2287,7 @@ impl RawTestSession {
                     event: Some(Event::Result(result)),
                 }) => {
                     if result.success {
-                        return Ok(result.message);
+                        return Ok(flatten_command_messages(&result));
                     }
                     return Err(io::Error::other(format!(
                         "command failed: {}\ndiagnostics: {:?}",
@@ -2498,6 +2515,29 @@ async fn run_command(server: &str, query: &str) -> io::Result<String> {
     Ok(output)
 }
 
+/// Renders a command result as the aggregate message followed by every statement's message. A
+/// transaction reports per-statement outcomes, and the quiesce level lands on the first mutated
+/// statement, so assertions need all of them rather than just the outermost message.
+fn flatten_command_messages(result: &proto::CommandResult) -> String {
+    let mut messages = vec![result.message.clone()];
+    messages.extend(result.results.iter().map(flatten_command_messages));
+    messages
+        .into_iter()
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn flatten_outcome_messages(outcome: &nervix_client_core::CommandOutcome) -> String {
+    let mut messages = vec![outcome.message.clone()];
+    messages.extend(outcome.results.iter().map(flatten_outcome_messages));
+    messages
+        .into_iter()
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 async fn run_command_via_client(server: &str, domain: &str, query: &str) -> io::Result<String> {
     let client =
         Client::connect_with_options(server, domain.to_string(), client_connect_options(server)?)
@@ -2508,7 +2548,7 @@ async fn run_command_via_client(server: &str, domain: &str, query: &str) -> io::
         .await
         .map_err(io::Error::other)?;
     if outcome.success {
-        Ok(outcome.message)
+        Ok(flatten_outcome_messages(&outcome))
     } else {
         Err(io::Error::other(format!(
             "command failed: {}\ndiagnostics: {:?}",

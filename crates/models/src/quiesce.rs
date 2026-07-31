@@ -36,6 +36,14 @@ impl QuiesceLevel {
             Self::DomainPause => "DOMAIN_PAUSE",
         }
     }
+
+    pub const fn requires_domain_pause(self) -> bool {
+        matches!(self, Self::DomainPause)
+    }
+
+    pub const fn requires_entity_pause(self) -> bool {
+        matches!(self, Self::EntityPause)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,14 +110,64 @@ pub enum ModelChangeAspect {
     GeneratorCadence,
     GeneratorBranching,
     GeneratorRoutes,
+    CorrelatorCorrelation,
+    CorrelatorMatchPolicy,
+    CorrelatorMaxTime,
+    CorrelatorTimeoutPolicy,
+    WindowBounds,
+    InferencerBinding,
+    InferencerTensors,
+    WasmBinding,
+    WasmGlobalError,
     SchemaDefinition,
     WireSchemaDefinition,
+    CodecDefinition,
+    ClientConfig,
+    VhostHostnames,
+    VhostTls,
+    EndpointDefinition,
+    SignalingProtocolDefinition,
+    LookupDefinition,
+    BranchSchema,
+    BranchLifecycle,
+    UdfDefinition,
     EntityReplaced,
     EntityCreated,
     EntityDropped,
 }
 
+/// Node-owned runtime state that a model change makes meaningless even though the schemas around
+/// it are unchanged, so fingerprint-keyed staleness cannot detect it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatePurge {
+    DeduplicatorKeyspace,
+    ReordererBuffer,
+    WindowAccumulator,
+    CorrelationBuffer,
+    InferencerWarmState,
+    WasmGuestState,
+}
+
 impl ModelChangeAspect {
+    /// The runtime state this change invalidates, if any. Schema-driven staleness is already
+    /// handled by keying persisted state on the schema fingerprint; this covers the changes that
+    /// keep the schema identical but redefine what the retained state means.
+    pub const fn state_purge(self) -> Option<StatePurge> {
+        match self {
+            Self::DeduplicatorKeyspace => Some(StatePurge::DeduplicatorKeyspace),
+            Self::ReordererOrdering => Some(StatePurge::ReordererBuffer),
+            Self::WindowBounds => Some(StatePurge::WindowAccumulator),
+            Self::CorrelatorCorrelation | Self::CorrelatorMatchPolicy => {
+                Some(StatePurge::CorrelationBuffer)
+            }
+            Self::InferencerBinding | Self::InferencerTensors => {
+                Some(StatePurge::InferencerWarmState)
+            }
+            Self::WasmBinding => Some(StatePurge::WasmGuestState),
+            _ => None,
+        }
+    }
+
     pub const fn quiesce_level(self) -> QuiesceLevel {
         match self {
             Self::RelayCapacity
@@ -157,12 +215,31 @@ impl ModelChangeAspect {
             | Self::GeneratorMaterializedState
             | Self::GeneratorCadence
             | Self::GeneratorBranching
-            | Self::GeneratorRoutes => QuiesceLevel::EntityPause,
+            | Self::GeneratorRoutes
+            | Self::CorrelatorCorrelation
+            | Self::CorrelatorMatchPolicy
+            | Self::CorrelatorMaxTime
+            | Self::CorrelatorTimeoutPolicy
+            | Self::WindowBounds
+            | Self::InferencerBinding
+            | Self::InferencerTensors
+            | Self::WasmBinding
+            | Self::WasmGlobalError => QuiesceLevel::EntityPause,
             Self::RelaySchema
             | Self::RelayBranching
             | Self::EmitterInput
             | Self::SchemaDefinition
-            | Self::WireSchemaDefinition => QuiesceLevel::DomainPause,
+            | Self::WireSchemaDefinition
+            | Self::CodecDefinition
+            | Self::ClientConfig
+            | Self::VhostHostnames
+            | Self::VhostTls
+            | Self::EndpointDefinition
+            | Self::SignalingProtocolDefinition
+            | Self::LookupDefinition
+            | Self::BranchSchema
+            | Self::BranchLifecycle
+            | Self::UdfDefinition => QuiesceLevel::DomainPause,
         }
     }
 }
@@ -180,6 +257,19 @@ impl ModelChangeAspects {
 
     pub fn dynamic_updates(&self) -> &[DynamicModelUpdate] {
         &self.dynamic_updates
+    }
+
+    /// Every runtime state this change set invalidates. The replacement node must drop these
+    /// before it starts, otherwise it would keep interpreting state the change redefined.
+    pub fn state_purges(&self) -> Vec<StatePurge> {
+        let mut purges = self
+            .aspects
+            .iter()
+            .copied()
+            .filter_map(ModelChangeAspect::state_purge)
+            .collect::<Vec<_>>();
+        purges.dedup();
+        purges
     }
 
     pub fn is_empty(&self) -> bool {
@@ -269,6 +359,81 @@ impl Model {
             }
             (Self::WireAvroSchema(base), Self::WireAvroSchema(candidate)) => {
                 wire_schema_change_aspects(base, candidate)
+            }
+            (Self::Correlator(base), Self::Correlator(candidate)) => {
+                correlator_change_aspects(base, candidate)
+            }
+            (Self::WindowProcessor(base), Self::WindowProcessor(candidate)) => {
+                window_processor_change_aspects(base, candidate)
+            }
+            (Self::Inferencer(base), Self::Inferencer(candidate)) => {
+                inferencer_change_aspects(base, candidate)
+            }
+            (Self::WasmProcessor(base), Self::WasmProcessor(candidate)) => {
+                wasm_processor_change_aspects(base, candidate)
+            }
+            (Self::Vhost(base), Self::Vhost(candidate)) => vhost_change_aspects(base, candidate),
+            (Self::Branch(base), Self::Branch(candidate)) => branch_change_aspects(base, candidate),
+            (Self::Codec(base), Self::Codec(candidate)) => {
+                if base.name == candidate.name {
+                    definition_change_aspect(ModelChangeAspect::CodecDefinition)
+                } else {
+                    ModelChangeAspects::replaced()
+                }
+            }
+            (Self::Endpoint(base), Self::Endpoint(candidate)) => {
+                if base.name == candidate.name {
+                    definition_change_aspect(ModelChangeAspect::EndpointDefinition)
+                } else {
+                    ModelChangeAspects::replaced()
+                }
+            }
+            (Self::SignalingProtocol(base), Self::SignalingProtocol(candidate)) => {
+                if base.name == candidate.name {
+                    definition_change_aspect(ModelChangeAspect::SignalingProtocolDefinition)
+                } else {
+                    ModelChangeAspects::replaced()
+                }
+            }
+            (Self::Lookup(base), Self::Lookup(candidate)) => {
+                if base.name == candidate.name {
+                    definition_change_aspect(ModelChangeAspect::LookupDefinition)
+                } else {
+                    ModelChangeAspects::replaced()
+                }
+            }
+            (Self::Udf(base), Self::Udf(candidate)) => {
+                if base.name == candidate.name {
+                    definition_change_aspect(ModelChangeAspect::UdfDefinition)
+                } else {
+                    ModelChangeAspects::replaced()
+                }
+            }
+            (Self::ClientKafka(_), Self::ClientKafka(_))
+            | (Self::ClientPulsar(_), Self::ClientPulsar(_))
+            | (Self::ClientHttp(_), Self::ClientHttp(_))
+            | (Self::ClientSentry(_), Self::ClientSentry(_))
+            | (Self::ClientPrometheus(_), Self::ClientPrometheus(_))
+            | (Self::ClientMqtt(_), Self::ClientMqtt(_))
+            | (Self::ClientNats(_), Self::ClientNats(_))
+            | (Self::ClientRabbitMq(_), Self::ClientRabbitMq(_))
+            | (Self::ClientRedis(_), Self::ClientRedis(_))
+            | (Self::ClientZeroMq(_), Self::ClientZeroMq(_))
+            | (Self::ClientSqs(_), Self::ClientSqs(_))
+            | (Self::ClientWebsockets(_), Self::ClientWebsockets(_))
+            | (Self::ClientClickHouse(_), Self::ClientClickHouse(_))
+            | (Self::ClientPostgres(_), Self::ClientPostgres(_))
+            | (Self::ClientMySql(_), Self::ClientMySql(_))
+            | (Self::ClientMongoDb(_), Self::ClientMongoDb(_))
+            | (Self::ClientS3(_), Self::ClientS3(_))
+            | (Self::ClientGcs(_), Self::ClientGcs(_))
+            | (Self::ClientAzureBlob(_), Self::ClientAzureBlob(_))
+            | (Self::ClientIcebergRest(_), Self::ClientIcebergRest(_)) => {
+                if self.identifier() == candidate.identifier() {
+                    definition_change_aspect(ModelChangeAspect::ClientConfig)
+                } else {
+                    ModelChangeAspects::replaced()
+                }
             }
             (Self::Codec(_), _)
             | (Self::ClientKafka(_), _)
@@ -686,6 +851,256 @@ fn reorderer_change_aspects(
         });
     }
     changes
+}
+
+fn correlator_change_aspects(
+    base: &crate::CreateCorrelator,
+    candidate: &crate::CreateCorrelator,
+) -> ModelChangeAspects {
+    if base.name != candidate.name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    let mut has_dynamic_change = false;
+    // A correlator has two independent input sides, so its inputs are compared side by side
+    // rather than through the single-input processor view.
+    compare_processor_inputs(
+        &base.left,
+        &candidate.left,
+        &mut changes,
+        &mut has_dynamic_change,
+    );
+    compare_processor_inputs(
+        &base.right,
+        &candidate.right,
+        &mut changes,
+        &mut has_dynamic_change,
+    );
+    compare_processor_outputs(
+        &base.output_routes,
+        &candidate.output_routes,
+        &mut changes,
+        &mut has_dynamic_change,
+    );
+    if base.filter_where != candidate.filter_where {
+        changes.push(ModelChangeAspect::ProcessorFilter);
+        has_dynamic_change = true;
+    }
+    if base.branched_by != candidate.branched_by {
+        changes.push(ModelChangeAspect::ProcessorBranching);
+    }
+    if base.mode != candidate.mode {
+        changes.push(ModelChangeAspect::ProcessorMode);
+    }
+    if base.materialized_state != candidate.materialized_state {
+        changes.push(ModelChangeAspect::ProcessorMaterializedState);
+    }
+    if base.correlate_where != candidate.correlate_where {
+        changes.push(ModelChangeAspect::CorrelatorCorrelation);
+    }
+    if base.match_policy != candidate.match_policy {
+        changes.push(ModelChangeAspect::CorrelatorMatchPolicy);
+    }
+    if base.max_time != candidate.max_time {
+        changes.push(ModelChangeAspect::CorrelatorMaxTime);
+    }
+    if base.timeout_policy != candidate.timeout_policy {
+        changes.push(ModelChangeAspect::CorrelatorTimeoutPolicy);
+    }
+    if has_dynamic_change {
+        changes.dynamic_updates.push(DynamicModelUpdate::Processor {
+            kind: ModelKind::Correlator,
+            processor: candidate.name.clone(),
+        });
+    }
+    changes
+}
+
+fn window_processor_change_aspects(
+    base: &crate::CreateWindowProcessor,
+    candidate: &crate::CreateWindowProcessor,
+) -> ModelChangeAspects {
+    if base.name != candidate.name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    let mut has_dynamic_change = false;
+    compare_processor_common(
+        ProcessorConfigView {
+            from: &base.from,
+            outputs: &base.output_routes,
+            branching: &base.branched_by,
+            mode: &base.mode,
+            filter: &base.filter_where,
+            materialized_state: &base.materialized_state,
+        },
+        ProcessorConfigView {
+            from: &candidate.from,
+            outputs: &candidate.output_routes,
+            branching: &candidate.branched_by,
+            mode: &candidate.mode,
+            filter: &candidate.filter_where,
+            materialized_state: &candidate.materialized_state,
+        },
+        &mut changes,
+        &mut has_dynamic_change,
+    );
+    if base.width != candidate.width || base.step != candidate.step {
+        changes.push(ModelChangeAspect::WindowBounds);
+    }
+    if has_dynamic_change {
+        changes.dynamic_updates.push(DynamicModelUpdate::Processor {
+            kind: ModelKind::WindowProcessor,
+            processor: candidate.name.clone(),
+        });
+    }
+    changes
+}
+
+fn inferencer_change_aspects(
+    base: &crate::CreateInferencer,
+    candidate: &crate::CreateInferencer,
+) -> ModelChangeAspects {
+    if base.name != candidate.name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    let mut has_dynamic_change = false;
+    compare_processor_common(
+        ProcessorConfigView {
+            from: &base.from,
+            outputs: &base.output_routes,
+            branching: &base.branched_by,
+            mode: &base.mode,
+            filter: &base.filter_where,
+            materialized_state: &base.materialized_state,
+        },
+        ProcessorConfigView {
+            from: &candidate.from,
+            outputs: &candidate.output_routes,
+            branching: &candidate.branched_by,
+            mode: &candidate.mode,
+            filter: &candidate.filter_where,
+            materialized_state: &candidate.materialized_state,
+        },
+        &mut changes,
+        &mut has_dynamic_change,
+    );
+    if base.resource != candidate.resource
+        || base.resource_version != candidate.resource_version
+        || base.file != candidate.file
+    {
+        changes.push(ModelChangeAspect::InferencerBinding);
+    }
+    if base.inputs != candidate.inputs || base.output_schema != candidate.output_schema {
+        changes.push(ModelChangeAspect::InferencerTensors);
+    }
+    if has_dynamic_change {
+        changes.dynamic_updates.push(DynamicModelUpdate::Processor {
+            kind: ModelKind::Inferencer,
+            processor: candidate.name.clone(),
+        });
+    }
+    changes
+}
+
+fn wasm_processor_change_aspects(
+    base: &crate::CreateWasmProcessor,
+    candidate: &crate::CreateWasmProcessor,
+) -> ModelChangeAspects {
+    if base.name != candidate.name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    let mut has_dynamic_change = false;
+    compare_processor_common(
+        ProcessorConfigView {
+            from: &base.from,
+            outputs: &base.output_routes,
+            branching: &base.branched_by,
+            mode: &base.mode,
+            filter: &base.filter_where,
+            materialized_state: &base.materialized_state,
+        },
+        ProcessorConfigView {
+            from: &candidate.from,
+            outputs: &candidate.output_routes,
+            branching: &candidate.branched_by,
+            mode: &candidate.mode,
+            filter: &candidate.filter_where,
+            materialized_state: &candidate.materialized_state,
+        },
+        &mut changes,
+        &mut has_dynamic_change,
+    );
+    if base.resource != candidate.resource
+        || base.resource_version != candidate.resource_version
+        || base.file != candidate.file
+    {
+        changes.push(ModelChangeAspect::WasmBinding);
+    }
+    if base.global_error_policy != candidate.global_error_policy {
+        changes.push(ModelChangeAspect::WasmGlobalError);
+    }
+    if has_dynamic_change {
+        changes.dynamic_updates.push(DynamicModelUpdate::Processor {
+            kind: ModelKind::WasmProcessor,
+            processor: candidate.name.clone(),
+        });
+    }
+    changes
+}
+
+fn vhost_change_aspects(
+    base: &crate::CreateVhost,
+    candidate: &crate::CreateVhost,
+) -> ModelChangeAspects {
+    if base.name != candidate.name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    if base.hostnames != candidate.hostnames {
+        changes.push(ModelChangeAspect::VhostHostnames);
+    }
+    if base.tls != candidate.tls {
+        changes.push(ModelChangeAspect::VhostTls);
+    }
+    changes
+}
+
+fn branch_change_aspects(
+    base: &crate::CreateBranch,
+    candidate: &crate::CreateBranch,
+) -> ModelChangeAspects {
+    if base.name != candidate.name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    if base.schema != candidate.schema {
+        // The branch schema types every branch key in the domain, exactly like a relay schema.
+        changes.push(ModelChangeAspect::BranchSchema);
+    }
+    if base.ttl != candidate.ttl || base.eviction != candidate.eviction {
+        // TTL and eviction are baked into branch node specs when a branch task spawns, so they
+        // only take effect once the domain rebuilds around the new models.
+        changes.push(ModelChangeAspect::BranchLifecycle);
+    }
+    changes
+}
+
+/// Reports a whole-definition change for a model kind whose every field participates in typing,
+/// routing, or connection identity, so no part of it can change without quiescing the domain.
+fn definition_change_aspect(aspect: ModelChangeAspect) -> ModelChangeAspects {
+    ModelChangeAspects {
+        aspects: vec![aspect],
+        dynamic_updates: Vec::new(),
+    }
 }
 
 struct ProcessorConfigView<'a> {
@@ -1848,6 +2263,293 @@ mod tests {
             Model::Generator(base.clone())
                 .change_aspects_against(&Model::Generator(base))
                 .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod catch_all_kind_tests {
+    use crate::{
+        AckMode, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
+        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateCodec,
+        CreateCorrelator, CreateInferencer, CreateVhost, CreateWasmProcessor,
+        CreateWindowProcessor, GeneralErrorPolicy, Identifier, Literal, Model, ModelChangeAspect,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, VhostTlsResource,
+        WindowBound,
+    };
+
+    fn identifier(raw: &str) -> Identifier {
+        Identifier::parse(raw).expect("valid identifier")
+    }
+
+    fn expression(value: i64) -> crate::Expression {
+        crate::Expression::Literal(Literal::I64(value))
+    }
+
+    fn outputs() -> ProcessorOutputs {
+        ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+            identifier("output"),
+            "1s".to_string(),
+            Some("1MiB".to_string()),
+        )])
+    }
+
+    fn assert_single_aspect(
+        base: Model,
+        candidate: Model,
+        aspect: ModelChangeAspect,
+        level: QuiesceLevel,
+    ) {
+        let changes = base.change_aspects_against(&candidate);
+        assert_eq!(changes.aspects(), &[aspect]);
+        assert_eq!(changes.quiesce_level(), level);
+    }
+
+    fn correlator() -> CreateCorrelator {
+        CreateCorrelator {
+            name: identifier("correlate"),
+            left: ProcessorInputs::single(identifier("left_input")),
+            right: ProcessorInputs::single(identifier("right_input")),
+            output_routes: outputs(),
+            branched_by: BranchSelection::unbranched(),
+            correlate_where: expression(1),
+            match_policy: CorrelatorMatchPolicy::Earliest,
+            max_time: "1m".to_string(),
+            timeout_policy: CorrelationTimeoutPolicy {
+                left: CorrelationTimeoutAction::Drop,
+                right: CorrelationTimeoutAction::Drop,
+            },
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }
+    }
+
+    fn codec() -> CreateCodec {
+        CreateCodec {
+            name: identifier("event_codec"),
+            wire_format: CodecWireFormat::Json,
+            wire_schema: Some(identifier("event_wire")),
+            schema: identifier("event"),
+            encoding_rules: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn correlator_aspects_pause_only_the_entity() {
+        let base = correlator();
+
+        let mut correlation = base.clone();
+        correlation.correlate_where = expression(2);
+        assert_single_aspect(
+            Model::Correlator(base.clone()),
+            Model::Correlator(correlation),
+            ModelChangeAspect::CorrelatorCorrelation,
+            QuiesceLevel::EntityPause,
+        );
+
+        let mut max_time = base.clone();
+        max_time.max_time = "5m".to_string();
+        assert_single_aspect(
+            Model::Correlator(base.clone()),
+            Model::Correlator(max_time),
+            ModelChangeAspect::CorrelatorMaxTime,
+            QuiesceLevel::EntityPause,
+        );
+
+        let mut right = base.clone();
+        right.right = ProcessorInputs::single(identifier("other_right"));
+        assert_single_aspect(
+            Model::Correlator(base),
+            Model::Correlator(right),
+            ModelChangeAspect::ProcessorInputs,
+            QuiesceLevel::EntityPause,
+        );
+    }
+
+    #[test]
+    fn window_bound_changes_pause_only_the_entity() {
+        let base = CreateWindowProcessor {
+            name: identifier("window"),
+            from: ProcessorInputs::single(identifier("input")),
+            output_routes: outputs(),
+            branched_by: BranchSelection::unbranched(),
+            width: WindowBound {
+                messages: Some(10),
+                duration: None,
+            },
+            step: WindowBound {
+                messages: Some(5),
+                duration: None,
+            },
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        };
+        let mut widened = base.clone();
+        widened.width = WindowBound {
+            messages: Some(20),
+            duration: None,
+        };
+        assert_single_aspect(
+            Model::WindowProcessor(base),
+            Model::WindowProcessor(widened),
+            ModelChangeAspect::WindowBounds,
+            QuiesceLevel::EntityPause,
+        );
+    }
+
+    #[test]
+    fn wasm_binding_changes_pause_only_the_entity() {
+        let base = CreateWasmProcessor {
+            name: identifier("guest"),
+            from: ProcessorInputs::single(identifier("input")),
+            output_routes: outputs(),
+            branched_by: BranchSelection::unbranched(),
+            resource: identifier("guest_bundle"),
+            resource_version: Some(1),
+            file: "processors/guest.wasm".to_string(),
+            global_error_policy: GeneralErrorPolicy::Log,
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        };
+        let mut rebound = base.clone();
+        rebound.resource_version = Some(2);
+        assert_single_aspect(
+            Model::WasmProcessor(base),
+            Model::WasmProcessor(rebound),
+            ModelChangeAspect::WasmBinding,
+            QuiesceLevel::EntityPause,
+        );
+    }
+
+    #[test]
+    fn inferencer_binding_changes_pause_only_the_entity() {
+        let base = CreateInferencer {
+            name: identifier("score"),
+            from: ProcessorInputs::single(identifier("input")),
+            output_routes: outputs(),
+            branched_by: BranchSelection::unbranched(),
+            resource: identifier("model_bundle"),
+            resource_version: Some(1),
+            file: "models/score.onnx".to_string(),
+            inputs: Vec::new(),
+            output_schema: Vec::new(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        };
+        let mut rebound = base.clone();
+        rebound.file = "models/score_v2.onnx".to_string();
+        assert_single_aspect(
+            Model::Inferencer(base),
+            Model::Inferencer(rebound),
+            ModelChangeAspect::InferencerBinding,
+            QuiesceLevel::EntityPause,
+        );
+    }
+
+    #[test]
+    fn config_entity_definitions_pause_the_domain() {
+        let base_codec = codec();
+        let mut recoded = base_codec.clone();
+        recoded.schema = identifier("event_v2");
+        assert_single_aspect(
+            Model::Codec(base_codec),
+            Model::Codec(recoded),
+            ModelChangeAspect::CodecDefinition,
+            QuiesceLevel::DomainPause,
+        );
+
+        let base_vhost = CreateVhost {
+            name: identifier("edge"),
+            hostnames: vec!["edge.example.com".to_string()],
+            tls: None,
+        };
+        let mut renamed_host = base_vhost.clone();
+        renamed_host.hostnames = vec!["edge2.example.com".to_string()];
+        assert_single_aspect(
+            Model::Vhost(base_vhost.clone()),
+            Model::Vhost(renamed_host),
+            ModelChangeAspect::VhostHostnames,
+            QuiesceLevel::DomainPause,
+        );
+
+        let mut secured = base_vhost.clone();
+        secured.tls = Some(VhostTlsResource {
+            resource: identifier("edge_tls"),
+            version: Some(1),
+        });
+        assert_single_aspect(
+            Model::Vhost(base_vhost),
+            Model::Vhost(secured),
+            ModelChangeAspect::VhostTls,
+            QuiesceLevel::DomainPause,
+        );
+
+        let base_branch = CreateBranch {
+            name: identifier("by_tenant"),
+            schema: identifier("tenant_branch"),
+            ttl: "5m".to_string(),
+            eviction: None,
+        };
+        let mut retimed = base_branch.clone();
+        retimed.ttl = "10m".to_string();
+        assert_single_aspect(
+            Model::Branch(base_branch.clone()),
+            Model::Branch(retimed),
+            ModelChangeAspect::BranchLifecycle,
+            QuiesceLevel::DomainPause,
+        );
+
+        let mut reschemad = base_branch.clone();
+        reschemad.schema = identifier("tenant_branch_v2");
+        assert_single_aspect(
+            Model::Branch(base_branch),
+            Model::Branch(reschemad),
+            ModelChangeAspect::BranchSchema,
+            QuiesceLevel::DomainPause,
+        );
+    }
+
+    #[test]
+    fn semantic_state_purges_follow_their_aspects() {
+        use crate::StatePurge;
+
+        let base = correlator();
+        let mut recorrelated = base.clone();
+        recorrelated.correlate_where = expression(2);
+        assert_eq!(
+            Model::Correlator(base)
+                .change_aspects_against(&Model::Correlator(recorrelated))
+                .state_purges(),
+            vec![StatePurge::CorrelationBuffer],
+            "a changed correlation key invalidates the buffered pairs it was matching on"
+        );
+
+        let unchanged = codec();
+        let mut recoded = unchanged.clone();
+        recoded.schema = identifier("event_v2");
+        assert!(
+            Model::Codec(unchanged)
+                .change_aspects_against(&Model::Codec(recoded))
+                .state_purges()
+                .is_empty(),
+            "a schema-driven change is already covered by fingerprint-keyed staleness"
+        );
+    }
+
+    #[test]
+    fn a_renamed_entity_of_any_kind_is_a_replacement() {
+        let base = codec();
+        let mut renamed = base.clone();
+        renamed.name = identifier("other_codec");
+        assert_single_aspect(
+            Model::Codec(base),
+            Model::Codec(renamed),
+            ModelChangeAspect::EntityReplaced,
+            QuiesceLevel::Dynamic,
         );
     }
 }

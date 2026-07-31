@@ -360,6 +360,7 @@ impl Runtime {
             events,
             emitter_faults: hooks.emitter_faults,
             ingestor_faults: hooks.ingestor_faults,
+            schedule_publication_faults: hooks.schedule_publication_faults,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
             remote_dispatcher: Arc::new(RwLock::new(None)),
@@ -702,18 +703,13 @@ impl Runtime {
     }
 
     pub(crate) fn try_begin_domain_alter(&self, domain: &Domain) -> Option<DomainAlterGuard> {
-        let level = Arc::new(RwLock::new(nervix_models::QuiesceLevel::Dynamic));
-        let active = ActiveDomainAlter {
-            level: level.clone(),
-        };
         match self.active_domain_alters.entry(domain.clone()) {
             dashmap::mapref::entry::Entry::Occupied(_) => None,
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(active);
+                entry.insert(ActiveDomainAlter);
                 Some(DomainAlterGuard {
                     domain: domain.clone(),
                     active_domain_alters: self.active_domain_alters.clone(),
-                    level,
                 })
             }
         }
@@ -723,13 +719,9 @@ impl Runtime {
         self.active_domain_alters.contains_key(domain)
     }
 
-    pub fn active_domain_alter_level(
-        &self,
-        domain: &Domain,
-    ) -> Option<nervix_models::QuiesceLevel> {
-        self.active_domain_alters
-            .get(domain)
-            .map(|active| *active.level.read())
+    #[cfg(feature = "testing")]
+    pub fn take_armed_schedule_publication_fault(&self, domain: &Domain) -> bool {
+        self.schedule_publication_faults.take_armed_fault(domain)
     }
 
     pub(in crate::runtime) fn record_ingestor_transient_error(
@@ -4515,69 +4507,39 @@ impl Runtime {
                 || existing_passive_only.get(&domain.domain) != Some(&desired_passive_only)
                 || existing_start_versions.get(&domain.domain) != Some(&desired_start_version)
             {
-                if !desired_passive_only
+                let applied_incrementally = if !desired_passive_only
                     && existing_passive_only.get(&domain.domain) == Some(&desired_passive_only)
                     && existing_start_versions.get(&domain.domain) == Some(&desired_start_version)
                     && let Some(existing_schedule) = existing_schedules.get(&domain.domain)
                 {
-                    match ScheduleDelta::classify(existing_schedule, domain) {
-                        ScheduleDelta::Unchanged => continue,
-                        ScheduleDelta::Dynamic(updates) => {
-                            self.apply_dynamic_schedule_update(
-                                &domain.domain,
-                                domain.clone(),
-                                &updates,
-                            )
-                            .await?;
-                            continue;
-                        }
-                        ScheduleDelta::EntitySwap {
-                            entities,
-                            dynamic_updates,
-                        } => {
-                            if let Err(error) = self
-                                .swap_scheduled_nodes(
-                                    &domain.domain,
-                                    domain.clone(),
-                                    &entities,
-                                    &dynamic_updates,
-                                )
-                                .await
-                            {
-                                warn!(
-                                    domain = domain.domain.as_str(),
-                                    error = %error,
-                                    "entity-level schedule apply failed; rebuilding domain"
-                                );
-                                self.rebuild_domain_from_schedule(
-                                    local_node_id,
-                                    &domain.domain,
-                                    Some(domain.clone()),
-                                    start_ingestors,
-                                )
-                                .await?;
-                            }
-                            continue;
-                        }
-                        ScheduleDelta::Rebuild => {}
-                    }
-                }
-                match self
-                    .rebuild_domain_from_schedule(
+                    self.apply_schedule_delta(
                         local_node_id,
-                        &domain.domain,
-                        Some(domain.clone()),
+                        existing_schedule,
+                        domain,
                         start_ingestors,
                     )
-                    .await
-                {
-                    Ok(()) => {
-                        self.domain_instantiation_errors.remove(&domain.domain);
-                    }
-                    Err(error) => {
-                        self.domain_instantiation_errors
-                            .insert(domain.domain.clone(), error.to_string());
-                        return Err(error);
+                    .await?
+                } else {
+                    false
+                };
+                if !applied_incrementally {
+                    match self
+                        .rebuild_domain_from_schedule(
+                            local_node_id,
+                            &domain.domain,
+                            Some(domain.clone()),
+                            start_ingestors,
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            self.domain_instantiation_errors.remove(&domain.domain);
+                        }
+                        Err(error) => {
+                            self.domain_instantiation_errors
+                                .insert(domain.domain.clone(), error.to_string());
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -4595,6 +4557,54 @@ impl Runtime {
         }
 
         Ok(())
+    }
+
+    /// Applies a changed schedule without tearing the domain down when the delta allows it.
+    /// Returns `false` when the delta demands a full rebuild from the schedule instead.
+    async fn apply_schedule_delta(
+        &self,
+        local_node_id: &str,
+        existing_schedule: &DomainSchedule,
+        desired: &DomainSchedule,
+        start_ingestors: bool,
+    ) -> Result<bool, RuntimeError> {
+        match ScheduleDelta::classify(existing_schedule, desired) {
+            ScheduleDelta::Unchanged => Ok(true),
+            ScheduleDelta::Dynamic(updates) => {
+                self.apply_dynamic_schedule_update(&desired.domain, desired.clone(), &updates)
+                    .await?;
+                Ok(true)
+            }
+            ScheduleDelta::EntitySwap {
+                entities,
+                dynamic_updates,
+            } => {
+                if let Err(error) = self
+                    .swap_scheduled_nodes(
+                        &desired.domain,
+                        desired.clone(),
+                        &entities,
+                        &dynamic_updates,
+                    )
+                    .await
+                {
+                    warn!(
+                        domain = desired.domain.as_str(),
+                        error = %error,
+                        "entity-level schedule apply failed; rebuilding domain"
+                    );
+                    self.rebuild_domain_from_schedule(
+                        local_node_id,
+                        &desired.domain,
+                        Some(desired.clone()),
+                        start_ingestors,
+                    )
+                    .await?;
+                }
+                Ok(true)
+            }
+            ScheduleDelta::Rebuild => Ok(false),
+        }
     }
 
     pub(super) async fn swap_scheduled_nodes(
@@ -4624,6 +4634,9 @@ impl Runtime {
             },
         )?);
         let graph_handle = self.domain_graph_handle(domain).await;
+        // Publish the whole desired graph before any entity swaps so no task observes a
+        // half-applied topology while its siblings are still being replaced.
+        graph_handle.store(Some(desired_graph));
         let desired_model_index = schedule
             .nodes
             .iter()
@@ -4734,7 +4747,6 @@ impl Runtime {
                 if self.ingestors.contains_key(&key) {
                     self.stop_ingestor(domain, &entity.identifier).await?;
                 }
-                graph_handle.store(Some(desired_graph.clone()));
 
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_deref()) {
                     let source_model =
@@ -4825,7 +4837,6 @@ impl Runtime {
                         })?;
                 }
 
-                graph_handle.store(Some(desired_graph.clone()));
                 let executes_locally = local_node_id
                     .as_deref()
                     .is_some_and(|node_id| desired_node.executes_on(node_id));
@@ -4996,7 +5007,6 @@ impl Runtime {
                     runtime.shutdown().await;
                 }
 
-                graph_handle.store(Some(desired_graph.clone()));
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_deref()) {
                     let desired_entrypoint_specs = desired_specs
                         .entrypoints
@@ -5150,7 +5160,6 @@ impl Runtime {
                     let _ = task.await;
                 }
 
-                graph_handle.store(Some(desired_graph.clone()));
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_deref()) {
                     let (shutdown, spec) = {
                         let execution = self.executions.get(domain).ok_or_else(|| {
@@ -5281,17 +5290,6 @@ impl Runtime {
                         entity.identifier.as_str()
                     ),
                 })?;
-            if !desired_spec.spec.operation.supports_entity_handoff() {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "{} '{}' cannot hand off node-local processor state",
-                        entity.kind.as_str(),
-                        entity.identifier.as_str()
-                    ),
-                });
-            }
-
             let old_spec = {
                 let execution = self.executions.get(domain).ok_or_else(|| {
                     RuntimeError::BuildDomainExecution {
@@ -5312,22 +5310,45 @@ impl Runtime {
                     })?;
                 old_spec
             };
-            let deduplicator_keyspace_changed =
-                match (&old_spec.spec.operation, &desired_spec.spec.operation) {
-                    (
-                        BranchedProcessorOperationSpec::Deduplicator {
-                            deduplicate_on: old,
-                            ..
-                        },
-                        BranchedProcessorOperationSpec::Deduplicator {
-                            deduplicate_on: desired,
-                            ..
-                        },
-                    ) => old != desired,
-                    _ => false,
-                };
-            if deduplicator_keyspace_changed {
-                self.purge_deduplicator_state(domain, &entity.identifier)?;
+            // The change aspects own which node-local state a swap invalidates, so the runtime
+            // applies that contract rather than re-deriving it per processor kind.
+            let state_purges = self
+                .executions
+                .get(domain)
+                .and_then(|execution| {
+                    execution
+                        .schedule
+                        .nodes
+                        .iter()
+                        .find(|node| {
+                            node.kind == entity.kind && node.identifier == entity.identifier
+                        })
+                        .map(|node| (*node.config).clone())
+                })
+                .and_then(|old_model| {
+                    desired_model_index
+                        .get(&(entity.kind, entity.identifier.clone()))
+                        .map(|desired_model| {
+                            old_model
+                                .change_aspects_against(desired_model)
+                                .state_purges()
+                        })
+                })
+                .unwrap_or_default();
+            for purge in state_purges {
+                match purge {
+                    nervix_models::StatePurge::DeduplicatorKeyspace => {
+                        self.purge_deduplicator_state(domain, &entity.identifier)?;
+                    }
+                    // Reorderer, window, correlator, inferencer and WASM state is carried through
+                    // the branch handoff rather than persisted per keyspace, so their replacements
+                    // start from the flushed snapshot instead of a purge.
+                    nervix_models::StatePurge::ReordererBuffer
+                    | nervix_models::StatePurge::WindowAccumulator
+                    | nervix_models::StatePurge::CorrelationBuffer
+                    | nervix_models::StatePurge::InferencerWarmState
+                    | nervix_models::StatePurge::WasmGuestState => {}
+                }
             }
 
             let (old_task, mut template) = {
@@ -5373,7 +5394,6 @@ impl Runtime {
                 Vec::new()
             };
 
-            graph_handle.store(Some(desired_graph.clone()));
             let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
                 RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -5422,9 +5442,9 @@ impl Runtime {
             }
         }
 
-        graph_handle.store(Some(desired_graph));
         self.apply_dynamic_model_updates(domain, dynamic_updates)
             .await?;
+        self.install_state_schema_fingerprints(&schedule);
         if let Some(mut execution) = self.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id.as_deref() {
                 let remote_consumers =

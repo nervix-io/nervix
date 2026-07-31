@@ -157,10 +157,10 @@ DROP UDF risk_band;
 nodes. `SHOW CREATE` preserves the Roto source bytes and chooses a safe dollar-quote delimiter.
 Dropping a UDF is rejected while a stored model references it.
 
-UDF bodies are immutable after creation. Nervix has no `ALTER UDF`, replace, or same-name overwrite
-path. Changing a body requires dropping the old UDF first, which dependency validation forbids
-until every referencing model has been removed. A referenced node's UDF semantics are therefore
-fixed by the UDF content hash reported by `DESCRIBE UDF` for that node's lifetime.
+Changing a UDF body means dropping the old UDF and recreating it, and the drop is rejected until
+every referencing model has been removed. While a node references a UDF, that node's UDF semantics
+are fixed by the UDF content hash reported by `DESCRIBE UDF`. A UDF body change quiesces the domain
+because its callers are spread across the graph.
 
 Roto source is persisted; native JIT output is rebuilt in memory during domain activation. A
 server that does not support a stored language tag rejects activation rather than reinterpreting
