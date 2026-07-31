@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from scripts.build_book import (
+    IMAGES_DIR_NAME,
     MDBOOK_VERSION,
     bundle_roto_reference,
     render_jaq_reference,
@@ -16,6 +17,7 @@ from scripts.build_book import (
     run_mdbook,
     stage_book,
     verify_mdbook_version,
+    verify_published_images,
 )
 
 
@@ -256,6 +258,36 @@ class BookStagingTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             with self.assertRaises(SystemExit):
                 remove_generated_edit_links(Path(tmp))
+
+    def test_staged_source_carries_the_documentation_images(self) -> None:
+        with TemporaryDirectory() as tmp:
+            staged = Path(tmp) / "book"
+            with patch("scripts.build_book.generate_upstream_references"):
+                stage_book(staged)
+
+            staged_images = staged / "src" / IMAGES_DIR_NAME
+            self.assertTrue(staged_images.is_dir())
+            self.assertTrue(sorted(staged_images.glob("*.png")))
+
+
+class PublishedImageTests(unittest.TestCase):
+    def test_a_source_image_missing_from_the_book_fails_the_build(self) -> None:
+        # mdBook copies non-Markdown files out of `src` verbatim. If that stops,
+        # the build must fail rather than publish chapters with broken images.
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                verify_published_images(Path(tmp))
+
+    def test_a_book_carrying_every_source_image_passes(self) -> None:
+        source_images = Path("docs/src") / IMAGES_DIR_NAME
+        with TemporaryDirectory() as tmp:
+            publication = Path(tmp) / IMAGES_DIR_NAME
+            publication.mkdir(parents=True)
+            for image in source_images.iterdir():
+                if image.is_file():
+                    (publication / image.name).write_bytes(b"")
+
+            verify_published_images(Path(tmp))
 
 
 class MdbookVersionTests(unittest.TestCase):

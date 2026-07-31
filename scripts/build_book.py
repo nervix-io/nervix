@@ -22,6 +22,9 @@ OUTPUT_DIR = DOCS_DIR / "book"
 # release, so local builds and CI must agree on it. CI reads this constant.
 MDBOOK_VERSION = "0.5.3"
 MDBOOK_LLMS_COMMAND = ROOT / "scripts" / "mdbook_llms.py"
+# Documentation images live beside the chapters that reference them and are
+# copied verbatim by mdBook's HTML renderer.
+IMAGES_DIR_NAME = "images"
 ROTO_UPSTREAM_PATH = "docs/source/reference/language_reference.md"
 ROTO_REFERENCE_NAME = "roto-language-reference.md"
 ROTO_LICENSE_PATH = "LICENSE"
@@ -360,7 +363,26 @@ def copy_theme_assets(source_theme_dir: Path, book_dir: Path) -> None:
             shutil.copy2(source_file, output_theme_dir / source_file.name)
 
 
+def verify_published_images(publication_dir: Path) -> None:
+    """Fail when a source image did not reach the rendered book.
+
+    mdBook copies non-Markdown files out of `src` verbatim. If that ever stops,
+    every screenshot in the book would 404 while the build still succeeded.
+    """
+    source_images = DOCS_DIR / "src" / IMAGES_DIR_NAME
+    if not source_images.is_dir():
+        return
+    for image in sorted(source_images.iterdir()):
+        if not image.is_file():
+            continue
+        if not (publication_dir / IMAGES_DIR_NAME / image.name).is_file():
+            raise SystemExit(
+                f"the rendered book is missing the source image {IMAGES_DIR_NAME}/{image.name}"
+            )
+
+
 def verify_publication(publication_dir: Path) -> None:
+    verify_published_images(publication_dir)
     llms_path = publication_dir / "llms.txt"
     if not llms_path.is_file():
         raise SystemExit("mdBook did not generate llms.txt")

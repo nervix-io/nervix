@@ -41,6 +41,13 @@ test-scenarios-reuse *args: tests-deps
     export NERVIX_TESTCONTAINERS_MODE=reusable
     cargo test --features testing --test scenarios -- {{ args }}
 
+# Regenerate the web console images published under docs/src/images.
+docs-screenshots:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export NERVIX_DOCS_SCREENSHOT_DIR="{{ justfile_directory() }}/docs/src/images"
+    just test-scenarios --input tests/features/web-console/docs_screenshots.feature --concurrency 1
+
 test-lib *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
