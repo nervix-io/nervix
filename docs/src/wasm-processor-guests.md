@@ -20,7 +20,7 @@ Capacity therefore grows with the linear-memory pages dirtied by each live branc
 copy of compiled machine code per branch. See
 [Capacity Planning For Branched Graphs](capacity-planning.md#per-branch-cost-structure).
 
-WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does not accept `FLUSH EACH` or `FLUSH IMMEDIATE`; Nervix routes batches returned from `nervix_process_batch` and batches returned later from `nervix_on_timeout` callbacks requested by the guest through the processor's declared `TO` clauses.
+WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does not accept `FLUSH EACH` or `FLUSH IMMEDIATE`; Nervix routes batches returned from `nervix_process_batch`, batches returned later from `nervix_on_timeout` callbacks requested by the guest, and batches released by `nervix_flush` when the host quiesces the branch, through the processor's declared `TO` clauses.
 
 ## Contract Summary
 
@@ -42,6 +42,7 @@ nervix_init(ptr: i32, size: i32) -> i32
 nervix_current_domain_time_nanos() -> i64
 nervix_process_batch(ptr: i32, size: i32) -> i32
 nervix_on_timeout(handle: i64) -> i32
+nervix_flush() -> i32
 nervix_read_emit() -> i32
 nervix_dump_state() -> i32
 nervix_load_state(ptr: i32, size: i32) -> i32
@@ -261,7 +262,7 @@ nervix_global_error_len() -> i32
 nervix_clear_global_error() -> i32
 ```
 
-If any of these exports exists, all three must exist. After host calls into the guest (`nervix_process_batch`, `nervix_on_timeout`, and emit reads), it checks `nervix_global_error_len()`. A positive length means `nervix_global_error_ptr()` points at UTF-8 error bytes. The host reads the bytes, calls `nervix_clear_global_error()`, and applies `ON GLOBAL ERROR`. Wasmtime call failures and traps are also handled as global processor errors.
+If any of these exports exists, all three must exist. After host calls into the guest (`nervix_process_batch`, `nervix_on_timeout`, `nervix_flush`, and emit reads), it checks `nervix_global_error_len()`. A positive length means `nervix_global_error_ptr()` points at UTF-8 error bytes. The host reads the bytes, calls `nervix_clear_global_error()`, and applies `ON GLOBAL ERROR`. Wasmtime call failures and traps are also handled as global processor errors.
 
 The guest decides lineage; the host performs the actual ACK/NACK operation. Tokens are host-local hot-path capabilities. They are valid only while the current host instance is alive, and they are never persisted.
 
@@ -332,6 +333,25 @@ After any successful timeout callback, the host repeatedly calls
 `nervix_read_emit()` and forwards every emitted output group. Shared generated
 columns work identically in timeout output. Input-column references remain
 valid while their source token is live.
+
+## Quiesce Flush
+
+When Nervix quiesces a branch — to hand it to a replacement node during an `ENTITY_PAUSE`
+alteration, or to shut it down — it calls:
+
+```text
+nervix_flush()
+```
+
+Emit every buffered output group during this call; the host drains them with `nervix_read_emit()`
+exactly as it does after a timeout, and only then snapshots the guest through `nervix_dump_state`.
+A guest that keeps input past `nervix_flush` leaves it unacknowledged until the branch resumes, so
+a guest that buffers between calls must release that buffer here instead of waiting for more input
+or for its next timeout. A guest that never buffers can return success without emitting.
+
+This is what lets a WASM processor participate in `ENTITY_PAUSE` like every other stateful node:
+the host pauses intake at the relay gate, asks the guest to flush, snapshots it, and restores that
+snapshot into the replacement instance.
 
 ## Rust SDK
 

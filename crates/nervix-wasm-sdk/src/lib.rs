@@ -115,6 +115,11 @@ macro_rules! export_processor {
             }
 
             #[unsafe(no_mangle)]
+            pub extern "C" fn nervix_flush() -> i32 {
+                $crate::abi::flush(&INSTANCE)
+            }
+
+            #[unsafe(no_mangle)]
             pub extern "C" fn nervix_read_emit() -> i32 {
                 $crate::abi::read_emit()
             }

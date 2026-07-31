@@ -305,6 +305,22 @@ pub fn on_timeout<P: Processor>(slot: &InstanceSlot<P>, handle: i64) -> i32 {
     })
 }
 
+pub fn flush<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
+    guarded(true, |core| {
+        if core.branch.is_none() {
+            return Err(GuestError::NotInitialized);
+        }
+        let mut ctx = core.guest_context()?;
+        slot.with(|instance| {
+            let Some(instance) = instance.as_mut() else {
+                return Err(GuestError::NotInitialized);
+            };
+            instance.flush(&mut ctx)
+        })?;
+        Ok(SUCCESS)
+    })
+}
+
 pub fn read_emit() -> i32 {
     guarded(true, |core| {
         if core.pending_emit.is_empty() {

@@ -89,7 +89,7 @@ use nervix_interconnect::{
 use nervix_models::{
     BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter,
     CreateEndpoint, CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor,
-    CreateReorderer, CreateResource, CreateStatement, CreateUdf, CreateUser, CreateWindowProcessor,
+    CreateReorderer, CreateResource, CreateStatement, CreateUser, CreateWindowProcessor,
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
     DescribeIngestor, DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer,
     DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, Domain,
@@ -257,55 +257,6 @@ enum DomainAlterError {
     RestoreIngestion { domain: Domain, reason: String },
     #[error("failed to roll back model alteration in domain '{domain}': {reason}")]
     Rollback { domain: Domain, reason: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AlterExecutionMode {
-    Dynamic,
-    EntityPause,
-    DomainPause { classified: QuiesceLevel },
-}
-
-impl AlterExecutionMode {
-    fn resolve(classified: QuiesceLevel) -> Self {
-        match classified {
-            QuiesceLevel::Dynamic => Self::Dynamic,
-            QuiesceLevel::EntityPause => Self::EntityPause,
-            QuiesceLevel::DomainPause => Self::DomainPause { classified },
-        }
-    }
-
-    fn executed_level(self) -> QuiesceLevel {
-        match self {
-            Self::Dynamic => QuiesceLevel::Dynamic,
-            Self::EntityPause => QuiesceLevel::EntityPause,
-            Self::DomainPause { .. } => QuiesceLevel::DomainPause,
-        }
-    }
-
-    fn response_suffix(self) -> String {
-        let executed = self.executed_level().as_str();
-        match self {
-            Self::DomainPause {
-                classified: QuiesceLevel::EntityPause,
-            } => format!("; quiesce level: {executed} (escalated from ENTITY_PAUSE)"),
-            Self::Dynamic | Self::EntityPause | Self::DomainPause { .. } => {
-                format!("; quiesce level: {executed}")
-            }
-        }
-    }
-
-    fn requires_domain_pause(self) -> bool {
-        if let Self::DomainPause { .. } = self {
-            true
-        } else {
-            false
-        }
-    }
-
-    fn requires_entity_pause(self) -> bool {
-        self == Self::EntityPause
-    }
 }
 
 struct ClusterEntityGate {
@@ -3926,6 +3877,98 @@ impl SessionServiceImpl {
         });
     }
 
+    /// Validates the bindings a planned batch would activate: everything that has to reach outside
+    /// the registry (domain pace, resource storage, ONNX metadata) and therefore cannot live in
+    /// `DomainState::build`, which follower synchronization and startup replay also run.
+    ///
+    /// This runs over the candidate models the batch produces rather than over the statements that
+    /// produced them, so `CREATE` and every present and future `ALTER` share one boundary.
+    async fn validate_changed_model_bindings(
+        &self,
+        domain: &Domain,
+        pace: DomainPace,
+        planned: &crate::registry::PlannedMutations,
+    ) -> Result<(), String> {
+        for model in planned.changed_models() {
+            tokio::task::consume_budget().await;
+            match model {
+                Model::Ingestor(ingestor) => {
+                    if let DomainPace::Paced = pace
+                        && ingestor.timestamp_source.is_none()
+                    {
+                        return Err(format!(
+                            "paced domain '{}' requires ingestor '{}' to declare TIMESTAMP NOW or \
+                             TIMESTAMP AT <field>",
+                            domain.as_str(),
+                            ingestor.name.as_str()
+                        ));
+                    }
+                }
+                Model::Vhost(vhost) => {
+                    if let Some(tls) = vhost.tls.as_ref() {
+                        self.validate_vhost_tls_binding(tls)
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                    "invalid TLS resource for VHOST '{}': {error}",
+                                    vhost.name.as_str()
+                                )
+                            })?;
+                    }
+                }
+                Model::Lookup(lookup) => {
+                    self.validate_lookup_binding(lookup)
+                        .await
+                        .map_err(|error| {
+                            format!("invalid HASH MAP '{}': {error}", lookup.name.as_str())
+                        })?;
+                }
+                Model::Inferencer(processor) => {
+                    self.validate_inferencer_binding(processor)
+                        .await
+                        .map_err(|error| {
+                            format!("invalid INFERENCER '{}': {error}", processor.name.as_str())
+                        })?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Compiles the UDF family the batch would leave active. A UDF body is only usable once every
+    /// sibling it may call compiles with it, so this takes the whole candidate set rather than the
+    /// changed members.
+    async fn prepare_planned_domain_udfs(
+        &self,
+        planned: &crate::registry::PlannedMutations,
+    ) -> Result<Option<crate::runtime::CompiledDomainUdfs>, String> {
+        let changed_udfs = planned
+            .changed_models()
+            .into_iter()
+            .filter_map(|model| match model {
+                Model::Udf(udf) => Some(udf.name.as_str().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if changed_udfs.is_empty() {
+            return Ok(None);
+        }
+        let domain_udfs = planned
+            .candidate_models_of_kind(ModelKind::Udf)
+            .into_iter()
+            .filter_map(|model| match model {
+                Model::Udf(udf) => Some(udf.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.runtime
+            .prepare_domain_udfs(domain_udfs)
+            .await
+            .map(Some)
+            .map_err(|error| format!("invalid UDF '{}': {error}", changed_udfs.join(", ")))
+    }
+
     async fn validate_vhost_tls_binding(&self, tls: &VhostTlsResource) -> Result<(), String> {
         let resources = self.consensus.current_resources().await;
         let version = resolve_vhost_tls_resource_version(&resources, tls)?;
@@ -5663,6 +5706,11 @@ impl SessionServiceImpl {
                     error,
                     "failed to release entity gates; deadline expiry remains the backstop"
                 );
+                self.broadcast_error(format!(
+                    "failed to release entity gates on node '{node}' in domain '{}': {error}; \
+                     affected relays stay gated until the gate deadline expires",
+                    domain.as_str()
+                ));
             }
         }
     }
@@ -5813,30 +5861,34 @@ impl SessionServiceImpl {
         })
     }
 
-    async fn rollback_domain_alter_and_resume(
+    /// Restores the pre-alteration models and schedule after a committed batch failed to reach the
+    /// cluster. Every quiesce level needs the restore, because the registry commit already landed;
+    /// only a domain-paused alteration additionally has to resume the domain.
+    async fn rollback_model_alteration(
         &self,
         domain: &Domain,
         planned: crate::registry::PlannedMutations,
+        classified_level: QuiesceLevel,
     ) -> Result<(), Report<DomainAlterError>> {
-        let rollback_result = async {
-            let runtime_changes = self.registry.rollback_committed(planned).map_err(|error| {
+        let runtime_changes = self.registry.rollback_committed(planned).map_err(|error| {
+            Report::new(DomainAlterError::Rollback {
+                domain: domain.clone(),
+                reason: format!("registry rollback failed: {error}"),
+            })
+        })?;
+        self.publish_domain_schedule(domain, runtime_changes.graph)
+            .await
+            .map_err(|error| {
                 Report::new(DomainAlterError::Rollback {
                     domain: domain.clone(),
-                    reason: format!("registry rollback failed: {error}"),
+                    reason: format!("old schedule restore failed: {error}"),
                 })
             })?;
-            self.publish_domain_schedule(domain, runtime_changes.graph)
-                .await
-                .map_err(|error| {
-                    Report::new(DomainAlterError::Rollback {
-                        domain: domain.clone(),
-                        reason: format!("old schedule restore failed: {error}"),
-                    })
-                })
+        if classified_level.requires_domain_pause() {
+            self.resume_domain_after_alter(domain).await
+        } else {
+            Ok(())
         }
-        .await;
-        rollback_result?;
-        self.resume_domain_after_alter(domain).await
     }
 
     async fn describe_metrics_for_scheduled_node(
@@ -7043,31 +7095,6 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn prepare_created_udfs(
-        &self,
-        domain: &Domain,
-        created_udfs: &[CreateUdf],
-    ) -> Result<Option<crate::runtime::CompiledDomainUdfs>, nervix_roto::UdfError> {
-        if created_udfs.is_empty() {
-            return Ok(None);
-        }
-        let mut domain_udfs = self
-            .registry
-            .active_graph(domain)
-            .into_iter()
-            .flat_map(|graph| graph.nodes())
-            .filter_map(|node| match node.config.as_ref() {
-                Model::Udf(udf) => Some(udf.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        domain_udfs.extend_from_slice(created_udfs);
-        self.runtime
-            .prepare_domain_udfs(domain_udfs)
-            .await
-            .map(Some)
-    }
-
     async fn process_model_mutation_batch(
         &self,
         statements: Vec<Statement>,
@@ -7089,7 +7116,7 @@ impl SessionServiceImpl {
             return self.not_leader_response(query, leader).await;
         }
 
-        let alter_guard = match self.runtime.try_begin_domain_alter(&domain) {
+        let _alter_guard = match self.runtime.try_begin_domain_alter(&domain) {
             Some(guard) => guard,
             None => {
                 return command_error(
@@ -7116,7 +7143,6 @@ impl SessionServiceImpl {
         let mut results = vec![None; statements.len()];
         let mut mutations = Vec::new();
         let mut applied = Vec::new();
-        let mut created_udfs = Vec::new();
         let mut refresh_http_tls = false;
 
         for (index, statement) in statements.into_iter().enumerate() {
@@ -7137,45 +7163,6 @@ impl SessionServiceImpl {
                         continue;
                     }
 
-                    if let Model::Ingestor(ingestor) = model.as_ref()
-                        && let DomainPace::Paced = domain_state.config.pace
-                        && ingestor.timestamp_source.is_none()
-                    {
-                        return command_error(format!(
-                            "paced domain '{}' requires ingestor '{}' to declare TIMESTAMP NOW or \
-                             TIMESTAMP AT <field>",
-                            domain.as_str(),
-                            ingestor.name.as_str()
-                        ));
-                    }
-                    if let Model::Vhost(vhost) = model.as_ref()
-                        && let Some(tls) = vhost.tls.as_ref()
-                        && let Err(error) = self.validate_vhost_tls_binding(tls).await
-                    {
-                        return command_error(format!(
-                            "invalid TLS resource for VHOST '{}': {error}",
-                            vhost.name.as_str()
-                        ));
-                    }
-                    if let Model::Lookup(lookup) = model.as_ref()
-                        && let Err(error) = self.validate_lookup_binding(lookup).await
-                    {
-                        return command_error(format!(
-                            "invalid HASH MAP '{}': {error}",
-                            lookup.name.as_str()
-                        ));
-                    }
-                    if let Model::Inferencer(processor) = model.as_ref()
-                        && let Err(error) = self.validate_inferencer_binding(processor).await
-                    {
-                        return command_error(format!(
-                            "invalid INFERENCER '{}': {error}",
-                            processor.name.as_str()
-                        ));
-                    }
-                    if let Model::Udf(udf) = model.as_ref() {
-                        created_udfs.push(udf.clone());
-                    }
                     refresh_http_tls |= model_kind == ModelKind::Vhost;
                     applied.push((
                         index,
@@ -7363,17 +7350,6 @@ impl SessionServiceImpl {
         }
 
         if !mutations.is_empty() {
-            let prepared_udfs = match self.prepare_created_udfs(&domain, &created_udfs).await {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    let names = created_udfs
-                        .iter()
-                        .map(|udf| udf.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    return command_error(format!("invalid UDF '{names}': {error}"));
-                }
-            };
             let error_target = applied
                 .first()
                 .map(|(_, id, _)| id.clone())
@@ -7389,14 +7365,22 @@ impl SessionServiceImpl {
                     return create_registry_error_response(query, &domain, &error_target, &err);
                 }
             };
+            if let Err(error) = self
+                .validate_changed_model_bindings(&domain, domain_state.config.pace, &planned)
+                .await
+            {
+                return command_error(error);
+            }
+            let prepared_udfs = match self.prepare_planned_domain_udfs(&planned).await {
+                Ok(prepared) => prepared,
+                Err(error) => return command_error(error),
+            };
             let classified_level = if let DomainStatus::Running = domain_state.status {
                 planned.quiesce().level()
             } else {
                 QuiesceLevel::Dynamic
             };
-            alter_guard.set_level(classified_level);
-            let execution_mode = AlterExecutionMode::resolve(classified_level);
-            let requires_domain_pause = execution_mode.requires_domain_pause();
+            let requires_domain_pause = classified_level.requires_domain_pause();
             let affected_entities = planned.quiesce().affected_entities().to_vec();
             let is_noop = planned.is_noop();
             let mut cluster_entity_gate = None;
@@ -7414,7 +7398,7 @@ impl SessionServiceImpl {
             {
                 return command_error(error.to_string());
             }
-            if !is_noop && execution_mode.requires_entity_pause() {
+            if !is_noop && classified_level.requires_entity_pause() {
                 let relays = self
                     .runtime
                     .entity_pause_relays(&domain, &affected_entities);
@@ -7443,7 +7427,7 @@ impl SessionServiceImpl {
             }
 
             if !is_noop {
-                let mut rollback_plan = requires_domain_pause.then(|| planned.clone());
+                let mut rollback_plan = Some(planned.clone());
                 let runtime_changes = match self.registry.commit_planned(planned) {
                     Ok(changes) => changes,
                     Err(err) => {
@@ -7490,7 +7474,7 @@ impl SessionServiceImpl {
                     }
                     if let Some(rollback_plan) = rollback_plan.take()
                         && let Err(rollback_error) = self
-                            .rollback_domain_alter_and_resume(&domain, rollback_plan)
+                            .rollback_model_alteration(&domain, rollback_plan, classified_level)
                             .await
                     {
                         return command_error(format!(
@@ -7529,7 +7513,7 @@ impl SessionServiceImpl {
                     if let Err(error) = self.wait_for_paused_domain_drain(&domain).await {
                         if let Some(rollback_plan) = rollback_plan.take()
                             && let Err(rollback_error) = self
-                                .rollback_domain_alter_and_resume(&domain, rollback_plan)
+                                .rollback_model_alteration(&domain, rollback_plan, classified_level)
                                 .await
                         {
                             return command_error(format!("{error}; {rollback_error}"));
@@ -7539,7 +7523,7 @@ impl SessionServiceImpl {
                     if let Err(error) = self.resume_domain_after_alter(&domain).await {
                         if let Some(rollback_plan) = rollback_plan.take()
                             && let Err(rollback_error) = self
-                                .rollback_domain_alter_and_resume(&domain, rollback_plan)
+                                .rollback_model_alteration(&domain, rollback_plan, classified_level)
                                 .await
                         {
                             return command_error(format!("{error}; {rollback_error}"));
@@ -7558,7 +7542,7 @@ impl SessionServiceImpl {
             let mut first_applied = true;
             for (index, _, mut message) in applied {
                 if first_applied {
-                    message.push_str(&execution_mode.response_suffix());
+                    message.push_str(&format!("; quiesce level: {}", classified_level.as_str()));
                     first_applied = false;
                 }
                 results[index] = Some(CommandResult {
@@ -8901,6 +8885,13 @@ impl SessionServiceImpl {
         domain: &Domain,
         graph: Option<ActiveGraph>,
     ) -> Result<(), String> {
+        #[cfg(feature = "testing")]
+        if self.runtime.take_armed_schedule_publication_fault(domain) {
+            return Err(format!(
+                "injected schedule publication fault for domain '{}'",
+                domain.as_str()
+            ));
+        }
         let live_node_ids = self.cluster.live_node_ids().await;
         let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
         let cluster_nodes = self

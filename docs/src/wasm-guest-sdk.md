@@ -128,6 +128,7 @@ callbacks onto the trait:
 | `create` | Branch initialization, with the decoded `BranchInit` payload as a `BranchContext`: domain, serialized branch key, and the exact input and output schemas. |
 | `process_batch` | One input envelope, decoded into an `InputBatch`: Arrow record batches, the ACK sidecar, and the original envelope bytes. |
 | `on_timeout` | A previously requested domain-clock timeout fired. |
+| `flush` | The runtime is quiescing this branch for a handoff or shutdown. Emit everything the processor still buffers; whatever it keeps stays unacknowledged until the branch resumes. |
 | `save_state` / `restore` | The runtime snapshots or recreates the branch instance. |
 
 Keep all state branch-local. Never aggregate across branch keys inside one

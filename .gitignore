@@ -14,5 +14,5 @@ __pycache__
 .playwright-mcp/
 node_modules/
 crates/web-console/dist/
-/examples/datalake/geo-wasm-guest/dbip-city-lite-*.mmdb.gz
+/examples/datalake/geo-wasm-guest/dbip-city-lite*.mmdb.gz
 tests/fixtures/onnx/*.onnx

@@ -190,7 +190,6 @@ pub struct RuntimeChanges {
     pub domain: Domain,
     pub graph: Option<ActiveGraph>,
     pub changes: Vec<RuntimeChange>,
-    pub state_invalidations: Vec<RegistryEntity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -365,7 +364,6 @@ impl Registry {
                 let changes = runtime_changes_for_domain(
                     &domain,
                     Some(domain_state.graph.clone()),
-                    None,
                     &HashMap::new(),
                     &domain_state.models,
                 );
@@ -952,20 +950,18 @@ impl Registry {
                 Some(_) => None,
             })
             .collect::<HashMap<_, _>>();
-        let quiesce = classify_quiesce(&current_models, &candidate);
+        let quiesce = classify_quiesce(&current_models, &candidate, &domain_state.graph);
         let is_noop = models_to_persist.is_empty() && drops_in_batch.is_empty();
         let runtime_changes = if is_noop {
             RuntimeChanges {
                 domain: domain.clone(),
                 graph: None,
                 changes: Vec::new(),
-                state_invalidations: Vec::new(),
             }
         } else {
             runtime_changes_for_domain(
                 domain,
                 (domain_state.graph.node_count() > 0).then_some(domain_state.graph.clone()),
-                Some(&current_state.graph),
                 &current_state.models,
                 &domain_state.models,
             )
@@ -1092,7 +1088,6 @@ impl Registry {
         let runtime_changes = runtime_changes_for_domain(
             &planned.domain,
             (base_state.graph.node_count() > 0).then_some(base_state.graph.clone()),
-            Some(&planned.domain_state.graph),
             &planned.domain_state.models,
             &base_state.models,
         );
@@ -1189,9 +1184,11 @@ impl Registry {
 fn classify_quiesce(
     base: &HashMap<RegistryKey, Model>,
     candidate: &HashMap<RegistryKey, Model>,
+    candidate_graph: &ActiveGraph,
 ) -> QuiescePlan {
     let mut level = QuiesceLevel::Dynamic;
     let mut affected_entities = Vec::new();
+    let mut gated_seeds = HashSet::<RegistryKey>::default();
 
     for (key, base_model) in base {
         let change_level = match candidate.get(key) {
@@ -1205,6 +1202,9 @@ fn classify_quiesce(
             None => ModelChangeAspect::EntityDropped.quiesce_level(),
         };
         level = level.max(change_level);
+        if change_level.requires_entity_pause() {
+            gated_seeds.insert(key.clone());
+        }
         affected_entities.push(RegistryEntity {
             kind: key.kind,
             identifier: key.identifier.clone(),
@@ -1218,6 +1218,10 @@ fn classify_quiesce(
             identifier: key.identifier.clone(),
         });
     }
+
+    // An entity-paused change also disturbs everything downstream of it, so the gate has to cover
+    // the dependent dataflow nodes and not just the models the batch names.
+    affected_entities.extend(candidate_graph.dependent_dataflow_entities(&gated_seeds));
 
     affected_entities.sort_by(|left, right| {
         left.kind
@@ -1276,6 +1280,41 @@ impl PlannedMutations {
 
     pub fn is_noop(&self) -> bool {
         self.models_to_persist.is_empty() && self.drops_in_batch.is_empty()
+    }
+
+    /// Every model the batch would create or replace, ordered by kind and identifier so boundary
+    /// validation reports the same model first for the same batch.
+    pub fn changed_models(&self) -> Vec<&Model> {
+        let mut changed = self.models_to_persist.iter().collect::<Vec<_>>();
+        changed.sort_by(|(left, _), (right, _)| {
+            left.kind
+                .as_str()
+                .cmp(right.kind.as_str())
+                .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
+        });
+        changed
+            .into_iter()
+            .map(|(_, mutation)| match mutation {
+                RegistryPersistMutation::Create(model)
+                | RegistryPersistMutation::Replace(model) => model,
+            })
+            .collect()
+    }
+
+    /// Every model of one kind the batch would leave active, including the models it does not
+    /// change. Callers that must compile or bind a whole family at once need the candidate set,
+    /// not just the mutated members.
+    pub fn candidate_models_of_kind(&self, kind: ModelKind) -> Vec<&Model> {
+        let mut candidates = self
+            .domain_state
+            .models
+            .iter()
+            .filter(|(key, _)| key.kind == kind)
+            .collect::<Vec<_>>();
+        candidates.sort_by(|(left, _), (right, _)| {
+            left.identifier.as_str().cmp(right.identifier.as_str())
+        });
+        candidates.into_iter().map(|(_, model)| model).collect()
     }
 }
 
@@ -9318,7 +9357,6 @@ fn parse_as_is_integer(ty: &ParseAsType) -> bool {
 fn runtime_changes_for_domain(
     domain: &Domain,
     graph: Option<ActiveGraph>,
-    current_graph: Option<&ActiveGraph>,
     current_models: &HashMap<RegistryKey, Model>,
     candidate_models: &HashMap<RegistryKey, Model>,
 ) -> RuntimeChanges {
@@ -9394,92 +9432,10 @@ fn runtime_changes_for_domain(
         });
     }
 
-    let changed_schemas = current_models
-        .iter()
-        .filter_map(|(key, current)| {
-            matches!(
-                key.kind,
-                ModelKind::Schema
-                    | ModelKind::WireJsonSchema
-                    | ModelKind::WireCborSchema
-                    | ModelKind::WireAvroSchema
-            )
-            .then(|| {
-                candidate_models
-                    .get(key)
-                    .filter(|candidate| *candidate != current)
-            })
-            .flatten()
-            .map(|_| key.clone())
-        })
-        .chain(candidate_models.iter().filter_map(|(key, candidate)| {
-            matches!(
-                key.kind,
-                ModelKind::Schema
-                    | ModelKind::WireJsonSchema
-                    | ModelKind::WireCborSchema
-                    | ModelKind::WireAvroSchema
-            )
-            .then(|| {
-                current_models
-                    .get(key)
-                    .filter(|current| *current != candidate)
-            })
-            .flatten()
-            .map(|_| key.clone())
-        }))
-        .collect::<HashSet<_>>();
-    let directly_replaced_or_dropped = current_models
-        .iter()
-        .filter_map(|(key, current)| {
-            candidate_models
-                .get(key)
-                .is_none_or(|candidate| candidate != current)
-                .then_some(key.clone())
-        })
-        .collect::<HashSet<_>>();
-    let mut state_invalidations = HashSet::default();
-    if let Some(current_graph) = current_graph {
-        state_invalidations.extend(current_graph.dependent_dataflow_entities(&changed_schemas));
-        state_invalidations.extend(
-            directly_replaced_or_dropped
-                .iter()
-                .filter_map(|key| current_graph.indices.get(key))
-                .filter_map(|index| current_graph.graph.node_weight(*index))
-                .filter(|node| node.is_dataflow_node())
-                .map(|node| RegistryEntity {
-                    kind: node.kind,
-                    identifier: node.identifier.clone(),
-                }),
-        );
-    }
-    if let Some(candidate_graph) = graph.as_ref() {
-        state_invalidations.extend(candidate_graph.dependent_dataflow_entities(&changed_schemas));
-        state_invalidations.extend(
-            directly_replaced_or_dropped
-                .iter()
-                .filter_map(|key| candidate_graph.indices.get(key))
-                .filter_map(|index| candidate_graph.graph.node_weight(*index))
-                .filter(|node| node.is_dataflow_node())
-                .map(|node| RegistryEntity {
-                    kind: node.kind,
-                    identifier: node.identifier.clone(),
-                }),
-        );
-    }
-    let mut state_invalidations = state_invalidations.into_iter().collect::<Vec<_>>();
-    state_invalidations.sort_by(|left, right| {
-        left.kind
-            .as_str()
-            .cmp(right.kind.as_str())
-            .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
-    });
-
     RuntimeChanges {
         domain: domain.clone(),
         graph,
         changes,
-        state_invalidations,
     }
 }
 
@@ -9559,7 +9515,7 @@ mod tests {
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
     use nervix_models::{
-        AckMode, AlterEmitter, AlterJunction, AlterJunctionOperation, AlterRelay,
+        AckMode, AlterEmitter, AlterJunction, AlterProcessorOperation, AlterRelay,
         AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
         AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope,
         BranchSelection, ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule,
@@ -10728,7 +10684,7 @@ mod tests {
                 &domain,
                 &[RegistryMutation::AlterJunction(AlterJunction {
                     junction: identifier("route_events"),
-                    operations: vec![AlterJunctionOperation::SetFilterWhere {
+                    operations: vec![AlterProcessorOperation::SetFilterWhere {
                         where_clause: nervix_nspl::parse_expression("input.value != ''")
                             .expect("valid expression"),
                     }],
@@ -10742,7 +10698,7 @@ mod tests {
                 &domain,
                 &[RegistryMutation::AlterJunction(AlterJunction {
                     junction: identifier("route_events"),
-                    operations: vec![AlterJunctionOperation::SetMode {
+                    operations: vec![AlterProcessorOperation::SetMode {
                         mode: AckMode::Detached,
                     }],
                 })],
@@ -15098,97 +15054,6 @@ mod tests {
             panic!("expected schema");
         };
         assert_eq!(after.fields.len(), 2);
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn planned_schema_alter_targets_only_schema_dependent_runtime_state() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
-        let mut unrelated = relay("unrelated", "other_schema");
-        let Model::Relay(unrelated_relay) = &mut unrelated else {
-            unreachable!("relay helper must build a relay model")
-        };
-        unrelated_relay.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
-        registry
-            .apply_batch(
-                &domain,
-                full_graph_batch()
-                    .into_iter()
-                    .chain([schema("other_schema"), unrelated])
-                    .collect(),
-            )
-            .expect("create should succeed");
-        let before_schedule = registry
-            .active_graph(&domain)
-            .expect("graph should exist")
-            .schedule_for_domain(&domain, &["node-1".to_string()], 0);
-
-        let planned = registry
-            .plan_mutations(
-                &domain,
-                &[
-                    RegistryMutation::AlterSchema(AlterSchema {
-                        schema: identifier("event_schema"),
-                        operations: vec![AlterSchemaOperation::AddField {
-                            field: SchemaField {
-                                name: identifier("note"),
-                                ty: ParseAsType::String,
-                                optional: true,
-                                sensitive: false,
-                            },
-                        }],
-                    }),
-                    RegistryMutation::AlterWireJsonSchema(AlterWireSchema {
-                        schema: identifier("event_wire"),
-                        operations: vec![AlterWireSchemaOperation::AddField {
-                            field: WireSchemaField {
-                                name: identifier("note"),
-                                ty: JsonType::String,
-                                optional: true,
-                            },
-                        }],
-                    }),
-                ],
-            )
-            .expect("planning should succeed");
-
-        let invalidated = planned
-            .runtime_changes
-            .state_invalidations
-            .iter()
-            .map(|entity| (entity.kind, entity.identifier.as_str()))
-            .collect::<Vec<_>>();
-        assert!(
-            invalidated.contains(&(ModelKind::Deduplicator, "p99_proc")),
-            "stateful processors derived from the altered schema must be invalidated"
-        );
-        assert!(
-            invalidated.contains(&(ModelKind::Relay, "notifications")),
-            "branch-LRU state for dependent relays must be invalidated"
-        );
-        assert!(
-            !invalidated.contains(&(ModelKind::Relay, "unrelated")),
-            "independent materialized state must survive the rebuild"
-        );
-        let after_schedule =
-            planned
-                .domain_state
-                .graph
-                .schedule_for_domain(&domain, &["node-1".to_string()], 0);
-        assert_ne!(
-            scheduled_node(&before_schedule, ModelKind::Deduplicator, "p99_proc")
-                .schema_fingerprint,
-            scheduled_node(&after_schedule, ModelKind::Deduplicator, "p99_proc").schema_fingerprint,
-            "dependent state placements must receive a new schema fingerprint"
-        );
-        assert_eq!(
-            scheduled_node(&before_schedule, ModelKind::Relay, "unrelated").schema_fingerprint,
-            scheduled_node(&after_schedule, ModelKind::Relay, "unrelated").schema_fingerprint,
-            "independent state placements must retain their schema fingerprint"
-        );
 
         let _ = fs::remove_dir_all(path);
     }

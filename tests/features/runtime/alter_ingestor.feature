@@ -113,3 +113,83 @@ Feature: Altering ingestors
       | cluster_size |
       | 1            |
       | 3            |
+
+  @paced_ingestor_timestamp_alter_rejected
+  Scenario Outline: A paced domain rejects dropping an ingestor timestamp source
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100000h;
+      """
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these NSPL commands are executed on the leader node
+      """
+      START AT NOW TIME RATE 1.0;
+
+      CREATE SCHEMA paced_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA paced_event_wire MODE STRICT ( seq integer );
+      CREATE CODEC paced_event_codec
+        FROM WIRE JSON SCHEMA paced_event_wire
+        TO SCHEMA paced_event;
+      CREATE RELAY paced_events SCHEMA paced_event UNBRANCHED;
+
+      CREATE CLIENT paced_sink
+        TYPE ZEROMQ
+        CONFIG {
+          'addr' = '{{zeromq_emit_addr}}',
+          'bind' = 'false'
+        };
+
+      CREATE VHOST paced_edge http-{{test_id}}-paced-alter.example.com;
+      CREATE ENDPOINT paced_ingress ON paced_edge PATH '/paced-alter' TYPE HTTP;
+
+      CREATE INGESTOR paced_source
+        FROM ENDPOINT paced_ingress MODE NO_ACK SEQUENTIAL
+        DECODE USING paced_event_codec
+        TIMESTAMP NOW
+        TO paced_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      CREATE EMITTER paced_out
+        FROM paced_events
+        TO ZEROMQ paced_sink ENCODE USING paced_event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-paced-alter.example.com" path "/paced-alter"
+      """
+      {"seq":1}
+      """
+    Then the observed broker receives a payload
+      """
+      "seq":1
+      """
+    When these NSPL commands fail with "requires ingestor 'paced_source' to declare TIMESTAMP NOW"
+      """
+      ALTER INGESTOR paced_source DROP TIMESTAMP;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE INGESTOR paced_source;
+      """
+    Then the last command output contains
+      """
+      TIMESTAMP NOW
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-paced-alter.example.com" path "/paced-alter"
+      """
+      {"seq":2}
+      """
+    Then the observed broker receives a payload
+      """
+      "seq":2
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

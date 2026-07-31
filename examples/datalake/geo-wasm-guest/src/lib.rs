@@ -1,64 +1,47 @@
-use std::{
-    cell::UnsafeCell, io::Cursor, net::IpAddr, ops::Range, panic::AssertUnwindSafe, sync::Arc,
-};
+//! GeoIP enrichment reference guest built on the `nervix-wasm-sdk` crate.
+//!
+//! Each input row's `source_ip` is resolved against an embedded DB-IP city
+//! database into continent, country, region, city, and coordinates, then
+//! extended with a geohash and the nearest of a fixed set of hubs. The ten
+//! derived values form one shared generated column pool that every declared
+//! `TO` relay references alongside the untouched input columns.
+//!
+//! The processor holds nothing between calls, so it needs neither a saved
+//! state nor a quiesce flush: the SDK's defaults are correct for it.
+
+use std::{net::IpAddr, sync::Arc};
 
 use arrow_array::{
     Array, ArrayRef, RecordBatch, StringArray,
     builder::{Float64Builder, StringBuilder},
 };
-use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
-use arrow_schema::{DataType, Field, Schema};
 use geo::{Distance, Haversine, Point};
 use geohash::{Coord, encode};
-use maxminddb::{geoip2, Reader};
-use nervix_wasm_protocol::{
-    AckSidecar, BranchInit as BranchInitMetadata, Envelope, EnvelopeRef, GuestSnapshot,
-    OutputColumnRef, RoutedOutput,
+use maxminddb::{Reader, geoip2};
+use nervix_wasm_sdk::{
+    BranchContext, GuestContext, GuestError, InputBatch, OutputColumnRef, OutputEnvelope, Processor,
 };
 
-const SUCCESS: i32 = 0;
-const ERR_INVALID_SIZE: i32 = -1;
-const ERR_OUT_OF_BOUNDS: i32 = -2;
-const ERR_NOT_INITIALIZED: i32 = -3;
-const ERR_ARROW_IPC: i32 = -4;
-const ERR_ENVELOPE: i32 = -5;
-const ERR_ERROR_STATE: i32 = -6;
-const DBIP_MMDB: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/dbip-city-lite-2026-06.mmdb"
-));
+const DBIP_MMDB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dbip-city-lite.mmdb"));
 
-const SOURCE_IP: usize = 7;
+const SOURCE_IP_FIELD: &str = "source_ip";
 const GEOHASH_PRECISION: usize = 8;
 const METERS_PER_KM: f64 = 1000.0;
 
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn nervix_domain_time_nanos() -> i64;
-}
-
-struct GuestState {
-    buffer: Vec<u8>,
-    init_metadata: Vec<u8>,
-    pending_emit: Vec<Vec<u8>>,
-    global_error: Vec<u8>,
-    output_relays: Vec<String>,
-    geoip_reader: Option<Reader<&'static [u8]>>,
-    initialized: bool,
-    processed_batches: u64,
-    processed_rows: u64,
-    last_domain_time_nanos: i64,
-    error_state: Option<String>,
-}
-
-struct ResolvedGeo {
-    continent: String,
-    country: String,
-    region: String,
-    city: String,
-    lat: f64,
-    lon: f64,
-}
+/// The columns this guest derives, in the order every destination schema must
+/// declare them after its input columns.
+const GENERATED_FIELDS: &[&str] = &[
+    "geoip_database",
+    "geoip_continent",
+    "geoip_country",
+    "geoip_region",
+    "geoip_city",
+    "geoip_lat",
+    "geoip_lon",
+    "geoip_geohash",
+    "nearest_hub",
+    "distance_to_hub_km",
+];
 
 #[derive(Clone, Copy)]
 struct Hub {
@@ -90,537 +73,214 @@ const HUBS: &[Hub] = &[
     },
 ];
 
-impl GuestState {
-    const fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-            init_metadata: Vec::new(),
-            pending_emit: Vec::new(),
-            global_error: Vec::new(),
-            output_relays: Vec::new(),
-            geoip_reader: None,
-            initialized: false,
-            processed_batches: 0,
-            processed_rows: 0,
-            last_domain_time_nanos: 0,
-            error_state: None,
-        }
-    }
-
-    fn alloc(&mut self, size: usize) -> i32 {
-        if self.buffer.capacity() < size {
-            self.buffer.reserve_exact(size - self.buffer.capacity());
-        }
-        self.buffer.resize(size, 0);
-        self.buffer.as_mut_ptr() as i32
-    }
-
-    fn buffer_range(&self, ptr: i32, size: i32) -> Result<Range<usize>, i32> {
-        let ptr = usize::try_from(ptr).map_err(|_| ERR_OUT_OF_BOUNDS)?;
-        let size = usize::try_from(size).map_err(|_| ERR_INVALID_SIZE)?;
-        let end = ptr.checked_add(size).ok_or(ERR_OUT_OF_BOUNDS)?;
-        let base = self.buffer.as_ptr() as usize;
-        if ptr < base || end > base + self.buffer.len() {
-            return Err(ERR_OUT_OF_BOUNDS);
-        }
-        Ok(ptr - base..end - base)
-    }
-
-    fn read_memory(&self, ptr: i32, size: i32) -> Result<Vec<u8>, i32> {
-        Ok(self.buffer[self.buffer_range(ptr, size)?].to_vec())
-    }
-
-    fn dump_state(&mut self) -> i32 {
-        let snapshot = GuestSnapshot {
-            processed_batches: self.processed_batches,
-            processed_rows: self.processed_rows,
-            pending_start_row: 0,
-            last_domain_time_nanos: self.last_domain_time_nanos,
-            last_timeout_handle: 0,
-            pending_batch: Vec::new(),
-            init_metadata: self.init_metadata.clone(),
-            saved_state: Vec::new(),
-            error_state: self.error_state.clone(),
-        };
-
-        self.buffer = snapshot.encode();
-        self.buffer.len() as i32
-    }
-
-    fn load_state_bytes(&mut self, saved_state: Vec<u8>) -> i32 {
-        let Ok(snapshot) = GuestSnapshot::decode(&saved_state) else {
-            return ERR_INVALID_SIZE;
-        };
-
-        self.init_metadata = snapshot.init_metadata;
-        self.output_relays = output_relays_from_init_metadata(&self.init_metadata)
-            .unwrap_or_default();
-        self.processed_batches = snapshot.processed_batches;
-        self.processed_rows = snapshot.processed_rows;
-        self.last_domain_time_nanos = snapshot.last_domain_time_nanos;
-        self.error_state = snapshot.error_state;
-        let Ok(reader) = geoip_reader() else {
-            return ERR_INVALID_SIZE;
-        };
-        self.geoip_reader = Some(reader);
-        self.initialized = true;
-        SUCCESS
-    }
-
-    fn reset(&mut self) {
-        self.init_metadata.clear();
-        self.pending_emit.clear();
-        self.global_error.clear();
-        self.output_relays.clear();
-        self.geoip_reader = None;
-        self.initialized = false;
-        self.processed_batches = 0;
-        self.processed_rows = 0;
-        self.last_domain_time_nanos = 0;
-        self.error_state = None;
-    }
-
-    fn set_global_error(&mut self, reason: impl Into<String>) {
-        let reason = reason.into();
-        self.error_state = Some(reason.clone());
-        self.global_error.clear();
-        self.global_error.extend_from_slice(reason.as_bytes());
-    }
+struct ResolvedGeo {
+    continent: String,
+    country: String,
+    region: String,
+    city: String,
+    lat: f64,
+    lon: f64,
 }
 
-struct Global<T>(UnsafeCell<T>);
-
-unsafe impl<T> Sync for Global<T> {}
-
-static STATE: Global<GuestState> = Global(UnsafeCell::new(GuestState::new()));
-
-impl Global<GuestState> {
-    fn with_mut<R>(&self, f: impl FnOnce(&mut GuestState) -> R) -> R {
-        let state = unsafe { &mut *self.0.get() };
-        f(state)
-    }
-
-    fn guarded_export(&self, f: impl FnOnce(&mut GuestState) -> i32) -> i32 {
-        self.guarded_state_export(true, f)
-    }
-
-    fn guarded_state_export(
-        &self,
-        check_error_state: bool,
-        f: impl FnOnce(&mut GuestState) -> i32,
-    ) -> i32 {
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            self.with_mut(|state| {
-                if check_error_state {
-                    if let Some(error_state) = state.error_state.clone() {
-                        if state.global_error.is_empty() {
-                            state.global_error.extend_from_slice(error_state.as_bytes());
-                        }
-                        return ERR_ERROR_STATE;
-                    }
-                }
-                f(state)
-            })
-        }));
-        match result {
-            Ok(code) => code,
-            Err(payload) => self.with_mut(|state| {
-                state.set_global_error(panic_reason(payload));
-                ERR_ERROR_STATE
-            }),
-        }
-    }
+struct GeoIpResolver {
+    reader: Reader<&'static [u8]>,
+    source_ip_column: usize,
+    input_columns: usize,
+    output_relays: Vec<String>,
 }
 
-fn panic_reason(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(reason) = payload.downcast_ref::<&str>() {
-        format!("guest panic: {reason}")
-    } else if let Some(reason) = payload.downcast_ref::<String>() {
-        format!("guest panic: {reason}")
-    } else {
-        "guest panic".to_string()
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_buffer_ptr() -> i32 {
-    STATE.with_mut(|state| state.buffer.as_mut_ptr() as i32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_buffer_len() -> i32 {
-    STATE.with_mut(|state| state.buffer.len() as i32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_buffer_capacity() -> i32 {
-    STATE.with_mut(|state| state.buffer.capacity() as i32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_global_error_ptr() -> i32 {
-    STATE.with_mut(|state| {
-        if state.global_error.is_empty() {
-            0
-        } else {
-            state.global_error.as_mut_ptr() as i32
-        }
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_global_error_len() -> i32 {
-    STATE.with_mut(|state| state.global_error.len() as i32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_clear_global_error() -> i32 {
-    STATE.with_mut(|state| {
-        state.global_error.clear();
-        SUCCESS
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_alloc(size: i32) -> i32 {
-    let Ok(size) = usize::try_from(size) else {
-        return ERR_INVALID_SIZE;
-    };
-    STATE.with_mut(|state| state.alloc(size))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_init(ptr: i32, size: i32) -> i32 {
-    STATE.guarded_export(|state| match state.read_memory(ptr, size) {
-        Ok(metadata) => {
-            let Ok(reader) = geoip_reader() else {
-                return ERR_INVALID_SIZE;
-            };
-            let output_relays = match output_relays_from_init_metadata(&metadata) {
-                Ok(output_relays) => output_relays,
-                Err(error) => return error,
-            };
-            state.init_metadata = metadata;
-            state.output_relays = output_relays;
-            state.geoip_reader = Some(reader);
-            state.initialized = true;
-            SUCCESS
-        }
-        Err(error) => error,
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_current_domain_time_nanos() -> i64 {
-    let now = unsafe { nervix_domain_time_nanos() };
-    STATE.with_mut(|state| {
-        state.last_domain_time_nanos = now;
-    });
-    now
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_process_batch(ptr: i32, size: i32) -> i32 {
-    STATE.guarded_export(|state| {
-        if !state.initialized {
-            return ERR_NOT_INITIALIZED;
-        }
-        let range = match state.buffer_range(ptr, size) {
-            Ok(range) => range,
-            Err(error) => return error,
-        };
-
-        state.processed_batches = state.processed_batches.saturating_add(1);
-        state.last_domain_time_nanos = unsafe { nervix_domain_time_nanos() };
-        let (row_count, enriched) = {
-            let envelope = match EnvelopeRef::decode(&state.buffer[range]) {
-                Ok(EnvelopeRef::Input(envelope)) => envelope,
-                Ok(EnvelopeRef::Output(_)) | Err(_) => return ERR_ENVELOPE,
-            };
-            let arrow_ipc_batch = envelope.arrow_ipc_batch();
-            let row_count = match arrow_ipc_row_count(arrow_ipc_batch) {
-                Ok(row_count) => row_count,
-                Err(error) => return error,
-            };
-            let Some(reader) = state.geoip_reader.as_ref() else {
-                return ERR_NOT_INITIALIZED;
-            };
-            let enriched = match geo_enrich_envelope(arrow_ipc_batch, envelope.acks(), reader) {
-                Ok(envelope) => envelope,
-                Err(error) => return error,
-            };
-            (row_count, enriched)
-        };
-        state.processed_rows = state.processed_rows.saturating_add(row_count);
-        if state.output_relays.is_empty() {
-            return ERR_NOT_INITIALIZED;
-        }
-        let Envelope::Output {
-            generated_arrow_ipc_batch,
-            mut outputs,
-        } = enriched
-        else {
-            return ERR_ENVELOPE;
-        };
-        let Some(template) = outputs.pop() else {
-            return ERR_ENVELOPE;
-        };
-        outputs = state
-            .output_relays
+impl Processor for GeoIpResolver {
+    fn create(branch: &BranchContext) -> Result<Self, GuestError> {
+        let reader = Reader::from_source(DBIP_MMDB)
+            .map_err(|error| GuestError::failed(format!("embedded GeoIP database is unusable: {error}")))?;
+        let input_schema = branch.input_schema();
+        let source_ip_column = input_schema
+            .fields
             .iter()
-            .enumerate()
-            .map(|(index, relay)| {
-                let mut output = template.clone();
-                output.output_relay = relay.clone();
-                if index > 0 {
-                    output.acks.acked.clear();
-                    output.acks.nacked.clear();
-                    output.acks.message_errors.clear();
-                }
-                output
-            })
-            .collect();
-        state.pending_emit.clear();
-        let encoded = (Envelope::Output {
-            generated_arrow_ipc_batch,
-            outputs,
-        })
-        .encode();
-        state.pending_emit.push(encoded);
-        SUCCESS
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_on_timeout(_handle: i64) -> i32 {
-    SUCCESS
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_read_emit() -> i32 {
-    STATE.guarded_export(|state| {
-        if state.pending_emit.is_empty() {
-            return 0;
+            .position(|field| field.name == SOURCE_IP_FIELD)
+            .ok_or_else(|| {
+                GuestError::failed(format!(
+                    "input schema '{}' has no '{SOURCE_IP_FIELD}' field to resolve",
+                    input_schema.name
+                ))
+            })?;
+        let input_columns = input_schema.fields.len();
+        if branch.output_schemas().is_empty() {
+            return Err(GuestError::failed(
+                "geoip enrichment needs at least one destination relay",
+            ));
         }
-        state.buffer.clear();
-        state.buffer.extend_from_slice(&state.pending_emit.remove(0));
-        state.buffer.len() as i32
-    })
-}
+        // Every route reuses the same column layout, so a destination that does not declare the
+        // input columns followed by the generated ones is rejected here rather than producing
+        // misaligned output later.
+        for output_schema in branch.output_schemas() {
+            let expected = input_columns + GENERATED_FIELDS.len();
+            if output_schema.fields.len() != expected {
+                return Err(GuestError::failed(format!(
+                    "destination schema '{}' declares {} fields, but geoip enrichment produces \
+                     {expected}: {input_columns} input columns followed by {}",
+                    output_schema.name,
+                    output_schema.fields.len(),
+                    GENERATED_FIELDS.join(", ")
+                )));
+            }
+        }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_dump_state() -> i32 {
-    STATE.guarded_state_export(false, GuestState::dump_state)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_load_state(ptr: i32, size: i32) -> i32 {
-    STATE.guarded_state_export(false, |state| match state.read_memory(ptr, size) {
-        Ok(saved_state) => state.load_state_bytes(saved_state),
-        Err(error) => error,
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_reset_state() -> i32 {
-    STATE.with_mut(|state| {
-        state.reset();
-        SUCCESS
-    })
-}
-
-fn output_relays_from_init_metadata(metadata: &[u8]) -> Result<Vec<String>, i32> {
-    BranchInitMetadata::decode(metadata)
-        .map(|metadata| {
-            metadata
-                .output_schemas
-                .into_iter()
-                .map(|schema| schema.name)
-                .collect()
+        Ok(Self {
+            reader,
+            source_ip_column,
+            input_columns,
+            output_relays: branch
+                .output_schemas()
+                .iter()
+                .map(|schema| schema.name.clone())
+                .collect(),
         })
-        .map_err(|_| ERR_INVALID_SIZE)
-}
-
-fn arrow_ipc_row_count(bytes: &[u8]) -> Result<u64, i32> {
-    let reader = StreamReader::try_new(Cursor::new(bytes), None).map_err(|_| ERR_ARROW_IPC)?;
-    let mut rows = 0_u64;
-    for batch in reader {
-        let batch = batch.map_err(|_| ERR_ARROW_IPC)?;
-        rows = rows.saturating_add(batch.num_rows() as u64);
-    }
-    Ok(rows)
-}
-
-fn geo_enrich_envelope(
-    arrow_ipc_batch: &[u8],
-    acks: AckSidecar,
-    reader: &Reader<&'static [u8]>,
-) -> Result<Envelope, i32> {
-    let ipc_reader = StreamReader::try_new(Cursor::new(arrow_ipc_batch), None)
-        .map_err(|_| ERR_ARROW_IPC)?;
-    let batches = ipc_reader
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ERR_ARROW_IPC)?;
-    if batches.len() != 1 {
-        return Err(ERR_ARROW_IPC);
-    }
-    let generated = geo_enrich_columns(&batches[0], reader)?;
-    let fields = generated_fields();
-    let mut columns = (0..14_u32)
-        .map(|column_index| OutputColumnRef::Input { column_index })
-        .collect::<Vec<_>>();
-    for column_index in 0..generated.len() {
-        columns.push(OutputColumnRef::Generated {
-            column_index: u32::try_from(column_index).map_err(|_| ERR_ENVELOPE)?,
-        });
-    }
-    Ok(Envelope::Output {
-        generated_arrow_ipc_batch: encode_generated_batch(fields, generated)?,
-        outputs: vec![RoutedOutput {
-            output_relay: String::new(),
-            columns,
-            acks,
-        }],
-    })
-}
-
-fn geo_enrich_columns(
-    batch: &RecordBatch,
-    reader: &Reader<&'static [u8]>,
-) -> Result<Vec<ArrayRef>, i32> {
-    let source_ip = string_column(batch, SOURCE_IP)?;
-    let row_count = batch.num_rows();
-    let mut out_geoip_database = StringBuilder::new();
-    let mut out_geoip_continent = StringBuilder::new();
-    let mut out_geoip_country = StringBuilder::new();
-    let mut out_geoip_region = StringBuilder::new();
-    let mut out_geoip_city = StringBuilder::new();
-    let mut out_geoip_lat = Float64Builder::new();
-    let mut out_geoip_lon = Float64Builder::new();
-    let mut out_geoip_geohash = StringBuilder::new();
-    let mut out_nearest_hub = StringBuilder::new();
-    let mut out_distance_to_hub_km = Float64Builder::new();
-
-    for row in 0..row_count {
-        let geo = resolve_ip(reader, string_value(source_ip, row));
-        let geo_hash = geo_hash(geo.lat, geo.lon);
-        let (hub, distance) = nearest_hub(geo.lat, geo.lon);
-        out_geoip_database.append_value(reader.metadata.database_type.as_str());
-        out_geoip_continent.append_value(geo.continent.as_str());
-        out_geoip_country.append_value(geo.country.as_str());
-        out_geoip_region.append_value(geo.region.as_str());
-        out_geoip_city.append_value(geo.city.as_str());
-        out_geoip_lat.append_value(geo.lat);
-        out_geoip_lon.append_value(geo.lon);
-        out_geoip_geohash.append_value(geo_hash);
-        out_nearest_hub.append_value(hub);
-        out_distance_to_hub_km.append_value(distance);
     }
 
-    Ok(vec![
-        Arc::new(out_geoip_database.finish()),
-        Arc::new(out_geoip_continent.finish()),
-        Arc::new(out_geoip_country.finish()),
-        Arc::new(out_geoip_region.finish()),
-        Arc::new(out_geoip_city.finish()),
-        Arc::new(out_geoip_lat.finish()),
-        Arc::new(out_geoip_lon.finish()),
-        Arc::new(out_geoip_geohash.finish()),
-        Arc::new(out_nearest_hub.finish()),
-        Arc::new(out_distance_to_hub_km.finish()),
-    ])
-}
+    fn process_batch(
+        &mut self,
+        ctx: &mut GuestContext<'_>,
+        input: InputBatch,
+    ) -> Result<(), GuestError> {
+        ctx.domain_time();
+        let [batch] = input.batches() else {
+            return Err(GuestError::failed(format!(
+                "geoip enrichment expects exactly one record batch per envelope, got {}",
+                input.batches().len()
+            )));
+        };
 
-fn generated_fields() -> Vec<Field> {
-    vec![
-        Field::new("", DataType::Utf8, false),
-        Field::new("", DataType::Utf8, false),
-        Field::new("", DataType::Utf8, false),
-        Field::new("", DataType::Utf8, false),
-        Field::new("", DataType::Utf8, false),
-        Field::new("", DataType::Float64, false),
-        Field::new("", DataType::Float64, false),
-        Field::new("", DataType::Utf8, false),
-        Field::new("", DataType::Utf8, false),
-        Field::new("", DataType::Float64, false),
-    ]
-}
+        let mut output = OutputEnvelope::new();
+        let columns = (0..self.input_columns)
+            .map(|column_index| OutputColumnRef::Input {
+                column_index: column_index as u32,
+            })
+            .chain(
+                self.enrich(batch)?
+                    .into_iter()
+                    .map(|array| OutputColumnRef::Generated {
+                        column_index: output.add_generated_column(array, false),
+                    }),
+            )
+            .collect::<Vec<_>>();
 
-fn encode_generated_batch(fields: Vec<Field>, arrays: Vec<ArrayRef>) -> Result<Vec<u8>, i32> {
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema.clone(), arrays).map_err(|_| ERR_ARROW_IPC)?;
-    let mut ipc = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut ipc, &schema).map_err(|_| ERR_ARROW_IPC)?;
-        writer.write(&batch).map_err(|_| ERR_ARROW_IPC)?;
-        writer.finish().map_err(|_| ERR_ARROW_IPC)?;
-    }
-    Ok(ipc)
-}
-
-fn string_column(batch: &RecordBatch, index: usize) -> Result<&StringArray, i32> {
-    batch
-        .column(index)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or(ERR_ARROW_IPC)
-}
-
-fn string_value(array: &StringArray, row: usize) -> &str {
-    if array.is_valid(row) {
-        array.value(row)
-    } else {
-        ""
+        // Every destination receives the same rows, but only the first carries the ACK, NACK, and
+        // message-error sets so one input row is never settled twice.
+        for (index, relay) in self.output_relays.iter().enumerate() {
+            let mut acks = input.acks().clone();
+            if index > 0 {
+                acks.acked.clear();
+                acks.nacked.clear();
+                acks.message_errors.clear();
+            }
+            output.add_route(relay.clone(), columns.clone(), acks);
+        }
+        ctx.emit(output)
     }
 }
 
-fn geoip_reader() -> Result<Reader<&'static [u8]>, i32> {
-    Reader::from_source(DBIP_MMDB).map_err(|_| ERR_INVALID_SIZE)
-}
+impl GeoIpResolver {
+    fn enrich(&self, batch: &RecordBatch) -> Result<Vec<ArrayRef>, GuestError> {
+        let source_ip = batch
+            .column(self.source_ip_column)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                GuestError::failed(format!("'{SOURCE_IP_FIELD}' is not a UTF-8 string column"))
+            })?;
 
-fn resolve_ip(reader: &Reader<&'static [u8]>, source_ip: &str) -> ResolvedGeo {
-    let Ok(ip) = source_ip.parse::<IpAddr>() else {
-        return unknown_geo();
-    };
+        let mut database = StringBuilder::new();
+        let mut continent = StringBuilder::new();
+        let mut country = StringBuilder::new();
+        let mut region = StringBuilder::new();
+        let mut city = StringBuilder::new();
+        let mut latitude = Float64Builder::new();
+        let mut longitude = Float64Builder::new();
+        let mut geohash = StringBuilder::new();
+        let mut hub = StringBuilder::new();
+        let mut distance_km = Float64Builder::new();
 
-    let Ok(result) = reader.lookup(ip) else {
-        return unknown_geo();
-    };
-    let Ok(Some(city)) = result.decode::<geoip2::City>() else {
-        return unknown_geo();
-    };
-    let Some(lat) = city.location.latitude else {
-        return unknown_geo();
-    };
-    let Some(lon) = city.location.longitude else {
-        return unknown_geo();
-    };
+        for row in 0..batch.num_rows() {
+            let address = if source_ip.is_valid(row) {
+                source_ip.value(row)
+            } else {
+                ""
+            };
+            let geo = self.resolve(address);
+            let (nearest, distance) = nearest_hub(geo.lat, geo.lon);
+            database.append_value(self.reader.metadata.database_type.as_str());
+            continent.append_value(geo.continent.as_str());
+            country.append_value(geo.country.as_str());
+            region.append_value(geo.region.as_str());
+            city.append_value(geo.city.as_str());
+            latitude.append_value(geo.lat);
+            longitude.append_value(geo.lon);
+            geohash.append_value(geo_hash(geo.lat, geo.lon));
+            hub.append_value(nearest);
+            distance_km.append_value(distance);
+        }
 
-    ResolvedGeo {
-        continent: city.continent.code.unwrap_or("ZZ").to_string(),
-        country: city.country.iso_code.unwrap_or("ZZ").to_string(),
-        region: city
-            .subdivisions
-            .first()
-            .and_then(|subdivision| subdivision.names.english)
-            .unwrap_or("unknown")
-            .to_string(),
-        city: city.city.names.english.unwrap_or("unknown").to_string(),
-        lat,
-        lon,
+        Ok(vec![
+            Arc::new(database.finish()),
+            Arc::new(continent.finish()),
+            Arc::new(country.finish()),
+            Arc::new(region.finish()),
+            Arc::new(city.finish()),
+            Arc::new(latitude.finish()),
+            Arc::new(longitude.finish()),
+            Arc::new(geohash.finish()),
+            Arc::new(hub.finish()),
+            Arc::new(distance_km.finish()),
+        ])
+    }
+
+    /// An address the database cannot place is enriched as unknown rather than failed, because one
+    /// unroutable address must not reject the batch around it.
+    fn resolve(&self, source_ip: &str) -> ResolvedGeo {
+        let Ok(address) = source_ip.parse::<IpAddr>() else {
+            return ResolvedGeo::unknown();
+        };
+        let Ok(result) = self.reader.lookup(address) else {
+            return ResolvedGeo::unknown();
+        };
+        let Ok(Some(city)) = result.decode::<geoip2::City>() else {
+            return ResolvedGeo::unknown();
+        };
+        let (Some(lat), Some(lon)) = (city.location.latitude, city.location.longitude) else {
+            return ResolvedGeo::unknown();
+        };
+
+        ResolvedGeo {
+            continent: city.continent.code.unwrap_or("ZZ").to_string(),
+            country: city.country.iso_code.unwrap_or("ZZ").to_string(),
+            region: city
+                .subdivisions
+                .first()
+                .and_then(|subdivision| subdivision.names.english)
+                .unwrap_or("unknown")
+                .to_string(),
+            city: city.city.names.english.unwrap_or("unknown").to_string(),
+            lat,
+            lon,
+        }
     }
 }
 
-fn unknown_geo() -> ResolvedGeo {
-    ResolvedGeo {
-        continent: "ZZ".to_string(),
-        country: "ZZ".to_string(),
-        region: "unknown".to_string(),
-        city: "unknown".to_string(),
-        lat: 0.0,
-        lon: 0.0,
+impl ResolvedGeo {
+    fn unknown() -> Self {
+        Self {
+            continent: "ZZ".to_string(),
+            country: "ZZ".to_string(),
+            region: "unknown".to_string(),
+            city: "unknown".to_string(),
+            lat: 0.0,
+            lon: 0.0,
+        }
     }
 }
+
+nervix_wasm_sdk::export_processor!(GeoIpResolver);
 
 fn geo_hash(lat: f64, lon: f64) -> String {
     encode(Coord { x: lon, y: lat }, GEOHASH_PRECISION).unwrap_or_default()

@@ -44,11 +44,22 @@ not recursively upload Cargo build artifacts. `reference-data/dbip_city_lite_sam
 is a tiny sample using DB-IP's CSV field order for readers who want to inspect
 the equivalent CSV shape. `reference-data/edge_sites.jsonl` is the edge-location
 hash map used to compare IoT-reported positions with the selected edge site.
-The WASM guest emits `geoip_geohash` using the Rust `geohash` crate and computes
-hub distances with the `geo` crate.
-Its FlatBuffers output references the 14 unchanged input columns by index and serializes
-only the ten generated GeoIP columns as independent single-column Arrow IPC
-streams. Nervix materializes the referenced columns from retained host arrays.
+The WASM guest is built on the [Rust WASM Guest SDK](../../docs/src/wasm-guest-sdk.md): it
+implements the `Processor` trait and lets `export_processor!` own the ABI surface. It emits
+`geoip_geohash` using the Rust `geohash` crate and computes hub distances with the `geo` crate.
+Its output references the unchanged input columns by index and serializes only the ten generated
+GeoIP columns into the shared generated pool, which every declared `TO` relay references. Nervix
+materializes the referenced columns from retained host arrays. The guest resolves each batch as it
+arrives and holds nothing between calls, so it keeps the SDK's default saved state and quiesce
+flush.
+
+`crates/nervix-wasm/tests/geo_guest.rs` exercises the built artifact end to end. It is ignored by
+default because it needs the embedded database:
+
+```bash
+just wasm-datalake-geo-guest
+cargo test -p nervix-wasm --test geo_guest -- --ignored --nocapture
+```
 
 This example uses the DB-IP City Lite database. IP geolocation data is provided
 by [DB-IP.com](https://db-ip.com).
