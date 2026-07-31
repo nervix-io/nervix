@@ -23,6 +23,7 @@ pub fn statement_parser<'src>()
         crate::describe_domain::describe_domain_parser().map(Statement::DescribeDomain),
         crate::describe_endpoint::describe_endpoint_parser().map(Statement::DescribeEndpoint),
         crate::describe_ingestor::describe_ingestor_parser().map(Statement::DescribeIngestor),
+        crate::describe_junction::describe_junction_parser().map(Statement::DescribeJunction),
         crate::describe_lookup::describe_lookup_parser().map(Statement::DescribeLookup),
         crate::describe_resource::describe_resource_parser().map(Statement::DescribeResource),
         crate::describe_stream::describe_stream_parser().map(Statement::DescribeRelay),
@@ -1484,6 +1485,7 @@ mod tests {
         assert!(suggestions.contains(&"DOMAIN".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(suggestions.contains(&"INGESTOR".to_string()));
+        assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"REINGESTOR".to_string()));
         assert!(suggestions.contains(&"RESOURCE".to_string()));
         assert!(suggestions.contains(&"RELAY".to_string()));
@@ -1548,6 +1550,18 @@ mod tests {
             parsed,
             Statement::DescribeDeduplicator(nervix_models::DescribeDeduplicator {
                 name: ModelIdentifier::parse("dedup_txns").expect("valid identifier"),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_describe_junction_statement() {
+        let parsed = parse_statement("DESCRIBE JUNCTION route_notifications;")
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            Statement::DescribeJunction(nervix_models::DescribeJunction {
+                name: ModelIdentifier::parse("route_notifications").expect("valid identifier"),
             })
         );
     }

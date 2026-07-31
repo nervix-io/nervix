@@ -161,8 +161,8 @@ Choose checks relevant to the configured graph:
 - `DESCRIBE RELAY <relay>;` and `DESCRIBE RELAY <relay> WHERE (...);` inspect logical and concrete
   branch state.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
-- `DESCRIBE INGESTOR`, processor-specific `DESCRIBE`, and `DESCRIBE EMITTER` inspect runtime state
-  and edge metrics.
+- `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
+  `DESCRIBE EMITTER` inspect runtime state and edge metrics.
 - The observability server's `/metrics` endpoint reports `nervix_branch_instances` per domain,
   branch declaration, and physical node, plus `nervix_branch_evictions_total` split by
   `reason="lru"` or `reason="ttl"`.

@@ -3100,6 +3100,7 @@ fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
             || normalized.starts_with("DESCRIBE ENDPOINT ")
             || normalized.starts_with("DESCRIBE RESOURCE ")
             || normalized.starts_with("DESCRIBE RELAY ")
+            || normalized.starts_with("DESCRIBE JUNCTION ")
             || normalized.starts_with("DESCRIBE DEDUPLICATOR ")
             || normalized.starts_with("DESCRIBE REINGESTOR ")
             || normalized.starts_with("DESCRIBE EMITTER ")

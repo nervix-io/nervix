@@ -88,19 +88,20 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter,
-    CreateEndpoint, CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor,
-    CreateReorderer, CreateResource, CreateStatement, CreateUser, CreateWindowProcessor,
-    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, Domain,
-    DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
-    IcebergCatalog, Identifier, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
-    IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind,
-    MongoDbConflictAction, MySqlConflictAction, ParseAsType, PostgresConflictAction,
-    ProcessorInputs, ProcessorOutputs, QuiesceLevel, ResourceNodeState, ResourceNodeStatus,
-    ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement,
-    StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
-    UploadResource, VhostTlsResource, expression_to_nspl,
+    CreateEndpoint, CreateInferencer, CreateIngestor, CreateJunction, CreateLookup,
+    CreateReingestor, CreateReorderer, CreateResource, CreateStatement, CreateUser,
+    CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
+    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
+    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf,
+    DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig, DomainPace,
+    DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier,
+    InferencerTensorDimension, InferencerTensorSchema, IngestSource, IngestTimestampSource,
+    KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind, MongoDbConflictAction,
+    MySqlConflictAction, ParseAsType, PostgresConflictAction, ProcessorInputs, ProcessorOutputs,
+    QuiesceLevel, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
+    ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp, UploadResource, VhostTlsResource,
+    expression_to_nspl,
 };
 use nervix_nspl::{
     Token, Word,
@@ -6174,6 +6175,63 @@ impl SessionServiceImpl {
         ))
     }
 
+    async fn describe_junction(
+        &self,
+        domain: &Domain,
+        describe: DescribeJunction,
+    ) -> CommandResult {
+        let scheduled_node = self
+            .scheduled_model_node(domain, ModelKind::Junction, &describe.name)
+            .await;
+        let model = match self
+            .registry
+            .get(domain, ModelKind::Junction, &describe.name)
+        {
+            Ok(Some(model)) => model,
+            Ok(None) => {
+                let Some(scheduled_node) = scheduled_node.as_ref() else {
+                    return command_error(format!(
+                        "junction '{}' does not exist in domain '{}'",
+                        describe.name.as_str(),
+                        domain.as_str()
+                    ));
+                };
+                (*scheduled_node.config).clone()
+            }
+            Err(error) => {
+                return command_error(format!(
+                    "failed to read junction '{}' in domain '{}': {error:?}",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
+            }
+        };
+        let Model::Junction(junction) = model else {
+            return command_error(format!(
+                "model '{}' in domain '{}' is not a junction",
+                describe.name.as_str(),
+                domain.as_str()
+            ));
+        };
+
+        let metrics = match self
+            .describe_metrics_for_scheduled_node(
+                domain,
+                ModelKind::Junction,
+                &describe.name,
+                scheduled_node.as_ref(),
+            )
+            .await
+        {
+            Ok(metrics) => metrics,
+            Err(message) => return command_error(message),
+        };
+        command_ok(append_metrics_lines(
+            format_junction_describe_output(&describe.name, &junction, scheduled_node.as_ref()),
+            metrics,
+        ))
+    }
+
     async fn describe_reingestor(
         &self,
         domain: &Domain,
@@ -7726,6 +7784,10 @@ impl SessionServiceImpl {
             Statement::DescribeLookup(describe) => {
                 let domain = domain.as_ref().expect("domain required");
                 self.describe_lookup(domain, describe).await
+            }
+            Statement::DescribeJunction(describe) => {
+                let domain = domain.as_ref().expect("domain required");
+                self.describe_junction(domain, describe).await
             }
             Statement::DescribeDeduplicator(describe) => {
                 let domain = domain.as_ref().expect("domain required");
@@ -11061,6 +11123,34 @@ fn format_deduplicator_describe_output(
     lines.join("\n")
 }
 
+fn format_junction_describe_output(
+    name: &Identifier,
+    junction: &CreateJunction,
+    scheduled_node: Option<&ScheduledNode>,
+) -> String {
+    let mut lines = vec![
+        format!("junction: {}", name.as_str()),
+        "kind: JUNCTION".to_string(),
+    ];
+    lines.extend(format_schedule_placement_lines(scheduled_node));
+    lines.extend([
+        format!("from: {}", processor_input_names(&junction.from)),
+        format!("branch: {}", format_branch_selection(&junction.branched_by)),
+        format!("mode: {}", junction.mode.as_ref()),
+        format!(
+            "filter-where: {}",
+            if junction.filter_where.is_some() {
+                "present"
+            } else {
+                "none"
+            }
+        ),
+        "branch-local: true".to_string(),
+    ]);
+    lines.extend(format_processor_output_lines(&junction.output_routes));
+    lines.join("\n")
+}
+
 fn format_reingestor_describe_output(
     name: &Identifier,
     reingestor: &CreateReingestor,
@@ -11593,6 +11683,7 @@ fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribeIngestor(_)
             | Statement::DescribeRelay(_)
             | Statement::DescribeLookup(_)
+            | Statement::DescribeJunction(_)
             | Statement::DescribeDeduplicator(_)
             | Statement::DescribeReingestor(_)
             | Statement::DescribeCorrelator(_)
