@@ -51,6 +51,8 @@ picker.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.
+The **Cluster** footer stays independent of the selected domain: it reports the number of running
+domains, non-relay graph nodes, and relays across the current cluster graph.
 
 ## The Execution Graph
 

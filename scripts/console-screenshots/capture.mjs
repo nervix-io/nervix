@@ -40,9 +40,6 @@ const DEVICE_SCALE_FACTOR = 2;
 // Half of the graph's 2.7s pulse period. Every edge shares that duration, so
 // freezing here puts every pulse at the midpoint of its own path.
 const PULSE_FREEZE_OFFSET_SECONDS = 1.35;
-// The sidebar cluster counters are wired to constants rather than to cluster
-// state; publishing them would document numbers untrue of any deployment.
-const SUPPRESSED_PLACEHOLDERS = ".cluster-block { display: none; }";
 
 const READY_TIMEOUT_MS = 90_000;
 const SETTLE_TIMEOUT_MS = 20_000;
@@ -56,7 +53,6 @@ const CAPTURE_OPTIONS = {
   animations: "disabled",
   caret: "hide",
   scale: "device",
-  style: SUPPRESSED_PLACEHOLDERS,
 };
 
 const CHROME_CANDIDATES = [

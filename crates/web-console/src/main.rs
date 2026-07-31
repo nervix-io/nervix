@@ -56,6 +56,7 @@ struct WebConsoleSignals {
     terminal_lines: RwSignal<Vec<TermLine>>,
     suggestions: RwSignal<Vec<String>>,
     domain_snapshots: RwSignal<Vec<DomainSnapshotView>>,
+    cluster_counters: RwSignal<ClusterCounters>,
     active_domain: RwSignal<Option<String>>,
     transaction_active: RwSignal<bool>,
     domains: RwSignal<Vec<DomainView>>,
@@ -260,6 +261,7 @@ fn App() -> impl IntoView {
     let next_subscription_tab_id = RwSignal::new(1_u64);
     let suggestions = RwSignal::new(Vec::<String>::new());
     let domain_snapshots = RwSignal::new(Vec::<DomainSnapshotView>::new());
+    let cluster_counters = RwSignal::new(ClusterCounters::default());
     let resource_details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
     let domains_loaded = RwSignal::new(false);
     let user_selected_domain = RwSignal::new(false);
@@ -269,6 +271,7 @@ fn App() -> impl IntoView {
         terminal_lines,
         suggestions,
         domain_snapshots,
+        cluster_counters,
         active_domain,
         transaction_active,
         domains,
@@ -567,7 +570,7 @@ fn App() -> impl IntoView {
                     run_command=run_command
                 />
                 <div class="console-body">
-                    <Sidebar active_domain=active_domain user_selected_domain=user_selected_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities resource_details=resource_details web_console_session=web_console_session.clone() run_command=run_command />
+                    <Sidebar active_domain=active_domain user_selected_domain=user_selected_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details web_console_session=web_console_session.clone() run_command=run_command />
                     <section class="main-pane">
                         <GraphPanel active_domain=active_domain domain=active_graph run_command=run_command start_subscription=start_subscription />
                         <ReplPanel
@@ -975,6 +978,7 @@ fn handle_session_response(
         terminal_lines,
         suggestions,
         domain_snapshots,
+        cluster_counters,
         active_domain,
         transaction_active,
         domains,
@@ -1098,6 +1102,9 @@ fn handle_session_response(
                     });
                 }
             }
+        }
+        Some(nervix_proto::session_response::Event::Cluster(summary)) => {
+            cluster_counters.set(ClusterCounters::from(summary));
         }
         None => {}
     }
@@ -1651,6 +1658,7 @@ fn Sidebar(
     domains_loaded: RwSignal<bool>,
     active_graph: impl Fn() -> Option<GraphView> + Copy + Send + Sync + 'static,
     active_entities: impl Fn() -> Vec<EntityView> + Copy + Send + Sync + 'static,
+    cluster_counters: RwSignal<ClusterCounters>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     web_console_session: WebConsoleSession,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
@@ -1883,9 +1891,9 @@ fn Sidebar(
             </nav>
             <div class="cluster-block">
                 <p>"Cluster"</p>
-                <ClusterRow label="running" value="5" />
-                <ClusterRow label="nodes" value="57" />
-                <ClusterRow label="relays" value="49" />
+                <ClusterRow label="running" value=move || cluster_counters.get().running.to_string() />
+                <ClusterRow label="nodes" value=move || cluster_counters.get().nodes.to_string() />
+                <ClusterRow label="relays" value=move || cluster_counters.get().relays.to_string() />
             </div>
             <Show when=move || selected_resource.get().is_some() fallback=|| ()>
                 <ResourceDialog
@@ -2288,7 +2296,10 @@ fn encode_query_component(value: &str) -> String {
 }
 
 #[component]
-fn ClusterRow(label: &'static str, value: &'static str) -> impl IntoView {
+fn ClusterRow(
+    label: &'static str,
+    value: impl Fn() -> String + Copy + Send + 'static,
+) -> impl IntoView {
     view! {
         <div class="cluster-row">
             <span>
@@ -2299,7 +2310,7 @@ fn ClusterRow(label: &'static str, value: &'static str) -> impl IntoView {
                 } />
                 {label}
             </span>
-            <strong>{value}</strong>
+            <strong>{move || value()}</strong>
         </div>
     }
 }
@@ -5920,6 +5931,23 @@ impl DomainSnapshotView {
             domain: snapshot.domain,
             dataflow_graph,
             entities,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ClusterCounters {
+    running: u64,
+    nodes: u64,
+    relays: u64,
+}
+
+impl From<nervix_proto::ClusterSummary> for ClusterCounters {
+    fn from(summary: nervix_proto::ClusterSummary) -> Self {
+        Self {
+            running: summary.running_domains,
+            nodes: summary.nodes,
+            relays: summary.relays,
         }
     }
 }

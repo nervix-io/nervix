@@ -413,10 +413,11 @@ use crate::{
     memory_pressure::{MemoryPressureConfig, MemoryPressureController},
     proto,
     proto::{
-        CommandRequest, CommandResult, CommandResultKind, Diagnostic, DomainEntitySnapshot,
-        DomainInfo, DomainList, DomainSnapshot, ServerEvent, ServerEventLevel, SessionRequest,
-        SessionResponse, SetActiveDomainRequest, SuggestRequest, SuggestResponse,
-        Suggestion as ApiSuggestion, SuggestionKind, UploadResourceRequest, UploadResourceResponse,
+        ClusterSummary, CommandRequest, CommandResult, CommandResultKind, Diagnostic,
+        DomainEntitySnapshot, DomainInfo, DomainList, DomainSnapshot, ServerEvent,
+        ServerEventLevel, SessionRequest, SessionResponse, SetActiveDomainRequest, SuggestRequest,
+        SuggestResponse, Suggestion as ApiSuggestion, SuggestionKind, UploadResourceRequest,
+        UploadResourceResponse,
         session_service_server::{SessionService, SessionServiceServer},
     },
     resource::{ResourceEntryType, ResourceManifestEntry, ResourceStore},
@@ -1934,7 +1935,7 @@ async fn handle_web_console_request(
                                                                     break;
                                                                 }
                                                                 if leader_connected
-                                                                    && !send_web_console_domain_snapshot_responses(
+                                                                    && !send_web_console_state_responses(
                                                                         &mut websocket,
                                                                         &service,
                                                                         active_domain.as_ref(),
@@ -2081,7 +2082,7 @@ async fn handle_web_console_request(
                                     {
                                         break;
                                     }
-                                    if !send_web_console_domain_snapshot_responses(
+                                    if !send_web_console_state_responses(
                                         &mut websocket,
                                         &service,
                                         active_domain.as_ref(),
@@ -2093,7 +2094,7 @@ async fn handle_web_console_request(
                                 }
                             }
                             _ = graph_snapshot.tick(), if leader_connected => {
-                                if !send_web_console_domain_snapshot_responses(
+                                if !send_web_console_state_responses(
                                     &mut websocket,
                                     &service,
                                     active_domain.as_ref(),
@@ -2121,7 +2122,7 @@ async fn handle_web_console_request(
                                 {
                                     break;
                                 }
-                                if !send_web_console_domain_snapshot_responses(
+                                if !send_web_console_state_responses(
                                     &mut websocket,
                                     &service,
                                     active_domain.as_ref(),
@@ -2217,7 +2218,7 @@ where
         .is_ok()
 }
 
-async fn send_web_console_domain_snapshot_responses<S>(
+async fn send_web_console_state_responses<S>(
     websocket: &mut WebSocketStream<S>,
     service: &SessionServiceImpl,
     active_domain: Option<&Domain>,
@@ -2225,6 +2226,14 @@ async fn send_web_console_domain_snapshot_responses<S>(
 where
     WebSocketStream<S>: SinkExt<Message> + Unpin,
 {
+    if !send_web_console_session_response(
+        websocket,
+        service.web_console_cluster_summary_response().await,
+    )
+    .await
+    {
+        return false;
+    }
     for response in service
         .web_console_domain_snapshot_responses(active_domain)
         .await
@@ -11954,6 +11963,30 @@ impl SessionServiceImpl {
             event: Some(proto::session_response::Event::Domains(DomainList {
                 domains,
                 response_to_request,
+            })),
+        }
+    }
+
+    async fn web_console_cluster_summary_response(&self) -> SessionResponse {
+        let running_domains = self
+            .consensus
+            .current_domains()
+            .await
+            .into_values()
+            .filter(|domain| domain.status == DomainStatus::Running)
+            .count();
+        let (nodes, relays) = self.registry.active_graphs().into_iter().fold(
+            (0_usize, 0_usize),
+            |(nodes, relays), (_, graph)| {
+                let counts = graph.dataflow_graph_counts();
+                (nodes + counts.nodes, relays + counts.relays)
+            },
+        );
+        SessionResponse {
+            event: Some(proto::session_response::Event::Cluster(ClusterSummary {
+                running_domains: u64::try_from(running_domains).unwrap_or(u64::MAX),
+                nodes: u64::try_from(nodes).unwrap_or(u64::MAX),
+                relays: u64::try_from(relays).unwrap_or(u64::MAX),
             })),
         }
     }
