@@ -7,17 +7,27 @@ use std::{
 
 use flate2::read::GzDecoder;
 
+/// `just download-datalake-dbip` stages whichever monthly DB-IP build it could fetch under one
+/// stable name, so the build and the guest never encode a release date.
+const MMDB_ARCHIVE: &str = "dbip-city-lite.mmdb.gz";
+const MMDB: &str = "dbip-city-lite.mmdb";
+
 fn main() -> io::Result<()> {
-    let source = PathBuf::from("dbip-city-lite-2026-06.mmdb.gz");
+    let source = PathBuf::from(MMDB_ARCHIVE);
     println!("cargo:rerun-if-changed={}", source.display());
 
-    let compressed = fs::File::open(&source)?;
+    let compressed = fs::File::open(&source).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("{}: run `just download-datalake-dbip` first", source.display()),
+        )
+    })?;
     let mut decoder = GzDecoder::new(compressed);
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed)?;
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
-    let destination = out_dir.join("dbip-city-lite-2026-06.mmdb");
+    let destination = out_dir.join(MMDB);
     fs::write(&destination, decompressed)?;
     let reader = maxminddb::Reader::open_readfile(&destination).map_err(|error| {
         io::Error::new(

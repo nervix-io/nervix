@@ -27,7 +27,7 @@
 // artifact, then stages only that artifact in geo-wasm-guest/resource for
 // upload:
 //
-//   examples/datalake/geo-wasm-guest/dbip-city-lite-2026-06.mmdb.gz
+//   examples/datalake/geo-wasm-guest/dbip-city-lite.mmdb.gz
 
 CREATE UNPACED DOMAIN datalake_demo;
 
