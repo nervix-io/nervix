@@ -28,9 +28,10 @@ use crate::{
     PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
     PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
     RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RetryPolicy,
-    RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry, SqsConfigEntry,
-    SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WireSchemaDefinition, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry, SignalingWait,
+    SignalingWireFormat, SqsConfigEntry, SqsIngestMode, UnaryOperator, WebsocketsConfigEntry,
+    WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqConfigEntry,
+    ZeroMqIngestMode,
 };
 
 pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
@@ -1022,29 +1023,77 @@ impl CreateEndpoint {
 
 impl CreateSignalingProtocol {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let send_bodies = self
-            .on_connect
-            .send_bodies
-            .iter()
-            .map(|body| string_literal(body))
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-        let wait_bodies = self
-            .on_connect
-            .wait_bodies
-            .iter()
-            .map(|body| string_literal(body))
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
+        let mut clauses = String::new();
+        for phase in &self.on_connect.phases {
+            if !phase.sends.is_empty() {
+                clauses.push_str(" SEND JAQ ");
+                clauses.push_str(&jaq_program_list_to_nspl(&phase.sends)?);
+            }
+            for wait in &phase.waits {
+                clauses.push_str(&wait.to_canonical_nspl()?);
+            }
+        }
+        if !self.on_connect.fail_matchers.is_empty() {
+            clauses.push_str(" FAIL JAQ ");
+            clauses.push_str(&jaq_program_list_to_nspl(&self.on_connect.fail_matchers)?);
+        }
 
         Ok(format!(
-            "CREATE SIGNALING PROTOCOL {} ON CONNECT SEND BODY {} WAIT BODY {} TIMEOUT {};",
+            "CREATE SIGNALING PROTOCOL {} FROM {} ON CONNECT{} TIMEOUT {};",
             self.name.as_str(),
-            send_bodies,
-            wait_bodies,
+            self.format.to_canonical_nspl()?,
+            clauses,
             self.on_connect.timeout
         ))
     }
+}
+
+impl SignalingWait {
+    fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let mut rendered = format!(" WAIT JAQ {}", string_literal(&self.matcher)?);
+        if let Some(capture) = self.capture.as_deref() {
+            rendered.push_str(" CAPTURE ");
+            rendered.push_str(&string_literal(capture)?);
+        }
+        if self.accept_data {
+            rendered.push_str(" ACCEPT DATA");
+        }
+        Ok(rendered)
+    }
+}
+
+impl SignalingWireFormat {
+    fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let Self::Protobuf(config) = self else {
+            return Ok(self.as_ref().to_string());
+        };
+        let version = config
+            .resource_version
+            .map(|version| format!(" VERSION {version}"))
+            .unwrap_or_default();
+        let protobuf_config = config
+            .config
+            .iter()
+            .map(kafka_entry_to_nspl)
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        Ok(format!(
+            "PROTOBUF USING RESOURCE {}{} CONFIG {{{}}} SEND MESSAGE {} WAIT MESSAGE {}",
+            config.resource.as_str(),
+            version,
+            protobuf_config,
+            string_literal(&config.send_message)?,
+            string_literal(&config.wait_message)?
+        ))
+    }
+}
+
+fn jaq_program_list_to_nspl(programs: &[String]) -> Result<String, CanonicalNsplError> {
+    Ok(programs
+        .iter()
+        .map(|program| string_literal(program))
+        .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+        .join(", "))
 }
 
 impl CreateCodec {
@@ -2780,7 +2829,8 @@ mod tests {
         NatsIngestMode, OutputBranch, ParseAsType, PostgresConflictAction, PostgresValueMapping,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
         RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction,
-        SchemaField, SentryConfigEntry, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
+        SchemaField, SentryConfigEntry, SignalingPhase, SignalingProtobufConfig, SignalingWait,
+        SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
         WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
     };
 
@@ -3242,15 +3292,63 @@ mod tests {
 
         let signaling_protocol = CreateSignalingProtocol {
             name: identifier("binance_ws"),
+            format: SignalingWireFormat::Json,
             on_connect: crate::SignalingProtocolOnConnect {
-                send_bodies: vec![r#"{"method":"SUBSCRIBE","id":1}"#.to_string()],
-                wait_bodies: vec![r#"{"id":1,"result":null}"#.to_string()],
+                phases: vec![SignalingPhase::new(
+                    vec![r#"{method: "SUBSCRIBE", id: 1}"#.to_string()],
+                    vec![SignalingWait::new(
+                        ".id == 1 and .result == null".to_string(),
+                    )],
+                )],
+                fail_matchers: Vec::new(),
                 timeout: "5s".to_string(),
             },
         };
         assert_eq!(
             signaling_protocol.to_canonical_nspl().expect("must render"),
-            r#"CREATE SIGNALING PROTOCOL binance_ws ON CONNECT SEND BODY '{"method":"SUBSCRIBE","id":1}' WAIT BODY '{"id":1,"result":null}' TIMEOUT 5s;"#
+            r#"CREATE SIGNALING PROTOCOL binance_ws FROM JSON ON CONNECT SEND JAQ '{method: "SUBSCRIBE", id: 1}' WAIT JAQ '.id == 1 and .result == null' TIMEOUT 5s;"#
+        );
+
+        let protobuf_signaling_protocol = CreateSignalingProtocol {
+            name: identifier("orders_ws"),
+            format: SignalingWireFormat::Protobuf(SignalingProtobufConfig {
+                resource: identifier("proto_bundle"),
+                resource_version: Some(2),
+                config: vec![crate::ClientConfigEntry {
+                    key: "file".to_string(),
+                    value: "signaling.proto".to_string(),
+                }],
+                send_message: "nervix.test.Subscribe".to_string(),
+                wait_message: "nervix.test.Ack".to_string(),
+            }),
+            on_connect: crate::SignalingProtocolOnConnect {
+                phases: vec![
+                    SignalingPhase::new(
+                        vec!["{id: 1}".to_string()],
+                        vec![SignalingWait {
+                            matcher: ".authed".to_string(),
+                            capture: Some("{token: .token}".to_string()),
+                            accept_data: true,
+                        }],
+                    ),
+                    SignalingPhase::new(
+                        vec!["{id: 2, token: $state.token}".to_string()],
+                        vec![SignalingWait::new(".id == 2".to_string())],
+                    ),
+                ],
+                fail_matchers: vec![".error".to_string()],
+                timeout: "5s".to_string(),
+            },
+        };
+        assert_eq!(
+            protobuf_signaling_protocol
+                .to_canonical_nspl()
+                .expect("must render"),
+            "CREATE SIGNALING PROTOCOL orders_ws FROM PROTOBUF USING RESOURCE proto_bundle \
+             VERSION 2 CONFIG {'file' = 'signaling.proto'} SEND MESSAGE 'nervix.test.Subscribe' \
+             WAIT MESSAGE 'nervix.test.Ack' ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ '.authed' \
+             CAPTURE '{token: .token}' ACCEPT DATA SEND JAQ '{id: 2, token: $state.token}' WAIT \
+             JAQ '.id == 2' FAIL JAQ '.error' TIMEOUT 5s;"
         );
 
         let codec = CreateCodec {

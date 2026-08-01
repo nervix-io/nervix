@@ -75,6 +75,16 @@ per-route branch selection, while generator route bodies remain set-only.
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
   `ON EMITTING`, or both in that order. At least one direction is required.
+- Give every signaling protocol an explicit `FROM` wire format and express the handshake as JAQ:
+  `SEND JAQ` programs must each yield exactly one value, `WAIT JAQ` matchers accept any output
+  that is neither null nor false, and optional `FAIL JAQ` matchers abort the handshake. Match only
+  the fields that matter so acknowledgements carrying connection ids or timestamps still match.
+- Order signaling clauses as they must happen: a `SEND` written after a `WAIT` is withheld until
+  that wait is satisfied. Use `CAPTURE` on a single-matcher `WAIT` to record values from the
+  matched frame, and read them in later programs through `$state`.
+- Mark the matcher whose success means the peer is streaming with `ACCEPT DATA`. Payload held up
+  to that point is then ingested and later frames pass straight through while the handshake
+  continues. Without it, payload is held for the whole handshake and discarded if it fails.
 - Preserve written operation order in schema, relay, junction, deduplicator, reorderer, emitter,
   ingestor, reingestor, and generator ALTER
   statements.

@@ -2368,14 +2368,93 @@ pub enum EndpointType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSignalingProtocol {
     pub name: Identifier,
+    pub format: SignalingWireFormat,
     pub on_connect: SignalingProtocolOnConnect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum SignalingWireFormat {
+    Json,
+    Yaml,
+    Toml,
+    Xml,
+    Cbor,
+    Raw,
+    Protobuf(SignalingProtobufConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalingProtobufConfig {
+    pub resource: Identifier,
+    pub resource_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config: Vec<ClientConfigEntry>,
+    pub send_message: String,
+    pub wait_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalingProtocolOnConnect {
-    pub send_bodies: Vec<String>,
-    pub wait_bodies: Vec<String>,
+    pub phases: Vec<SignalingPhase>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fail_matchers: Vec<String>,
     pub timeout: String,
+}
+
+/// One ordered step of a handshake: everything it sends, then everything it waits for.
+///
+/// Sends of a phase are only written once every wait of the preceding phase is satisfied, which is
+/// what makes a later request able to depend on an earlier reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalingPhase {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waits: Vec<SignalingWait>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalingWait {
+    pub matcher: String,
+    /// Program merged into the handshake state when this matcher is satisfied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<String>,
+    /// Whether satisfying this matcher opens payload ingestion, releasing anything held so far
+    /// and passing later frames straight through while the handshake continues.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_data: bool,
+}
+
+impl SignalingWait {
+    pub fn new(matcher: String) -> Self {
+        Self {
+            matcher,
+            capture: None,
+            accept_data: false,
+        }
+    }
+}
+
+impl SignalingPhase {
+    pub fn new(sends: Vec<String>, waits: Vec<SignalingWait>) -> Self {
+        Self { sends, waits }
+    }
+}
+
+impl SignalingProtocolOnConnect {
+    pub fn waits(&self) -> impl Iterator<Item = &SignalingWait> {
+        self.phases.iter().flat_map(|phase| phase.waits.iter())
+    }
+
+    pub fn sends(&self) -> impl Iterator<Item = &String> {
+        self.phases.iter().flat_map(|phase| phase.sends.iter())
+    }
+
+    /// Whether any matcher opens payload ingestion before the handshake finishes.
+    pub fn accepts_data_during_handshake(&self) -> bool {
+        self.waits().any(|wait| wait.accept_data)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]

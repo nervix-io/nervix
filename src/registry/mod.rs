@@ -24,7 +24,7 @@ use nervix_models::{
     Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
     MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, OutputBranch,
     ParseAsType, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode,
-    SchemaField, WireSchemaDefinition,
+    SchemaField, SignalingWireFormat, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -51,6 +51,8 @@ pub use stored::StoredModelVersioned;
 use thiserror::Error;
 use tracing::{info, warn};
 use triomphe::Arc;
+
+use crate::jaq_program::StatefulJaqProgram;
 
 const BRANCH_NAMESPACE: &str = "branch";
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
@@ -3640,29 +3642,66 @@ fn ensure_signaling_protocol_is_valid(
     identifier: &Identifier,
     protocol: &CreateSignalingProtocol,
 ) -> Result<(), Report<RegistryError>> {
-    if protocol.on_connect.send_bodies.is_empty() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "signaling protocol must send at least one body".to_string(),
-        }));
-    }
-    if protocol.on_connect.wait_bodies.is_empty() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "signaling protocol must wait for at least one body".to_string(),
-        }));
-    }
-    humantime::parse_duration(&protocol.on_connect.timeout).map_err(|error| {
+    let invalid = |reason: String| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "invalid signaling protocol timeout '{}': {error}",
-                protocol.on_connect.timeout
-            ),
+            reason,
         })
+    };
+
+    if protocol.on_connect.sends().next().is_none() {
+        return Err(invalid(
+            "signaling protocol must declare at least one SEND JAQ program".to_string(),
+        ));
+    }
+    if protocol.on_connect.waits().next().is_none() {
+        return Err(invalid(
+            "signaling protocol must declare at least one WAIT JAQ matcher".to_string(),
+        ));
+    }
+
+    let compile = |clause: &str, index: usize, program: &str| {
+        StatefulJaqProgram::compile(program)
+            .map(|_| ())
+            .map_err(|error| {
+                invalid(format!(
+                    "signaling protocol {clause} program #{} is invalid: {error}",
+                    index + 1
+                ))
+            })
+    };
+    for (index, program) in protocol.on_connect.sends().enumerate() {
+        compile("SEND JAQ", index, program)?;
+    }
+    for (index, wait) in protocol.on_connect.waits().enumerate() {
+        compile("WAIT JAQ", index, &wait.matcher)?;
+        if let Some(capture) = wait.capture.as_deref() {
+            compile("CAPTURE", index, capture)?;
+        }
+    }
+    for (index, matcher) in protocol.on_connect.fail_matchers.iter().enumerate() {
+        compile("FAIL JAQ", index, matcher)?;
+    }
+
+    if let SignalingWireFormat::Protobuf(config) = &protocol.format {
+        if config.send_message.trim().is_empty() {
+            return Err(invalid(
+                "protobuf signaling protocol must declare a SEND MESSAGE type".to_string(),
+            ));
+        }
+        if config.wait_message.trim().is_empty() {
+            return Err(invalid(
+                "protobuf signaling protocol must declare a WAIT MESSAGE type".to_string(),
+            ));
+        }
+    }
+
+    humantime::parse_duration(&protocol.on_connect.timeout).map_err(|error| {
+        invalid(format!(
+            "invalid signaling protocol timeout '{}': {error}",
+            protocol.on_connect.timeout
+        ))
     })?;
     Ok(())
 }
@@ -9562,13 +9601,16 @@ mod tests {
         KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model,
         ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
-        ScheduledNode, SchemaField, WindowBound, WireSchemaField,
+        ScheduledNode, SchemaField, SignalingPhase, SignalingProtobufConfig,
+        SignalingProtocolOnConnect, SignalingWait, SignalingWireFormat, WindowBound,
+        WireSchemaField,
     };
 
     #[cfg(feature = "testing")]
     use super::SchedulerMode;
     use super::{
-        DataflowGraphCounts, ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange,
+        CreateSignalingProtocol, DataflowGraphCounts, ModelStorage, Registry, RegistryError,
+        RegistryMutation, Report, RuntimeChange, ensure_signaling_protocol_is_valid,
     };
 
     fn temp_db_path() -> PathBuf {
@@ -10194,6 +10236,137 @@ mod tests {
         })
     }
 
+    fn signaling_protocol(
+        format: SignalingWireFormat,
+        send_programs: &[&str],
+        wait_matchers: &[&str],
+        fail_matchers: &[&str],
+    ) -> CreateSignalingProtocol {
+        CreateSignalingProtocol {
+            name: identifier("handshake"),
+            format,
+            on_connect: SignalingProtocolOnConnect {
+                phases: vec![SignalingPhase::new(
+                    send_programs.iter().map(|p| p.to_string()).collect(),
+                    wait_matchers
+                        .iter()
+                        .map(|matcher| SignalingWait::new(matcher.to_string()))
+                        .collect(),
+                )],
+                fail_matchers: fail_matchers.iter().map(|p| p.to_string()).collect(),
+                timeout: "5s".to_string(),
+            },
+        }
+    }
+
+    fn validate_signaling_protocol(
+        protocol: &CreateSignalingProtocol,
+    ) -> Result<(), Report<RegistryError>> {
+        let domain = Domain::parse("default").expect("valid domain");
+        ensure_signaling_protocol_is_valid(&domain, &protocol.name, protocol)
+    }
+
+    #[test]
+    fn signaling_protocols_accept_valid_jaq_programs() {
+        validate_signaling_protocol(&signaling_protocol(
+            SignalingWireFormat::Json,
+            &["{id: 1}"],
+            &[".id == 1 and .result == null"],
+            &[".error"],
+        ))
+        .expect("valid signaling protocol must be accepted");
+
+        validate_signaling_protocol(&signaling_protocol(
+            SignalingWireFormat::Protobuf(SignalingProtobufConfig {
+                resource: identifier("proto_bundle"),
+                resource_version: Some(1),
+                config: Vec::new(),
+                send_message: "nervix.test.Subscribe".to_string(),
+                wait_message: "nervix.test.Ack".to_string(),
+            }),
+            &["{id: 1}"],
+            &[".id == 1"],
+            &[],
+        ))
+        .expect("valid protobuf signaling protocol must be accepted");
+    }
+
+    #[test]
+    fn signaling_protocols_reject_invalid_jaq_programs() {
+        let error = validate_signaling_protocol(&signaling_protocol(
+            SignalingWireFormat::Json,
+            &["{id: 1}", ".["],
+            &[".id == 1"],
+            &[],
+        ))
+        .expect_err("invalid send program must be rejected");
+        assert!(
+            error.to_string().contains("SEND JAQ program #2 is invalid"),
+            "unexpected error: {error:?}"
+        );
+
+        let error = validate_signaling_protocol(&signaling_protocol(
+            SignalingWireFormat::Json,
+            &["{id: 1}"],
+            &[".id == 1"],
+            &[".error", "if ."],
+        ))
+        .expect_err("invalid fail matcher must be rejected");
+        assert!(
+            error.to_string().contains("FAIL JAQ program #2 is invalid"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn signaling_protocols_require_send_and_wait_programs() {
+        let error = validate_signaling_protocol(&signaling_protocol(
+            SignalingWireFormat::Json,
+            &[],
+            &[".id == 1"],
+            &[],
+        ))
+        .expect_err("missing send program must be rejected");
+        assert!(
+            error.to_string().contains("at least one SEND JAQ program"),
+            "unexpected error: {error:?}"
+        );
+
+        let error = validate_signaling_protocol(&signaling_protocol(
+            SignalingWireFormat::Json,
+            &["{id: 1}"],
+            &[],
+            &[],
+        ))
+        .expect_err("missing wait matcher must be rejected");
+        assert!(
+            error.to_string().contains("at least one WAIT JAQ matcher"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn protobuf_signaling_protocols_require_both_message_types() {
+        let error = validate_signaling_protocol(&signaling_protocol(
+            SignalingWireFormat::Protobuf(SignalingProtobufConfig {
+                resource: identifier("proto_bundle"),
+                resource_version: None,
+                config: Vec::new(),
+                send_message: "nervix.test.Subscribe".to_string(),
+                wait_message: "  ".to_string(),
+            }),
+            &["{id: 1}"],
+            &[".id == 1"],
+            &[],
+        ))
+        .expect_err("missing wait message type must be rejected");
+
+        assert!(
+            error.to_string().contains("WAIT MESSAGE type"),
+            "unexpected error: {error:?}"
+        );
+    }
+
     #[test]
     fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         let domain = Domain::parse("default").expect("valid domain");
@@ -10348,6 +10521,18 @@ mod tests {
         assert_example_graph_validates(
             "wasm_dual",
             include_str!("../../examples/wasm-processors/wasm-dual.nspl"),
+        );
+        assert_example_graph_validates(
+            "binance_websocket",
+            include_str!("../../examples/binance-websocket/binance_websocket.nspl"),
+        );
+        assert_example_graph_validates(
+            "onnx_batched",
+            include_str!("../../examples/onnx-inference/batched.nspl"),
+        );
+        assert_example_graph_validates(
+            "onnx_per_message",
+            include_str!("../../examples/onnx-inference/per-message.nspl"),
         );
     }
 

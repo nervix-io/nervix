@@ -1,4 +1,4 @@
-use std::{io::Cursor, str::FromStr, sync::Arc as StdArc};
+use std::{io::Cursor, sync::Arc as StdArc};
 
 use ahash::{HashMap, HashMapExt, HashSet};
 use apache_avro::{
@@ -21,20 +21,9 @@ use arrow_schema::{
     Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
 };
 use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter_record_batch};
-use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
-use jaq_core::{
-    Compiler as JaqCompiler, Ctx as JaqCtx, Vars as JaqVars, data,
-    load::{Arena, File, Loader},
-    unwrap_valr,
-};
-use jaq_fmts::{
-    Format as JaqFormat, read as jaq_read,
-    write::{self as jaq_write, Writer as JaqWriter},
-};
-use jaq_json::{Num as JaqNum, Val as JaqVal};
 use nervix_models::{
-    AvroType, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
+    AvroType, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
     CreateWireSchema, Identifier, JsonType, ParseAsType, RemoteDecodedRecord,
     RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
     RemoteRuntimeRecordMetadata, RemoteRuntimeValue, Timestamp, WireSchemaDefinition,
@@ -51,6 +40,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use thiserror::Error;
 use triomphe::Arc;
+
+use crate::jaq_program::{CompiledJaqProgram, JaqNativeFormat};
 
 #[derive(Debug, Clone)]
 pub struct CompiledSchema {
@@ -96,41 +87,65 @@ struct CompiledAvroWireSchema {
 
 #[derive(Debug, Clone)]
 struct CompiledJaqNativeCodec {
-    format: CodecJaqFormat,
-    transformations: CodecJaqTransformations,
+    format: JaqNativeFormat,
+    transformations: CompiledJaqTransformations,
 }
 
-#[derive(Debug, Clone)]
-pub struct ProtobufCodecDescriptor {
-    message: MessageDescriptor,
+#[derive(Debug, Clone, Default)]
+struct CompiledJaqTransformations {
+    on_ingestion: Option<Arc<CompiledJaqProgram>>,
+    on_emitting: Option<Arc<CompiledJaqProgram>>,
+}
+
+impl CompiledJaqTransformations {
+    fn compile(
+        codec: &CreateCodec,
+        transformations: &CodecJaqTransformations,
+    ) -> Result<Self, CodecError> {
+        let compile = |program: Option<&str>| {
+            program
+                .map(|program| {
+                    CompiledJaqProgram::compile(program)
+                        .map(Arc::new)
+                        .map_err(|error| CodecError::InvalidJaqTransformation {
+                            codec: codec.name.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                })
+                .transpose()
+        };
+        Ok(Self {
+            on_ingestion: compile(transformations.on_ingestion.as_deref())?,
+            on_emitting: compile(transformations.on_emitting.as_deref())?,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
 struct CompiledProtobufCodec {
     message: MessageDescriptor,
-    transformations: CodecJaqTransformations,
+    transformations: CompiledJaqTransformations,
 }
 
-impl ProtobufCodecDescriptor {
+/// A protobuf descriptor pool compiled from a resource version.
+#[derive(Debug, Clone)]
+pub struct ProtobufDescriptorPool {
+    pool: DescriptorPool,
+}
+
+impl ProtobufDescriptorPool {
     pub fn from_file_descriptor_set(
-        codec: &CreateCodec,
         file_descriptor_set: prost_types::FileDescriptorSet,
-        message_name: &str,
-    ) -> Result<Self, CodecError> {
-        let pool =
-            DescriptorPool::from_file_descriptor_set(file_descriptor_set).map_err(|source| {
-                CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
-                    reason: format!("invalid protobuf descriptor set: {source}"),
-                }
-            })?;
-        let message =
-            pool.get_message_by_name(message_name)
-                .ok_or_else(|| CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
-                    reason: format!("protobuf message '{message_name}' was not found"),
-                })?;
-        Ok(Self { message })
+    ) -> Result<Self, String> {
+        DescriptorPool::from_file_descriptor_set(file_descriptor_set)
+            .map(|pool| Self { pool })
+            .map_err(|source| format!("invalid protobuf descriptor set: {source}"))
+    }
+
+    pub fn message(&self, message_name: &str) -> Result<MessageDescriptor, String> {
+        self.pool
+            .get_message_by_name(message_name)
+            .ok_or_else(|| format!("protobuf message '{message_name}' was not found"))
     }
 }
 
@@ -1327,7 +1342,7 @@ pub fn compile_codec_with_protobuf(
     codec: &CreateCodec,
     schema: Arc<CompiledSchema>,
     wire_schema: Option<&WireSchemaDefinition>,
-    protobuf_descriptor: Option<ProtobufCodecDescriptor>,
+    protobuf_descriptor: Option<MessageDescriptor>,
 ) -> Result<Arc<CompiledCodec>, CodecError> {
     let wire_schema = match (&codec.wire_format, wire_schema) {
         (CodecWireFormat::Json, Some(WireSchemaDefinition::Json(schema_def))) => {
@@ -1374,15 +1389,9 @@ pub fn compile_codec_with_protobuf(
                     reason: "JAQ-native codec must declare a JAQ transformation".to_string(),
                 });
             }
-            if let Some(program) = transformations.on_ingestion.as_deref() {
-                validate_jaq_program(codec, program)?;
-            }
-            if let Some(program) = transformations.on_emitting.as_deref() {
-                validate_jaq_program(codec, program)?;
-            }
             CompiledWireSchema::JaqNative(CompiledJaqNativeCodec {
-                format: *format,
-                transformations: transformations.clone(),
+                format: JaqNativeFormat::from(*format),
+                transformations: CompiledJaqTransformations::compile(codec, transformations)?,
             })
         }
         (CodecWireFormat::Protobuf(config), None) => {
@@ -1392,19 +1401,16 @@ pub fn compile_codec_with_protobuf(
                     reason: "protobuf codec must declare a JAQ transformation".to_string(),
                 });
             }
-            if let Some(program) = config.transformations.on_ingestion.as_deref() {
-                validate_jaq_program(codec, program)?;
-            }
-            if let Some(program) = config.transformations.on_emitting.as_deref() {
-                validate_jaq_program(codec, program)?;
-            }
-            let descriptor = protobuf_descriptor.ok_or_else(|| CodecError::InvalidCodec {
+            let message = protobuf_descriptor.ok_or_else(|| CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason: "protobuf codec is missing compiled descriptor".to_string(),
             })?;
             CompiledWireSchema::Protobuf(CompiledProtobufCodec {
-                message: descriptor.message,
-                transformations: config.transformations.clone(),
+                message,
+                transformations: CompiledJaqTransformations::compile(
+                    codec,
+                    &config.transformations,
+                )?,
             })
         }
         (CodecWireFormat::Json, Some(WireSchemaDefinition::Avro(_))) => {
@@ -1608,7 +1614,15 @@ fn decode_jaq_native(
                 .to_string(),
         });
     };
-    let value = parse_jaq_native_payload(codec, native.format, payload)?;
+    let value =
+        native
+            .format
+            .read_single_value(payload)
+            .map_err(|error| CodecError::JaqNativeDecode {
+                codec: codec.name.as_str().to_string(),
+                format: native.format.name(),
+                reason: error.to_string(),
+            })?;
     let value = run_jaq_transformation(codec, program, value)?;
     decode_json_value(codec, &value, None)
 }
@@ -1625,21 +1639,46 @@ fn decode_protobuf(
                 .to_string(),
         });
     };
-    let message = DynamicMessage::decode(protobuf.message.clone(), payload).map_err(|source| {
+    let value = decode_protobuf_payload(&protobuf.message, payload).map_err(|reason| {
         CodecError::ProtobufDecode {
             codec: codec.name.as_str().to_string(),
-            reason: source.to_string(),
+            reason,
         }
     })?;
-    let value = protobuf_message_to_json(codec, &message)?;
     let value = run_jaq_transformation(codec, program, value)?;
     decode_json_value(codec, &value, None)
 }
 
-fn protobuf_message_to_json(
-    codec: &CompiledCodec,
-    message: &DynamicMessage,
-) -> Result<JsonValue, CodecError> {
+/// Decode protobuf bytes as `message` into the JSON value jaq programs operate on.
+pub(crate) fn decode_protobuf_payload(
+    message: &MessageDescriptor,
+    payload: &[u8],
+) -> Result<JsonValue, String> {
+    let message =
+        DynamicMessage::decode(message.clone(), payload).map_err(|source| source.to_string())?;
+    protobuf_message_to_json(&message)
+}
+
+/// Encode a JSON value as protobuf bytes for `message`.
+pub(crate) fn encode_protobuf_payload(
+    message: &MessageDescriptor,
+    value: &JsonValue,
+) -> Result<Vec<u8>, String> {
+    let encoded_json = serde_json::to_vec(value).map_err(|source| source.to_string())?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&encoded_json);
+    let options = ProtobufDeserializeOptions::new().deny_unknown_fields(true);
+    let message =
+        DynamicMessage::deserialize_with_options(message.clone(), &mut deserializer, &options)
+            .map_err(|source| source.to_string())?;
+    deserializer.end().map_err(|source| source.to_string())?;
+    let mut encoded = Vec::new();
+    message
+        .encode(&mut encoded)
+        .map_err(|source| source.to_string())?;
+    Ok(encoded)
+}
+
+fn protobuf_message_to_json(message: &DynamicMessage) -> Result<JsonValue, String> {
     let mut encoded = Vec::new();
     let mut serializer = serde_json::Serializer::new(&mut encoded);
     let options = ProtobufSerializeOptions::new()
@@ -1647,106 +1686,8 @@ fn protobuf_message_to_json(
         .stringify_64_bit_integers(false);
     message
         .serialize_with_options(&mut serializer, &options)
-        .map_err(|source| CodecError::ProtobufDecode {
-            codec: codec.name.as_str().to_string(),
-            reason: source.to_string(),
-        })?;
-    serde_json::from_slice(&encoded).map_err(|source| CodecError::JsonDecode {
-        codec: codec.name.as_str().to_string(),
-        source,
-    })
-}
-
-fn parse_jaq_native_payload(
-    codec: &CompiledCodec,
-    format: CodecJaqFormat,
-    payload: &[u8],
-) -> Result<JsonValue, CodecError> {
-    let bytes = Bytes::copy_from_slice(payload);
-    let jaq_format = codec_jaq_format_to_jaq(format);
-    let format_name = codec_jaq_format_name(format);
-    let source =
-        jaq_read::bytes_str(jaq_format, &bytes).map_err(|error| CodecError::JaqNativeDecode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: error.to_string(),
-        })?;
-    let mut values = jaq_read::parse(jaq_format, &bytes, source, false);
-    let value = values
-        .next()
-        .ok_or_else(|| CodecError::JaqNativeDecode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: "payload produced no input values".to_string(),
-        })?
-        .map_err(|error| CodecError::JaqNativeDecode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: error.to_string(),
-        })?;
-    if values.next().is_some() {
-        return Err(CodecError::JaqNativeDecode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: "payload produced multiple input values".to_string(),
-        });
-    }
-    jaq_value_to_json(value).map_err(|reason| CodecError::JaqNativeDecode {
-        codec: codec.name.as_str().to_string(),
-        format: format_name,
-        reason,
-    })
-}
-
-fn write_jaq_native_payload(
-    codec: &CompiledCodec,
-    format: CodecJaqFormat,
-    value: JsonValue,
-) -> Result<Vec<u8>, CodecError> {
-    let format_name = codec_jaq_format_name(format);
-    let value: JaqVal =
-        serde_json::from_value(value).map_err(|error| CodecError::JaqNativeEncode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: error.to_string(),
-        })?;
-    let mut encoded = Vec::new();
-    let writer = JaqWriter {
-        format: codec_jaq_format_to_jaq(format),
-        pp: jaq_json::write::Pp {
-            sep_space: true,
-            ..Default::default()
-        },
-        join: true,
-    };
-    jaq_write::write(&mut encoded, &writer, &value).map_err(|error| {
-        CodecError::JaqNativeEncode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: error.to_string(),
-        }
-    })?;
-    Ok(encoded)
-}
-
-fn codec_jaq_format_to_jaq(format: CodecJaqFormat) -> JaqFormat {
-    match format {
-        CodecJaqFormat::Json => JaqFormat::Json,
-        CodecJaqFormat::Yaml => JaqFormat::Yaml,
-        CodecJaqFormat::Toml => JaqFormat::Toml,
-        CodecJaqFormat::Xml => JaqFormat::Xml,
-        CodecJaqFormat::Cbor => JaqFormat::Cbor,
-    }
-}
-
-fn codec_jaq_format_name(format: CodecJaqFormat) -> &'static str {
-    match format {
-        CodecJaqFormat::Json => "JSON",
-        CodecJaqFormat::Yaml => "YAML",
-        CodecJaqFormat::Toml => "TOML",
-        CodecJaqFormat::Xml => "XML",
-        CodecJaqFormat::Cbor => "CBOR",
-    }
+        .map_err(|source| source.to_string())?;
+    serde_json::from_slice(&encoded).map_err(|source| source.to_string())
 }
 
 fn decode_json_value(
@@ -1818,120 +1759,17 @@ fn decode_json_value(
     Ok(DecodedRecord::from_fields(fields))
 }
 
-fn validate_jaq_program(codec: &CreateCodec, program: &str) -> Result<(), CodecError> {
-    compile_jaq_filter(program)
-        .map(|_| ())
-        .map_err(|reason| CodecError::InvalidJaqTransformation {
-            codec: codec.name.as_str().to_string(),
-            reason,
-        })
-}
-
 fn run_jaq_transformation(
     codec: &CompiledCodec,
-    program: &str,
+    program: &CompiledJaqProgram,
     input: JsonValue,
 ) -> Result<JsonValue, CodecError> {
-    let filter = compile_jaq_filter(program).map_err(|reason| CodecError::JaqTransform {
-        codec: codec.name.as_str().to_string(),
-        reason,
-    })?;
-    let input: JaqVal =
-        serde_json::from_value(input).map_err(|reason| CodecError::JaqTransform {
-            codec: codec.name.as_str().to_string(),
-            reason: reason.to_string(),
-        })?;
-    let ctx = JaqCtx::<data::JustLut<JaqVal>>::new(&filter.lut, JaqVars::new([]));
-    let mut outputs = filter.id.run((ctx, input)).map(unwrap_valr);
-    let output = outputs
-        .next()
-        .ok_or_else(|| CodecError::JaqTransform {
-            codec: codec.name.as_str().to_string(),
-            reason: "transformation produced no output".to_string(),
-        })?
+    program
+        .run_single(input)
         .map_err(|error| CodecError::JaqTransform {
             codec: codec.name.as_str().to_string(),
             reason: error.to_string(),
-        })?;
-    if outputs.next().is_some() {
-        return Err(CodecError::JaqTransform {
-            codec: codec.name.as_str().to_string(),
-            reason: "transformation produced multiple outputs".to_string(),
-        });
-    }
-    jaq_value_to_json(output).map_err(|reason| CodecError::JaqTransform {
-        codec: codec.name.as_str().to_string(),
-        reason,
-    })
-}
-
-fn compile_jaq_filter(program: &str) -> Result<jaq_core::Filter<data::JustLut<JaqVal>>, String> {
-    let defs = jaq_core::defs()
-        .chain(jaq_std::defs())
-        .chain(jaq_json::defs());
-    let funs = jaq_core::funs()
-        .chain(jaq_std::funs())
-        .chain(jaq_json::funs())
-        .chain(jaq_fmts::funs());
-    let loader = Loader::new(defs);
-    let arena = Arena::default();
-    let modules = loader
-        .load(
-            &arena,
-            File {
-                code: program,
-                path: (),
-            },
-        )
-        .map_err(|errors| format!("{errors:?}"))?;
-    JaqCompiler::default()
-        .with_funs(funs)
-        .compile(modules)
-        .map_err(|errors| format!("{errors:?}"))
-}
-
-fn jaq_value_to_json(value: JaqVal) -> Result<JsonValue, String> {
-    match value {
-        JaqVal::Null => Ok(JsonValue::Null),
-        JaqVal::Bool(value) => Ok(JsonValue::Bool(value)),
-        JaqVal::Num(value) => jaq_num_to_json(value),
-        JaqVal::BStr(_) => {
-            Err("jaq output contains binary string, which is not valid JSON".to_string())
-        }
-        JaqVal::TStr(value) => String::from_utf8(value.to_vec())
-            .map(JsonValue::String)
-            .map_err(|error| error.to_string()),
-        JaqVal::Arr(values) => values
-            .iter()
-            .cloned()
-            .map(jaq_value_to_json)
-            .collect::<Result<Vec<_>, _>>()
-            .map(JsonValue::Array),
-        JaqVal::Obj(values) => {
-            let mut object = JsonMap::new();
-            for (key, value) in values.iter() {
-                let key = match key {
-                    JaqVal::TStr(key) => {
-                        String::from_utf8(key.to_vec()).map_err(|error| error.to_string())?
-                    }
-                    _ => {
-                        return Err("jaq output contains a non-string object key, which is not \
-                                    valid JSON"
-                            .to_string());
-                    }
-                };
-                object.insert(key, jaq_value_to_json(value.clone())?);
-            }
-            Ok(JsonValue::Object(object))
-        }
-    }
-}
-
-fn jaq_num_to_json(value: JaqNum) -> Result<JsonValue, String> {
-    let rendered = value.to_string();
-    serde_json::Number::from_str(&rendered)
-        .map(JsonValue::Number)
-        .map_err(|error| error.to_string())
+        })
 }
 
 fn decode_avro(
@@ -2040,7 +1878,14 @@ fn encode_jaq_native(
     };
     let value = record_to_json_value(codec, record)?;
     let value = run_jaq_transformation(codec, program, value)?;
-    write_jaq_native_payload(codec, native.format, value)
+    native
+        .format
+        .write_value(value)
+        .map_err(|error| CodecError::JaqNativeEncode {
+            codec: codec.name.as_str().to_string(),
+            format: native.format.name(),
+            reason: error.to_string(),
+        })
 }
 
 fn encode_protobuf(
@@ -2057,35 +1902,12 @@ fn encode_protobuf(
     };
     let value = record_to_json_value(codec, record)?;
     let value = run_jaq_transformation(codec, program, value)?;
-    let json = serde_json::to_vec(&value).map_err(|source| CodecError::JsonDecode {
-        codec: codec.name.as_str().to_string(),
-        source,
-    })?;
-    let mut deserializer = serde_json::Deserializer::from_slice(&json);
-    let options = ProtobufDeserializeOptions::new().deny_unknown_fields(true);
-    let message = DynamicMessage::deserialize_with_options(
-        protobuf.message.clone(),
-        &mut deserializer,
-        &options,
-    )
-    .map_err(|source| CodecError::ProtobufEncode {
-        codec: codec.name.as_str().to_string(),
-        reason: source.to_string(),
-    })?;
-    deserializer
-        .end()
-        .map_err(|source| CodecError::ProtobufEncode {
+    encode_protobuf_payload(&protobuf.message, &value).map_err(|reason| {
+        CodecError::ProtobufEncode {
             codec: codec.name.as_str().to_string(),
-            reason: source.to_string(),
-        })?;
-    let mut encoded = Vec::new();
-    message
-        .encode(&mut encoded)
-        .map_err(|source| CodecError::ProtobufEncode {
-            codec: codec.name.as_str().to_string(),
-            reason: source.to_string(),
-        })?;
-    Ok(encoded)
+            reason,
+        }
+    })
 }
 
 fn encode_avro(
@@ -2960,8 +2782,8 @@ fn avro_type_name(ty: AvroType) -> &'static str {
 mod tests {
     use chrono::DateTime;
     use nervix_models::{
-        CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema, CreateWireSchema,
-        Identifier, SchemaField,
+        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema,
+        CreateWireSchema, Identifier, SchemaField,
     };
 
     use super::*;
@@ -3597,7 +3419,7 @@ mod tests {
         }
     }
 
-    fn protobuf_descriptor(codec: &CreateCodec) -> ProtobufCodecDescriptor {
+    fn protobuf_descriptor() -> MessageDescriptor {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let proto_path = dir.path().join("notification.proto");
         std::fs::write(
@@ -3616,12 +3438,10 @@ mod tests {
         .expect("proto file should be written");
         let file_descriptor_set =
             protox::compile([proto_path], [dir.path()]).expect("proto should compile");
-        ProtobufCodecDescriptor::from_file_descriptor_set(
-            codec,
-            file_descriptor_set,
-            "nervix.test.Notification",
-        )
-        .expect("descriptor should be built")
+        ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
+            .expect("descriptor pool should be built")
+            .message("nervix.test.Notification")
+            .expect("descriptor should be built")
     }
 
     fn primitive_arrays_record() -> RuntimeRecord {
@@ -4556,13 +4376,9 @@ mod tests {
     fn protobuf_codec_applies_transformation_on_ingestion_before_decoding() {
         let codec = protobuf_codec("protobuf_ingest", Some("."), None);
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
-            compiled_schema,
-            None,
-            Some(protobuf_descriptor(&codec)),
-        )
-        .expect("codec should compile");
+        let compiled_codec =
+            compile_codec_with_protobuf(&codec, compiled_schema, None, Some(protobuf_descriptor()))
+                .expect("codec should compile");
         assert!(compiled_codec.requires_blocking_decode());
         assert!(!compiled_codec.requires_blocking_encode());
 
@@ -4586,13 +4402,9 @@ mod tests {
     fn protobuf_codec_applies_transformation_on_emitting_before_encoding() {
         let codec = protobuf_codec("protobuf_emit", None, Some("."));
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
-            compiled_schema,
-            None,
-            Some(protobuf_descriptor(&codec)),
-        )
-        .expect("codec should compile");
+        let compiled_codec =
+            compile_codec_with_protobuf(&codec, compiled_schema, None, Some(protobuf_descriptor()))
+                .expect("codec should compile");
         assert!(!compiled_codec.requires_blocking_decode());
         assert!(compiled_codec.requires_blocking_encode());
 

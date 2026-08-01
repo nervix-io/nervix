@@ -70,7 +70,7 @@ use tokio::{
 use tokio_rustls::TlsConnector;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_tungstenite::{
-    client_async, connect_async,
+    WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
 use tokio_util::sync::CancellationToken;
@@ -936,7 +936,7 @@ impl Cluster {
         publish_websocket(&handle.spec, host, path, payload).await
     }
 
-    pub(crate) async fn exchange_websocket_text(
+    pub(crate) async fn exchange_websocket(
         &self,
         node_id: &str,
         host: &str,
@@ -947,7 +947,7 @@ impl Cluster {
             .nodes
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        exchange_websocket_text(&handle.spec, host, path, actions).await
+        exchange_websocket(&handle.spec, host, path, actions).await
     }
 
     pub(crate) async fn publish_secure_websocket(
@@ -1954,9 +1954,13 @@ async fn publish_websocket(
 pub(crate) enum WebsocketExchangeAction {
     ExpectText(String),
     SendText(String),
+    ExpectBinary(Vec<u8>),
+    SendBinary(Vec<u8>),
+    ExpectClose,
+    ExpectSilence(Duration),
 }
 
-async fn exchange_websocket_text(
+async fn exchange_websocket(
     spec: &NodeSpec,
     host: &str,
     path: &str,
@@ -1974,14 +1978,10 @@ async fn exchange_websocket_text(
     for action in actions {
         match action {
             WebsocketExchangeAction::ExpectText(expected) => {
-                let message = timeout(
-                    Duration::from_secs(5),
-                    futures_util::StreamExt::next(&mut relay),
-                )
-                .await
-                .map_err(|_| io::Error::other("timed out waiting for websocket text frame"))?
-                .ok_or_else(|| io::Error::other("websocket closed before expected text frame"))?
-                .map_err(io::Error::other)?;
+                let message = next_exchange_message(&mut relay)
+                    .await?
+                    .ok_or_else(|| io::Error::other("websocket closed before expected text frame"))?
+                    .map_err(io::Error::other)?;
                 let WsMessage::Text(actual) = message else {
                     return Err(io::Error::other(format!(
                         "expected websocket text frame {expected:?}, got {message:?}"
@@ -1999,10 +1999,78 @@ async fn exchange_websocket_text(
                     .await
                     .map_err(io::Error::other)?;
             }
+            WebsocketExchangeAction::ExpectBinary(expected) => {
+                let message = next_exchange_message(&mut relay)
+                    .await?
+                    .ok_or_else(|| {
+                        io::Error::other("websocket closed before expected binary frame")
+                    })?
+                    .map_err(io::Error::other)?;
+                let WsMessage::Binary(actual) = message else {
+                    return Err(io::Error::other(format!(
+                        "expected websocket binary frame {expected:02x?}, got {message:?}"
+                    )));
+                };
+                if actual != *expected {
+                    return Err(io::Error::other(format!(
+                        "expected websocket binary frame {expected:02x?}, got {actual:02x?}"
+                    )));
+                }
+            }
+            WebsocketExchangeAction::SendBinary(payload) => {
+                relay
+                    .send(WsMessage::Binary(payload.clone()))
+                    .await
+                    .map_err(io::Error::other)?;
+            }
+            WebsocketExchangeAction::ExpectSilence(window) => {
+                // Proves a frame is withheld rather than merely delivered later: the peer must
+                // stay quiet for the whole window.
+                match timeout(*window, futures_util::StreamExt::next(&mut relay)).await {
+                    Err(_) => {}
+                    Ok(None) => {
+                        return Err(io::Error::other(
+                            "websocket closed while silence was expected",
+                        ));
+                    }
+                    Ok(Some(Ok(message))) => {
+                        return Err(io::Error::other(format!(
+                            "expected no websocket frame for {window:?}, got {message:?}"
+                        )));
+                    }
+                    Ok(Some(Err(error))) => return Err(io::Error::other(error)),
+                }
+            }
+            WebsocketExchangeAction::ExpectClose => {
+                // The server aborts a rejected session without a close handshake, so a
+                // transport error is as valid an outcome as a close frame or clean EOF.
+                match next_exchange_message(&mut relay).await? {
+                    None | Some(Ok(WsMessage::Close(_))) | Some(Err(_)) => {}
+                    Some(Ok(message)) => {
+                        return Err(io::Error::other(format!(
+                            "expected the websocket to close, got {message:?}"
+                        )));
+                    }
+                }
+                return Ok(());
+            }
         }
     }
     let _ = relay.close(None).await;
     Ok(())
+}
+
+type ExchangeMessage = Result<WsMessage, tokio_tungstenite::tungstenite::Error>;
+
+async fn next_exchange_message<S>(
+    relay: &mut WebSocketStream<S>,
+) -> io::Result<Option<ExchangeMessage>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    timeout(Duration::from_secs(5), futures_util::StreamExt::next(relay))
+        .await
+        .map_err(|_| io::Error::other("timed out waiting for a websocket frame"))
 }
 
 async fn publish_http(spec: &NodeSpec, host: &str, path: &str, payload: &str) -> io::Result<()> {

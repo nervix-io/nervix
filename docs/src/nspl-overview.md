@@ -475,9 +475,16 @@ WebSocket clients and endpoints may also reference a signaling protocol:
 
 ```nspl,ignore
 CREATE [IF NOT EXISTS] SIGNALING PROTOCOL <name>
+  FROM JSON | YAML | TOML | XML | CBOR | RAW
+     | PROTOBUF USING RESOURCE <resource> [VERSION <version>]
+       CONFIG { '<key>' = '<value>' }
+       SEND MESSAGE '<message_type>' WAIT MESSAGE '<message_type>'
   ON CONNECT
-  SEND BODY '<text_body>'[, '<text_body>'...]
-  WAIT BODY '<text_body>'[, '<text_body>'...] TIMEOUT <duration>;
+  ( SEND JAQ '<program>'[, '<program>'...]
+  | WAIT JAQ '<matcher>'[, '<matcher>'...]
+  | WAIT JAQ '<matcher>' [CAPTURE '<program>'] [ACCEPT DATA] )+
+  [FAIL JAQ '<matcher>'[, '<matcher>'...]]
+  TIMEOUT <duration>;
 
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE WEBSOCKETS WITH SIGNALING PROTOCOL <name>
@@ -485,6 +492,19 @@ CREATE [IF NOT EXISTS] CLIENT <name>
     'endpoint' = 'wss://example.com/ws'
   };
 ```
+
+Each `SEND JAQ` program must produce exactly one value, which is serialized in the declared format.
+Each `WAIT JAQ` matcher is satisfied by any output that is neither `null` nor `false`, so it can
+assert the fields that matter and ignore the connection ids and timestamps real services add.
+`FAIL JAQ` matchers abort the handshake immediately with the matched value as the reason.
+
+Clauses run in written order, and a `SEND` following a `WAIT` begins a new phase that is withheld
+until the preceding matchers are satisfied. `CAPTURE` records values from the frame that satisfied
+its matcher, which every later program reads through `$state`.
+
+`ACCEPT DATA` marks the matcher whose success means the peer is streaming: payload held up to that
+point is ingested and later frames pass straight through. Without it, payload is held until the
+whole handshake succeeds and discarded if it fails.
 
 Current built-in client transport kinds include:
 

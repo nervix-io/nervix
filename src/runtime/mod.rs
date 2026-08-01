@@ -35,15 +35,15 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, Assignment, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule,
-    CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy,
-    CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor,
-    CreateRelay, CreateSignalingProtocol, CreateUdf, Domain, DomainConfig, DomainPace,
-    DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath,
-    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
+    CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMqtt, CreateClientNats, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint,
+    CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
+    CreateSignalingProtocol, CreateUdf, Domain, DomainConfig, DomainPace, DomainSchedule,
+    DomainState, DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy,
+    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
@@ -52,7 +52,7 @@ use nervix_models::{
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
     RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
-    SqsIngestMode, StructuredMessageError, Timestamp, WireSchemaDefinition,
+    SignalingWireFormat, SqsIngestMode, StructuredMessageError, Timestamp, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -111,7 +111,7 @@ use crate::{
     resource::ResourceStore,
     runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckRootTracker, AckSet},
     runtime_schema::{
-        CodecError, CompiledCodec, CompiledSchema, DecodedRecord, ProtobufCodecDescriptor,
+        CodecError, CompiledCodec, CompiledSchema, DecodedRecord, ProtobufDescriptorPool,
         RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
         compile_codec_with_protobuf, compile_schema, decode_with_codec, decode_with_codec_owned,
         encode_with_codec, parse_as_type_from_arrow, runtime_value_from_arrow_array,
@@ -207,7 +207,10 @@ pub use test_hooks::{
 };
 use tls::RustlsClientConfigSource;
 use wasm_state::ReplicatedWasmProcessorState;
-pub(crate) use websocket_signaling::WebsocketSignalingSession;
+pub use websocket_signaling::CompiledSignalingProtocol;
+pub(crate) use websocket_signaling::{
+    SignalingDataSink, SignalingProtobufDescriptors, WebsocketSignalingSession,
+};
 use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,
     WindowAggregateAccumulatorSnapshot, WindowEntrySnapshot, WindowProcessorStateSnapshot,
@@ -476,7 +479,7 @@ struct DomainExecution {
     branched_ingestors: HashMap<Identifier, Vec<BranchedIngestorSpec>>,
     branched_entrypoints: HashMap<Identifier, Vec<Arc<IngestorRouteRuntime>>>,
     codecs: HashMap<Identifier, Arc<CompiledCodec>>,
-    signaling_protocols: HashMap<Identifier, Arc<CreateSignalingProtocol>>,
+    signaling_protocols: HashMap<Identifier, Arc<CompiledSignalingProtocol>>,
     endpoint_routes: HashMap<Identifier, EndpointRoute>,
     node_tasks: HashMap<RegistryEntity, ScheduledNodeTask>,
     emitter_tasks: HashMap<RegistryEntity, ScheduledEmitterTask>,
@@ -832,7 +835,7 @@ struct EndpointRoute {
     path: String,
     hostnames: Vec<String>,
     endpoint_type: EndpointType,
-    signaling_protocol: Option<Arc<CreateSignalingProtocol>>,
+    signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
 }
 
 #[derive(Clone)]

@@ -182,13 +182,16 @@ impl WebsocketsIngestor {
                     } => {
                         match connect {
                             Ok((mut relay, _)) => {
-                                let buffered_payloads = if let Some(protocol) =
+                                let signaled = if let Some(protocol) =
                                     task_signaling_protocol.as_ref()
                                 {
-                                    let session = match WebsocketSignalingSession::new(
-                                        protocol.clone(),
-                                    ) {
-                                        Ok(session) => Some(session),
+                                    let session =
+                                        WebsocketSignalingSession::new(protocol.clone());
+                                    let sink = ClientSignalingDataSink {
+                                        context: &dispatch_context,
+                                    };
+                                    match session.run(&mut relay, &sink).await {
+                                        Ok(()) => Some(()),
                                         Err(error) => {
                                             task_runtime.record_ingestor_transient_error(
                                                 &task_domain,
@@ -209,38 +212,12 @@ impl WebsocketsIngestor {
                                             );
                                             None
                                         }
-                                    };
-                                    match session {
-                                        Some(session) => match session.run(&mut relay).await {
-                                            Ok(buffered_payloads) => Some(buffered_payloads),
-                                            Err(error) => {
-                                                task_runtime.record_ingestor_transient_error(
-                                                    &task_domain,
-                                                    &task_ingestor,
-                                                    format!("websocket signaling failed: {error}"),
-                                                );
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                    "websocket signaling failed for ingestor '{}' in domain '{}': {}",
-                                                    task_ingestor.as_str(),
-                                                    task_domain.as_str(),
-                                                    error
-                                                )));
-                                                warn!(
-                                                    domain = task_domain.as_str(),
-                                                    ingestor = task_ingestor.as_str(),
-                                                    error = %error,
-                                                    "websocket signaling failed"
-                                                );
-                                                None
-                                            }
-                                        },
-                                        None => None,
                                     }
                                 } else {
-                                    Some(Vec::new())
+                                    Some(())
                                 };
 
-                                let Some(buffered_payloads) = buffered_payloads else {
+                                let Some(()) = signaled else {
                                     if !backoff.wait(&mut shutdown_rx).await {
                                         break 'outer;
                                     }
@@ -250,13 +227,6 @@ impl WebsocketsIngestor {
                                 task_runtime
                                     .clear_ingestor_transient_error(&task_domain, &task_ingestor);
                                 backoff.reset();
-                                for payload in buffered_payloads {
-                                    Self::dispatch_payload(
-                                        &dispatch_context,
-                                        payload.as_slice(),
-                                    )
-                                    .await;
-                                }
 
                                 loop {
                                     tokio::task::consume_budget().await;
@@ -431,5 +401,16 @@ impl WebsocketsIngestor {
         client_config_value(config, "endpoint", || {
             "missing WebSockets client config key 'endpoint'".to_string()
         })
+    }
+}
+
+/// Ingests data frames that arrive on an outbound client while its handshake is running.
+struct ClientSignalingDataSink<'a, 'ctx> {
+    context: &'a WebsocketDispatchContext<'ctx>,
+}
+
+impl SignalingDataSink for ClientSignalingDataSink<'_, '_> {
+    async fn accept(&self, payload: Vec<u8>) {
+        WebsocketsIngestor::dispatch_payload(self.context, payload.as_slice()).await;
     }
 }
