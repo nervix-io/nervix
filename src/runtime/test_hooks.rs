@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use ahash::RandomState;
 use dashmap::DashMap;
-use nervix_models::{Domain, Identifier};
+use nervix_models::Identifier;
 use tokio::sync::broadcast;
 use triomphe::Arc;
 
@@ -88,14 +88,6 @@ impl IngestorFaultInjector {
 impl SchedulePublicationFaultInjector {
     pub fn fail_next_publication(&self, domain: &str) {
         self.domains.insert(domain.to_ascii_lowercase(), ());
-    }
-
-    /// Consumes an armed fault so the rollback republication that follows a failed publication can
-    /// still reach the cluster.
-    pub(crate) fn take_armed_fault(&self, domain: &Domain) -> bool {
-        self.domains
-            .remove(&domain.as_str().to_ascii_lowercase())
-            .is_some()
     }
 }
 

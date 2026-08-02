@@ -36,7 +36,6 @@ pub enum StoredModelVersioned {
     Codec(StoredCreateCodec),
     TransportKafka(StoredCreateClientKafka),
     TransportPulsar(StoredCreateClientPulsar),
-    RemovedTransport(StoredRemovedClient),
     TransportHttp(StoredCreateClientHttp),
     TransportSentry(StoredCreateClientSentry),
     TransportPrometheus(StoredCreateClientPrometheus),
@@ -79,8 +78,6 @@ pub enum StoredModelVersioned {
 pub enum StoredModelConversionError {
     #[error("stored model contains an invalid name")]
     InvalidName,
-    #[error("stored model uses the removed Kinesis integration")]
-    RemovedIntegration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -615,12 +612,6 @@ pub enum StoredIngestSource {
         client: String,
         every: String,
     },
-    RemovedIntegration {
-        client: String,
-        relay: String,
-        instances: u64,
-        mode: StoredRemovedIngestMode,
-    },
     Kafka {
         client: String,
         topic: String,
@@ -682,16 +673,6 @@ pub enum StoredIngestSource {
         client: String,
         mode: StoredWebsocketsIngestMode,
     },
-}
-
-impl StoredIngestSource {
-    fn is_removed_integration(&self) -> bool {
-        if let Self::RemovedIntegration { .. } = self {
-            true
-        } else {
-            false
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -996,10 +977,6 @@ pub enum StoredEmitSink {
         client: String,
         topic: String,
     },
-    RemovedIntegration {
-        client: String,
-        relay: String,
-    },
     RabbitMq {
         client: String,
         queue: String,
@@ -1068,16 +1045,6 @@ pub enum StoredEmitSink {
         commit_each: String,
         max_commit_size: String,
     },
-}
-
-impl StoredEmitSink {
-    fn is_removed_integration(&self) -> bool {
-        if let Self::RemovedIntegration { .. } = self {
-            true
-        } else {
-            false
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1203,9 +1170,6 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Codec(v) => Ok(Model::Codec(convert_stored(v)?)),
             StoredModelVersioned::TransportKafka(v) => Ok(Model::ClientKafka(convert_stored(v)?)),
             StoredModelVersioned::TransportPulsar(v) => Ok(Model::ClientPulsar(convert_stored(v)?)),
-            StoredModelVersioned::RemovedTransport(_) => {
-                Err(Report::new(StoredModelConversionError::RemovedIntegration))
-            }
             StoredModelVersioned::TransportHttp(v) => Ok(Model::ClientHttp(convert_stored(v)?)),
             StoredModelVersioned::TransportSentry(v) => Ok(Model::ClientSentry(convert_stored(v)?)),
             StoredModelVersioned::TransportPrometheus(v) => {
@@ -1249,9 +1213,6 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Generator(v) => Ok(Model::Generator(convert_stored(v)?)),
             StoredModelVersioned::Inferencer(v) => Ok(Model::Inferencer(convert_stored(v)?)),
             StoredModelVersioned::WasmProcessor(v) => Ok(Model::WasmProcessor(convert_stored(v)?)),
-            StoredModelVersioned::Ingestor(v) if v.source.is_removed_integration() => {
-                Err(Report::new(StoredModelConversionError::RemovedIntegration))
-            }
             StoredModelVersioned::Ingestor(v) => Ok(Model::Ingestor(convert_stored(v)?)),
             StoredModelVersioned::Reingestor(v) => Ok(Model::Reingestor(convert_stored(v)?)),
             StoredModelVersioned::Relay(v) => Ok(Model::Relay(convert_stored(v)?)),
@@ -1262,9 +1223,6 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Junction(v) => Ok(Model::Junction(convert_stored(v)?)),
             StoredModelVersioned::WindowProcessor(v) => {
                 Ok(Model::WindowProcessor(convert_stored(v)?))
-            }
-            StoredModelVersioned::Emitter(v) if v.sink.is_removed_integration() => {
-                Err(Report::new(StoredModelConversionError::RemovedIntegration))
             }
             StoredModelVersioned::Emitter(v) => Ok(Model::Emitter(convert_stored(v)?)),
             StoredModelVersioned::Udf(v) => Ok(Model::Udf(convert_stored(v)?)),
@@ -3156,8 +3114,6 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 client: Identifier::parse(&client)?,
                 every,
             }),
-            StoredIngestSource::RemovedIntegration { .. } => Err(Report::new(NameError::Empty)
-                .attach_printable("stored model uses the removed Kinesis integration")),
             StoredIngestSource::Kafka {
                 client,
                 topic,
@@ -4190,8 +4146,6 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 client: Identifier::parse(&client)?,
                 topic: Identifier::parse(&topic)?,
             }),
-            StoredEmitSink::RemovedIntegration { .. } => Err(Report::new(NameError::Empty)
-                .attach_printable("stored model uses the removed Kinesis integration")),
             StoredEmitSink::RabbitMq { client, queue } => Ok(Self::RabbitMq {
                 client: Identifier::parse(&client)?,
                 queue: Identifier::parse(&queue)?,

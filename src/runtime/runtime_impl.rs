@@ -360,7 +360,6 @@ impl Runtime {
             events,
             emitter_faults: hooks.emitter_faults,
             ingestor_faults: hooks.ingestor_faults,
-            schedule_publication_faults: hooks.schedule_publication_faults,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
             remote_dispatcher: Arc::new(RwLock::new(None)),

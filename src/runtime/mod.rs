@@ -2412,7 +2412,6 @@ pub struct Runtime {
     events: broadcast::Sender<RuntimeEvent>,
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
-    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,
