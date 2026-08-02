@@ -475,10 +475,10 @@ WebSocket clients and endpoints may also reference a signaling protocol:
 
 ```nspl,ignore
 CREATE [IF NOT EXISTS] SIGNALING PROTOCOL <name>
-  FROM JSON | YAML | TOML | XML | CBOR | RAW
-     | PROTOBUF USING RESOURCE <resource> [VERSION <version>]
-       CONFIG { '<key>' = '<value>' }
-       SEND MESSAGE '<message_type>' WAIT MESSAGE '<message_type>'
+  FORMAT JSON | YAML | TOML | XML | CBOR | RAW
+       | PROTOBUF USING RESOURCE <resource> [VERSION <version>]
+         CONFIG { '<key>' = '<value>' }
+         SEND MESSAGE '<message_type>' WAIT MESSAGE '<message_type>'
   ON CONNECT
   ( SEND JAQ '<program>'[, '<program>'...]
   | WAIT JAQ '<matcher>'[, '<matcher>'...]
@@ -498,13 +498,15 @@ Each `WAIT JAQ` matcher is satisfied by any output that is neither `null` nor `f
 assert the fields that matter and ignore the connection ids and timestamps real services add.
 `FAIL JAQ` matchers abort the handshake immediately with the matched value as the reason.
 
-Clauses run in written order, and a `SEND` following a `WAIT` begins a new phase that is withheld
-until the preceding matchers are satisfied. `CAPTURE` records values from the frame that satisfied
-its matcher, which every later program reads through `$state`.
+Steps run strictly in written order: a step completes before the next starts, so a request can
+depend on an earlier reply. A `WAIT` step completes when every matcher it lists is satisfied, in any
+arrival order. `CAPTURE` records values from the matched frame, which every later program reads
+through `$state`.
 
-`ACCEPT DATA` marks the matcher whose success means the peer is streaming: payload held up to that
-point is ingested and later frames pass straight through. Without it, payload is held until the
-whole handshake succeeds and discarded if it fails.
+`ACCEPT DATA` says where payload starts flowing to the relay — on `ON CONNECT` for the first frame,
+or on the `WAIT` step whose completion proves the peer is streaming. Frames arriving before that are
+dropped rather than buffered. A `FAIL JAQ` guard on a step aborts during that step; the optional one
+before `ON CONNECT` applies throughout.
 
 Current built-in client transport kinds include:
 

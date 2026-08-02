@@ -245,9 +245,10 @@ mod tests {
         KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, MqttIngestMode,
         MqttQos, MqttSession, NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs,
         ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
-        RedisPubSubIngestMode, RetryPolicy, SchemaField, SignalingPhase, SignalingProtobufConfig,
-        SignalingProtocolOnConnect, SignalingWait, SignalingWireFormat, SqsIngestMode, Statement,
-        SubscriptionBinding, SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
+        RedisPubSubIngestMode, RetryPolicy, SchemaField, SignalingProtobufConfig,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+        SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
+        WireSchemaField, ZeroMqIngestMode,
     };
 
     use super::*;
@@ -967,27 +968,31 @@ mod tests {
                     })
                 },
                 on_connect: SignalingProtocolOnConnect {
-                    phases: if g.bool() {
-                        vec![SignalingPhase::new(
-                            vec![r#"{method: "SUBSCRIBE", id: 1}"#.to_string()],
-                            vec![SignalingWait::new(
+                    accept_data: g.bool(),
+                    steps: if g.bool() {
+                        vec![
+                            SignalingStep::Send(vec![
+                                r#"{method: "SUBSCRIBE", id: 1}"#.to_string(),
+                            ]),
+                            SignalingStep::Wait(SignalingWaitStep::new(vec![
                                 ".id == 1 and .result == null".to_string(),
-                            )],
-                        )]
+                            ])),
+                        ]
                     } else {
                         vec![
-                            SignalingPhase::new(
-                                vec![r#"{op: "auth"}"#.to_string()],
-                                vec![SignalingWait {
-                                    matcher: ".authed".to_string(),
-                                    capture: Some("{token: .token}".to_string()),
-                                    accept_data: g.bool(),
-                                }],
-                            ),
-                            SignalingPhase::new(
-                                vec![r#"{op: "subscribe", token: $state.token}"#.to_string()],
-                                vec![SignalingWait::new(".subscribed".to_string())],
-                            ),
+                            SignalingStep::Send(vec![r#"{op: "auth"}"#.to_string()]),
+                            SignalingStep::Wait(SignalingWaitStep {
+                                matchers: vec![".authed".to_string()],
+                                capture: Some("{token: .token}".to_string()),
+                                fail_matchers: vec![".denied".to_string()],
+                                accept_data: g.bool(),
+                            }),
+                            SignalingStep::Send(vec![
+                                r#"{op: "subscribe", token: $state.token}"#.to_string(),
+                            ]),
+                            SignalingStep::Wait(SignalingWaitStep::new(vec![
+                                ".subscribed".to_string(),
+                            ])),
                         ]
                     },
                     fail_matchers: if g.bool() {

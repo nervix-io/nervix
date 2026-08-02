@@ -20,10 +20,10 @@ use nervix_models::{
     Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
     NameError, NatsIngestMode, OutputFlushPolicy, ParseAsType, PostgresConflictAction,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
-    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, SchemaField, SignalingPhase,
-    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingWait, SignalingWireFormat,
-    SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource, WebsocketsIngestMode,
-    WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, SchemaField,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource,
+    WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -478,21 +478,23 @@ pub struct StoredSignalingProtobufConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredSignalingProtocolOnConnect {
-    pub phases: Vec<StoredSignalingPhase>,
+    pub accept_data: bool,
+    pub steps: Vec<StoredSignalingStep>,
     pub fail_matchers: Vec<String>,
     pub timeout: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredSignalingPhase {
-    pub sends: Vec<String>,
-    pub waits: Vec<StoredSignalingWait>,
+pub enum StoredSignalingStep {
+    Send(Vec<String>),
+    Wait(StoredSignalingWaitStep),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredSignalingWait {
-    pub matcher: String,
+pub struct StoredSignalingWaitStep {
+    pub matchers: Vec<String>,
     pub capture: Option<String>,
+    pub fail_matchers: Vec<String>,
     pub accept_data: bool,
 }
 
@@ -2353,7 +2355,8 @@ impl TryFrom<StoredSignalingWireFormat> for SignalingWireFormat {
 impl From<SignalingProtocolOnConnect> for StoredSignalingProtocolOnConnect {
     fn from(value: SignalingProtocolOnConnect) -> Self {
         Self {
-            phases: value.phases.into_iter().map(Into::into).collect(),
+            accept_data: value.accept_data,
+            steps: value.steps.into_iter().map(Into::into).collect(),
             fail_matchers: value.fail_matchers,
             timeout: value.timeout,
         }
@@ -2363,46 +2366,49 @@ impl From<SignalingProtocolOnConnect> for StoredSignalingProtocolOnConnect {
 impl From<StoredSignalingProtocolOnConnect> for SignalingProtocolOnConnect {
     fn from(value: StoredSignalingProtocolOnConnect) -> Self {
         Self {
-            phases: value.phases.into_iter().map(Into::into).collect(),
+            accept_data: value.accept_data,
+            steps: value.steps.into_iter().map(Into::into).collect(),
             fail_matchers: value.fail_matchers,
             timeout: value.timeout,
         }
     }
 }
 
-impl From<SignalingPhase> for StoredSignalingPhase {
-    fn from(value: SignalingPhase) -> Self {
-        Self {
-            sends: value.sends,
-            waits: value.waits.into_iter().map(Into::into).collect(),
+impl From<SignalingStep> for StoredSignalingStep {
+    fn from(value: SignalingStep) -> Self {
+        match value {
+            SignalingStep::Send(programs) => Self::Send(programs),
+            SignalingStep::Wait(wait) => Self::Wait(wait.into()),
         }
     }
 }
 
-impl From<StoredSignalingPhase> for SignalingPhase {
-    fn from(value: StoredSignalingPhase) -> Self {
-        Self {
-            sends: value.sends,
-            waits: value.waits.into_iter().map(Into::into).collect(),
+impl From<StoredSignalingStep> for SignalingStep {
+    fn from(value: StoredSignalingStep) -> Self {
+        match value {
+            StoredSignalingStep::Send(programs) => Self::Send(programs),
+            StoredSignalingStep::Wait(wait) => Self::Wait(wait.into()),
         }
     }
 }
 
-impl From<SignalingWait> for StoredSignalingWait {
-    fn from(value: SignalingWait) -> Self {
+impl From<SignalingWaitStep> for StoredSignalingWaitStep {
+    fn from(value: SignalingWaitStep) -> Self {
         Self {
-            matcher: value.matcher,
+            matchers: value.matchers,
             capture: value.capture,
+            fail_matchers: value.fail_matchers,
             accept_data: value.accept_data,
         }
     }
 }
 
-impl From<StoredSignalingWait> for SignalingWait {
-    fn from(value: StoredSignalingWait) -> Self {
+impl From<StoredSignalingWaitStep> for SignalingWaitStep {
+    fn from(value: StoredSignalingWaitStep) -> Self {
         Self {
-            matcher: value.matcher,
+            matchers: value.matchers,
             capture: value.capture,
+            fail_matchers: value.fail_matchers,
             accept_data: value.accept_data,
         }
     }
@@ -4546,12 +4552,13 @@ mod tests {
                 name: identifier("binance_ws"),
                 format: SignalingWireFormat::Json,
                 on_connect: SignalingProtocolOnConnect {
-                    phases: vec![SignalingPhase::new(
-                        vec![r#"{method: "SUBSCRIBE", id: 1}"#.to_string()],
-                        vec![SignalingWait::new(
+                    accept_data: false,
+                    steps: vec![
+                        SignalingStep::Send(vec![r#"{method: "SUBSCRIBE", id: 1}"#.to_string()]),
+                        SignalingStep::Wait(SignalingWaitStep::new(vec![
                             ".id == 1 and .result == null".to_string(),
-                        )],
-                    )],
+                        ])),
+                    ],
                     fail_matchers: vec![".error".to_string()],
                     timeout: "5s".to_string(),
                 },
@@ -4569,19 +4576,17 @@ mod tests {
                     wait_message: "nervix.test.Ack".to_string(),
                 }),
                 on_connect: SignalingProtocolOnConnect {
-                    phases: vec![
-                        SignalingPhase::new(
-                            vec![r#"{op: "auth"}"#.to_string()],
-                            vec![SignalingWait {
-                                matcher: ".authed".to_string(),
-                                capture: Some("{token: .token}".to_string()),
-                                accept_data: true,
-                            }],
-                        ),
-                        SignalingPhase::new(
-                            vec!["{id: 1, token: $state.token}".to_string()],
-                            vec![SignalingWait::new(".id == 1".to_string())],
-                        ),
+                    accept_data: true,
+                    steps: vec![
+                        SignalingStep::Send(vec![r#"{op: "auth"}"#.to_string()]),
+                        SignalingStep::Wait(SignalingWaitStep {
+                            matchers: vec![".authed".to_string()],
+                            capture: Some("{token: .token}".to_string()),
+                            fail_matchers: vec![".denied".to_string()],
+                            accept_data: true,
+                        }),
+                        SignalingStep::Send(vec!["{id: 1, token: $state.token}".to_string()]),
+                        SignalingStep::Wait(SignalingWaitStep::new(vec![".id == 1".to_string()])),
                     ],
                     fail_matchers: Vec::new(),
                     timeout: "5s".to_string(),
@@ -4750,6 +4755,13 @@ mod tests {
         }
 
         #[derive(Archive, RkyvSerialize)]
+        struct SteplessSignalingProtocolOnConnect {
+            steps: Vec<StoredSignalingStep>,
+            fail_matchers: Vec<String>,
+            timeout: String,
+        }
+
+        #[derive(Archive, RkyvSerialize)]
         struct LegacyCreateSignalingProtocol<O> {
             name: String,
             on_connect: O,
@@ -4800,7 +4812,7 @@ mod tests {
                     .expect("legacy value should serialize"),
             ),
             (
-                "waits without a payload acceptance marker",
+                "phases without a payload acceptance marker",
                 rkyv::to_bytes::<rkyv::rancor::Error>(&phased)
                     .expect("legacy value should serialize"),
             ),

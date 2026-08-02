@@ -106,26 +106,28 @@ impl ClauseCounts {
     }
 }
 
+/// One step of the handshake. Steps run strictly in order: a step completes before the next one
+/// starts, so a request can depend on an earlier reply.
 #[derive(Debug)]
-struct CompiledSignalingWait {
-    matcher: Arc<StatefulJaqProgram>,
-    capture: Option<Arc<StatefulJaqProgram>>,
-    accept_data: bool,
+enum CompiledSignalingStep {
+    Send(Vec<Arc<StatefulJaqProgram>>),
+    Wait(CompiledWaitStep),
 }
 
-/// One ordered step of the handshake: its sends, then the matchers that must be satisfied before
-/// the next step's sends are written.
 #[derive(Debug)]
-struct CompiledSignalingPhase {
-    sends: Vec<Arc<StatefulJaqProgram>>,
-    waits: Vec<CompiledSignalingWait>,
+struct CompiledWaitStep {
+    matchers: Vec<Arc<StatefulJaqProgram>>,
+    capture: Option<Arc<StatefulJaqProgram>>,
+    fails: Vec<Arc<StatefulJaqProgram>>,
+    accept_data: bool,
 }
 
 /// A signaling protocol with its jaq programs compiled and its wire format resolved.
 #[derive(Debug)]
 pub struct CompiledSignalingProtocol {
     wire: CompiledSignalingWire,
-    phases: Vec<CompiledSignalingPhase>,
+    accept_data: bool,
+    steps: Vec<CompiledSignalingStep>,
     fails: Vec<Arc<StatefulJaqProgram>>,
     timeout: Duration,
 }
@@ -161,30 +163,37 @@ impl CompiledSignalingProtocol {
                 })
         };
 
-        let mut phases = Vec::with_capacity(protocol.on_connect.phases.len());
-        for phase in &protocol.on_connect.phases {
-            let sends = phase
-                .sends
-                .iter()
-                .map(|program| compile("SEND JAQ", counts.next_send(), program))
-                .collect::<Result<Vec<_>, _>>()?;
-            let waits = phase
-                .waits
-                .iter()
-                .map(|wait| {
+        let mut steps = Vec::with_capacity(protocol.on_connect.steps.len());
+        for step in &protocol.on_connect.steps {
+            steps.push(match step {
+                nervix_models::SignalingStep::Send(programs) => CompiledSignalingStep::Send(
+                    programs
+                        .iter()
+                        .map(|program| compile("SEND JAQ", counts.next_send(), program))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                nervix_models::SignalingStep::Wait(wait) => {
                     let index = counts.next_wait();
-                    Ok(CompiledSignalingWait {
-                        matcher: compile("WAIT JAQ", index, &wait.matcher)?,
+                    CompiledSignalingStep::Wait(CompiledWaitStep {
+                        matchers: wait
+                            .matchers
+                            .iter()
+                            .map(|matcher| compile("WAIT JAQ", index, matcher))
+                            .collect::<Result<Vec<_>, _>>()?,
                         capture: wait
                             .capture
                             .as_deref()
                             .map(|capture| compile("CAPTURE", index, capture))
                             .transpose()?,
+                        fails: wait
+                            .fail_matchers
+                            .iter()
+                            .map(|matcher| compile("FAIL JAQ", index, matcher))
+                            .collect::<Result<Vec<_>, _>>()?,
                         accept_data: wait.accept_data,
                     })
-                })
-                .collect::<Result<Vec<_>, SignalingProtocolCompileError>>()?;
-            phases.push(CompiledSignalingPhase { sends, waits });
+                }
+            });
         }
 
         let fails = protocol
@@ -205,7 +214,8 @@ impl CompiledSignalingProtocol {
 
         Ok(Self {
             wire,
-            phases,
+            accept_data: protocol.on_connect.accept_data,
+            steps,
             fails,
             timeout,
         })
@@ -262,33 +272,23 @@ impl CompiledSignalingProtocol {
     }
 }
 
-/// Payload frames seen during a handshake, before and after `ACCEPT DATA` opens ingestion.
-#[derive(Default)]
-struct HeldPayload {
-    held: Vec<Vec<u8>>,
+/// Handshake state carried across steps.
+struct SessionState {
+    state: JsonValue,
+    /// Whether payload frames stream to the relay yet.
     accepting: bool,
 }
 
-impl HeldPayload {
-    /// Take one payload frame: straight through once ingestion is open, held otherwise.
-    async fn accept<D: SignalingDataSink>(&mut self, frame: Vec<u8>, sink: &D) {
+impl SessionState {
+    /// Stream one payload frame, or drop it if the relay is not open yet.
+    async fn stream<D: SignalingDataSink>(&self, frame: Vec<u8>, sink: &D) {
         if self.accepting {
-            sink.accept(frame).await;
-        } else {
-            self.held.push(frame);
-        }
-    }
-
-    /// Open ingestion, releasing everything held so far in arrival order.
-    async fn open<D: SignalingDataSink>(&mut self, sink: &D) {
-        self.accepting = true;
-        for frame in std::mem::take(&mut self.held) {
             sink.accept(frame).await;
         }
     }
 }
 
-/// Receives the data frames a handshake sees, so they need not be held in memory.
+/// Receives payload frames as the handshake streams them to the relay.
 ///
 /// A trait rather than a closure: the returned future borrows the sink under one concrete
 /// lifetime, which keeps it `Send` inside the spawned connection tasks that drive signaling.
@@ -305,11 +305,11 @@ impl WebsocketSignalingSession {
         Self { protocol }
     }
 
-    /// Run the handshake, handing every data frame it sees to `on_data`.
+    /// Run the handshake, streaming payload frames to `sink` once `ACCEPT DATA` opens the relay.
     ///
-    /// Under `DATA IMMEDIATE` a frame reaches `on_data` as soon as it arrives, so a long handshake
-    /// neither delays data nor accumulates it. Under `DATA BUFFERED` frames are held and handed
-    /// over only once the handshake succeeds, so a failed handshake discards them.
+    /// Steps run strictly in order. Frames that arrive before the relay is open are not payload
+    /// yet and are dropped, so nothing accumulates in memory and nothing reaches the relay from a
+    /// connection that was never established.
     pub(crate) async fn run<S, D>(
         &self,
         websocket: &mut WebSocketStream<S>,
@@ -319,41 +319,35 @@ impl WebsocketSignalingSession {
         S: AsyncRead + AsyncWrite + Unpin,
         D: SignalingDataSink,
     {
-        // Both outlive the timed future so a timeout can name the matchers the handshake was
-        // actually still waiting on.
-        let mut pending: Vec<&CompiledSignalingWait> = Vec::new();
-        let mut state = JsonValue::Object(serde_json::Map::new());
-        let mut payload = HeldPayload::default();
+        // Outlives the timed future so a timeout can name what the current step was waiting on.
+        let mut pending: Vec<&Arc<StatefulJaqProgram>> = Vec::new();
+        let mut session = SessionState {
+            state: JsonValue::Object(serde_json::Map::new()),
+            accepting: self.protocol.accept_data,
+        };
         let outcome = time::timeout(
             self.protocol.timeout,
-            self.run_phases(websocket, &mut pending, &mut state, &mut payload, sink),
+            self.run_steps(websocket, &mut pending, &mut session, sink),
         )
         .await;
 
         match outcome {
-            Ok(Ok(())) => {
-                for frame in payload.held {
-                    sink.accept(frame).await;
-                }
-                Ok(())
-            }
-            Ok(Err(error)) => Err(error),
+            Ok(result) => result,
             Err(_) => Err(WebsocketSignalingError::Timeout {
                 timeout: self.protocol.timeout,
                 unsatisfied: pending
                     .iter()
-                    .map(|wait| wait.matcher.source().to_string())
+                    .map(|matcher| matcher.source().to_string())
                     .collect(),
             }),
         }
     }
 
-    async fn run_phases<'a, S, D>(
+    async fn run_steps<'a, S, D>(
         &'a self,
         websocket: &mut WebSocketStream<S>,
-        pending: &mut Vec<&'a CompiledSignalingWait>,
-        state: &mut JsonValue,
-        payload: &mut HeldPayload,
+        pending: &mut Vec<&'a Arc<StatefulJaqProgram>>,
+        session: &mut SessionState,
         sink: &D,
     ) -> Result<(), WebsocketSignalingError>
     where
@@ -362,43 +356,53 @@ impl WebsocketSignalingSession {
     {
         let mut sent = 0usize;
 
-        for phase in &self.protocol.phases {
-            for program in &phase.sends {
-                sent += 1;
-                let value = program
-                    .run_single(JsonValue::Null, state)
-                    .map_err(|error| WebsocketSignalingError::SendProgram {
-                        index: sent,
-                        reason: error.to_string(),
-                    })?;
-                let frame = self.protocol.encode_frame(value).map_err(|reason| {
-                    WebsocketSignalingError::SendEncode {
-                        index: sent,
-                        format: self.protocol.format_name(),
-                        reason,
+        for step in &self.protocol.steps {
+            match step {
+                CompiledSignalingStep::Send(programs) => {
+                    for program in programs {
+                        sent += 1;
+                        let value = program
+                            .run_single(JsonValue::Null, &session.state)
+                            .map_err(|error| WebsocketSignalingError::SendProgram {
+                                index: sent,
+                                reason: error.to_string(),
+                            })?;
+                        let frame = self.protocol.encode_frame(value).map_err(|reason| {
+                            WebsocketSignalingError::SendEncode {
+                                index: sent,
+                                format: self.protocol.format_name(),
+                                reason,
+                            }
+                        })?;
+                        websocket
+                            .send(frame)
+                            .await
+                            .map_err(|error| WebsocketSignalingError::Send(Box::new(error)))?;
                     }
-                })?;
-                websocket
-                    .send(frame)
-                    .await
-                    .map_err(|error| WebsocketSignalingError::Send(Box::new(error)))?;
+                }
+                CompiledSignalingStep::Wait(wait) => {
+                    pending.clear();
+                    pending.extend(wait.matchers.iter());
+                    self.wait_for_step(websocket, wait, pending, session, sink)
+                        .await?;
+                    // Completing a marked step means the peer is streaming: open the relay so
+                    // later frames flow while the remaining steps continue.
+                    if wait.accept_data {
+                        session.accepting = true;
+                    }
+                }
             }
-
-            pending.clear();
-            pending.extend(phase.waits.iter());
-            self.wait_for_phase(websocket, pending, state, payload, sink)
-                .await?;
         }
 
         Ok(())
     }
 
-    async fn wait_for_phase<'a, S, D>(
+    async fn wait_for_step<'a, S, D>(
         &'a self,
         websocket: &mut WebSocketStream<S>,
-        pending: &mut Vec<&'a CompiledSignalingWait>,
-        state: &mut JsonValue,
-        payload: &mut HeldPayload,
+        step: &'a CompiledWaitStep,
+        pending: &mut Vec<&'a Arc<StatefulJaqProgram>>,
+        session: &mut SessionState,
         sink: &D,
     ) -> Result<(), WebsocketSignalingError>
     where
@@ -427,39 +431,45 @@ impl WebsocketSignalingSession {
             };
 
             let Some(value) = self.protocol.decode_frame(&frame, is_text) else {
-                payload.accept(frame, sink).await;
+                session.stream(frame, sink).await;
                 continue;
             };
 
-            // A rejection must be recognized before a lenient WAIT matcher can consume it.
-            if let Some(rejection) = self.rejection(&value, state) {
+            // A rejection must be recognized before a lenient matcher can consume it. The step's
+            // own guards run first so a diagnostic names the closest rule.
+            if let Some(rejection) = self.rejection(&step.fails, &value, &session.state) {
+                return Err(rejection);
+            }
+            if let Some(rejection) = self.rejection(&self.protocol.fails, &value, &session.state) {
                 return Err(rejection);
             }
 
             let Some(index) = pending
                 .iter()
-                .position(|wait| matcher_is_satisfied(&wait.matcher, &value, state))
+                .position(|matcher| matcher_is_satisfied(matcher, &value, &session.state))
             else {
-                payload.accept(frame, sink).await;
+                session.stream(frame, sink).await;
                 continue;
             };
 
-            let wait = pending.remove(index);
-            if let Some(capture) = wait.capture.as_ref() {
-                merge_capture(capture, &value, state)?;
-            }
-            // Satisfying a marked matcher means the peer is now streaming: release what was held
-            // and let later frames through while the rest of the handshake continues.
-            if wait.accept_data {
-                payload.open(sink).await;
+            pending.remove(index);
+            if pending.is_empty()
+                && let Some(capture) = step.capture.as_ref()
+            {
+                merge_capture(capture, &value, &mut session.state)?;
             }
         }
 
         Ok(())
     }
 
-    fn rejection(&self, value: &JsonValue, state: &JsonValue) -> Option<WebsocketSignalingError> {
-        self.protocol.fails.iter().find_map(|matcher| {
+    fn rejection(
+        &self,
+        matchers: &[Arc<StatefulJaqProgram>],
+        value: &JsonValue,
+        state: &JsonValue,
+    ) -> Option<WebsocketSignalingError> {
+        matchers.iter().find_map(|matcher| {
             let output = matcher.run_first(value.clone(), state).ok().flatten()?;
             is_truthy(&output).then(|| WebsocketSignalingError::Rejected {
                 matcher: matcher.source().to_string(),
@@ -543,8 +553,8 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use nervix_models::{
-        Identifier, SignalingPhase, SignalingProtobufConfig, SignalingProtocolOnConnect,
-        SignalingWait, SignalingWireFormat,
+        Identifier, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+        SignalingWaitStep, SignalingWireFormat,
     };
     use parking_lot::Mutex;
     use serde_json::json;
@@ -569,7 +579,8 @@ mod tests {
         fail_matchers: &[&str],
     ) -> SignalingProtocolOnConnect {
         SignalingProtocolOnConnect {
-            phases: vec![phase(send_programs, wait_matchers)],
+            accept_data: false,
+            steps: steps(send_programs, wait_matchers),
             fail_matchers: fail_matchers.iter().map(|p| p.to_string()).collect(),
             timeout: "5s".to_string(),
         }
@@ -593,35 +604,35 @@ mod tests {
         }
     }
 
-    fn phase(sends: &[&str], matchers: &[&str]) -> SignalingPhase {
-        SignalingPhase {
-            sends: sends.iter().map(|p| p.to_string()).collect(),
-            waits: matchers
-                .iter()
-                .map(|matcher| SignalingWait::new(matcher.to_string()))
-                .collect(),
+    /// A send step followed by a wait step, the ordinary shape of a one-exchange handshake.
+    fn steps(sends: &[&str], matchers: &[&str]) -> Vec<SignalingStep> {
+        vec![
+            SignalingStep::Send(sends.iter().map(|p| p.to_string()).collect()),
+            SignalingStep::Wait(SignalingWaitStep::new(
+                matchers.iter().map(|p| p.to_string()).collect(),
+            )),
+        ]
+    }
+
+    /// The same pair, with the wait step opening the relay when it completes.
+    fn accepting_steps(sends: &[&str], matchers: &[&str]) -> Vec<SignalingStep> {
+        let mut built = steps(sends, matchers);
+        if let Some(SignalingStep::Wait(wait)) = built.last_mut() {
+            wait.accept_data = true;
         }
+        built
     }
 
-    /// The same phase, with its last matcher opening payload ingestion.
-    fn accepting(mut phase: SignalingPhase) -> SignalingPhase {
-        phase
-            .waits
-            .last_mut()
-            .expect("phase has a matcher to mark")
-            .accept_data = true;
-        phase
-    }
-
-    fn captured(sends: &[&str], matcher: &str, capture: &str) -> SignalingPhase {
-        SignalingPhase {
-            sends: sends.iter().map(|p| p.to_string()).collect(),
-            waits: vec![SignalingWait {
-                matcher: matcher.to_string(),
+    fn captured_steps(sends: &[&str], matcher: &str, capture: &str) -> Vec<SignalingStep> {
+        vec![
+            SignalingStep::Send(sends.iter().map(|p| p.to_string()).collect()),
+            SignalingStep::Wait(SignalingWaitStep {
+                matchers: vec![matcher.to_string()],
                 capture: Some(capture.to_string()),
+                fail_matchers: Vec::new(),
                 accept_data: false,
-            }],
-        }
+            }),
+        ]
     }
 
     #[test]
@@ -636,9 +647,7 @@ mod tests {
         .expect("protocol should compile");
 
         assert_eq!(compiled.timeout, Duration::from_secs(5));
-        assert_eq!(compiled.phases.len(), 1);
-        assert_eq!(compiled.phases[0].sends.len(), 1);
-        assert_eq!(compiled.phases[0].waits.len(), 1);
+        assert_eq!(compiled.steps.len(), 2);
         assert_eq!(compiled.fails.len(), 1);
     }
 
@@ -899,7 +908,8 @@ mod tests {
             protocol(
                 SignalingWireFormat::Json,
                 SignalingProtocolOnConnect {
-                    phases: vec![phase(&["{id: 1}", "{id: 2}"], &[".id == 1", ".id == 2"])],
+                    accept_data: false,
+                    steps: steps(&["{id: 1}", "{id: 2}"], &[".id == 1", ".id == 2"]),
                     fail_matchers: Vec::new(),
                     timeout: "200ms".to_string(),
                 },
@@ -924,12 +934,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completing_the_handshake_returns_frames_buffered_before_it() {
+    async fn payload_arriving_before_the_relay_opens_is_dropped() {
         let buffered = run_against_peer(
             protocol(
                 SignalingWireFormat::Json,
                 SignalingProtocolOnConnect {
-                    phases: vec![phase(&["{id: 1}"], &[".id == 1 and .result == null"])],
+                    accept_data: false,
+                    steps: steps(&["{id: 1}"], &[".id == 1 and .result == null"]),
                     fail_matchers: vec![".error".to_string()],
                     timeout: "5s".to_string(),
                 },
@@ -946,22 +957,24 @@ mod tests {
         .await
         .expect("handshake should complete");
 
-        assert_eq!(buffered, vec![br#"{"seq":1}"#.to_vec()]);
+        // Nothing opened the relay, so the frame was never payload.
+        assert!(buffered.is_empty());
     }
 
     #[tokio::test]
-    async fn a_later_phase_sends_with_state_captured_by_an_earlier_one() {
+    async fn a_later_step_sends_with_state_captured_by_an_earlier_one() {
         let buffered = run_against_peer(
             protocol(
                 SignalingWireFormat::Json,
                 SignalingProtocolOnConnect {
-                    phases: vec![
-                        captured(&[r#"{op: "auth"}"#], ".authed", "{token: .data.token}"),
-                        phase(
+                    accept_data: false,
+                    steps: captured_steps(&[r#"{op: "auth"}"#], ".authed", "{token: .data.token}")
+                        .into_iter()
+                        .chain(steps(
                             &[r#"{op: "subscribe", token: $state.token}"#],
                             &[".subscribed"],
-                        ),
-                    ],
+                        ))
+                        .collect(),
                     fail_matchers: Vec::new(),
                     timeout: "5s".to_string(),
                 },
@@ -971,7 +984,7 @@ mod tests {
                 PeerStep::Send(Message::Text(
                     r#"{"authed":true,"data":{"token":"tok-7f3a"}}"#.to_string(),
                 )),
-                // Proves the second phase interpolated captured state.
+                // Proves the second step interpolated captured state.
                 PeerStep::Expect(r#"{"op": "subscribe", "token": "tok-7f3a"}"#.to_string()),
                 PeerStep::Send(Message::Text(r#"{"seq":1}"#.to_string())),
                 PeerStep::Send(Message::Text(r#"{"subscribed":true}"#.to_string())),
@@ -980,31 +993,33 @@ mod tests {
         .await
         .expect("handshake should complete");
 
-        assert_eq!(buffered, vec![br#"{"seq":1}"#.to_vec()]);
+        // The capture drove the second send; no step opened the relay, so nothing was payload.
+        assert!(buffered.is_empty());
     }
 
     #[tokio::test]
-    async fn a_later_phase_withholds_its_sends_until_the_current_one_is_satisfied() {
+    async fn a_later_step_withholds_its_sends_until_the_current_one_is_satisfied() {
         let error = run_against_peer(
             protocol(
                 SignalingWireFormat::Json,
                 SignalingProtocolOnConnect {
-                    phases: vec![
-                        phase(&[r#"{op: "first"}"#], &[r#".acked == "first""#]),
-                        phase(&[r#"{op: "second"}"#], &[r#".acked == "second""#]),
-                    ],
+                    accept_data: false,
+                    steps: steps(&[r#"{op: "first"}"#], &[r#".acked == "first""#])
+                        .into_iter()
+                        .chain(steps(&[r#"{op: "second"}"#], &[r#".acked == "second""#]))
+                        .collect(),
                     fail_matchers: Vec::new(),
                     timeout: "200ms".to_string(),
                 },
             ),
-            // The peer never acknowledges the first phase, so the second must never be written.
+            // The peer never acknowledges the first step, so the second must never be written.
             vec![
                 PeerStep::Expect(r#"{"op": "first"}"#.to_string()),
                 PeerStep::ExpectSilence(Duration::from_millis(100)),
             ],
         )
         .await
-        .expect_err("an unanswered phase must time out");
+        .expect_err("an unanswered step must time out");
 
         assert!(
             matches!(
@@ -1017,29 +1032,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_data_releases_held_payload_and_opens_passthrough_mid_handshake() {
+    async fn accept_data_opens_the_relay_mid_handshake() {
         let sink = RecordingSink::default();
         let error = run_against_peer_with(
             protocol(
                 SignalingWireFormat::Json,
                 SignalingProtocolOnConnect {
-                    phases: vec![
-                        // Acknowledging the first subscription opens ingestion, even though the
-                        // handshake continues negotiating the second.
-                        accepting(phase(&[r#"{op: "first"}"#], &[r#".acked == "first""#])),
-                        phase(&[r#"{op: "second"}"#], &[r#".acked == "second""#]),
-                    ],
+                    accept_data: false,
+                    // Acknowledging the first subscription opens the relay, even though the
+                    // handshake continues negotiating the second.
+                    steps: accepting_steps(&[r#"{op: "first"}"#], &[r#".acked == "first""#])
+                        .into_iter()
+                        .chain(steps(&[r#"{op: "second"}"#], &[r#".acked == "second""#]))
+                        .collect(),
                     fail_matchers: Vec::new(),
                     timeout: "200ms".to_string(),
                 },
             ),
             vec![
                 PeerStep::Expect(r#"{"op": "first"}"#.to_string()),
-                // Arrives before the marker, so it is held rather than dropped.
+                // Arrives before the relay opens, so it is not payload yet.
                 PeerStep::Send(Message::Text(r#"{"seq":1}"#.to_string())),
                 PeerStep::Send(Message::Text(r#"{"acked":"first"}"#.to_string())),
                 PeerStep::Expect(r#"{"op": "second"}"#.to_string()),
-                // Arrives after the marker, so it passes straight through.
+                // Arrives after the relay opens, so it streams even though the handshake goes on.
                 PeerStep::Send(Message::Text(r#"{"seq":2}"#.to_string())),
             ],
             &sink,
@@ -1051,25 +1067,86 @@ mod tests {
             matches!(error, WebsocketSignalingError::Timeout { .. }),
             "unexpected error: {error}"
         );
-        // Both reached ingestion in arrival order despite the handshake failing afterwards,
-        // because the marker was passed.
-        assert_eq!(
-            sink.accepted(),
-            vec![br#"{"seq":1}"#.to_vec(), br#"{"seq":2}"#.to_vec()]
-        );
+        // Only the frame that arrived after the relay opened reached it.
+        assert_eq!(sink.accepted(), vec![br#"{"seq":2}"#.to_vec()]);
     }
 
     #[tokio::test]
-    async fn payload_before_the_marker_is_discarded_when_the_handshake_fails_first() {
+    async fn accept_data_on_connect_streams_from_the_first_frame() {
         let sink = RecordingSink::default();
         let error = run_against_peer_with(
             protocol(
                 SignalingWireFormat::Json,
                 SignalingProtocolOnConnect {
-                    phases: vec![
-                        accepting(phase(&[r#"{op: "first"}"#], &[r#".acked == "first""#])),
-                        phase(&[r#"{op: "second"}"#], &[r#".acked == "second""#]),
+                    // The relay is open before anything is negotiated.
+                    accept_data: true,
+                    steps: steps(&[r#"{op: "subscribe"}"#], &[".subscribed"]),
+                    fail_matchers: Vec::new(),
+                    timeout: "200ms".to_string(),
+                },
+            ),
+            vec![
+                PeerStep::Expect(r#"{"op": "subscribe"}"#.to_string()),
+                PeerStep::Send(Message::Text(r#"{"seq":1}"#.to_string())),
+            ],
+            &sink,
+        )
+        .await
+        .expect_err("the subscription is never acknowledged");
+
+        assert!(
+            matches!(error, WebsocketSignalingError::Timeout { .. }),
+            "unexpected error: {error}"
+        );
+        assert_eq!(sink.accepted(), vec![br#"{"seq":1}"#.to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn a_step_scoped_fail_guard_rejects_during_its_own_step() {
+        let error = run_against_peer(
+            protocol(
+                SignalingWireFormat::Json,
+                SignalingProtocolOnConnect {
+                    accept_data: false,
+                    steps: vec![
+                        SignalingStep::Send(vec![r#"{op: "subscribe"}"#.to_string()]),
+                        SignalingStep::Wait(SignalingWaitStep {
+                            matchers: vec![".subscribed".to_string()],
+                            capture: None,
+                            fail_matchers: vec![".denied".to_string()],
+                            accept_data: false,
+                        }),
                     ],
+                    fail_matchers: Vec::new(),
+                    timeout: "200ms".to_string(),
+                },
+            ),
+            vec![
+                PeerStep::Expect(r#"{"op": "subscribe"}"#.to_string()),
+                PeerStep::Send(Message::Text(r#"{"denied":"quota"}"#.to_string())),
+            ],
+        )
+        .await
+        .expect_err("the step guard must reject");
+
+        assert!(
+            matches!(&error, WebsocketSignalingError::Rejected { matcher, .. } if matcher == ".denied"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_is_dropped_when_the_opening_step_is_never_satisfied() {
+        let sink = RecordingSink::default();
+        let error = run_against_peer_with(
+            protocol(
+                SignalingWireFormat::Json,
+                SignalingProtocolOnConnect {
+                    accept_data: false,
+                    steps: accepting_steps(&[r#"{op: "first"}"#], &[r#".acked == "first""#])
+                        .into_iter()
+                        .chain(steps(&[r#"{op: "second"}"#], &[r#".acked == "second""#]))
+                        .collect(),
                     fail_matchers: Vec::new(),
                     timeout: "200ms".to_string(),
                 },
@@ -1090,7 +1167,7 @@ mod tests {
         );
         assert!(
             sink.accepted().is_empty(),
-            "payload held before the marker must not reach ingestion"
+            "payload must not reach the relay before a step opens it"
         );
     }
 
@@ -1100,7 +1177,8 @@ mod tests {
             protocol(
                 SignalingWireFormat::Json,
                 SignalingProtocolOnConnect {
-                    phases: vec![captured(&["{id: 1}"], ".id == 1", ".id")],
+                    accept_data: false,
+                    steps: captured_steps(&["{id: 1}"], ".id == 1", ".id"),
                     fail_matchers: Vec::new(),
                     timeout: "5s".to_string(),
                 },
@@ -1126,7 +1204,8 @@ mod tests {
                 SignalingWireFormat::Json,
                 SignalingProtocolOnConnect {
                     // Deliberately lenient: the matcher would also accept the error frame.
-                    phases: vec![phase(&["{id: 1}"], &[".id == 1"])],
+                    accept_data: false,
+                    steps: steps(&["{id: 1}"], &[".id == 1"]),
                     fail_matchers: vec![".error".to_string()],
                     timeout: "5s".to_string(),
                 },

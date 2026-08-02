@@ -3655,10 +3655,24 @@ fn ensure_signaling_protocol_is_valid(
             "signaling protocol must declare at least one SEND JAQ program".to_string(),
         ));
     }
-    if protocol.on_connect.waits().next().is_none() {
+    if protocol
+        .on_connect
+        .wait_steps()
+        .all(|wait| wait.matchers.is_empty())
+    {
         return Err(invalid(
             "signaling protocol must declare at least one WAIT JAQ matcher".to_string(),
         ));
+    }
+    if let Some(position) = protocol
+        .on_connect
+        .wait_steps()
+        .position(|wait| wait.matchers.is_empty())
+    {
+        return Err(invalid(format!(
+            "signaling protocol WAIT JAQ step #{} declares no matcher",
+            position + 1
+        )));
     }
 
     let compile = |clause: &str, index: usize, program: &str| {
@@ -3674,10 +3688,21 @@ fn ensure_signaling_protocol_is_valid(
     for (index, program) in protocol.on_connect.sends().enumerate() {
         compile("SEND JAQ", index, program)?;
     }
-    for (index, wait) in protocol.on_connect.waits().enumerate() {
-        compile("WAIT JAQ", index, &wait.matcher)?;
+    for (index, wait) in protocol.on_connect.wait_steps().enumerate() {
+        for matcher in &wait.matchers {
+            compile("WAIT JAQ", index, matcher)?;
+        }
         if let Some(capture) = wait.capture.as_deref() {
             compile("CAPTURE", index, capture)?;
+        }
+        for matcher in &wait.fail_matchers {
+            compile("FAIL JAQ", index, matcher)?;
+        }
+        if wait.capture.is_some() && wait.matchers.len() > 1 {
+            return Err(invalid(
+                "CAPTURE describes one matched frame, so it requires a single WAIT JAQ matcher"
+                    .to_string(),
+            ));
         }
     }
     for (index, matcher) in protocol.on_connect.fail_matchers.iter().enumerate() {
@@ -9601,9 +9626,8 @@ mod tests {
         KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model,
         ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
-        ScheduledNode, SchemaField, SignalingPhase, SignalingProtobufConfig,
-        SignalingProtocolOnConnect, SignalingWait, SignalingWireFormat, WindowBound,
-        WireSchemaField,
+        ScheduledNode, SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect,
+        SignalingStep, SignalingWaitStep, SignalingWireFormat, WindowBound, WireSchemaField,
     };
 
     #[cfg(feature = "testing")]
@@ -10246,13 +10270,13 @@ mod tests {
             name: identifier("handshake"),
             format,
             on_connect: SignalingProtocolOnConnect {
-                phases: vec![SignalingPhase::new(
-                    send_programs.iter().map(|p| p.to_string()).collect(),
-                    wait_matchers
-                        .iter()
-                        .map(|matcher| SignalingWait::new(matcher.to_string()))
-                        .collect(),
-                )],
+                accept_data: false,
+                steps: vec![
+                    SignalingStep::Send(send_programs.iter().map(|p| p.to_string()).collect()),
+                    SignalingStep::Wait(SignalingWaitStep::new(
+                        wait_matchers.iter().map(|p| p.to_string()).collect(),
+                    )),
+                ],
                 fail_matchers: fail_matchers.iter().map(|p| p.to_string()).collect(),
                 timeout: "5s".to_string(),
             },

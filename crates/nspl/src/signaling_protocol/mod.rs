@@ -1,7 +1,7 @@
 use chumsky::prelude::*;
 use nervix_models::{
-    CreateSignalingProtocol, CreateStatement, SignalingPhase, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingWait, SignalingWireFormat,
+    CreateSignalingProtocol, CreateStatement, SignalingProtobufConfig, SignalingProtocolOnConnect,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat,
 };
 
 use crate::{
@@ -23,98 +23,78 @@ fn jaq_program_list<'src>(
         .collect::<Vec<_>>()
 }
 
-/// What follows the first matcher of a `WAIT JAQ` clause.
-#[derive(Debug, Clone)]
-enum WaitTail {
-    Matchers(Vec<String>),
-    Modifiers {
-        capture: Option<String>,
-        accept_data: bool,
-    },
+/// What follows the first matcher of a `WAIT JAQ` step.
+struct WaitTail {
+    further_matchers: Vec<String>,
+    capture: Option<String>,
+    fail_matchers: Vec<String>,
+    accept_data: bool,
 }
 
 impl WaitTail {
-    fn into_waits(self, first: String) -> Vec<SignalingWait> {
-        match self {
-            Self::Matchers(rest) => std::iter::once(first)
-                .chain(rest)
-                .map(SignalingWait::new)
+    fn into_step(self, first: String) -> SignalingWaitStep {
+        SignalingWaitStep {
+            matchers: std::iter::once(first)
+                .chain(self.further_matchers)
                 .collect(),
-            Self::Modifiers {
-                capture,
-                accept_data,
-            } => vec![SignalingWait {
-                matcher: first,
-                capture,
-                accept_data,
-            }],
+            capture: self.capture,
+            fail_matchers: self.fail_matchers,
+            accept_data: self.accept_data,
         }
     }
 }
 
-/// One written clause of the handshake, before clauses are grouped into ordered phases.
-#[derive(Debug, Clone)]
-enum SignalingClause {
-    Send(Vec<String>),
-    Wait(Vec<SignalingWait>),
-}
-
-fn signaling_clause<'src>()
--> impl Parser<'src, &'src [Token], SignalingClause, extra::Err<ParseError<'src>>> + Clone {
+fn signaling_step<'src>()
+-> impl Parser<'src, &'src [Token], SignalingStep, extra::Err<ParseError<'src>>> + Clone {
     let send = kw(Identifier::Send)
         .ignore_then(kw(Identifier::Jaq))
         .ignore_then(jaq_program_list("jaq_program"))
-        .map(SignalingClause::Send);
-    // Both modifiers describe the one frame that satisfied the matcher, so a wait either lists
-    // several plain matchers or carries modifiers on a single one.
+        .map(SignalingStep::Send);
+
+    let step_fail = kw(Identifier::Fail)
+        .ignore_then(kw(Identifier::Jaq))
+        .ignore_then(jaq_program_list("jaq_matcher"))
+        .or_not()
+        .map(Option::unwrap_or_default);
+    let accept_data = kw(Identifier::Accept)
+        .ignore_then(kw(Identifier::Data))
+        .or_not()
+        .map(|accept| accept.is_some());
+    // A capture describes the one frame that matched, so the grammar offers it only where a step
+    // waits for a single matcher.
     let further_matchers = tok(Token::Comma)
         .ignore_then(string_lit().labelled("jaq_matcher"))
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()
-        .map(WaitTail::Matchers);
-    let modifiers = kw(Identifier::Capture)
-        .ignore_then(string_lit().labelled("jaq_capture"))
-        .or_not()
+        .then(step_fail.clone())
+        .then(accept_data.clone())
+        .map(|((matchers, fail_matchers), accept_data)| WaitTail {
+            further_matchers: matchers,
+            capture: None,
+            fail_matchers,
+            accept_data,
+        });
+    let single_matcher = step_fail
         .then(
-            kw(Identifier::Accept)
-                .ignore_then(kw(Identifier::Data))
-                .or_not()
-                .map(|accept| accept.is_some()),
+            kw(Identifier::Capture)
+                .ignore_then(string_lit().labelled("jaq_capture"))
+                .or_not(),
         )
-        .map(|(capture, accept_data)| WaitTail::Modifiers {
+        .then(accept_data)
+        .map(|((fail_matchers, capture), accept_data)| WaitTail {
+            further_matchers: Vec::new(),
             capture,
+            fail_matchers,
             accept_data,
         });
     let wait = kw(Identifier::Wait)
         .ignore_then(kw(Identifier::Jaq))
         .ignore_then(string_lit().labelled("jaq_matcher"))
-        .then(choice((further_matchers, modifiers)))
-        .map(|(matcher, tail)| SignalingClause::Wait(tail.into_waits(matcher)));
+        .then(choice((further_matchers, single_matcher)))
+        .map(|(first, tail)| SignalingStep::Wait(tail.into_step(first)));
 
     choice((send, wait)).boxed()
-}
-
-/// Group written clauses into ordered phases.
-///
-/// Sends that follow a wait begin a new phase, which is what holds them back until the preceding
-/// wait is satisfied. Consecutive clauses of the same kind stay in one phase, so a protocol that
-/// never interleaves keeps the single-phase behavior of sending everything and then waiting.
-fn phases_from_clauses(clauses: Vec<SignalingClause>) -> Vec<SignalingPhase> {
-    let mut phases: Vec<SignalingPhase> = Vec::new();
-    for clause in clauses {
-        match clause {
-            SignalingClause::Send(sends) => match phases.last_mut() {
-                Some(phase) if phase.waits.is_empty() => phase.sends.extend(sends),
-                _ => phases.push(SignalingPhase::new(sends, Vec::new())),
-            },
-            SignalingClause::Wait(waits) => match phases.last_mut() {
-                Some(phase) => phase.waits.extend(waits),
-                None => phases.push(SignalingPhase::new(Vec::new(), waits)),
-            },
-        }
-    }
-    phases
 }
 
 fn signaling_wire_format<'src>()
@@ -166,18 +146,8 @@ pub fn create_signaling_protocol_parser<'src>() -> impl Parser<
         .then_ignore(kw(Identifier::Signaling))
         .then_ignore(kw(Identifier::Protocol))
         .then(signaling_protocol_name())
-        .then_ignore(kw(Identifier::From))
+        .then_ignore(kw(Identifier::Format))
         .then(signaling_wire_format())
-        .boxed()
-        .then_ignore(kw(Identifier::On))
-        .then_ignore(kw(Identifier::Connect))
-        .then(
-            signaling_clause()
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .map(phases_from_clauses),
-        )
         .boxed()
         .then(
             kw(Identifier::Fail)
@@ -186,6 +156,16 @@ pub fn create_signaling_protocol_parser<'src>() -> impl Parser<
                 .or_not()
                 .map(Option::unwrap_or_default),
         )
+        .then_ignore(kw(Identifier::On))
+        .then_ignore(kw(Identifier::Connect))
+        .then(
+            kw(Identifier::Accept)
+                .ignore_then(kw(Identifier::Data))
+                .or_not()
+                .map(|accept| accept.is_some()),
+        )
+        .then(signaling_step().repeated().at_least(1).collect::<Vec<_>>())
+        .boxed()
         .then_ignore(kw(Identifier::Timeout))
         .then(duration_lit().try_map(|timeout, span| {
             humantime::parse_duration(&timeout)
@@ -196,13 +176,17 @@ pub fn create_signaling_protocol_parser<'src>() -> impl Parser<
         }))
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
-            |(((((if_not_exists, name), format), phases), fail_matchers), timeout)| {
+            |(
+                (((((if_not_exists, name), format), fail_matchers), accept_data), steps),
+                timeout,
+            )| {
                 CreateStatement::new(
                     CreateSignalingProtocol {
                         name,
                         format,
                         on_connect: SignalingProtocolOnConnect {
-                            phases,
+                            accept_data,
+                            steps,
                             fail_matchers,
                             timeout,
                         },
@@ -261,7 +245,7 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL binance_style
-              FROM JSON
+              FORMAT JSON
               ON CONNECT
               SEND JAQ '{method: "SUBSCRIBE", id: 1}', '{method: "SUBSCRIBE", id: 2}'
               WAIT JAQ '.id == 1 and .result == null', '.id == 2 and .result == null'
@@ -273,17 +257,17 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "binance_style");
         assert_eq!(parsed.format, SignalingWireFormat::Json);
         assert_eq!(
-            parsed.on_connect.phases,
-            vec![SignalingPhase::new(
-                vec![
+            parsed.on_connect.steps,
+            vec![
+                SignalingStep::Send(vec![
                     r#"{method: "SUBSCRIBE", id: 1}"#.to_string(),
                     r#"{method: "SUBSCRIBE", id: 2}"#.to_string(),
-                ],
-                vec![
-                    SignalingWait::new(".id == 1 and .result == null".to_string()),
-                    SignalingWait::new(".id == 2 and .result == null".to_string()),
-                ],
-            )]
+                ]),
+                SignalingStep::Wait(SignalingWaitStep::new(vec![
+                    ".id == 1 and .result == null".to_string(),
+                    ".id == 2 and .result == null".to_string(),
+                ])),
+            ]
         );
         assert!(parsed.on_connect.fail_matchers.is_empty());
         assert_eq!(parsed.on_connect.timeout, "5s");
@@ -294,11 +278,11 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE IF NOT EXISTS SIGNALING PROTOCOL guarded
-              FROM YAML
+              FORMAT YAML
+              FAIL JAQ '.success == false', '.error'
               ON CONNECT
               SEND JAQ '{op: "subscribe"}'
               WAIT JAQ '.success == true'
-              FAIL JAQ '.success == false', '.error'
               TIMEOUT 10s;
             "#,
         );
@@ -310,7 +294,7 @@ mod tests {
             parsed.on_connect.fail_matchers,
             vec![".success == false".to_string(), ".error".to_string()]
         );
-        assert_eq!(parsed.on_connect.phases.len(), 1);
+        assert_eq!(parsed.on_connect.steps.len(), 2);
     }
 
     #[test]
@@ -318,7 +302,7 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL authenticated
-              FROM JSON
+              FORMAT JSON
               ON CONNECT
               SEND JAQ '{op: "auth"}'
               WAIT JAQ '.authed' CAPTURE '{token: .token}'
@@ -330,30 +314,29 @@ mod tests {
         let parsed = parse_create_signaling_protocol_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.on_connect.phases,
+            parsed.on_connect.steps,
             vec![
-                SignalingPhase::new(
-                    vec![r#"{op: "auth"}"#.to_string()],
-                    vec![SignalingWait {
-                        matcher: ".authed".to_string(),
-                        capture: Some("{token: .token}".to_string()),
-                        accept_data: false,
-                    }],
-                ),
-                SignalingPhase::new(
-                    vec![r#"{op: "subscribe", token: $state.token, id: 1}"#.to_string()],
-                    vec![SignalingWait::new(".id == 1".to_string())],
-                ),
+                SignalingStep::Send(vec![r#"{op: "auth"}"#.to_string()]),
+                SignalingStep::Wait(SignalingWaitStep {
+                    matchers: vec![".authed".to_string()],
+                    capture: Some("{token: .token}".to_string()),
+                    fail_matchers: Vec::new(),
+                    accept_data: false,
+                }),
+                SignalingStep::Send(vec![
+                    r#"{op: "subscribe", token: $state.token, id: 1}"#.to_string(),
+                ]),
+                SignalingStep::Wait(SignalingWaitStep::new(vec![".id == 1".to_string()])),
             ]
         );
     }
 
     #[test]
-    fn keeps_consecutive_clauses_of_one_kind_in_a_single_phase() {
+    fn keeps_every_written_clause_as_its_own_step() {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL batched
-              FROM JSON
+              FORMAT JSON
               ON CONNECT
               SEND JAQ '{id: 1}'
               SEND JAQ '{id: 2}'
@@ -364,17 +347,16 @@ mod tests {
         );
         let parsed = parse_create_signaling_protocol_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.on_connect.phases.len(), 1);
-        assert_eq!(parsed.on_connect.phases[0].sends.len(), 2);
-        assert_eq!(parsed.on_connect.phases[0].waits.len(), 2);
+        // Four written clauses stay four steps, run one after another.
+        assert_eq!(parsed.on_connect.steps.len(), 4);
     }
 
     #[test]
-    fn parses_a_leading_wait_as_a_phase_without_sends() {
+    fn parses_a_leading_wait_before_any_send() {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL challenge
-              FROM JSON
+              FORMAT JSON
               ON CONNECT
               WAIT JAQ '.challenge' CAPTURE '{nonce: .challenge}'
               SEND JAQ '{answer: $state.nonce}'
@@ -384,17 +366,15 @@ mod tests {
         );
         let parsed = parse_create_signaling_protocol_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.on_connect.phases.len(), 2);
-        assert!(parsed.on_connect.phases[0].sends.is_empty());
-        assert_eq!(
-            parsed.on_connect.phases[0].waits[0].capture.as_deref(),
-            Some("{nonce: .challenge}")
-        );
+        let SignalingStep::Wait(first) = &parsed.on_connect.steps[0] else {
+            panic!("a challenge protocol waits before it sends");
+        };
+        assert_eq!(first.capture.as_deref(), Some("{nonce: .challenge}"));
     }
 
     #[test]
     fn rejects_capture_on_a_multi_matcher_wait() {
-        let input = "CREATE SIGNALING PROTOCOL bad_capture FROM JSON ON CONNECT SEND JAQ '{id: \
+        let input = "CREATE SIGNALING PROTOCOL bad_capture FORMAT JSON ON CONNECT SEND JAQ '{id: \
                      1}' WAIT JAQ '.id == 1', '.id == 2' CAPTURE '{token: .token}' TIMEOUT 5s ;";
 
         assert!(parse_create_signaling_protocol(input).is_err());
@@ -405,7 +385,7 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL plain
-              FROM RAW
+              FORMAT RAW
               ON CONNECT
               SEND JAQ '"HELLO"'
               WAIT JAQ '. == "WELCOME"'
@@ -422,7 +402,7 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL binary
-              FROM CBOR
+              FORMAT CBOR
               ON CONNECT
               SEND JAQ '{op: "subscribe"}'
               WAIT JAQ '.ok'
@@ -439,7 +419,7 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL proto_handshake
-              FROM PROTOBUF USING RESOURCE proto_bundle VERSION 2
+              FORMAT PROTOBUF USING RESOURCE proto_bundle VERSION 2
                 CONFIG {'file' = 'signaling.proto', 'include' = '.'}
                 SEND MESSAGE 'nervix.test.Subscribe'
                 WAIT MESSAGE 'nervix.test.Ack'
@@ -478,7 +458,7 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL proto_handshake
-              FROM PROTOBUF USING RESOURCE proto_bundle
+              FORMAT PROTOBUF USING RESOURCE proto_bundle
                 CONFIG {'file' = 'signaling.proto'}
                 SEND MESSAGE 'nervix.test.Subscribe'
                 WAIT MESSAGE 'nervix.test.Ack'
@@ -501,7 +481,7 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL staged
-              FROM JSON
+              FORMAT JSON
               ON CONNECT
               SEND JAQ '{id: 1}', '{id: 2}'
               WAIT JAQ '.id == 1' ACCEPT DATA
@@ -511,11 +491,15 @@ mod tests {
         );
         let parsed = parse_create_signaling_protocol_tokens(&tokens).expect("parse should succeed");
 
-        // Both subscriptions stay in one phase, so they are still written together.
-        assert_eq!(parsed.on_connect.phases.len(), 1);
-        let waits = &parsed.on_connect.phases[0].waits;
-        assert!(waits[0].accept_data);
-        assert!(!waits[1].accept_data);
+        // Both subscriptions are written together, then acknowledged one step at a time.
+        let SignalingStep::Wait(first) = &parsed.on_connect.steps[1] else {
+            panic!("the second step waits");
+        };
+        let SignalingStep::Wait(second) = &parsed.on_connect.steps[2] else {
+            panic!("the third step waits");
+        };
+        assert!(first.accept_data);
+        assert!(!second.accept_data);
         assert!(parsed.on_connect.accepts_data_during_handshake());
     }
 
@@ -524,7 +508,7 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL both
-              FROM JSON
+              FORMAT JSON
               ON CONNECT
               SEND JAQ '{op: "auth"}'
               WAIT JAQ '.authed' CAPTURE '{token: .token}' ACCEPT DATA
@@ -533,7 +517,9 @@ mod tests {
         );
         let parsed = parse_create_signaling_protocol_tokens(&tokens).expect("parse should succeed");
 
-        let wait = &parsed.on_connect.phases[0].waits[0];
+        let SignalingStep::Wait(wait) = &parsed.on_connect.steps[1] else {
+            panic!("the second step waits");
+        };
         assert_eq!(wait.capture.as_deref(), Some("{token: .token}"));
         assert!(wait.accept_data);
     }
@@ -543,7 +529,7 @@ mod tests {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL held
-              FROM JSON
+              FORMAT JSON
               ON CONNECT
               SEND JAQ '{id: 1}'
               WAIT JAQ '.id == 1'
@@ -556,17 +542,70 @@ mod tests {
     }
 
     #[test]
-    fn rejects_accept_data_on_a_matcher_list() {
-        let input = "CREATE SIGNALING PROTOCOL bad FROM JSON ON CONNECT SEND JAQ '{id: 1}' WAIT \
-                     JAQ '.id == 1', '.id == 2' ACCEPT DATA TIMEOUT 5s;";
+    fn accepts_accept_data_on_a_matcher_list() {
+        let parsed = parse_create_signaling_protocol(
+            "CREATE SIGNALING PROTOCOL both FORMAT JSON ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ \
+             '.id == 1', '.id == 2' ACCEPT DATA TIMEOUT 5s;",
+        )
+        .expect("parse should succeed");
+
+        let SignalingStep::Wait(wait) = &parsed.on_connect.steps[1] else {
+            panic!("the second step waits");
+        };
+        assert_eq!(wait.matchers.len(), 2);
+        assert!(wait.accept_data);
+    }
+
+    #[test]
+    fn rejects_capture_on_a_matcher_list() {
+        let input = "CREATE SIGNALING PROTOCOL bad FORMAT JSON ON CONNECT SEND JAQ '{id: 1}' WAIT \
+                     JAQ '.id == 1', '.id == 2' CAPTURE '{seen: .}' TIMEOUT 5s;";
 
         assert!(parse_create_signaling_protocol(input).is_err());
     }
 
     #[test]
+    fn parses_a_step_scoped_fail_guard() {
+        let parsed = parse_create_signaling_protocol(
+            "CREATE SIGNALING PROTOCOL guarded FORMAT JSON ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ \
+             '.ok' FAIL JAQ '.denied' ACCEPT DATA TIMEOUT 5s;",
+        )
+        .expect("parse should succeed");
+
+        let SignalingStep::Wait(wait) = &parsed.on_connect.steps[1] else {
+            panic!("the second step waits");
+        };
+        assert_eq!(wait.fail_matchers, vec![".denied".to_string()]);
+        assert!(parsed.on_connect.fail_matchers.is_empty());
+    }
+
+    #[test]
+    fn parses_a_protocol_wide_fail_before_on_connect() {
+        let parsed = parse_create_signaling_protocol(
+            "CREATE SIGNALING PROTOCOL guarded FORMAT JSON FAIL JAQ '.error' ON CONNECT SEND JAQ \
+             '{id: 1}' WAIT JAQ '.ok' TIMEOUT 5s;",
+        )
+        .expect("parse should succeed");
+
+        assert_eq!(parsed.on_connect.fail_matchers, vec![".error".to_string()]);
+    }
+
+    #[test]
+    fn parses_accept_data_on_connect() {
+        let parsed = parse_create_signaling_protocol(
+            "CREATE SIGNALING PROTOCOL live FORMAT JSON ON CONNECT ACCEPT DATA SEND JAQ '{id: 1}' \
+             WAIT JAQ '.ok' TIMEOUT 5s;",
+        )
+        .expect("parse should succeed");
+
+        assert!(parsed.on_connect.accept_data);
+        assert!(parsed.on_connect.accepts_data_during_handshake());
+    }
+
+    #[test]
     fn suggests_accept_after_a_single_matcher() {
-        let input = "CREATE SIGNALING PROTOCOL live FROM JSON ON CONNECT SEND JAQ '{id: 1}' WAIT \
-                     JAQ '.id == 1' ";
+        let input = "CREATE SIGNALING PROTOCOL live FORMAT JSON ON CONNECT SEND JAQ '{id: 1}' \
+                     WAIT JAQ '.id == 1' ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"ACCEPT".to_string()));
@@ -575,8 +614,8 @@ mod tests {
 
     #[test]
     fn suggests_data_after_accept() {
-        let input = "CREATE SIGNALING PROTOCOL live FROM JSON ON CONNECT SEND JAQ '{id: 1}' WAIT \
-                     JAQ '.id == 1' ACCEPT ";
+        let input = "CREATE SIGNALING PROTOCOL live FORMAT JSON ON CONNECT SEND JAQ '{id: 1}' \
+                     WAIT JAQ '.id == 1' ACCEPT ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"DATA".to_string()));
@@ -599,7 +638,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_wait_matcher() {
-        let input = "CREATE SIGNALING PROTOCOL missing_wait FROM JSON ON CONNECT SEND JAQ '{id: \
+        let input = "CREATE SIGNALING PROTOCOL missing_wait FORMAT JSON ON CONNECT SEND JAQ '{id: \
                      1}' WAIT JAQ TIMEOUT 5s;";
 
         assert!(parse_create_signaling_protocol(input).is_err());
@@ -607,7 +646,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_timeout() {
-        let input = "CREATE SIGNALING PROTOCOL missing_timeout FROM JSON ON CONNECT SEND JAQ \
+        let input = "CREATE SIGNALING PROTOCOL missing_timeout FORMAT JSON ON CONNECT SEND JAQ \
                      '{id: 1}' WAIT JAQ '.id == 1';";
 
         assert!(parse_create_signaling_protocol(input).is_err());
@@ -615,7 +654,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_timeout_duration() {
-        let input = "CREATE SIGNALING PROTOCOL bad_timeout FROM JSON ON CONNECT SEND JAQ '{id: \
+        let input = "CREATE SIGNALING PROTOCOL bad_timeout FORMAT JSON ON CONNECT SEND JAQ '{id: \
                      1}' WAIT JAQ '.id == 1' TIMEOUT 5potatoes;";
 
         assert!(parse_create_signaling_protocol(input).is_err());
@@ -623,7 +662,7 @@ mod tests {
 
     #[test]
     fn rejects_protobuf_without_config() {
-        let input = "CREATE SIGNALING PROTOCOL proto_handshake FROM PROTOBUF USING RESOURCE \
+        let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF USING RESOURCE \
                      proto_bundle SEND MESSAGE 'nervix.test.Subscribe' WAIT MESSAGE \
                      'nervix.test.Ack' ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ '.id == 1' TIMEOUT \
                      5s;";
@@ -633,7 +672,7 @@ mod tests {
 
     #[test]
     fn rejects_protobuf_without_wait_message() {
-        let input = "CREATE SIGNALING PROTOCOL proto_handshake FROM PROTOBUF USING RESOURCE \
+        let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF USING RESOURCE \
                      proto_bundle CONFIG {'file' = 'signaling.proto'} SEND MESSAGE \
                      'nervix.test.Subscribe' ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ '.id == 1' \
                      TIMEOUT 5s;";
@@ -651,16 +690,17 @@ mod tests {
     }
 
     #[test]
-    fn suggests_from_after_signaling_protocol_name() {
+    fn suggests_format_after_signaling_protocol_name() {
         let input = "CREATE SIGNALING PROTOCOL binance_style ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
-        assert!(suggestions.contains(&"FROM".to_string()));
+        assert!(suggestions.contains(&"FORMAT".to_string()));
+        assert!(!suggestions.contains(&"FROM".to_string()));
     }
 
     #[test]
-    fn suggests_wire_formats_after_from() {
-        let input = "CREATE SIGNALING PROTOCOL binance_style FROM ";
+    fn suggests_wire_formats_after_format() {
+        let input = "CREATE SIGNALING PROTOCOL binance_style FORMAT ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"JSON".to_string()));
@@ -675,8 +715,8 @@ mod tests {
     }
 
     #[test]
-    fn suggests_using_after_from_protobuf() {
-        let input = "CREATE SIGNALING PROTOCOL proto_handshake FROM PROTOBUF ";
+    fn suggests_using_after_protobuf() {
+        let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"USING".to_string()));
@@ -685,7 +725,7 @@ mod tests {
 
     #[test]
     fn suggests_send_message_after_protobuf_config() {
-        let input = "CREATE SIGNALING PROTOCOL proto_handshake FROM PROTOBUF USING RESOURCE \
+        let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF USING RESOURCE \
                      proto_bundle CONFIG {'file' = 'signaling.proto'} ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
@@ -695,7 +735,7 @@ mod tests {
 
     #[test]
     fn suggests_jaq_program_after_send_jaq() {
-        let input = "CREATE SIGNALING PROTOCOL binance_style FROM JSON ON CONNECT SEND JAQ ";
+        let input = "CREATE SIGNALING PROTOCOL binance_style FORMAT JSON ON CONNECT SEND JAQ ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"jaq_program".to_string()));
@@ -703,17 +743,17 @@ mod tests {
 
     #[test]
     fn suggests_jaq_matcher_after_wait_jaq() {
-        let input = "CREATE SIGNALING PROTOCOL binance_style FROM JSON ON CONNECT SEND JAQ '{id: \
-                     1}' WAIT JAQ ";
+        let input = "CREATE SIGNALING PROTOCOL binance_style FORMAT JSON ON CONNECT SEND JAQ \
+                     '{id: 1}' WAIT JAQ ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"jaq_matcher".to_string()));
     }
 
     #[test]
-    fn suggests_fail_and_timeout_after_wait_matchers() {
-        let input = "CREATE SIGNALING PROTOCOL binance_style FROM JSON ON CONNECT SEND JAQ '{id: \
-                     1}' WAIT JAQ '.id == 1' ";
+    fn suggests_fail_capture_and_timeout_after_a_matcher() {
+        let input = "CREATE SIGNALING PROTOCOL binance_style FORMAT JSON ON CONNECT SEND JAQ \
+                     '{id: 1}' WAIT JAQ '.id == 1' ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"FAIL".to_string()));
@@ -722,8 +762,8 @@ mod tests {
 
     #[test]
     fn suggests_capture_and_a_following_phase_after_a_single_matcher() {
-        let input = "CREATE SIGNALING PROTOCOL binance_style FROM JSON ON CONNECT SEND JAQ '{id: \
-                     1}' WAIT JAQ '.id == 1' ";
+        let input = "CREATE SIGNALING PROTOCOL binance_style FORMAT JSON ON CONNECT SEND JAQ \
+                     '{id: 1}' WAIT JAQ '.id == 1' ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"CAPTURE".to_string()));
@@ -733,8 +773,8 @@ mod tests {
 
     #[test]
     fn does_not_suggest_capture_after_a_matcher_list() {
-        let input = "CREATE SIGNALING PROTOCOL binance_style FROM JSON ON CONNECT SEND JAQ '{id: \
-                     1}' WAIT JAQ '.id == 1', '.id == 2' ";
+        let input = "CREATE SIGNALING PROTOCOL binance_style FORMAT JSON ON CONNECT SEND JAQ \
+                     '{id: 1}' WAIT JAQ '.id == 1', '.id == 2' ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(!suggestions.contains(&"CAPTURE".to_string()));
@@ -743,8 +783,8 @@ mod tests {
 
     #[test]
     fn suggests_a_capture_program_after_capture() {
-        let input = "CREATE SIGNALING PROTOCOL binance_style FROM JSON ON CONNECT SEND JAQ '{id: \
-                     1}' WAIT JAQ '.id == 1' CAPTURE ";
+        let input = "CREATE SIGNALING PROTOCOL binance_style FORMAT JSON ON CONNECT SEND JAQ \
+                     '{id: 1}' WAIT JAQ '.id == 1' CAPTURE ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"jaq_capture".to_string()));
@@ -752,8 +792,8 @@ mod tests {
 
     #[test]
     fn suggests_only_timeout_after_fail_matchers() {
-        let input = "CREATE SIGNALING PROTOCOL binance_style FROM JSON ON CONNECT SEND JAQ '{id: \
-                     1}' WAIT JAQ '.id == 1' FAIL JAQ '.error' ";
+        let input = "CREATE SIGNALING PROTOCOL binance_style FORMAT JSON ON CONNECT SEND JAQ \
+                     '{id: 1}' WAIT JAQ '.id == 1' FAIL JAQ '.error' ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"TIMEOUT".to_string()));

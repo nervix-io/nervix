@@ -262,6 +262,7 @@ pub enum Identifier {
     Capture,
     Accept,
     Data,
+    Format,
     Required,
     Skip,
     Default,

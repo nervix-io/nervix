@@ -2396,64 +2396,74 @@ pub struct SignalingProtobufConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalingProtocolOnConnect {
-    pub phases: Vec<SignalingPhase>,
+    /// Whether payload streams to the relay from the moment the connection opens.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_data: bool,
+    /// Handshake steps, executed strictly in written order.
+    pub steps: Vec<SignalingStep>,
+    /// Matchers that abort the handshake during any step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fail_matchers: Vec<String>,
     pub timeout: String,
 }
 
-/// One ordered step of a handshake: everything it sends, then everything it waits for.
+/// One step of a handshake: frames written, or an outcome waited for.
 ///
-/// Sends of a phase are only written once every wait of the preceding phase is satisfied, which is
-/// what makes a later request able to depend on an earlier reply.
+/// A step completes before the next begins, which is what makes a request able to depend on an
+/// earlier reply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignalingPhase {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sends: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub waits: Vec<SignalingWait>,
+pub enum SignalingStep {
+    Send(Vec<String>),
+    Wait(SignalingWaitStep),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignalingWait {
-    pub matcher: String,
-    /// Program merged into the handshake state when this matcher is satisfied.
+pub struct SignalingWaitStep {
+    /// Matchers that must all be satisfied, in any arrival order, for the step to complete.
+    pub matchers: Vec<String>,
+    /// Program merged into the handshake state, valid only for a single-matcher step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<String>,
-    /// Whether satisfying this matcher opens payload ingestion, releasing anything held so far
-    /// and passing later frames straight through while the handshake continues.
+    /// Matchers that abort the handshake while this step is waiting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fail_matchers: Vec<String>,
+    /// Whether completing this step starts streaming payload to the relay.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub accept_data: bool,
 }
 
-impl SignalingWait {
-    pub fn new(matcher: String) -> Self {
+impl SignalingWaitStep {
+    pub fn new(matchers: Vec<String>) -> Self {
         Self {
-            matcher,
+            matchers,
             capture: None,
+            fail_matchers: Vec::new(),
             accept_data: false,
         }
     }
 }
 
-impl SignalingPhase {
-    pub fn new(sends: Vec<String>, waits: Vec<SignalingWait>) -> Self {
-        Self { sends, waits }
-    }
-}
-
 impl SignalingProtocolOnConnect {
-    pub fn waits(&self) -> impl Iterator<Item = &SignalingWait> {
-        self.phases.iter().flat_map(|phase| phase.waits.iter())
+    pub fn wait_steps(&self) -> impl Iterator<Item = &SignalingWaitStep> {
+        self.steps.iter().filter_map(|step| match step {
+            SignalingStep::Wait(wait) => Some(wait),
+            SignalingStep::Send(_) => None,
+        })
     }
 
     pub fn sends(&self) -> impl Iterator<Item = &String> {
-        self.phases.iter().flat_map(|phase| phase.sends.iter())
+        self.steps
+            .iter()
+            .filter_map(|step| match step {
+                SignalingStep::Send(programs) => Some(programs),
+                SignalingStep::Wait(_) => None,
+            })
+            .flatten()
     }
 
-    /// Whether any matcher opens payload ingestion before the handshake finishes.
+    /// Whether payload ever starts streaming before the handshake finishes.
     pub fn accepts_data_during_handshake(&self) -> bool {
-        self.waits().any(|wait| wait.accept_data)
+        self.accept_data || self.wait_steps().any(|wait| wait.accept_data)
     }
 }
 

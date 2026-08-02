@@ -25,7 +25,7 @@ Feature: Websocket signaling protocols
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
       CREATE SIGNALING PROTOCOL binance_style_subscribe
-        FROM JSON
+        FORMAT JSON
         ON CONNECT
         SEND JAQ '{method: "SUBSCRIBE", params: ["btcusdt@aggTrade"], id: 1}',
                  '{method: "SUBSCRIBE", params: ["btcusdc@aggTrade"], id: 2}'
@@ -55,17 +55,15 @@ Feature: Websocket signaling protocols
       """
       EXPECT {"method": "SUBSCRIBE", "params": ["btcusdt@aggTrade"], "id": 1}
       EXPECT {"method": "SUBSCRIBE", "params": ["btcusdc@aggTrade"], "id": 2}
-      SEND {"seq":1}
       SEND {"id":2,"result":null,"conn_id":"1f0c7b2e","ts":1712000001}
-      SEND {"seq":2}
       SEND {"id":1,"result":null,"conn_id":"1f0c7b2e","ts":1712000000}
-      SEND {"seq":3}
+      SEND {"seq":1}
+      SEND {"seq":2}
       """
     Then within "5s" the relay subscription receives payloads in order
       """
       "seq":1
       "seq":2
-      "seq":3
       """
 
     Examples:
@@ -99,11 +97,10 @@ Feature: Websocket signaling protocols
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
       CREATE SIGNALING PROTOCOL rejecting_subscribe
-        FROM JSON
+        FORMAT JSON
         ON CONNECT
         SEND JAQ '{method: "SUBSCRIBE", id: 1}'
-        WAIT JAQ '.id == 1 and .result == null'
-        FAIL JAQ '.error'
+        WAIT JAQ '.id == 1 and .result == null' FAIL JAQ '.error'
         TIMEOUT 5s;
 
       CREATE ENDPOINT ws_notifications_endpoint
@@ -164,7 +161,7 @@ Feature: Websocket signaling protocols
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
       CREATE SIGNALING PROTOCOL raw_handshake
-        FROM RAW
+        FORMAT RAW
         ON CONNECT
         SEND JAQ '"HELLO"'
         WAIT JAQ '. == "WELCOME"'
@@ -191,8 +188,8 @@ Feature: Websocket signaling protocols
     And websocket frames are exchanged with host "ws-{{test_id}}.example.com" path "/ws"
       """
       EXPECT HELLO
-      SEND {"seq":1}
       SEND WELCOME
+      SEND {"seq":1}
       SEND {"seq":2}
       """
     Then within "5s" the relay subscription receives payloads in order
@@ -246,7 +243,7 @@ Feature: Websocket signaling protocols
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
       CREATE SIGNALING PROTOCOL protobuf_subscribe
-        FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1
+        FORMAT PROTOBUF USING RESOURCE proto_bundle VERSION 1
           CONFIG {'file' = 'signaling.proto', 'include' = '.'}
           SEND MESSAGE 'nervix.test.Subscribe'
           WAIT MESSAGE 'nervix.test.Ack'
@@ -315,7 +312,7 @@ Feature: Websocket signaling protocols
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
       CREATE SIGNALING PROTOCOL authenticated_subscribe
-        FROM JSON
+        FORMAT JSON
         ON CONNECT
         SEND JAQ '{op: "auth", key: "public"}'
         WAIT JAQ '.op == "auth" and .success' CAPTURE '{token: .data.token}'
@@ -385,7 +382,7 @@ Feature: Websocket signaling protocols
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
       CREATE SIGNALING PROTOCOL sequenced_subscribe
-        FROM JSON
+        FORMAT JSON
         ON CONNECT
         SEND JAQ '{op: "first"}'
         WAIT JAQ '.acked == "first"'
@@ -456,7 +453,7 @@ Feature: Websocket signaling protocols
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
       CREATE SIGNALING PROTOCOL challenge_response
-        FROM JSON
+        FORMAT JSON
         ON CONNECT
         WAIT JAQ '.challenge' CAPTURE '{nonce: .challenge}'
         SEND JAQ '{op: "answer", nonce: $state.nonce}'
@@ -525,7 +522,7 @@ Feature: Websocket signaling protocols
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
       CREATE SIGNALING PROTOCOL passthrough_subscribe
-        FROM JSON
+        FORMAT JSON
         ON CONNECT
         SEND JAQ '{op: "subscribe"}', '{op: "subscribe_more"}'
         WAIT JAQ '.subscribed' ACCEPT DATA
@@ -560,7 +557,6 @@ Feature: Websocket signaling protocols
       """
     Then within "5s" the relay subscription receives payloads in order
       """
-      "seq":1
       "seq":2
       """
 
@@ -595,7 +591,7 @@ Feature: Websocket signaling protocols
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
       CREATE SIGNALING PROTOCOL buffered_subscribe
-        FROM JSON
+        FORMAT JSON
         ON CONNECT
         SEND JAQ '{op: "subscribe"}'
         WAIT JAQ '.subscribed'
