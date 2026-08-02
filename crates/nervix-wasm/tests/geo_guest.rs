@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use nervix_models::Timestamp;
+use nervix_models::{Timestamp, WasmProcessorLimits};
 use nervix_wasm::{
     DomainClock, WasmAckSidecar, WasmAckToken, WasmBranchInit, WasmEnvelope, WasmOutputColumnRef,
     WasmOutputRow, WasmProcessorField, WasmProcessorSchema, WasmProcessorType, WasmRuntime,
@@ -23,6 +23,13 @@ use nervix_wasm::{
 
 const GUEST: &str = "../../examples/datalake/geo-wasm-guest/target/wasm32-unknown-unknown/release/\
                      nervix_datalake_geo_wasm_guest.wasm";
+
+fn limits() -> WasmProcessorLimits {
+    WasmProcessorLimits {
+        max_fuel: 1_000_000_000,
+        max_memory_bytes: 128 * 1024 * 1024,
+    }
+}
 
 #[derive(Debug)]
 struct FixedClock(Timestamp);
@@ -168,6 +175,7 @@ async fn the_geo_guest_enriches_every_declared_route() {
         .expect("geo guest must compile");
     let mut branch = compiled
         .instantiate_branch(
+            limits(),
             init(),
             Box::new(FixedClock(Timestamp::from_unix_nanos(
                 1_700_000_000_000_000_000,
@@ -302,6 +310,7 @@ async fn the_geo_guest_rejects_a_destination_schema_it_cannot_fill() {
     broken.output_schemas[0].fields.pop();
     let error = compiled
         .instantiate_branch(
+            limits(),
             broken,
             Box::new(FixedClock(Timestamp::from_unix_nanos(0))),
             None,

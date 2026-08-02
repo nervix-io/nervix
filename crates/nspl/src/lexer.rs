@@ -218,6 +218,8 @@ pub enum Identifier {
     Policy,
     Backoff,
     Max,
+    Fuel,
+    Memory,
     Min,
     Query,
     Every,

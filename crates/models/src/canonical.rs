@@ -1571,7 +1571,8 @@ impl CreateWasmProcessor {
             .map(|version| format!(" VERSION {version}"))
             .unwrap_or_default();
         Ok(format!(
-            "CREATE {} WASM PROCESSOR {} FROM {}{} USING RESOURCE {}{} FILE {} {}{}{} {};",
+            "CREATE {} WASM PROCESSOR {} FROM {}{} USING RESOURCE {}{} FILE {} MAX FUEL {} MAX \
+             MEMORY {}B {}{}{} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             processor_inputs_to_nspl(&self.from)?,
@@ -1579,6 +1580,8 @@ impl CreateWasmProcessor {
             self.resource.as_str(),
             version,
             string_literal(&self.file)?,
+            self.limits.max_fuel,
+            self.limits.max_memory_bytes,
             branch_selection_to_nspl(&self.branched_by),
             materialized_state_dependencies_suffix(&self.materialized_state)?,
             processor_outputs_to_nspl(&self.output_routes)?,

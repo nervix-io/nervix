@@ -56,6 +56,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR enrich_even_rows FROM raw_events
         USING RESOURCE wasm_reference_enricher VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         BRANCHED BY by_tenant
         TO enriched_events
         SET value = value, tenant = tenant, message = message, occurred_at = occurred_at, bucket = bucket
@@ -136,6 +138,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR emit_uninitialized_optional FROM wasm_input_events
         USING RESOURCE wasm_uninitialized_guest VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO wasm_output_events
         SET value = value,
@@ -206,6 +210,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR emit_uninitialized_required FROM required_input
         USING RESOURCE wasm_uninitialized_required_guest VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO required_output
         SET value = value
@@ -281,6 +287,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_filter VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -313,6 +321,14 @@ Feature: WASM processor runtime behavior
     And the last command output contains
       """
       ABI serialization: FlatBuffers
+      """
+    And the last command output contains
+      """
+      max fuel: 1000000000
+      """
+    And the last command output contains
+      """
+      max memory: 67108864 bytes
       """
     And the last command output contains
       """
@@ -374,6 +390,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_buffered_metrics FROM raw_buffered_metrics
         USING RESOURCE wasm_growing_buffer VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_buffered_metrics
         SET value = value, message = message
@@ -394,6 +412,98 @@ Feature: WASM processor runtime behavior
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  Scenario Outline: WASM processor limits isolate an exhausted guest branch
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has "<limit>" limit-exhausting WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_limited_guest;
+      UPLOAD RESOURCE wasm_limited_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA limited_input_event (
+        tenant STRING,
+        message STRING
+      );
+      CREATE SCHEMA limited_output_event (
+        tenant STRING OPTIONAL,
+        note STRING OPTIONAL
+      );
+      CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT (
+        tenant string,
+        message string
+      );
+      CREATE CODEC limited_input_codec
+        FROM WIRE JSON SCHEMA limited_input_wire
+        TO SCHEMA limited_input_event;
+      CREATE SCHEMA limited_branch_key ( tenant STRING );
+      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
+      CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
+      CREATE VHOST edge wasm-limits-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR limited_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        DECODE USING limited_input_codec
+        TO limited_input_events
+        INHERIT ALL
+        BRANCHED BY by_limited_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR limited_guest FROM limited_input_events
+        USING RESOURCE wasm_limited_guest VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL <max_fuel>
+        MAX MEMORY <max_memory>
+        BRANCHED BY by_limited_tenant
+        TO limited_events
+        SET tenant = branch.tenant,
+            note = coalesce(note, "ok")
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION limited_events_subscription TO limited_events;
+      START;
+      """
+    When http payload is posted to host "wasm-limits-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","message":"small-before"}
+      """
+    And http payload for tenant "alpha" with a 4096 byte message is posted to host "wasm-limits-{{test_id}}.example.com" path "/events"
+    And http payload is posted to host "wasm-limits-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","message":"small-after"}
+      """
+    Then within "10s" the active session observes a server error
+    And the last server error contains
+      """
+      <expected_error>
+      """
+    When http payload is posted to host "wasm-limits-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","message":"small-after-limit"}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      "tenant":"beta" | "note":"ok"
+      "tenant":"beta" | "note":"ok"
+      "tenant":"alpha" | "note":"ok"
+      """
+
+    Examples:
+      | cluster_size | replica_count | limit  | max_fuel | max_memory | expected_error                  |
+      | 1            | 0             | fuel   | 100000   | 1MiB       | exhausted MAX FUEL 100000       |
+      | 3            | 0             | fuel   | 100000   | 1MiB       | exhausted MAX FUEL 100000       |
+      | 1            | 0             | memory | 1000000  | 64KiB      | exceeded MAX MEMORY 65536 bytes |
+      | 3            | 0             | memory | 1000000  | 64KiB      | exceeded MAX MEMORY 65536 bytes |
 
   Scenario Outline: WASM processor shares one generated column across branched output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -464,6 +574,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_route_filter VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         BRANCHED BY by_tenant
         TO enriched_metrics
         SET value = value, tenant = tenant, bucket = bucket
@@ -562,6 +674,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics FILTER WHERE input.value != 10 AS I32
         USING RESOURCE wasm_route_timing_filter VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO selected_metrics
         SET value = value
@@ -684,6 +798,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_filter_restart VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -754,6 +870,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_timeout_filter VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -815,6 +933,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_go_filter VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -879,6 +999,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR rust_filter_even_rows FROM raw_metrics
         USING RESOURCE rust_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_rust_guest.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO rust_filtered_metrics
         SET value = value
@@ -887,6 +1009,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR go_filter_even_rows FROM rust_filtered_metrics
         USING RESOURCE go_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_go_guest.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO go_filtered_metrics
         SET value = value
@@ -969,6 +1093,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR rust_filter_even_rows FROM raw_metrics
         USING RESOURCE rust_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_rust_guest.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO rust_filtered_metrics
         SET value = value
@@ -977,6 +1103,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR go_filter_even_rows FROM rust_filtered_metrics
         USING RESOURCE go_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_go_guest.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO go_filtered_metrics
         SET value = value
@@ -1047,6 +1175,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR rust_filter_even_rows FROM raw_metrics
         USING RESOURCE rust_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_rust_guest.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO rust_filtered_metrics
         SET value = value
@@ -1110,6 +1240,8 @@ Feature: WASM processor runtime behavior
         FROM raw_metrics
         USING RESOURCE wasm_filter_message_error VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -1175,6 +1307,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_filter_global_error VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -1232,6 +1366,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_filter_error_state VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -1289,6 +1425,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_trapping_filter VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -1347,6 +1485,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_invalid_filter VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -1396,6 +1536,8 @@ Feature: WASM processor runtime behavior
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_malformed_filter VERSION 1
         FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
         UNBRANCHED
         TO filtered_metrics
         SET value = value

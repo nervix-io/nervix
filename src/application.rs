@@ -11557,6 +11557,8 @@ fn format_wasm_processor_describe_output(
         format!("resource: {}", processor.resource.as_str()),
         format!("resource version: {version}"),
         format!("file: {}", processor.file),
+        format!("max fuel: {}", processor.limits.max_fuel),
+        format!("max memory: {} bytes", processor.limits.max_memory_bytes),
         format!("ABI serialization: {}", nervix_wasm::ABI_SERIALIZATION_NAME),
         format!(
             "filter-where: {}",
