@@ -351,7 +351,7 @@ impl WebsocketsIngestor {
             Ok(record) => {
                 let mut output_routes = output_routes.clone();
                 if let Err(error) = runtime
-                    .dispatch_ingested_record(IngestDispatch {
+                    .dispatch_ingested_record(IngestDispatch { collector: None,
                         domain,
                         ingestor,
                         timestamp_source,

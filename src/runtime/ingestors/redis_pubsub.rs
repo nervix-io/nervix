@@ -174,7 +174,7 @@ impl RedisPubSubIngestor {
                                         Ok(record) => {
                                             let mut output_routes = output_routes.clone();
                                             if let Err(error) = task_runtime
-                                                .dispatch_ingested_record(IngestDispatch {
+                                                .dispatch_ingested_record(IngestDispatch { collector: None,
                                                     domain: &task_domain,
                                                     ingestor: &task_ingestor,
                                                     timestamp_source: task_timestamp_source.as_ref(),

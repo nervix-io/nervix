@@ -225,7 +225,7 @@ impl RabbitMqIngestor {
                                                         let (acks, completion) =
                                                             task_runtime.tracked_ack_root(&task_domain);
                                                         let dispatched = task_runtime
-                                                            .dispatch_ingested_record(IngestDispatch {
+                                                            .dispatch_ingested_record(IngestDispatch { collector: None,
                                                                 domain: &task_domain,
                                                                 ingestor: &task_ingestor,
                                                                 timestamp_source: task_timestamp_source

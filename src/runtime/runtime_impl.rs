@@ -3732,6 +3732,65 @@ impl Runtime {
             .map(|record| record.into_runtime_record(message.record.metadata().clone()))
     }
 
+    /// Builds one Arrow batch per (relay, branch key) from everything a poll group routed
+    /// and forwards each to its branch entrypoint.
+    ///
+    /// This is the counterpart to `IngestDispatch::collector`. Building the batch once per
+    /// group replaces N single-row batch constructions, N channel sends, and the
+    /// `spawn_blocking` hop the route task pays per message.
+    pub(in crate::runtime) async fn flush_ingest_collector(
+        &self,
+        domain: &Domain,
+        ingestor: &Identifier,
+        branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+        collector: &mut IngestRouteCollector,
+    ) -> Result<(), String> {
+        if collector.is_empty() {
+            return Ok(());
+        }
+        let Some(execution) = self.executions.get(domain) else {
+            return Err(format!("domain '{}' is not running", domain.as_str()));
+        };
+        let relay_schemas = execution.relay_schemas.clone();
+        drop(execution);
+
+        for (relay, messages) in collector.drain_groups() {
+            tokio::task::consume_budget().await;
+            let Some(schema) = relay_schemas.get(&relay).cloned() else {
+                return Err(format!(
+                    "stream '{}' schema is not instantiated in domain '{}'",
+                    relay.as_str(),
+                    domain.as_str()
+                ));
+            };
+            let batch = RelayRecordBatch::from_messages(schema, messages)?;
+            let Some(sender) = branched_senders.get(&relay) else {
+                return Err(format!(
+                    "ingestor '{}' has no branch entrypoint for relay '{}'",
+                    ingestor.as_str(),
+                    relay.as_str()
+                ));
+            };
+            if let Err(error) = sender.send(batch).await {
+                let batch = error.0;
+                self.handle_general_error_for_acks(
+                    domain,
+                    ModelKind::Ingestor.as_str(),
+                    ingestor,
+                    &ErrorPolicies::handled_by_log(),
+                    batch.acks.iter(),
+                    format!(
+                        "ingestor '{}' failed to forward batch to branch entrypoint for \
+                         relay '{}'",
+                        ingestor.as_str(),
+                        relay.as_str()
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub(in crate::runtime) async fn dispatch_ingested_record(
         &self,
         mut dispatch: IngestDispatch<'_>,
@@ -3994,6 +4053,21 @@ impl Runtime {
                     dispatch.domain.as_str()
                 ));
             };
+            // Defer to the caller's collector when it supplied one: appending the routed
+            // message costs nothing, and the whole poll group is later built as one Arrow
+            // batch per (relay, branch key). Building a one-row batch here instead means
+            // allocating every column buffer for a single row, once per ingested record.
+            if let Some(collector) = dispatch.collector.as_deref_mut() {
+                collector.push(
+                    relay.clone(),
+                    RelayMessage {
+                        key,
+                        record: output_record,
+                        acks,
+                    },
+                );
+                continue;
+            }
             let batch = RelayRecordBatch::single(schema, key, output_record, acks)?;
             if let Some(sender) = dispatch.branched_senders.get(&relay) {
                 if let Err(error) = sender.send(batch).await {
@@ -7028,7 +7102,7 @@ impl Runtime {
                 Ok(record) => {
                     let mut output_routes = binding.output_routes.clone();
                     if let Err(error) = self
-                        .dispatch_ingested_record(IngestDispatch {
+                        .dispatch_ingested_record(IngestDispatch { collector: None,
                             domain: &binding.domain,
                             ingestor: &binding.ingestor,
                             timestamp_source: binding.timestamp_source.as_ref(),

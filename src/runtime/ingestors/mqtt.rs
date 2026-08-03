@@ -850,7 +850,7 @@ impl MqttIngestor {
         let mut output_routes = context.output_routes.clone();
         context
             .runtime
-            .dispatch_ingested_record(IngestDispatch {
+            .dispatch_ingested_record(IngestDispatch { collector: None,
                 domain: &context.domain,
                 ingestor: &context.ingestor,
                 timestamp_source: context.timestamp_source.as_ref(),

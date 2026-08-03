@@ -217,6 +217,13 @@ use window_state::{
 
 #[cfg(test)]
 const STUPID_CHANNEL_CAPACITY_REMOVE_ME: usize = 1;
+/// How many routed messages accumulate before an ingest group is built into one Arrow
+/// batch per (relay, branch key). Bounds group memory while amortising batch
+/// construction across many records.
+pub(crate) const INGEST_GROUP_MAX_ROWS: usize = 1024;
+/// Longest a partial ingest group waits when the source goes quiet, so low-rate topics
+/// do not sit unflushed.
+pub(crate) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
 const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
@@ -866,6 +873,52 @@ struct IngestDispatch<'a> {
     filter_map_metadata: Option<IngestFilterMapMetadata>,
     ingested_at: Timestamp,
     acks: AckSet,
+    /// When present, routed messages are appended here instead of being turned into a
+    /// one-row Arrow batch and sent immediately. The caller flushes the collector once
+    /// per poll group, so a group of ingested records becomes one wide Arrow batch per
+    /// (relay, branch key) rather than N single-row batches and N channel sends.
+    collector: Option<&'a mut IngestRouteCollector>,
+}
+
+/// Accumulates routed ingest messages so a whole poll group can be built as one Arrow
+/// batch per (relay, branch key) instead of one batch per record.
+#[derive(Default)]
+struct IngestRouteCollector {
+    routed: Vec<(Identifier, RelayMessage)>,
+}
+
+impl IngestRouteCollector {
+    fn push(&mut self, relay: Identifier, message: RelayMessage) {
+        self.routed.push((relay, message));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.routed.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.routed.len()
+    }
+
+    /// Groups by (relay, branch key) preserving arrival order within each group.
+    /// `RelayRecordBatch::from_messages` requires a uniform key per batch.
+    fn drain_groups(&mut self) -> Vec<(Identifier, Vec<RelayMessage>)> {
+        let mut groups: Vec<(Identifier, Option<BranchKey>, Vec<RelayMessage>)> = Vec::new();
+        for (relay, message) in self.routed.drain(..) {
+            if let Some(slot) = groups
+                .iter_mut()
+                .find(|(name, key, _)| *name == relay && *key == message.key)
+            {
+                slot.2.push(message);
+            } else {
+                groups.push((relay, message.key.clone(), vec![message]));
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(relay, _, messages)| (relay, messages))
+            .collect()
+    }
 }
 
 #[derive(Clone, Default)]

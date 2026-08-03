@@ -311,6 +311,11 @@ impl KafkaIngestor {
                 let mut observed_start_version = initial_observed_start_version;
                 let mut consumer_ready = initial_consumer_ready;
                 let mut assignment_refresh_pending = false;
+                // Routed messages accumulate here across consecutive polls so a group of
+                // ingested records becomes one Arrow batch per (relay, branch key)
+                // instead of one single-row batch per record. Flushed on size or when
+                // the stream goes idle, so a partial group is never held indefinitely.
+                let mut ingest_collector = IngestRouteCollector::default();
 
                 'ingest: loop {
                     tokio::task::consume_budget().await;
@@ -410,8 +415,17 @@ impl KafkaIngestor {
                             }
                         }
                     }
+                    // Evaluated before the select so the idle-flush guard does not borrow
+                    // the collector while the dispatch arm needs it mutably.
+                    let ingest_group_pending = !ingest_collector.is_empty();
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
+                            let _ = task_runtime.flush_ingest_collector(
+                                &task_domain,
+                                &task_ingestor,
+                                &task_branched_senders,
+                                &mut ingest_collector,
+                            ).await;
                             if changed.is_err() || *shutdown_rx.borrow() {
                                 break;
                             }
@@ -420,6 +434,22 @@ impl KafkaIngestor {
                             if changed.is_ok() {
                                 assignment_refresh_pending = true;
                                 continue;
+                            }
+                        }
+                        // Bounds how long a partial group waits when the topic goes quiet.
+                        _ = sleep(INGEST_GROUP_IDLE_FLUSH), if ingest_group_pending => {
+                            if let Err(error) = task_runtime.flush_ingest_collector(
+                                &task_domain,
+                                &task_ingestor,
+                                &task_branched_senders,
+                                &mut ingest_collector,
+                            ).await {
+                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    "failed to flush ingest group for ingestor '{}' in domain '{}': {}",
+                                    task_ingestor.as_str(),
+                                    task_domain.as_str(),
+                                    error
+                                )));
                             }
                         }
                         message = consumer.recv() => {
@@ -502,7 +532,7 @@ impl KafkaIngestor {
                                                     let mut output_routes =
                                                         task_output_routes.clone();
                                                     if let Err(error) = task_runtime
-                                                        .dispatch_ingested_record(IngestDispatch {
+                                                        .dispatch_ingested_record(IngestDispatch { collector: Some(&mut ingest_collector),
                                                             domain: &task_domain,
                                                             ingestor: &task_ingestor,
                                                             timestamp_source: task_timestamp_source
@@ -522,6 +552,23 @@ impl KafkaIngestor {
                                                     {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                                             "failed to dispatch message for ingestor '{}' in domain '{}': {}",
+                                                            task_ingestor.as_str(),
+                                                            task_domain.as_str(),
+                                                            error
+                                                        )));
+                                                    } else if ingest_collector.len()
+                                                        >= INGEST_GROUP_MAX_ROWS
+                                                        && let Err(error) = task_runtime
+                                                            .flush_ingest_collector(
+                                                                &task_domain,
+                                                                &task_ingestor,
+                                                                &task_branched_senders,
+                                                                &mut ingest_collector,
+                                                            )
+                                                            .await
+                                                    {
+                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            "failed to flush ingest group for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
@@ -592,7 +639,7 @@ impl KafkaIngestor {
                                                 let mut output_routes =
                                                     task_output_routes.clone();
                                                 let dispatched = task_runtime
-                                                    .dispatch_ingested_record(IngestDispatch {
+                                                    .dispatch_ingested_record(IngestDispatch { collector: None,
                                                         domain: &task_domain,
                                                         ingestor: &task_ingestor,
                                                         timestamp_source: task_timestamp_source
@@ -870,7 +917,7 @@ impl KafkaIngestor {
                                                     let mut output_routes =
                                                         task_output_routes.clone();
                                                     let dispatched = task_runtime
-                                                        .dispatch_ingested_record(IngestDispatch {
+                                                        .dispatch_ingested_record(IngestDispatch { collector: None,
                                                             domain: &task_domain,
                                                             ingestor: &task_ingestor,
                                                             timestamp_source: task_timestamp_source
