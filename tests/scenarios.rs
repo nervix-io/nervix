@@ -16,6 +16,7 @@ use arrow_array::{
 };
 use arrow_ipc::reader::StreamReader;
 use arrow_schema::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cucumber::{
     World as _, WriterExt,
     gherkin::Step,
@@ -8594,8 +8595,8 @@ async fn when_websocket_message_is_published(
         .expect("failed to publish websocket message");
 }
 
-#[when(expr = "websocket text frames are exchanged with host {string} path {string}")]
-async fn when_websocket_text_frames_are_exchanged(
+#[when(expr = "websocket frames are exchanged with host {string} path {string}")]
+async fn when_websocket_frames_are_exchanged(
     world: &mut ScenarioWorld,
     host: String,
     path: String,
@@ -8608,20 +8609,41 @@ async fn when_websocket_text_frames_are_exchanged(
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(|line| {
-            if let Some(payload) = line.strip_prefix("EXPECT ") {
+            if line == "EXPECT CLOSE" {
+                WebsocketExchangeAction::ExpectClose
+            } else if let Some(window) = line.strip_prefix("EXPECT SILENCE ") {
+                WebsocketExchangeAction::ExpectSilence(
+                    humantime::parse_duration(window.trim()).unwrap_or_else(|error| {
+                        panic!("invalid silence window '{window}': {error}")
+                    }),
+                )
+            } else if let Some(payload) = line.strip_prefix("EXPECT BASE64 ") {
+                WebsocketExchangeAction::ExpectBinary(decode_base64_frame(payload))
+            } else if let Some(payload) = line.strip_prefix("SEND BASE64 ") {
+                WebsocketExchangeAction::SendBinary(decode_base64_frame(payload))
+            } else if let Some(payload) = line.strip_prefix("EXPECT ") {
                 WebsocketExchangeAction::ExpectText(expand_placeholders(world, payload))
             } else if let Some(payload) = line.strip_prefix("SEND ") {
                 WebsocketExchangeAction::SendText(expand_placeholders(world, payload))
             } else {
-                panic!("websocket exchange lines must start with EXPECT or SEND: {line}");
+                panic!(
+                    "websocket exchange lines must start with EXPECT, SEND, EXPECT BASE64, SEND \
+                     BASE64, or be EXPECT CLOSE: {line}"
+                );
             }
         })
         .collect::<Vec<_>>();
     world
         .cluster()
-        .exchange_websocket_text("node-1", &host, &path, &actions)
+        .exchange_websocket("node-1", &host, &path, &actions)
         .await
-        .expect("failed to exchange websocket text frames");
+        .expect("failed to exchange websocket frames");
+}
+
+fn decode_base64_frame(payload: &str) -> Vec<u8> {
+    BASE64_STANDARD
+        .decode(payload.trim())
+        .unwrap_or_else(|error| panic!("invalid base64 websocket frame '{payload}': {error}"))
 }
 
 #[when(expr = "websocket message is published to host {string} path {string} and fails")]

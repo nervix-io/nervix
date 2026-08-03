@@ -21,9 +21,9 @@ use nervix_models::{
     NameError, NatsIngestMode, OutputFlushPolicy, ParseAsType, PostgresConflictAction,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
     RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, SchemaField,
-    SignalingProtocolOnConnect, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
-    VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness,
-    ZeroMqIngestMode,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource,
+    WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -452,14 +452,50 @@ pub enum StoredEndpointType {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateSignalingProtocol {
     pub name: String,
+    pub format: StoredSignalingWireFormat,
     pub on_connect: StoredSignalingProtocolOnConnect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredSignalingWireFormat {
+    Json,
+    Yaml,
+    Toml,
+    Xml,
+    Cbor,
+    Raw,
+    Protobuf(StoredSignalingProtobufConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredSignalingProtobufConfig {
+    pub resource: String,
+    pub resource_version: Option<u64>,
+    pub config: Vec<StoredClientConfigEntry>,
+    pub send_message: String,
+    pub wait_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredSignalingProtocolOnConnect {
-    pub send_bodies: Vec<String>,
-    pub wait_bodies: Vec<String>,
+    pub accept_data: bool,
+    pub steps: Vec<StoredSignalingStep>,
+    pub fail_matchers: Vec<String>,
     pub timeout: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredSignalingStep {
+    Send(Vec<String>),
+    Wait(StoredSignalingWaitStep),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredSignalingWaitStep {
+    pub matchers: Vec<String>,
+    pub capture: Option<String>,
+    pub fail_matchers: Vec<String>,
+    pub accept_data: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -2254,6 +2290,7 @@ impl From<CreateSignalingProtocol> for StoredCreateSignalingProtocol {
     fn from(value: CreateSignalingProtocol) -> Self {
         Self {
             name: value.name.to_string(),
+            format: value.format.into(),
             on_connect: value.on_connect.into(),
         }
     }
@@ -2265,7 +2302,54 @@ impl TryFrom<StoredCreateSignalingProtocol> for CreateSignalingProtocol {
     fn try_from(value: StoredCreateSignalingProtocol) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
+            format: value.format.try_into()?,
             on_connect: value.on_connect.into(),
+        })
+    }
+}
+
+impl From<SignalingWireFormat> for StoredSignalingWireFormat {
+    fn from(value: SignalingWireFormat) -> Self {
+        match value {
+            SignalingWireFormat::Json => Self::Json,
+            SignalingWireFormat::Yaml => Self::Yaml,
+            SignalingWireFormat::Toml => Self::Toml,
+            SignalingWireFormat::Xml => Self::Xml,
+            SignalingWireFormat::Cbor => Self::Cbor,
+            SignalingWireFormat::Raw => Self::Raw,
+            SignalingWireFormat::Protobuf(config) => {
+                Self::Protobuf(StoredSignalingProtobufConfig {
+                    resource: config.resource.to_string(),
+                    resource_version: config.resource_version,
+                    config: config.config.into_iter().map(Into::into).collect(),
+                    send_message: config.send_message,
+                    wait_message: config.wait_message,
+                })
+            }
+        }
+    }
+}
+
+impl TryFrom<StoredSignalingWireFormat> for SignalingWireFormat {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredSignalingWireFormat) -> Result<Self, Self::Error> {
+        Ok(match value {
+            StoredSignalingWireFormat::Json => Self::Json,
+            StoredSignalingWireFormat::Yaml => Self::Yaml,
+            StoredSignalingWireFormat::Toml => Self::Toml,
+            StoredSignalingWireFormat::Xml => Self::Xml,
+            StoredSignalingWireFormat::Cbor => Self::Cbor,
+            StoredSignalingWireFormat::Raw => Self::Raw,
+            StoredSignalingWireFormat::Protobuf(config) => {
+                Self::Protobuf(SignalingProtobufConfig {
+                    resource: Identifier::parse(&config.resource)?,
+                    resource_version: config.resource_version,
+                    config: config.config.into_iter().map(Into::into).collect(),
+                    send_message: config.send_message,
+                    wait_message: config.wait_message,
+                })
+            }
         })
     }
 }
@@ -2273,8 +2357,9 @@ impl TryFrom<StoredCreateSignalingProtocol> for CreateSignalingProtocol {
 impl From<SignalingProtocolOnConnect> for StoredSignalingProtocolOnConnect {
     fn from(value: SignalingProtocolOnConnect) -> Self {
         Self {
-            send_bodies: value.send_bodies,
-            wait_bodies: value.wait_bodies,
+            accept_data: value.accept_data,
+            steps: value.steps.into_iter().map(Into::into).collect(),
+            fail_matchers: value.fail_matchers,
             timeout: value.timeout,
         }
     }
@@ -2283,9 +2368,50 @@ impl From<SignalingProtocolOnConnect> for StoredSignalingProtocolOnConnect {
 impl From<StoredSignalingProtocolOnConnect> for SignalingProtocolOnConnect {
     fn from(value: StoredSignalingProtocolOnConnect) -> Self {
         Self {
-            send_bodies: value.send_bodies,
-            wait_bodies: value.wait_bodies,
+            accept_data: value.accept_data,
+            steps: value.steps.into_iter().map(Into::into).collect(),
+            fail_matchers: value.fail_matchers,
             timeout: value.timeout,
+        }
+    }
+}
+
+impl From<SignalingStep> for StoredSignalingStep {
+    fn from(value: SignalingStep) -> Self {
+        match value {
+            SignalingStep::Send(programs) => Self::Send(programs),
+            SignalingStep::Wait(wait) => Self::Wait(wait.into()),
+        }
+    }
+}
+
+impl From<StoredSignalingStep> for SignalingStep {
+    fn from(value: StoredSignalingStep) -> Self {
+        match value {
+            StoredSignalingStep::Send(programs) => Self::Send(programs),
+            StoredSignalingStep::Wait(wait) => Self::Wait(wait.into()),
+        }
+    }
+}
+
+impl From<SignalingWaitStep> for StoredSignalingWaitStep {
+    fn from(value: SignalingWaitStep) -> Self {
+        Self {
+            matchers: value.matchers,
+            capture: value.capture,
+            fail_matchers: value.fail_matchers,
+            accept_data: value.accept_data,
+        }
+    }
+}
+
+impl From<StoredSignalingWaitStep> for SignalingWaitStep {
+    fn from(value: StoredSignalingWaitStep) -> Self {
+        Self {
+            matchers: value.matchers,
+            capture: value.capture,
+            fail_matchers: value.fail_matchers,
+            accept_data: value.accept_data,
         }
     }
 }
@@ -4432,9 +4558,45 @@ mod tests {
             }),
             Model::SignalingProtocol(CreateSignalingProtocol {
                 name: identifier("binance_ws"),
+                format: SignalingWireFormat::Json,
                 on_connect: SignalingProtocolOnConnect {
-                    send_bodies: vec![r#"{"method":"SUBSCRIBE","id":1}"#.to_string()],
-                    wait_bodies: vec![r#"{"id":1,"result":null}"#.to_string()],
+                    accept_data: false,
+                    steps: vec![
+                        SignalingStep::Send(vec![r#"{method: "SUBSCRIBE", id: 1}"#.to_string()]),
+                        SignalingStep::Wait(SignalingWaitStep::new(vec![
+                            ".id == 1 and .result == null".to_string(),
+                        ])),
+                    ],
+                    fail_matchers: vec![".error".to_string()],
+                    timeout: "5s".to_string(),
+                },
+            }),
+            Model::SignalingProtocol(CreateSignalingProtocol {
+                name: identifier("proto_ws"),
+                format: SignalingWireFormat::Protobuf(SignalingProtobufConfig {
+                    resource: identifier("proto_bundle"),
+                    resource_version: Some(1),
+                    config: vec![nervix_models::ClientConfigEntry {
+                        key: "file".to_string(),
+                        value: "signaling.proto".to_string(),
+                    }],
+                    send_message: "nervix.test.Subscribe".to_string(),
+                    wait_message: "nervix.test.Ack".to_string(),
+                }),
+                on_connect: SignalingProtocolOnConnect {
+                    accept_data: true,
+                    steps: vec![
+                        SignalingStep::Send(vec![r#"{op: "auth"}"#.to_string()]),
+                        SignalingStep::Wait(SignalingWaitStep {
+                            matchers: vec![".authed".to_string()],
+                            capture: Some("{token: .token}".to_string()),
+                            fail_matchers: vec![".denied".to_string()],
+                            accept_data: true,
+                        }),
+                        SignalingStep::Send(vec!["{id: 1, token: $state.token}".to_string()]),
+                        SignalingStep::Wait(SignalingWaitStep::new(vec![".id == 1".to_string()])),
+                    ],
+                    fail_matchers: Vec::new(),
                     timeout: "5s".to_string(),
                 },
             }),
@@ -4575,6 +4737,117 @@ mod tests {
             let stored = StoredModelVersioned::from(model.clone());
             let roundtrip = Model::try_from(stored).expect("stored model should roundtrip");
             assert_eq!(roundtrip, model);
+        }
+    }
+
+    /// Pre-alpha persisted models may break, but they must break loudly: signaling protocols
+    /// stored before jaq matchers, and before ordered phases, must fail to load rather than be
+    /// silently reinterpreted.
+    #[test]
+    fn stored_signaling_protocols_from_earlier_shapes_fail_to_load() {
+        #[derive(Archive, RkyvSerialize)]
+        struct BodySignalingProtocolOnConnect {
+            send_bodies: Vec<String>,
+            wait_bodies: Vec<String>,
+            timeout: String,
+        }
+
+        #[derive(Archive, RkyvSerialize)]
+        struct FlatJaqSignalingProtocolOnConnect {
+            send_programs: Vec<String>,
+            wait_matchers: Vec<String>,
+            fail_matchers: Vec<String>,
+            timeout: String,
+        }
+
+        #[derive(Archive, RkyvSerialize)]
+        struct LegacyStoredSignalingPhase {
+            sends: Vec<String>,
+            waits: Vec<LegacyStoredSignalingWait>,
+        }
+
+        #[derive(Archive, RkyvSerialize)]
+        struct LegacyStoredSignalingWait {
+            matcher: String,
+            capture: Option<String>,
+        }
+
+        #[derive(Archive, RkyvSerialize)]
+        struct PhasedSignalingProtocolOnConnect {
+            phases: Vec<LegacyStoredSignalingPhase>,
+            fail_matchers: Vec<String>,
+            timeout: String,
+        }
+
+        #[derive(Archive, RkyvSerialize)]
+        struct SteplessSignalingProtocolOnConnect {
+            steps: Vec<StoredSignalingStep>,
+            fail_matchers: Vec<String>,
+            timeout: String,
+        }
+
+        #[derive(Archive, RkyvSerialize)]
+        struct LegacyCreateSignalingProtocol<O> {
+            name: String,
+            on_connect: O,
+        }
+
+        let with_bodies = LegacyCreateSignalingProtocol {
+            name: "binance_ws".to_string(),
+            on_connect: BodySignalingProtocolOnConnect {
+                send_bodies: vec![r#"{"method":"SUBSCRIBE","id":1}"#.to_string()],
+                wait_bodies: vec![r#"{"id":1,"result":null}"#.to_string()],
+                timeout: "5s".to_string(),
+            },
+        };
+        let flat_jaq = LegacyCreateSignalingProtocol {
+            name: "binance_ws".to_string(),
+            on_connect: FlatJaqSignalingProtocolOnConnect {
+                send_programs: vec![r#"{method: "SUBSCRIBE", id: 1}"#.to_string()],
+                wait_matchers: vec![".id == 1".to_string()],
+                fail_matchers: Vec::new(),
+                timeout: "5s".to_string(),
+            },
+        };
+
+        let phased = LegacyCreateSignalingProtocol {
+            name: "binance_ws".to_string(),
+            on_connect: PhasedSignalingProtocolOnConnect {
+                phases: vec![LegacyStoredSignalingPhase {
+                    sends: vec!["{id: 1}".to_string()],
+                    waits: vec![LegacyStoredSignalingWait {
+                        matcher: ".id == 1".to_string(),
+                        capture: None,
+                    }],
+                }],
+                fail_matchers: Vec::new(),
+                timeout: "5s".to_string(),
+            },
+        };
+
+        for (shape, bytes) in [
+            (
+                "text bodies",
+                rkyv::to_bytes::<rkyv::rancor::Error>(&with_bodies)
+                    .expect("legacy value should serialize"),
+            ),
+            (
+                "flat jaq programs",
+                rkyv::to_bytes::<rkyv::rancor::Error>(&flat_jaq)
+                    .expect("legacy value should serialize"),
+            ),
+            (
+                "phases without a payload acceptance marker",
+                rkyv::to_bytes::<rkyv::rancor::Error>(&phased)
+                    .expect("legacy value should serialize"),
+            ),
+        ] {
+            assert!(
+                rkyv::from_bytes::<StoredCreateSignalingProtocol, rkyv::rancor::Error>(&bytes)
+                    .is_err(),
+                "a signaling protocol stored with {shape} must not deserialize into the current \
+                 model"
+            );
         }
     }
 

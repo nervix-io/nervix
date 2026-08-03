@@ -453,10 +453,127 @@ This opens an outbound WebSocket connection and decodes text or binary frames.
 
 Outbound WebSocket clients can declare `WITH SIGNALING PROTOCOL <name>` after
 `TYPE WEBSOCKETS`. Server-side WebSocket endpoints can declare the same clause
-after `TYPE WEBSOCKETS`. On connection, Nervix sends the configured bodies,
-waits for the configured acknowledgement bodies, and buffers schema-conforming
-data frames received before the handshake completes. Buffered frames are then
-ingested in their original order before live frames continue.
+after `TYPE WEBSOCKETS`.
+
+A signaling protocol declares a wire format and expresses the whole handshake as
+[JAQ](./schemas-and-codecs.md#jaq-transformations) programs:
+
+```nspl
+CREATE SIGNALING PROTOCOL bybit_subscribe
+  FORMAT JSON
+  ON CONNECT
+  SEND JAQ '{op: "subscribe", args: ["publicTrade.BTCUSDT"]}'
+  WAIT JAQ '.op == "subscribe" and .success == true'
+    FAIL JAQ 'select(.success == false) | .ret_msg'
+    ACCEPT DATA
+  TIMEOUT 5s;
+```
+
+Steps run strictly in the order they are written: a step completes before the
+next one starts, which is what lets a request depend on an earlier reply. A
+`SEND` step writes its frames; a `WAIT` step blocks until every matcher it lists
+is satisfied, in any arrival order.
+
+Each `SEND JAQ` program must produce exactly one value, sent as a frame in the
+declared format. `JSON`, `YAML`, `TOML`, `XML`, and `RAW` travel as text frames;
+`CBOR` and `PROTOBUF` travel as binary frames. A `RAW` program must produce a
+string, which is sent verbatim — that is how plain-text handshakes are
+expressed.
+
+Every incoming frame is decoded with the same format and offered to the current
+step. A textual format also reads payloads delivered as binary frames, since
+peers commonly frame text that way; a binary format reads binary frames only.
+Failure matchers run first, so a rejection is never swallowed by a lenient
+acknowledgement matcher: a `FAIL JAQ` guard on the step is checked before the
+protocol-wide one, and the first to produce a value that is neither `null` nor
+`false` aborts the handshake carrying that value as the reason. Otherwise the
+step's outstanding matchers are tried and the first satisfied one is consumed.
+Because matchers assert only the fields they name, acknowledgements carrying
+connection ids, timestamps, or echoed parameters still match.
+
+A matcher that errors on a frame of a different shape counts as a non-match
+rather than a connection failure. On timeout, the error names the matchers the
+current step was still waiting on.
+
+### Data Arriving During The Handshake
+
+Peers commonly start streaming before they finish acknowledging. `ACCEPT DATA`
+says where payload starts flowing to the relay:
+
+```nspl,ignore
+ON CONNECT ACCEPT DATA                                  -- from the first frame
+WAIT JAQ '<matcher>' [FAIL JAQ '<matcher>'] [CAPTURE '<program>'] ACCEPT DATA
+```
+
+On `ON CONNECT` the relay is open before anything is negotiated. On a `WAIT`
+step it opens when that step completes, which is the usual case: completing the
+step is what proves the peer is streaming. Because a step may list several
+matchers, a client can subscribe to two streams at once and open the relay when
+the first subscription is confirmed while the second is still outstanding.
+
+Frames that arrive before the relay opens are not payload the graph asked for,
+so they are dropped rather than held. Nothing accumulates in memory, and nothing
+reaches a relay from a connection that was never established. Without
+`ACCEPT DATA` anywhere, payload starts flowing once the handshake finishes.
+
+### Sequencing And Captured State
+
+`CAPTURE` records values from the frame that satisfied its matcher, and every
+program can read what has been captured so far through the `$state` variable:
+
+```nspl
+CREATE SIGNALING PROTOCOL exchange_login
+  FORMAT JSON
+  ON CONNECT
+  SEND JAQ '{op: "auth", key: "..."}'
+  WAIT JAQ '.op == "auth" and .success' CAPTURE '{token: .data.token}'
+  SEND JAQ '{op: "subscribe", token: $state.token, id: 1}',
+           '{op: "subscribe", token: $state.token, id: 2}'
+  WAIT JAQ '.id == 1' ACCEPT DATA
+  WAIT JAQ '.id == 2'
+  TIMEOUT 5s;
+```
+
+`$state` starts as an empty object; each `CAPTURE` must produce an object, whose
+entries are merged in with later values winning. A capture that fails or yields
+a non-object fails the handshake, because its matcher already accepted the frame.
+`CAPTURE` attaches to a single-matcher `WAIT` only, since it describes the one
+frame that matched.
+
+A handshake may wait before it sends anything, which is how a server-initiated
+challenge is answered — wait for the challenge, capture it, then reply:
+
+```nspl
+CREATE SIGNALING PROTOCOL challenge_response
+  FORMAT JSON
+  ON CONNECT
+  WAIT JAQ '.challenge' CAPTURE '{nonce: .challenge}'
+  SEND JAQ '{op: "answer", nonce: $state.nonce}'
+  WAIT JAQ '.accepted'
+  TIMEOUT 5s;
+```
+
+The `TIMEOUT` is one budget for the whole handshake, and captured state lives
+only for its duration — it is never logged, and does not reach ingestion.
+
+`PROTOBUF` signaling declares its resource and one message type per direction:
+
+```nspl,ignore
+CREATE SIGNALING PROTOCOL protobuf_subscribe
+  FORMAT PROTOBUF USING RESOURCE proto_bundle VERSION 1
+    CONFIG {'file' = 'signaling.proto', 'include' = '.'}
+    SEND MESSAGE 'nervix.test.Subscribe'
+    WAIT MESSAGE 'nervix.test.Ack'
+  ON CONNECT
+  SEND JAQ '{id: 1}'
+  WAIT JAQ '.id == 1'
+  TIMEOUT 5s;
+```
+
+Protobuf decoding is permissive: unknown fields are kept and missing fields take
+their proto3 defaults, so nearly any binary frame decodes as the `WAIT MESSAGE`
+type. Write matchers that test meaningful field values rather than relying on a
+decode failure to reject a frame.
 
 ## Instancing
 

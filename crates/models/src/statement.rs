@@ -2375,14 +2375,103 @@ pub enum EndpointType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSignalingProtocol {
     pub name: Identifier,
+    pub format: SignalingWireFormat,
     pub on_connect: SignalingProtocolOnConnect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum SignalingWireFormat {
+    Json,
+    Yaml,
+    Toml,
+    Xml,
+    Cbor,
+    Raw,
+    Protobuf(SignalingProtobufConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalingProtobufConfig {
+    pub resource: Identifier,
+    pub resource_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config: Vec<ClientConfigEntry>,
+    pub send_message: String,
+    pub wait_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalingProtocolOnConnect {
-    pub send_bodies: Vec<String>,
-    pub wait_bodies: Vec<String>,
+    /// Whether payload streams to the relay from the moment the connection opens.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_data: bool,
+    /// Handshake steps, executed strictly in written order.
+    pub steps: Vec<SignalingStep>,
+    /// Matchers that abort the handshake during any step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fail_matchers: Vec<String>,
     pub timeout: String,
+}
+
+/// One step of a handshake: frames written, or an outcome waited for.
+///
+/// A step completes before the next begins, which is what makes a request able to depend on an
+/// earlier reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignalingStep {
+    Send(Vec<String>),
+    Wait(SignalingWaitStep),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalingWaitStep {
+    /// Matchers that must all be satisfied, in any arrival order, for the step to complete.
+    pub matchers: Vec<String>,
+    /// Program merged into the handshake state, valid only for a single-matcher step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<String>,
+    /// Matchers that abort the handshake while this step is waiting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fail_matchers: Vec<String>,
+    /// Whether completing this step starts streaming payload to the relay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_data: bool,
+}
+
+impl SignalingWaitStep {
+    pub fn new(matchers: Vec<String>) -> Self {
+        Self {
+            matchers,
+            capture: None,
+            fail_matchers: Vec::new(),
+            accept_data: false,
+        }
+    }
+}
+
+impl SignalingProtocolOnConnect {
+    pub fn wait_steps(&self) -> impl Iterator<Item = &SignalingWaitStep> {
+        self.steps.iter().filter_map(|step| match step {
+            SignalingStep::Wait(wait) => Some(wait),
+            SignalingStep::Send(_) => None,
+        })
+    }
+
+    pub fn sends(&self) -> impl Iterator<Item = &String> {
+        self.steps
+            .iter()
+            .filter_map(|step| match step {
+                SignalingStep::Send(programs) => Some(programs),
+                SignalingStep::Wait(_) => None,
+            })
+            .flatten()
+    }
+
+    /// Whether payload ever starts streaming before the handshake finishes.
+    pub fn accepts_data_during_handshake(&self) -> bool {
+        self.accept_data || self.wait_steps().any(|wait| wait.accept_data)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
