@@ -70,12 +70,12 @@ fn relay_branching_schema_for_runtime(
 }
 
 #[derive(Debug)]
-struct ProtobufCodecCompileConfig {
+struct ProtobufDescriptorCompileConfig {
     files: Vec<String>,
     includes: Vec<String>,
 }
 
-impl ProtobufCodecCompileConfig {
+impl ProtobufDescriptorCompileConfig {
     fn from_entries(entries: &[ClientConfigEntry]) -> Result<Self, String> {
         let mut files = Vec::new();
         let mut includes = Vec::new();
@@ -85,8 +85,8 @@ impl ProtobufCodecCompileConfig {
                 "include" | "includes" => Self::append_paths(&mut includes, &entry.value),
                 other => {
                     return Err(format!(
-                        "unsupported protobuf codec config key '{other}'; expected 'file', \
-                         'files', 'include', or 'includes'"
+                        "unsupported protobuf config key '{other}'; expected 'file', 'files', \
+                         'include', or 'includes'"
                     ));
                 }
             }
@@ -204,14 +204,19 @@ impl Runtime {
         wire_schema: Option<&WireSchemaDefinition>,
     ) -> Result<Arc<CompiledCodec>, RuntimeError> {
         let protobuf_descriptor = if let CodecWireFormat::Protobuf(config) = &codec.wire_format {
-            Some(
-                self.compile_protobuf_codec_descriptor(codec, config)
-                    .await
-                    .map_err(|reason| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason,
-                    })?,
-            )
+            let build_error = |reason: String| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason,
+            };
+            let pool = self
+                .compile_protobuf_descriptor_pool(
+                    &config.resource,
+                    config.resource_version,
+                    &config.config,
+                )
+                .await
+                .map_err(build_error)?;
+            Some(pool.message(&config.message).map_err(build_error)?)
         } else {
             None
         };
@@ -224,38 +229,63 @@ impl Runtime {
         )
     }
 
-    async fn compile_protobuf_codec_descriptor(
+    async fn compile_signaling_protocol(
         &self,
-        codec: &CreateCodec,
-        config: &CodecProtobufConfig,
-    ) -> Result<ProtobufCodecDescriptor, String> {
-        let store = self
-            .resource_store
-            .read()
-            .clone()
-            .ok_or_else(|| "protobuf codec requires an attached resource store".to_string())?;
-        let version = if let Some(version) = config.resource_version {
+        domain: &Domain,
+        protocol: &CreateSignalingProtocol,
+    ) -> Result<Arc<CompiledSignalingProtocol>, RuntimeError> {
+        let build_error = |reason: String| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason,
+        };
+        let descriptors = if let SignalingWireFormat::Protobuf(config) = &protocol.format {
+            let pool = self
+                .compile_protobuf_descriptor_pool(
+                    &config.resource,
+                    config.resource_version,
+                    &config.config,
+                )
+                .await
+                .map_err(build_error)?;
+            Some(SignalingProtobufDescriptors {
+                send: pool.message(&config.send_message).map_err(build_error)?,
+                wait: pool.message(&config.wait_message).map_err(build_error)?,
+            })
+        } else {
+            None
+        };
+
+        CompiledSignalingProtocol::compile(protocol, descriptors)
+            .map(Arc::new)
+            .map_err(|error| build_error(error.to_string()))
+    }
+
+    async fn compile_protobuf_descriptor_pool(
+        &self,
+        resource: &Identifier,
+        resource_version: Option<u64>,
+        config: &[ClientConfigEntry],
+    ) -> Result<ProtobufDescriptorPool, String> {
+        let store =
+            self.resource_store.read().clone().ok_or_else(|| {
+                "protobuf descriptors require an attached resource store".to_string()
+            })?;
+        let version = if let Some(version) = resource_version {
             version
         } else {
-            self.resolve_resource_version(&config.resource, config.resource.as_str())?
+            self.resolve_resource_version(resource, resource.as_str())?
         };
-        let resource = config.resource.clone();
-        let compile_config = ProtobufCodecCompileConfig::from_entries(&config.config)?;
-        let store_for_task = store.clone();
+        let resource = resource.clone();
+        let compile_config = ProtobufDescriptorCompileConfig::from_entries(config)?;
         let file_descriptor_set = tokio::task::spawn_blocking(move || {
-            compile_config.compile_descriptor_set(&store_for_task, &resource, version)
+            compile_config.compile_descriptor_set(&store, &resource, version)
         })
         .await
         .map_err(|error| {
             format!("failed to join protobuf descriptor compilation task: {error}")
         })??;
 
-        ProtobufCodecDescriptor::from_file_descriptor_set(
-            codec,
-            file_descriptor_set,
-            &config.message,
-        )
-        .map_err(|error| error.to_string())
+        ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
     }
 
     pub(in crate::runtime) fn emitter_task_deps(
@@ -5608,7 +5638,7 @@ impl Runtime {
         &self,
         host: &str,
         path: &str,
-    ) -> Option<Arc<CreateSignalingProtocol>> {
+    ) -> Option<Arc<CompiledSignalingProtocol>> {
         let host = normalize_http_host(host);
         self.executions.iter().find_map(|execution| {
             execution
@@ -5627,7 +5657,7 @@ impl Runtime {
         &self,
         domain: &Domain,
         signaling_protocol: &Identifier,
-    ) -> Option<Arc<CreateSignalingProtocol>> {
+    ) -> Option<Arc<CompiledSignalingProtocol>> {
         self.executions.get(domain).and_then(|execution| {
             execution
                 .signaling_protocols
@@ -5854,7 +5884,10 @@ impl Runtime {
                     endpoint_specs.push(endpoint.clone());
                 }
                 Model::SignalingProtocol(protocol) => {
-                    signaling_protocols.insert(node.identifier.clone(), Arc::new(protocol.clone()));
+                    signaling_protocols.insert(
+                        node.identifier.clone(),
+                        self.compile_signaling_protocol(domain, protocol).await?,
+                    );
                 }
                 Model::Generator(_) => {}
                 _ => {}
@@ -8263,7 +8296,10 @@ impl Runtime {
                     endpoint_specs.push(endpoint.clone());
                 }
                 Model::SignalingProtocol(protocol) => {
-                    signaling_protocols.insert(node.identifier.clone(), Arc::new(protocol.clone()));
+                    signaling_protocols.insert(
+                        node.identifier.clone(),
+                        self.compile_signaling_protocol(domain, protocol).await?,
+                    );
                 }
                 _ => {}
             }

@@ -22,6 +22,34 @@ copy of compiled machine code per branch. See
 
 WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does not accept `FLUSH EACH` or `FLUSH IMMEDIATE`; Nervix routes batches returned from `nervix_process_batch`, batches returned later from `nervix_on_timeout` callbacks requested by the guest, and batches released by `nervix_flush` when the host quiesces the branch, through the processor's declared `TO` clauses.
 
+## Execution Limits
+
+Every declaration requires both limits immediately after `FILE`, in this order:
+
+```nspl,ignore
+FILE "processor.wasm"
+MAX FUEL 1000000000
+MAX MEMORY 64MiB
+```
+
+`MAX FUEL` is the Wasmtime instruction-fuel budget for one logical guest operation. Nervix resets
+the store to that budget before initialization, each input batch, each timeout callback, a
+quiesce flush, and each state save, load, or reset. All guest ABI calls made as part of that
+operation share the budget: for example, input-buffer allocation, `nervix_process_batch`, global
+error inspection, and every subsequent `nervix_read_emit` call are one batch-processing budget.
+Module instantiation also receives one budget. Fuel measures guest WebAssembly execution, not
+wall-clock time or host-side work.
+
+`MAX MEMORY` is the Wasmtime linear-memory ceiling for each branch store. It applies to the total
+initial size of all module memories and every later `memory.grow`; choose a value large enough for
+the module's initial pages and reusable ABI buffer. It does not include shared compiled code,
+host-side Arrow or FlatBuffer data, or Wasmtime store bookkeeping.
+
+Fuel or memory exhaustion is handled by the processor's node-wide `ON GLOBAL ERROR` policy. Nervix
+discards that concrete branch's trapped guest instance; later work may instantiate a replacement
+from the last replicated guest snapshot. Other branch instances are independent and continue
+running. There is no separate WASM wall-clock timeout clause.
+
 ## Contract Summary
 
 The guest imports host functions from the `env` module:
@@ -498,8 +526,18 @@ tinygo build \
 `guest buffer size ... exceeds configured limit`
 
 : The host refused to write or read a buffer larger than the configured safety
-  limit. Split the output, reduce batch size, or change the runtime limit when
-  that becomes configurable.
+  limit. Split the output, reduce the input batch size, or raise `MAX MEMORY` if
+  the processor's linear-memory ceiling is the constraining limit.
+
+`wasm guest exhausted MAX FUEL ...`
+
+: One logical guest operation consumed its complete Wasmtime fuel budget. Raise
+  `MAX FUEL` for expected work or remove an unbounded/overly expensive guest loop.
+
+`wasm guest exceeded MAX MEMORY ...`
+
+: The branch guest tried to instantiate or grow linear memory beyond `MAX MEMORY`.
+  Reduce guest allocation or raise the declared ceiling.
 
 `generated column ... has ... rows, but the routed output has ... rows`
 

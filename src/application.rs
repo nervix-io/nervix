@@ -439,7 +439,7 @@ use crate::{
         CompiledProgramWithMaterializedInterest, IngestHeaders,
         IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, RelayMessage, RelayRecordBatch,
         RelaySubscriptionReceiver, RelaySubscriptionRecvError, Runtime, RuntimeEvent,
-        RuntimeMaterializedRelaySpec, RuntimeTestHooks, RuntimeVmCompileContext,
+        RuntimeMaterializedRelaySpec, RuntimeTestHooks, RuntimeVmCompileContext, SignalingDataSink,
         WebsocketSignalingSession, compile_session_filter_map_program,
         execute_filter_map_on_record, scheduled_branched_stream_owner_nodes,
     },
@@ -1202,6 +1202,27 @@ fn is_websocket_upgrade_request(request: &HyperRequest<HyperIncoming>) -> bool {
             .is_some_and(|value| value.as_bytes() == b"13")
 }
 
+/// Ingests data frames that arrive on a server-side endpoint while its handshake is running.
+struct EndpointSignalingDataSink<'a> {
+    runtime: &'a Arc<Runtime>,
+    host: &'a str,
+    path: &'a str,
+    headers: &'a IngestHeaders,
+}
+
+impl SignalingDataSink for EndpointSignalingDataSink<'_> {
+    async fn accept(&self, payload: Vec<u8>) {
+        self.runtime
+            .dispatch_websocket_payload(
+                self.host,
+                self.path,
+                payload.as_slice(),
+                self.headers.clone(),
+            )
+            .await;
+    }
+}
+
 fn ingest_headers_from_hyper(headers: &hyper::HeaderMap) -> IngestHeaders {
     let mut values = IngestHeaders::new();
     for (name, value) in headers {
@@ -1268,43 +1289,25 @@ async fn handle_http_request(
                         .websocket_endpoint_signaling_protocol(&host, &path)
                         .await
                     {
-                        let session = match WebsocketSignalingSession::new(protocol) {
-                            Ok(session) => session,
-                            Err(error) => {
-                                warn!(
-                                    error = %error,
-                                    host,
-                                    path,
-                                    "websocket signaling protocol is invalid"
-                                );
-                                return;
-                            }
+                        let session = WebsocketSignalingSession::new(protocol);
+                        let sink = EndpointSignalingDataSink {
+                            runtime: &runtime,
+                            host: &host,
+                            path: &path,
+                            headers: &headers,
                         };
                         let session_result = tokio::select! {
                             _ = shutdown.cancelled() => return,
-                            result = session.run(&mut websocket) => result,
+                            result = session.run(&mut websocket, &sink) => result,
                         };
-                        let buffered_payloads = match session_result {
-                            Ok(buffered_payloads) => buffered_payloads,
-                            Err(error) => {
-                                warn!(
-                                    error = %error,
-                                    host,
-                                    path,
-                                    "websocket signaling failed"
-                                );
-                                return;
-                            }
-                        };
-                        for payload in buffered_payloads {
-                            runtime
-                                .dispatch_websocket_payload(
-                                    &host,
-                                    &path,
-                                    payload.as_slice(),
-                                    headers.clone(),
-                                )
-                                .await;
+                        if let Err(error) = session_result {
+                            warn!(
+                                error = %error,
+                                host,
+                                path,
+                                "websocket signaling failed"
+                            );
+                            return;
                         }
                     }
 
@@ -11568,6 +11571,8 @@ fn format_wasm_processor_describe_output(
         format!("resource: {}", processor.resource.as_str()),
         format!("resource version: {version}"),
         format!("file: {}", processor.file),
+        format!("max fuel: {}", processor.limits.max_fuel),
+        format!("max memory: {} bytes", processor.limits.max_memory_bytes),
         format!("ABI serialization: {}", nervix_wasm::ABI_SERIALIZATION_NAME),
         format!(
             "filter-where: {}",

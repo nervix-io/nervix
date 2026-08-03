@@ -35,15 +35,15 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, Assignment, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule,
-    CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy,
-    CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor,
-    CreateRelay, CreateSignalingProtocol, CreateUdf, Domain, DomainConfig, DomainPace,
-    DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath,
-    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
+    CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMqtt, CreateClientNats, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint,
+    CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
+    CreateSignalingProtocol, CreateUdf, Domain, DomainConfig, DomainPace, DomainSchedule,
+    DomainState, DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy,
+    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
@@ -52,7 +52,7 @@ use nervix_models::{
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
     RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
-    SqsIngestMode, StructuredMessageError, Timestamp, WireSchemaDefinition,
+    SignalingWireFormat, SqsIngestMode, StructuredMessageError, Timestamp, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -111,7 +111,7 @@ use crate::{
     resource::ResourceStore,
     runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckRootTracker, AckSet},
     runtime_schema::{
-        CodecError, CompiledCodec, CompiledSchema, DecodedRecord, ProtobufCodecDescriptor,
+        CodecError, CompiledCodec, CompiledSchema, DecodedRecord, ProtobufDescriptorPool,
         RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
         compile_codec_with_protobuf, compile_schema, decode_with_codec, decode_with_codec_owned,
         encode_with_codec, parse_as_type_from_arrow, runtime_value_from_arrow_array,
@@ -205,7 +205,10 @@ use test_hooks::EmitterFaultMode;
 pub use test_hooks::{EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks};
 use tls::RustlsClientConfigSource;
 use wasm_state::ReplicatedWasmProcessorState;
-pub(crate) use websocket_signaling::WebsocketSignalingSession;
+pub use websocket_signaling::CompiledSignalingProtocol;
+pub(crate) use websocket_signaling::{
+    SignalingDataSink, SignalingProtobufDescriptors, WebsocketSignalingSession,
+};
 use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,
     WindowAggregateAccumulatorSnapshot, WindowEntrySnapshot, WindowProcessorStateSnapshot,
@@ -474,7 +477,7 @@ struct DomainExecution {
     branched_ingestors: HashMap<Identifier, Vec<BranchedIngestorSpec>>,
     branched_entrypoints: HashMap<Identifier, Vec<Arc<IngestorRouteRuntime>>>,
     codecs: HashMap<Identifier, Arc<CompiledCodec>>,
-    signaling_protocols: HashMap<Identifier, Arc<CreateSignalingProtocol>>,
+    signaling_protocols: HashMap<Identifier, Arc<CompiledSignalingProtocol>>,
     endpoint_routes: HashMap<Identifier, EndpointRoute>,
     node_tasks: HashMap<RegistryEntity, ScheduledNodeTask>,
     emitter_tasks: HashMap<RegistryEntity, ScheduledEmitterTask>,
@@ -830,7 +833,7 @@ struct EndpointRoute {
     path: String,
     hostnames: Vec<String>,
     endpoint_type: EndpointType,
-    signaling_protocol: Option<Arc<CreateSignalingProtocol>>,
+    signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
 }
 
 #[derive(Clone)]
@@ -3212,6 +3215,7 @@ impl RelayProcessorOperationNode {
                     resource,
                     resource_version,
                     file,
+                    limits,
                     ..
                 },
                 RelayProcessorOperationTemplate::WasmProcessor {
@@ -3219,11 +3223,13 @@ impl RelayProcessorOperationNode {
                     resource: desired_resource,
                     resource_version: desired_resource_version,
                     file: desired_file,
+                    limits: desired_limits,
                     ..
                 },
             ) if resource == desired_resource
                 && resource_version == desired_resource_version
                 && file == desired_file
+                && limits == desired_limits
                 && output_routes.matches_template(desired_outputs) =>
             {
                 Ok(())
@@ -4898,6 +4904,7 @@ impl RelayProcessorNode {
                     resource,
                     resource_version,
                     file,
+                    limits,
                     compiled,
                     instance,
                     replicated_state,
@@ -4918,6 +4925,7 @@ impl RelayProcessorNode {
                             resource,
                             resource_version: *resource_version,
                             file,
+                            limits: *limits,
                             replicated_state,
                         },
                         compiled,
@@ -5147,10 +5155,10 @@ impl RelayProcessorNode {
                     ack_map,
                     ..
                 } => {
-                    let Some(instance) = instance.as_mut() else {
+                    let Some(branch_instance) = instance.as_mut() else {
                         return;
                     };
-                    let due_timeouts = instance.take_due_timeout_requests(now);
+                    let due_timeouts = branch_instance.take_due_timeout_requests(now);
                     if due_timeouts.is_empty() {
                         return;
                     }
@@ -5174,9 +5182,15 @@ impl RelayProcessorNode {
                     };
                     let output_key = branch.key.clone();
                     for timeout in due_timeouts {
-                        let outputs = match instance.on_timeout(timeout.handle).await {
+                        let timeout_result = instance
+                            .as_mut()
+                            .expect("WASM timeout instance was checked")
+                            .on_timeout(timeout.handle)
+                            .await;
+                        let outputs = match timeout_result {
                             Ok(outputs) => outputs,
                             Err(error) => {
+                                let resource_limit_exceeded = error.is_resource_limit_exceeded();
                                 let reason = format!(
                                     "wasm processor '{}' failed timeout callback: {}",
                                     self.processor.as_str(),
@@ -5191,6 +5205,9 @@ impl RelayProcessorNode {
                                     reason,
                                 );
                                 ack_map.clear();
+                                if resource_limit_exceeded {
+                                    *instance = None;
+                                }
                                 return;
                             }
                         };
@@ -5260,9 +5277,9 @@ impl RelayProcessorNode {
             else {
                 return;
             };
-            let Some(instance) = instance.as_mut() else {
+            if instance.is_none() {
                 return;
-            };
+            }
             if output_routes.routes.is_empty() {
                 return;
             }
@@ -5275,9 +5292,15 @@ impl RelayProcessorNode {
             ) else {
                 return;
             };
-            let outputs = match instance.flush().await {
+            let flush_result = instance
+                .as_mut()
+                .expect("WASM flush instance was checked")
+                .flush()
+                .await;
+            let outputs = match flush_result {
                 Ok(outputs) => outputs,
                 Err(error) => {
+                    let resource_limit_exceeded = error.is_resource_limit_exceeded();
                     let reason = format!(
                         "wasm processor '{}' failed quiesce flush: {}",
                         self.processor.as_str(),
@@ -5292,6 +5315,9 @@ impl RelayProcessorNode {
                         reason,
                     );
                     ack_map.clear();
+                    if resource_limit_exceeded {
+                        *instance = None;
+                    }
                     return;
                 }
             };
@@ -5615,6 +5641,7 @@ impl RelayProcessorTemplate {
                     resource,
                     resource_version,
                     file,
+                    limits,
                     compiled,
                 } => {
                     let replicated_state = runtime
@@ -5635,6 +5662,7 @@ impl RelayProcessorTemplate {
                         resource: resource.clone(),
                         resource_version: *resource_version,
                         file: file.clone(),
+                        limits: *limits,
                         compiled: compiled.clone(),
                         instance: None,
                         replicated_state,
@@ -16006,6 +16034,7 @@ async fn flush_branch_wasm_processor(
         resource,
         resource_version,
         file,
+        limits,
         replicated_state,
     } = context;
     if pending.is_empty() {
@@ -16101,6 +16130,7 @@ async fn flush_branch_wasm_processor(
             resource,
             resource_version,
             file,
+            limits,
             guest_input_relay: primary_input_relay,
             input_schema: &input_schema,
             output_schemas: &output_schemas,
@@ -16122,7 +16152,7 @@ async fn flush_branch_wasm_processor(
         return;
     }
 
-    let Some(instance) = instance.as_mut() else {
+    if instance.is_none() {
         branch.runtime.handle_internal_processor_error_for_acks(
             &branch.domain,
             node_kind,
@@ -16135,7 +16165,7 @@ async fn flush_branch_wasm_processor(
             ),
         );
         return;
-    };
+    }
 
     let (envelope, input_ack_map) = match wasm_envelope_from_relay_batch(&forwarded, next_ack_token)
     {
@@ -16153,9 +16183,15 @@ async fn flush_branch_wasm_processor(
         }
     };
     ack_map.extend(input_ack_map);
-    let outputs = match instance.process_envelope(&envelope).await {
+    let process_result = instance
+        .as_mut()
+        .expect("WASM instance presence was checked")
+        .process_envelope(&envelope)
+        .await;
+    let outputs = match process_result {
         Ok(outputs) => outputs,
         Err(error) => {
+            let resource_limit_exceeded = error.is_resource_limit_exceeded();
             branch.runtime.handle_general_error_for_acks(
                 &branch.domain,
                 node_kind,
@@ -16169,6 +16205,9 @@ async fn flush_branch_wasm_processor(
                 ),
             );
             ack_map.clear();
+            if resource_limit_exceeded {
+                *instance = None;
+            }
             return;
         }
     };
@@ -16203,9 +16242,9 @@ async fn flush_branch_wasm_processor(
         );
         return;
     }
-    if let Err(error) =
-        persist_wasm_guest_state(&branch.runtime, processor, replicated_state, instance).await
-    {
+    let persist_result =
+        persist_wasm_guest_state(&branch.runtime, processor, replicated_state, instance).await;
+    if let Err(error) = persist_result {
         branch.runtime.handle_internal_processor_error_for_acks(
             &branch.domain,
             node_kind,
@@ -16223,6 +16262,7 @@ struct WasmInstanceContext<'a> {
     resource: &'a Identifier,
     resource_version: Option<u64>,
     file: &'a str,
+    limits: nervix_models::WasmProcessorLimits,
     guest_input_relay: &'a Identifier,
     input_schema: &'a Arc<CompiledSchema>,
     output_schemas: &'a [(Identifier, Arc<CompiledSchema>)],
@@ -16289,6 +16329,7 @@ async fn ensure_wasm_processor_instance(
         resource,
         resource_version,
         file,
+        limits,
         guest_input_relay,
         input_schema,
         output_schemas,
@@ -16342,7 +16383,12 @@ async fn ensure_wasm_processor_instance(
         *instance = Some(Box::new(
             compiled
                 .compiled
-                .instantiate_branch(init, Box::new(clock), restored_guest_state.as_deref())
+                .instantiate_branch(
+                    limits,
+                    init,
+                    Box::new(clock),
+                    restored_guest_state.as_deref(),
+                )
                 .await
                 .map_err(|error| {
                     format!(
@@ -17836,15 +17882,32 @@ async fn persist_wasm_guest_state(
     runtime: &Runtime,
     processor: &Identifier,
     replicated_state: &ReplicatedWasmProcessorState,
-    instance: &mut nervix_wasm::WasmBranchInstance,
+    instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
 ) -> Result<(), String> {
-    let guest_state = instance.save_state().await.map_err(|error| {
-        format!(
-            "wasm processor '{}' failed to save guest state: {}",
-            processor.as_str(),
-            error
-        )
-    })?;
+    let save_result = match instance.as_mut() {
+        Some(instance) => instance.save_state().await,
+        None => {
+            return Err(format!(
+                "wasm processor '{}' instance is unavailable while saving guest state",
+                processor.as_str()
+            ));
+        }
+    };
+    let guest_state = match save_result {
+        Ok(guest_state) => guest_state,
+        Err(error) => {
+            let resource_limit_exceeded = error.is_resource_limit_exceeded();
+            let reason = format!(
+                "wasm processor '{}' failed to save guest state: {}",
+                processor.as_str(),
+                error
+            );
+            if resource_limit_exceeded {
+                *instance = None;
+            }
+            return Err(reason);
+        }
+    };
     let (lsm, payload) = replicated_state
         .replace_guest_state(guest_state)
         .map_err(|error| error.to_string())?;

@@ -118,6 +118,7 @@ pub enum ModelChangeAspect {
     InferencerBinding,
     InferencerTensors,
     WasmBinding,
+    WasmLimits,
     WasmGlobalError,
     SchemaDefinition,
     WireSchemaDefinition,
@@ -224,6 +225,7 @@ impl ModelChangeAspect {
             | Self::InferencerBinding
             | Self::InferencerTensors
             | Self::WasmBinding
+            | Self::WasmLimits
             | Self::WasmGlobalError => QuiesceLevel::EntityPause,
             Self::RelaySchema
             | Self::RelayBranching
@@ -1042,6 +1044,9 @@ fn wasm_processor_change_aspects(
         || base.file != candidate.file
     {
         changes.push(ModelChangeAspect::WasmBinding);
+    }
+    if base.limits != candidate.limits {
+        changes.push(ModelChangeAspect::WasmLimits);
     }
     if base.global_error_policy != candidate.global_error_policy {
         changes.push(ModelChangeAspect::WasmGlobalError);
@@ -2275,7 +2280,7 @@ mod catch_all_kind_tests {
         CreateCorrelator, CreateInferencer, CreateVhost, CreateWasmProcessor,
         CreateWindowProcessor, GeneralErrorPolicy, Identifier, Literal, Model, ModelChangeAspect,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, VhostTlsResource,
-        WindowBound,
+        WasmProcessorLimits, WindowBound,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -2409,6 +2414,10 @@ mod catch_all_kind_tests {
             resource: identifier("guest_bundle"),
             resource_version: Some(1),
             file: "processors/guest.wasm".to_string(),
+            limits: WasmProcessorLimits {
+                max_fuel: 1_000_000,
+                max_memory_bytes: 64 * 1024 * 1024,
+            },
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
             filter_where: None,
@@ -2422,6 +2431,36 @@ mod catch_all_kind_tests {
             ModelChangeAspect::WasmBinding,
             QuiesceLevel::EntityPause,
         );
+    }
+
+    #[test]
+    fn wasm_limit_changes_pause_only_the_entity_without_purging_guest_state() {
+        let base = CreateWasmProcessor {
+            name: identifier("guest"),
+            from: ProcessorInputs::single(identifier("input")),
+            output_routes: outputs(),
+            branched_by: BranchSelection::unbranched(),
+            resource: identifier("guest_bundle"),
+            resource_version: Some(1),
+            file: "processors/guest.wasm".to_string(),
+            limits: WasmProcessorLimits {
+                max_fuel: 1_000_000,
+                max_memory_bytes: 64 * 1024 * 1024,
+            },
+            global_error_policy: GeneralErrorPolicy::Log,
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        };
+        let mut tightened = base.clone();
+        tightened.limits.max_fuel = 500_000;
+        assert_single_aspect(
+            Model::WasmProcessor(base),
+            Model::WasmProcessor(tightened),
+            ModelChangeAspect::WasmLimits,
+            QuiesceLevel::EntityPause,
+        );
+        assert_eq!(ModelChangeAspect::WasmLimits.state_purge(), None);
     }
 
     #[test]
