@@ -11,6 +11,41 @@ When code and this document disagree, do not add a compatibility path around the
 Resolve the owning model and invariant directly, and update the public documentation when the
 language or interface changes.
 
+## No Backward Compatibility
+
+Nervix is pre-alpha and supports exactly one shape of everything: the current one. There is no
+migration, no dual read, no version negotiation, and no deprecation window. When a Model, stored
+shape, NSPL form, protocol message, or public interface changes, the previous form is deleted
+outright in the same change.
+
+Previously written data is expected to break. It must fail to load with a clear error and be
+recreated. It must never be reinterpreted, defaulted into the current shape, or routed through a
+second code path.
+
+The following are defects, not style preferences. Treat any of them as a change to reject:
+
+- Types, variants, or fields that exist only to represent a removed or earlier form, however they are
+  spelled: `RemovedTransport`, `LegacyFoo`, `FooV1`, `OldBar`, `CompatBaz`.
+- Decoding, `TryFrom`, or deserialization arms that name an older shape, including arms whose only
+  behavior is to reject it. Naming the old shape is itself the violation; delete it instead.
+- Fields retained, or newly added fields defaulted, so that previously written data still loads.
+- Fallbacks, feature gates, or configuration that select between an earlier behavior and the current
+  one.
+- Identifiers containing `legacy`, `old`, `deprecated`, `compat`, `removed`, or a bare version
+  number, in types, fields, variants, modules, or functions.
+
+Tests are held to the same rule. Do not reconstruct a removed Model, stored shape, or wire form in a
+test, not even to assert that the current code rejects it. Defining the historical shape is exactly
+what this rule forbids, and such a test pins a shape the product no longer has. Test the current
+shape only.
+
+Removing an integration or feature removes all of it in one change: Models, grammar, stored shapes,
+runtime paths, configuration, documentation, and tests. Never leave a placeholder behind so that old
+data still loads.
+
+The only permitted exceptions are an external contract where pass-through is the intentional public
+behavior, and a compatibility requirement the user states explicitly for the current change.
+
 ## Architecture
 
 ### Language pipeline
@@ -59,8 +94,8 @@ language or interface changes.
   invocations, and materialized-state dependencies.
 - Do not introduce a second public parser AST, raw-expression compatibility fields, or runtime
   parser adapters.
-- Persisted pre-alpha Models may break. Old incompatible data must fail clearly and be recreated;
-  it must not be silently reinterpreted or migrated through a legacy runtime path.
+- Persisted Models may break, and previously written data must fail clearly and be recreated. See
+  [No Backward Compatibility](#no-backward-compatibility) for what that forbids in code and tests.
 
 ### Types and sensitivity
 
@@ -249,7 +284,7 @@ language or interface changes.
 - Do not use `std::mem::forget`, `Closure::forget`, leaked boxes, or equivalent lifetime leaks to
   keep browser callbacks alive. Use explicit ownership and cleanup or a crate-managed abstraction.
 - Do not preserve old syntax, implicit fallbacks, compatibility shims, migration shortcuts, or
-  parallel legacy paths unless the user explicitly requests compatibility for the current change.
+  parallel legacy paths. See [No Backward Compatibility](#no-backward-compatibility).
 - Preserve unrelated user changes in dirty worktrees.
 
 ## Validation and Testing
@@ -264,6 +299,9 @@ language or interface changes.
   before changing product code.
 - Parser-only work requires positive parse tests, negative parse tests, and completion-context tests
   that guard against grammar-branch leakage. Composed language phrases require completion coverage.
+- Tests cover the current shape only. Never define a removed Model, stored shape, or wire form in a
+  test fixture, including to assert that loading it fails. See
+  [No Backward Compatibility](#no-backward-compatibility).
 
 ### Integration coverage
 
