@@ -7856,125 +7856,184 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
 }
 
 #[tokio::test]
-async fn ingestor_route_applies_size_boundaries_independently_per_branch() {
-    let runtime = super::Runtime::default();
-    let domain = domain("default");
-    let root_relay = identifier("notifications");
-    let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
-    let mut fan_in =
-        super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let services = Arc::new(super::RelayBoundaryServices::new(
-        fanout,
-        1,
-        0,
-        Vec::new(),
-        None,
-    ));
+async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_branch() {
+    let cases = [
+        (
+            ModelKind::Ingestor,
+            super::BranchInstanceAckBoundary::Preserve,
+            "notifications_ingestor",
+        ),
+        (
+            ModelKind::Reingestor,
+            super::BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
+            "notifications_reingestor",
+        ),
+    ];
+    for (source_kind, ack_boundary, source) in cases {
+        tokio::task::consume_budget().await;
+        let runtime = super::Runtime::default();
+        let domain = domain("default");
+        let root_relay = identifier("notifications");
+        let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
+        let mut fan_in = super::RelayRuntimeFanIn::new(
+            fanout.runtime_consumer_receiver_for_mode(AckMode::Attached),
+        );
+        let services = Arc::new(super::RelayBoundaryServices::new(
+            fanout,
+            1,
+            0,
+            Vec::new(),
+            None,
+        ));
+        let schema = test_schema(&[
+            ("tenant", ParseAsType::String),
+            ("user_id", ParseAsType::U32),
+        ]);
+        let batch = |tenant: &str, user_id| {
+            super::RelayRecordBatch::single(
+                schema.clone(),
+                string_branch_key("tenant", tenant),
+                RuntimeRecord::from_fields([
+                    (
+                        "tenant".to_string(),
+                        RuntimeValue::String(tenant.to_string()),
+                    ),
+                    ("user_id".to_string(), RuntimeValue::U32(user_id)),
+                ]),
+                AckSet::empty(),
+            )
+            .expect("ingestor output batch should build")
+        };
+        let acme_one = batch("acme", 1);
+        let max_batch_size = acme_one.estimated_bytes() + 1;
+        let route_runtime = super::IngestorRouteRuntime::new(
+            runtime,
+            domain,
+            identifier(source),
+            StdArc::new(ArcSwapOption::from(None)),
+            super::IngestorRouteTemplate {
+                branch: super::BranchInstanceTemplate {
+                    source_kind,
+                    source: identifier(source),
+                    root_relay: root_relay.clone(),
+                    branch: None,
+                    branch_ttl: None,
+                    branch_max_instances: None,
+                    error_policies: ErrorPolicies::handled_by_log(),
+                    relays: [(
+                        root_relay,
+                        super::RelayProcessorRelayTemplate {
+                            registry: super::RelayRegistry::new(),
+                            services,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    materialized_streams: HashSet::default(),
+                    processors: HashMap::default(),
+                },
+                branch_assignments: Vec::new(),
+                ack_boundary,
+                flush_policy: super::RuntimeFlushPolicy::Each {
+                    interval: Duration::from_secs(10),
+                    max_batch_size,
+                },
+            },
+            Duration::from_secs(30),
+        );
+
+        route_runtime
+            .sender()
+            .send(acme_one)
+            .await
+            .expect("acme batch should enter the route");
+        route_runtime
+            .sender()
+            .send(batch("beta", 1))
+            .await
+            .expect("beta batch should enter the route");
+        assert!(
+            timeout(Duration::from_millis(50), fan_in.recv())
+                .await
+                .is_err(),
+            "different branches must not share a size boundary"
+        );
+
+        route_runtime
+            .sender()
+            .send(batch("acme", 2))
+            .await
+            .expect("second acme batch should enter the route");
+        let acme = timeout(Duration::from_secs(1), fan_in.recv())
+            .await
+            .expect("acme size boundary should flush")
+            .expect("runtime consumer should remain open");
+        assert_eq!(key_label(&acme.key), r#"{"tenant":"acme"}"#);
+        assert_eq!(acme.message_count(), 2);
+        assert!(
+            timeout(Duration::from_millis(50), fan_in.recv())
+                .await
+                .is_err(),
+            "beta must remain pending until its own size boundary"
+        );
+
+        route_runtime
+            .sender()
+            .send(batch("beta", 2))
+            .await
+            .expect("second beta batch should enter the route");
+        let beta = timeout(Duration::from_secs(1), fan_in.recv())
+            .await
+            .expect("beta size boundary should flush")
+            .expect("runtime consumer should remain open");
+        assert_eq!(key_label(&beta.key), r#"{"tenant":"beta"}"#);
+        assert_eq!(beta.message_count(), 2);
+
+        route_runtime.shutdown().await;
+    }
+}
+
+#[test]
+fn relay_batch_estimated_bytes_counts_arrow_payload_buffers() {
     let schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("user_id", ParseAsType::U32),
     ]);
-    let batch = |tenant: &str, user_id| {
-        super::RelayRecordBatch::single(
-            schema.clone(),
-            string_branch_key("tenant", tenant),
-            RuntimeRecord::from_fields([
-                (
-                    "tenant".to_string(),
-                    RuntimeValue::String(tenant.to_string()),
-                ),
-                ("user_id".to_string(), RuntimeValue::U32(user_id)),
-            ]),
-            AckSet::empty(),
-        )
-        .expect("ingestor output batch should build")
-    };
-    let acme_one = batch("acme", 1);
-    let max_batch_size = acme_one.estimated_bytes() + 1;
-    let route_runtime = super::IngestorRouteRuntime::new(
-        runtime,
-        domain,
-        identifier("notifications_ingestor"),
-        StdArc::new(ArcSwapOption::from(None)),
-        super::IngestorRouteTemplate {
-            branch: super::BranchInstanceTemplate {
-                source_kind: ModelKind::Ingestor,
-                source: identifier("notifications_ingestor"),
-                root_relay: root_relay.clone(),
-                branch: None,
-                branch_ttl: None,
-                branch_max_instances: None,
-                error_policies: ErrorPolicies::handled_by_log(),
-                relays: [(
-                    root_relay,
-                    super::RelayProcessorRelayTemplate {
-                        registry: super::RelayRegistry::new(),
-                        services,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                materialized_streams: HashSet::default(),
-                processors: HashMap::default(),
-            },
-            branch_assignments: Vec::new(),
-            ack_boundary: super::BranchInstanceAckBoundary::Preserve,
-            flush_policy: super::RuntimeFlushPolicy::Each {
-                interval: Duration::from_secs(10),
-                max_batch_size,
-            },
-        },
-        Duration::from_secs(30),
-    );
+    let batch = super::RelayRecordBatch::single(
+        schema,
+        None,
+        RuntimeRecord::from_fields([
+            (
+                "tenant".to_string(),
+                RuntimeValue::String("acme".to_string()),
+            ),
+            ("user_id".to_string(), RuntimeValue::U32(42)),
+        ]),
+        AckSet::empty(),
+    )
+    .expect("relay batch should build");
+    let payload_bytes = batch
+        .batch
+        .batch()
+        .columns()
+        .iter()
+        .map(|column| {
+            column
+                .to_data()
+                .get_slice_memory_size()
+                .expect("test Arrow type should report its logical payload size") as u64
+        })
+        .sum::<u64>();
+    let allocated_bytes = batch
+        .batch
+        .batch()
+        .columns()
+        .iter()
+        .map(|column| column.get_array_memory_size() as u64)
+        .sum::<u64>();
 
-    route_runtime
-        .sender()
-        .send(acme_one)
-        .await
-        .expect("acme batch should enter the route");
-    route_runtime
-        .sender()
-        .send(batch("beta", 1))
-        .await
-        .expect("beta batch should enter the route");
-    assert!(
-        timeout(Duration::from_millis(50), fan_in.recv())
-            .await
-            .is_err(),
-        "different branches must not share a size boundary"
-    );
-
-    route_runtime
-        .sender()
-        .send(batch("acme", 2))
-        .await
-        .expect("second acme batch should enter the route");
-    let acme = timeout(Duration::from_secs(1), fan_in.recv())
-        .await
-        .expect("acme size boundary should flush")
-        .expect("runtime consumer should remain open");
-    assert_eq!(key_label(&acme.key), r#"{"tenant":"acme"}"#);
-    assert_eq!(acme.message_count(), 2);
-    assert!(
-        timeout(Duration::from_millis(50), fan_in.recv())
-            .await
-            .is_err(),
-        "beta must remain pending until its own size boundary"
-    );
-
-    route_runtime
-        .sender()
-        .send(batch("beta", 2))
-        .await
-        .expect("second beta batch should enter the route");
-    let beta = timeout(Duration::from_secs(1), fan_in.recv())
-        .await
-        .expect("beta size boundary should flush")
-        .expect("runtime consumer should remain open");
-    assert_eq!(key_label(&beta.key), r#"{"tenant":"beta"}"#);
-    assert_eq!(beta.message_count(), 2);
-
-    route_runtime.shutdown().await;
+    assert!(allocated_bytes > payload_bytes);
+    assert_eq!(batch.estimated_bytes(), payload_bytes);
 }
 
 #[tokio::test]

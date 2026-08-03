@@ -217,12 +217,12 @@ use window_state::{
 
 #[cfg(test)]
 const STUPID_CHANNEL_CAPACITY_REMOVE_ME: usize = 1;
-/// How many routed messages accumulate before an ingest group is built into one Arrow
-/// batch per (relay, branch key). Bounds group memory while amortising batch
-/// construction across many records.
+/// Chosen operational bound for how many routed messages accumulate before an ingest
+/// group is built into one Arrow batch per (relay, branch key). This is intentionally
+/// independent of an NSPL route's flush policy.
 pub(crate) const INGEST_GROUP_MAX_ROWS: usize = 1024;
-/// Longest a partial ingest group waits when the source goes quiet, so low-rate topics
-/// do not sit unflushed.
+/// Chosen operational bound for how long a partial source group waits when the source
+/// goes quiet. This is intentionally independent of an NSPL route's flush policy.
 pub(crate) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
 const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -868,16 +868,14 @@ struct IngestDispatch<'a> {
     timestamp_source: Option<&'a IngestTimestampSource>,
     output_routes: &'a mut RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
     record: DecodedRecord,
     filter_map_metadata: Option<IngestFilterMapMetadata>,
     ingested_at: Timestamp,
     acks: AckSet,
-    /// When present, routed messages are appended here instead of being turned into a
-    /// one-row Arrow batch and sent immediately. The caller flushes the collector once
-    /// per poll group, so a group of ingested records becomes one wide Arrow batch per
-    /// (relay, branch key) rather than N single-row batches and N channel sends.
-    collector: Option<&'a mut IngestRouteCollector>,
+    /// Routed messages always enter a source-owned collector. Sources differ only in
+    /// when they flush it: stream sources group by size/idle time, while request-scoped
+    /// sources flush at the end of the request or response.
+    collector: &'a mut IngestRouteCollector,
 }
 
 /// Accumulates routed ingest messages so a whole poll group can be built as one Arrow
@@ -885,10 +883,12 @@ struct IngestDispatch<'a> {
 #[derive(Default)]
 struct IngestRouteCollector {
     routed: Vec<(Identifier, RelayMessage)>,
+    flush_at: Option<Instant>,
 }
 
 impl IngestRouteCollector {
     fn push(&mut self, relay: Identifier, message: RelayMessage) {
+        self.flush_at = Some(Instant::now() + INGEST_GROUP_IDLE_FLUSH);
         self.routed.push((relay, message));
     }
 
@@ -900,17 +900,22 @@ impl IngestRouteCollector {
         self.routed.len()
     }
 
+    fn next_flush(&self) -> Option<Instant> {
+        self.flush_at
+    }
+
     /// Groups by (relay, branch key) preserving arrival order within each group.
     /// `RelayRecordBatch::from_messages` requires a uniform key per batch.
     fn drain_groups(&mut self) -> Vec<(Identifier, Vec<RelayMessage>)> {
+        self.flush_at = None;
         let mut groups: Vec<(Identifier, Option<BranchKey>, Vec<RelayMessage>)> = Vec::new();
+        let mut group_indices: HashMap<(Identifier, Option<BranchKey>), usize> = HashMap::default();
         for (relay, message) in self.routed.drain(..) {
-            if let Some(slot) = groups
-                .iter_mut()
-                .find(|(name, key, _)| *name == relay && *key == message.key)
-            {
-                slot.2.push(message);
+            let group_key = (relay.clone(), message.key.clone());
+            if let Some(index) = group_indices.get(&group_key).copied() {
+                groups[index].2.push(message);
             } else {
+                group_indices.insert(group_key, groups.len());
                 groups.push((relay, message.key.clone(), vec![message]));
             }
         }
@@ -925,13 +930,6 @@ impl IngestRouteCollector {
 struct IngestorRouteRuntimes {
     runtimes: Vec<Arc<IngestorRouteRuntime>>,
     senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
-}
-
-struct IngestBatchSelection<'a> {
-    domain: &'a Domain,
-    filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    records: &'a [RuntimeRecord],
-    filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
 }
 
 type BranchedEntrypointInput = RelayRecordBatch;
@@ -6390,10 +6388,16 @@ impl IngestorRouteTask {
                 .batch()
                 .columns()
                 .iter()
-                .map(|column| column.get_array_memory_size())
-                .sum::<usize>()
-                .checked_div(row_count)
-                .and_then(|bytes| u64::try_from(bytes).ok())
+                .map(|column| {
+                    column
+                        .to_data()
+                        .get_slice_memory_size()
+                        .ok()
+                        .and_then(|bytes| u64::try_from(bytes).ok())
+                        .unwrap_or(u64::MAX)
+                })
+                .fold(0_u64, u64::saturating_add)
+                .checked_div(u64::try_from(row_count).unwrap_or(u64::MAX))
                 .unwrap_or_default();
             for (key, row) in &branch_plan.valid_rows {
                 let Some(metadata) = input_batch.metadata.get(*row) else {

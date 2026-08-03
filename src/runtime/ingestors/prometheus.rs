@@ -222,6 +222,7 @@ impl PrometheusIngestor {
                             Ok(samples) => {
                                 task_runtime
                                     .clear_ingestor_transient_error(&task_domain, &task_ingestor);
+                                let mut collector = IngestRouteCollector::default();
                                 for sample in samples {
                                     tokio::task::consume_budget().await;
                                     match Self::sample_payload(&sample) {
@@ -229,15 +230,14 @@ impl PrometheusIngestor {
                                             Ok(record) => {
                                                 let mut output_routes = output_routes.clone();
                                                 if let Err(error) = task_runtime
-                                                .dispatch_ingested_record(IngestDispatch { collector: None,
+                                                .dispatch_ingested_record(IngestDispatch {
+                                                    collector: &mut collector,
                                                     domain: &task_domain,
                                                     ingestor: &task_ingestor,
                                                     timestamp_source: task_timestamp_source
                                                         .as_ref(),
                                                     output_routes: &mut output_routes,
                                                     filter_where: filter_where.as_ref(),
-                                                    branched_senders:
-                                                        &branched_senders,
                                                     record,
                                                     filter_map_metadata: None,
                                                         ingested_at: current_timestamp(),
@@ -283,6 +283,22 @@ impl PrometheusIngestor {
                                             );
                                         }
                                     }
+                                }
+                                if let Err(error) = task_runtime
+                                    .flush_ingest_collector(
+                                        &task_domain,
+                                        &task_ingestor,
+                                        &branched_senders,
+                                        &mut collector,
+                                    )
+                                    .await
+                                {
+                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        "failed to flush prometheus samples for ingestor '{}' in domain '{}': {}",
+                                        task_ingestor.as_str(),
+                                        task_domain.as_str(),
+                                        error
+                                    )));
                                 }
                             }
                             Err(error) => {

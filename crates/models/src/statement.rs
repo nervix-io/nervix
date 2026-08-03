@@ -2601,9 +2601,7 @@ pub enum KafkaIngestMode {
         timeout: String,
         retry_policy: RetryPolicy,
     },
-    NoAckParallel {
-        max: u64,
-    },
+    NoAckParallel,
 }
 
 pub type PulsarIngestMode = KafkaIngestMode;
@@ -2637,7 +2635,6 @@ pub enum MqttIngestMode {
         qos: MqttQos,
     },
     NoAckParallel {
-        max: u64,
         session: MqttSession,
         qos: MqttQos,
     },
@@ -2672,13 +2669,6 @@ impl MqttIngestMode {
         match self {
             Self::AckSequential { .. } | Self::AckParallel { .. } => true,
             Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => false,
-        }
-    }
-
-    pub const fn max_inflight(&self) -> usize {
-        match self {
-            Self::AckParallel { max, .. } | Self::NoAckParallel { max, .. } => *max as usize,
-            Self::AckSequential { .. } | Self::NoAckSequential { .. } => 1,
         }
     }
 }

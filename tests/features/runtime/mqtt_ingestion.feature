@@ -155,7 +155,7 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-noack-parallel-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_noack_parallel_{{test_id}} QOS 1 MODE NO_ACK PARALLEL MAX 2
+        FROM MQTT mqtt_main TOPIC notifications_noack_parallel_{{test_id}} QOS 1 MODE NO_ACK PARALLEL
         DECODE USING notification_codec
         TO notifications
         INHERIT ALL

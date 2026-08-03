@@ -726,9 +726,7 @@ pub enum StoredKafkaIngestMode {
         retry_backoff: String,
         retry_max_backoff: String,
     },
-    NoAckParallel {
-        max: u64,
-    },
+    NoAckParallel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -752,7 +750,6 @@ pub enum StoredMqttIngestMode {
         qos: StoredMqttQos,
     },
     NoAckParallel {
-        max: u64,
         session: StoredMqttSession,
         qos: StoredMqttQos,
     },
@@ -3401,7 +3398,7 @@ impl From<KafkaIngestMode> for StoredKafkaIngestMode {
                 retry_backoff: retry_policy.backoff,
                 retry_max_backoff: retry_policy.max_backoff,
             },
-            KafkaIngestMode::NoAckParallel { max } => Self::NoAckParallel { max },
+            KafkaIngestMode::NoAckParallel => Self::NoAckParallel,
         }
     }
 }
@@ -3435,7 +3432,7 @@ impl From<StoredKafkaIngestMode> for KafkaIngestMode {
                     max_backoff: retry_max_backoff,
                 },
             },
-            StoredKafkaIngestMode::NoAckParallel { max } => Self::NoAckParallel { max },
+            StoredKafkaIngestMode::NoAckParallel => Self::NoAckParallel,
         }
     }
 }
@@ -3496,8 +3493,7 @@ impl From<MqttIngestMode> for StoredMqttIngestMode {
                 session: session.into(),
                 qos: qos.into(),
             },
-            MqttIngestMode::NoAckParallel { max, session, qos } => Self::NoAckParallel {
-                max,
+            MqttIngestMode::NoAckParallel { session, qos } => Self::NoAckParallel {
                 session: session.into(),
                 qos: qos.into(),
             },
@@ -3532,8 +3528,7 @@ impl From<StoredMqttIngestMode> for MqttIngestMode {
                 session: session.into(),
                 qos: qos.into(),
             },
-            StoredMqttIngestMode::NoAckParallel { max, session, qos } => Self::NoAckParallel {
-                max,
+            StoredMqttIngestMode::NoAckParallel { session, qos } => Self::NoAckParallel {
                 session: session.into(),
                 qos: qos.into(),
             },

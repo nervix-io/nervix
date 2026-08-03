@@ -45,6 +45,10 @@ independently. `ON MESSAGE ERROR SEND TO` uses that same route's interval and ma
 boundaries for error-record delivery. `ON GENERAL ERROR` remains node-level because it handles
 source or transport failures that are not tied to one message or output route.
 
+`MAX BATCH SIZE` counts logical Arrow value, offset, and validity bytes. It excludes unused Arrow
+buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-flight window for
+`ACK PARALLEL`; `NO_ACK` modes never accept it.
+
 At runtime, the ingestor:
 
 - decodes inbound payloads into runtime records
@@ -295,7 +299,7 @@ FROM KAFKA <client>
 TOPIC <topic>
 OFFSET BY CONSUMER GROUP <group>|DOMAIN
 INSTANCES <count>
-MODE ACK PARALLEL MAX <n>|ACK SEQUENTIAL|NO_ACK PARALLEL MAX <n>
+MODE ACK PARALLEL MAX <n>|ACK SEQUENTIAL|NO_ACK PARALLEL
 ```
 
 Kafka is the richest ingestion surface today.
@@ -319,7 +323,7 @@ FROM PULSAR <client>
 TOPIC <topic>
 SUBSCRIPTION <subscription>
 INSTANCES <count>
-MODE ACK PARALLEL MAX <n>|ACK SEQUENTIAL|NO_ACK PARALLEL MAX <n>
+MODE ACK PARALLEL MAX <n>|ACK SEQUENTIAL|NO_ACK PARALLEL
 ```
 
 Pulsar ingestors use Nervix-managed shared subscriptions. The subscription
@@ -360,7 +364,7 @@ TOPIC <topic-filter>
 [SESSION CLEAN|PERSISTENT]
 [QOS 0|1]
 MODE NO_ACK SEQUENTIAL
-  | NO_ACK PARALLEL MAX <n>
+  | NO_ACK PARALLEL
   | ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
   | ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
 ```
@@ -370,6 +374,7 @@ MQTT topic filters may be bare identifiers or string literals for filters contai
 Delivery constraints:
 
 - `NO_ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
+- `NO_ACK` has no in-flight ACK window, so it never accepts `MAX <n>`
 - `ACK` modes require `SESSION PERSISTENT QOS 1`
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages

@@ -295,6 +295,10 @@ intervals and larger batches generally improve throughput at the cost of latency
 both values for the route's traffic, downstream behavior, and branch cardinality. Values in
 examples are illustrative, not recommended defaults.
 
+`MAX BATCH SIZE` measures the logical Arrow data in the current batch slice: value buffers plus
+the offsets and validity data needed to represent those values. It does not count unused buffer
+capacity or Rust and Arrow object overhead.
+
 `SET` assignments execute left to right and repeated targets are valid. A later assignment may read
 an earlier value through the bare field or `output.<field>`. `INHERIT ALL`, `INHERIT ALL EXCEPT
 ...`, and explicit `INHERIT field, ...` copy compatible same-named input fields. `UNSET` is not part

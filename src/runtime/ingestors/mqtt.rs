@@ -44,6 +44,7 @@ struct MqttBatchEntry {
 
 enum MqttNextPublish {
     Publish(Box<Publish>),
+    Flush,
     Shutdown,
     Reconnect,
 }
@@ -198,6 +199,7 @@ impl MqttIngestor {
             let task = tokio::spawn(async move {
                 let qos = Self::qos(task_mode.qos());
                 let mut backoff = RuntimeReconnectBackoff::default();
+                let mut ingest_collector = IngestRouteCollector::default();
 
                 info!(
                     domain = task_context.domain.as_str(),
@@ -318,22 +320,46 @@ impl MqttIngestor {
 
                     loop {
                         tokio::task::consume_budget().await;
+                        let next_flush = if task_mode.is_ack() {
+                            None
+                        } else {
+                            ingest_collector.next_flush()
+                        };
                         let publish = match Self::next_publish(
                             &mut eventloop,
                             &mut shutdown_rx,
                             &task_context,
+                            next_flush,
                         )
                         .await
                         {
                             MqttNextPublish::Publish(publish) => *publish,
-                            MqttNextPublish::Shutdown => break 'outer,
-                            MqttNextPublish::Reconnect => break,
+                            MqttNextPublish::Flush => {
+                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await;
+                                continue;
+                            }
+                            MqttNextPublish::Shutdown => {
+                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await;
+                                break 'outer;
+                            }
+                            MqttNextPublish::Reconnect => {
+                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await;
+                                break;
+                            }
                         };
 
                         match &task_mode {
                             MqttIngestMode::NoAckSequential { .. }
                             | MqttIngestMode::NoAckParallel { .. } => {
-                                Self::handle_no_ack_publish(&task_context, publish).await;
+                                Self::handle_no_ack_publish(
+                                    &task_context,
+                                    publish,
+                                    &mut ingest_collector,
+                                )
+                                .await;
                             }
                             MqttIngestMode::AckSequential { .. } => {
                                 if !Self::handle_ack_sequential_publish(
@@ -367,7 +393,7 @@ impl MqttIngestor {
                                     tokio::task::consume_budget().await;
                                     tokio::select! {
                                         _ = sleep_until(deadline) => break,
-                                        next = Self::next_publish(&mut eventloop, &mut shutdown_rx, &task_context) => {
+                                        next = Self::next_publish(&mut eventloop, &mut shutdown_rx, &task_context, None) => {
                                             match next {
                                                 MqttNextPublish::Publish(publish) => {
                                                     if let Some(entry) = Self::decode_publish(&task_context, *publish).await {
@@ -379,6 +405,7 @@ impl MqttIngestor {
                                                         break;
                                                     }
                                                 }
+                                                MqttNextPublish::Flush => {}
                                                 MqttNextPublish::Shutdown => break 'outer,
                                                 MqttNextPublish::Reconnect => break,
                                             }
@@ -389,7 +416,7 @@ impl MqttIngestor {
                                     &task_context,
                                     &client_handle,
                                     &mut shutdown_rx,
-                                    &batch,
+                                    batch,
                                     task_ack_timeout.expect("ack timeout must exist"),
                                     task_retry_policy,
                                     &mut backoff,
@@ -549,6 +576,7 @@ impl MqttIngestor {
         eventloop: &mut rumqttc::EventLoop,
         shutdown_rx: &mut watch::Receiver<bool>,
         context: &MqttTaskContext,
+        flush_at: Option<Instant>,
     ) -> MqttNextPublish {
         loop {
             tokio::task::consume_budget().await;
@@ -557,6 +585,11 @@ impl MqttIngestor {
                     if changed.is_err() || *shutdown_rx.borrow() {
                         return MqttNextPublish::Shutdown;
                     }
+                }
+                _ = sleep_until(
+                    flush_at.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400)),
+                ), if flush_at.is_some() => {
+                    return MqttNextPublish::Flush;
                 }
                 event = eventloop.poll() => {
                     match event {
@@ -590,17 +623,25 @@ impl MqttIngestor {
         }
     }
 
-    async fn handle_no_ack_publish(context: &MqttTaskContext, publish: Publish) {
+    async fn handle_no_ack_publish(
+        context: &MqttTaskContext,
+        publish: Publish,
+        collector: &mut IngestRouteCollector,
+    ) {
         let Some(entry) = Self::decode_publish(context, publish).await else {
             return;
         };
-        if let Err(error) = Self::dispatch_entry(context, entry.record, AckSet::empty()).await {
+        if let Err(error) =
+            Self::dispatch_entry(context, entry.record, AckSet::empty(), collector).await
+        {
             let _ = context.events.send(RuntimeEvent::Error(format!(
                 "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                 context.ingestor.as_str(),
                 context.domain.as_str(),
                 error
             )));
+        } else if collector.len() >= INGEST_GROUP_MAX_ROWS {
+            let _ = Self::flush_collector(context, collector).await;
         }
     }
 
@@ -619,7 +660,8 @@ impl MqttIngestor {
         loop {
             tokio::task::consume_budget().await;
             let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
-            let dispatched = Self::dispatch_entry(
+            let mut collector = IngestRouteCollector::default();
+            let dispatch_result = Self::dispatch_entry(
                 context,
                 entry.record.clone(),
                 if !context.branched_senders.is_empty() {
@@ -627,18 +669,22 @@ impl MqttIngestor {
                 } else {
                     acks.clone()
                 },
+                &mut collector,
             )
-            .await
-            .map(|()| true)
-            .unwrap_or_else(|error| {
-                let _ = context.events.send(RuntimeEvent::Error(format!(
-                    "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                    context.ingestor.as_str(),
-                    context.domain.as_str(),
-                    error
-                )));
-                false
-            });
+            .await;
+            let flush_result = Self::flush_collector(context, &mut collector).await;
+            let dispatched = dispatch_result
+                .and(flush_result)
+                .map(|()| true)
+                .unwrap_or_else(|error| {
+                    let _ = context.events.send(RuntimeEvent::Error(format!(
+                        "failed to dispatch message for ingestor '{}' in domain '{}': {}",
+                        context.ingestor.as_str(),
+                        context.domain.as_str(),
+                        error
+                    )));
+                    false
+                });
             if dispatched {
                 acks.ack_success();
                 match Runtime::await_ack_completion(shutdown_rx, completion, ack_timeout).await {
@@ -692,27 +738,52 @@ impl MqttIngestor {
         context: &MqttTaskContext,
         client_handle: &AsyncClient,
         shutdown_rx: &mut watch::Receiver<bool>,
-        batch: &[MqttBatchEntry],
+        batch: Vec<MqttBatchEntry>,
         ack_timeout: Duration,
         retry_policy: ParsedRetryPolicy,
         backoff: &mut RuntimeReconnectBackoff,
     ) -> bool {
-        loop {
+        let mut publishes = Vec::with_capacity(batch.len());
+        let mut initial_records = Vec::with_capacity(batch.len());
+        for entry in batch {
+            publishes.push(entry.publish);
+            initial_records.push(entry.record);
+        }
+        let mut initial_records = Some(initial_records);
+        'retry: loop {
             tokio::task::consume_budget().await;
-            let mut completions = Vec::with_capacity(batch.len());
+            let records = if let Some(records) = initial_records.take() {
+                records
+            } else {
+                let mut records = Vec::with_capacity(publishes.len());
+                for publish in &publishes {
+                    tokio::task::consume_budget().await;
+                    let Some(record) = Self::decode_publish_record(context, publish).await else {
+                        if !Self::wait_retry(shutdown_rx, retry_policy, backoff).await {
+                            return false;
+                        }
+                        continue 'retry;
+                    };
+                    records.push(record);
+                }
+                records
+            };
+            let mut completions = Vec::with_capacity(records.len());
             let mut batch_failure = None::<String>;
+            let mut collector = IngestRouteCollector::default();
 
-            for entry in batch {
+            for record in records {
                 tokio::task::consume_budget().await;
                 let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
                 let dispatched = Self::dispatch_entry(
                     context,
-                    entry.record.clone(),
+                    record,
                     if !context.branched_senders.is_empty() {
                         acks.attached()
                     } else {
                         acks.clone()
                     },
+                    &mut collector,
                 )
                 .await
                 .map(|()| true)
@@ -742,6 +813,10 @@ impl MqttIngestor {
                 }
             }
 
+            if let Err(error) = Self::flush_collector(context, &mut collector).await {
+                batch_failure = Some(error);
+            }
+
             if batch_failure.is_none() {
                 for completion in completions {
                     tokio::task::consume_budget().await;
@@ -769,8 +844,8 @@ impl MqttIngestor {
                 }
             } else {
                 let mut ack_failure = None::<String>;
-                for entry in batch {
-                    if let Err(error) = client_handle.ack(&entry.publish).await {
+                for publish in &publishes {
+                    if let Err(error) = client_handle.ack(publish).await {
                         ack_failure = Some(error.to_string());
                         let _ = context.events.send(RuntimeEvent::Error(format!(
                             "failed to acknowledge mqtt message for ingestor '{}' in domain '{}': \
@@ -810,6 +885,14 @@ impl MqttIngestor {
     }
 
     async fn decode_publish(context: &MqttTaskContext, publish: Publish) -> Option<MqttBatchEntry> {
+        let record = Self::decode_publish_record(context, &publish).await?;
+        Some(MqttBatchEntry { publish, record })
+    }
+
+    async fn decode_publish_record(
+        context: &MqttTaskContext,
+        publish: &Publish,
+    ) -> Option<DecodedRecord> {
         let key = publish.topic.clone();
         let payload = publish.payload.as_ref();
 
@@ -823,7 +906,7 @@ impl MqttIngestor {
         );
 
         match decode_ingested_payload(context.codec.clone(), payload).await {
-            Ok(record) => Some(MqttBatchEntry { publish, record }),
+            Ok(record) => Some(record),
             Err(error) => {
                 let _ = context.events.send(RuntimeEvent::Error(format!(
                     "failed to decode message for ingestor '{}' in domain '{}': {}",
@@ -846,23 +929,48 @@ impl MqttIngestor {
         context: &MqttTaskContext,
         record: DecodedRecord,
         acks: AckSet,
+        collector: &mut IngestRouteCollector,
     ) -> Result<(), String> {
         let mut output_routes = context.output_routes.clone();
         context
             .runtime
-            .dispatch_ingested_record(IngestDispatch { collector: None,
+            .dispatch_ingested_record(IngestDispatch {
+                collector,
                 domain: &context.domain,
                 ingestor: &context.ingestor,
                 timestamp_source: context.timestamp_source.as_ref(),
                 output_routes: &mut output_routes,
                 filter_where: context.filter_where.as_ref(),
-                branched_senders: &context.branched_senders,
                 record,
                 filter_map_metadata: None,
                 ingested_at: current_timestamp(),
                 acks,
             })
             .await
+    }
+
+    async fn flush_collector(
+        context: &MqttTaskContext,
+        collector: &mut IngestRouteCollector,
+    ) -> Result<(), String> {
+        let result = context
+            .runtime
+            .flush_ingest_collector(
+                &context.domain,
+                &context.ingestor,
+                &context.branched_senders,
+                collector,
+            )
+            .await;
+        if let Err(error) = &result {
+            let _ = context.events.send(RuntimeEvent::Error(format!(
+                "failed to flush messages for ingestor '{}' in domain '{}': {}",
+                context.ingestor.as_str(),
+                context.domain.as_str(),
+                error
+            )));
+        }
+        result
     }
 
     fn qos(qos: MqttQos) -> QoS {
