@@ -3357,9 +3357,9 @@ mod tests {
                 .expect("must render"),
             "CREATE SIGNALING PROTOCOL orders_ws FORMAT PROTOBUF USING RESOURCE proto_bundle \
              VERSION 2 CONFIG {'file' = 'signaling.proto'} SEND MESSAGE 'nervix.test.Subscribe' \
-             WAIT MESSAGE 'nervix.test.Ack' ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ '.authed' FAIL \
-             JAQ '.denied' CAPTURE '{token: .token}' ACCEPT DATA SEND JAQ '{id: 2, token: \
-             $state.token}' WAIT JAQ '.id == 2' FAIL JAQ '.error' TIMEOUT 5s;"
+             WAIT MESSAGE 'nervix.test.Ack' FAIL JAQ '.error' ON CONNECT SEND JAQ '{id: 1}' WAIT \
+             JAQ '.authed' FAIL JAQ '.denied' CAPTURE '{token: .token}' ACCEPT DATA SEND JAQ '{id: \
+             2, token: $state.token}' WAIT JAQ '.id == 2' TIMEOUT 5s;"
         );
 
         let codec = CreateCodec {
