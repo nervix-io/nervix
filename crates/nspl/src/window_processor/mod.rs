@@ -37,13 +37,12 @@ fn duration_bound<'src>()
     duration_lit().then_ignore(kw(Identifier::Duration)).boxed()
 }
 
-/// A window bound is a message count, a duration, or one of each — never two of the same kind.
+/// `WIDTH <bound> STEP <bound>`, checked as one unit.
 ///
+/// A window bound is a message count, a duration, or one of each — never two of the same kind.
 /// Spelling that out in the grammar rather than checking it after a `repeated()` is what stops
 /// completion offering `DURATION` again once a duration bound is already present, and then
 /// rejecting the statement the user just built from its own suggestion.
-
-/// `WIDTH <bound> STEP <bound>`, checked as one unit.
 ///
 /// The step is constrained by the width that precedes it, so the two are validated where both are
 /// known. Checking against the finished statement instead reports the failure at the statement's

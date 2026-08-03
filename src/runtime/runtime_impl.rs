@@ -390,7 +390,6 @@ impl Runtime {
             events,
             emitter_faults: hooks.emitter_faults,
             ingestor_faults: hooks.ingestor_faults,
-            schedule_publication_faults: hooks.schedule_publication_faults,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
             remote_dispatcher: Arc::new(RwLock::new(None)),
@@ -747,11 +746,6 @@ impl Runtime {
 
     pub fn domain_alter_is_active(&self, domain: &Domain) -> bool {
         self.active_domain_alters.contains_key(domain)
-    }
-
-    #[cfg(feature = "testing")]
-    pub fn take_armed_schedule_publication_fault(&self, domain: &Domain) -> bool {
-        self.schedule_publication_faults.take_armed_fault(domain)
     }
 
     pub(in crate::runtime) fn record_ingestor_transient_error(
@@ -5260,10 +5254,12 @@ impl Runtime {
                                 domain,
                                 &desired_generator,
                                 output,
-                                output_schema.arrow_schema(),
-                                output_schema.vm_sensitivity(),
-                                source_schema.arrow_schema(),
-                                source_branch_schema.clone(),
+                                GeneratorSetProgramSchemas {
+                                    output: output_schema.arrow_schema(),
+                                    output_sensitivity: output_schema.vm_sensitivity(),
+                                    source: source_schema.arrow_schema(),
+                                    branch: source_branch_schema.clone(),
+                                },
                                 Some(&execution.udfs),
                             )?;
                             routes.push(GeneratorTaskRouteSpec {
@@ -5328,7 +5324,7 @@ impl Runtime {
                     }
                 })?;
                 let old_specs = branched_node_specs_from_scheduled_nodes(&execution.schedule.nodes);
-                let old_spec = old_specs
+                old_specs
                     .processor(entity.kind, &entity.identifier)
                     .cloned()
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
@@ -5337,8 +5333,7 @@ impl Runtime {
                             "missing existing processor spec for '{}'",
                             entity.identifier.as_str()
                         ),
-                    })?;
-                old_spec
+                    })?
             };
             // The change aspects own which node-local state a swap invalidates, so the runtime
             // applies that contract rather than re-deriving it per processor kind.
@@ -5459,10 +5454,12 @@ impl Runtime {
                     ));
                 }
                 let task = spawn_processor_node_runtime_with_handoffs(
-                    self.clone(),
-                    domain.clone(),
+                    ProcessorRuntimeContext::new(
+                        self.clone(),
+                        domain.clone(),
+                        execution.graph.clone(),
+                    ),
                     &execution.shutdown,
-                    execution.graph.clone(),
                     template,
                     inputs,
                     handoffs,
@@ -6136,17 +6133,17 @@ impl Runtime {
                         {
                             tasks.push(task);
                         }
-                        materializer_specs.push((
-                            materializer.relay.clone(),
+                        materializer_specs.push(MaterializerTaskSpec {
+                            relay: materializer.relay.clone(),
                             state,
-                            materialized_stream_branch_ttls
+                            branch_ttl: materialized_stream_branch_ttls
                                 .get(&materializer.relay)
                                 .copied(),
-                            materialized_stream_branch_capacities
+                            branch_capacity: materialized_stream_branch_capacities
                                 .get(&materializer.relay)
                                 .copied(),
-                            relay.runtime_consumer_fan_in_for_mode(AckMode::Detached),
-                        ));
+                            receiver: relay.runtime_consumer_fan_in_for_mode(AckMode::Detached),
+                        });
                     } else {
                         if let Some(primary_node) = node.execution_node() {
                             push_remote_runtime_consumer(
@@ -6217,10 +6214,12 @@ impl Runtime {
                             domain,
                             generator,
                             output,
-                            output_schema.arrow_schema(),
-                            output_schema.vm_sensitivity(),
-                            source_schema.arrow_schema(),
-                            source_branch_schema.clone(),
+                            GeneratorSetProgramSchemas {
+                                output: output_schema.arrow_schema(),
+                                output_sensitivity: output_schema.vm_sensitivity(),
+                                source: source_schema.arrow_schema(),
+                                branch: source_branch_schema.clone(),
+                            },
                             Some(&udf_executor),
                         )?;
                         routes.push((output.clone(), program, output_schema));
@@ -6591,10 +6590,12 @@ impl Runtime {
             node_tasks.insert(
                 entity,
                 spawn_processor_node_runtime(
-                    self.clone(),
-                    domain.clone(),
+                    ProcessorRuntimeContext::new(
+                        self.clone(),
+                        domain.clone(),
+                        domain_graph.clone(),
+                    ),
                     &shutdown_tx,
-                    domain_graph.clone(),
                     template,
                     inputs,
                     self.branch_instance_expiration_scan_interval,
@@ -6657,16 +6658,8 @@ impl Runtime {
             );
         }
 
-        for (relay, state, branch_ttl, branch_capacity, receiver) in materializer_specs {
-            tasks.push(self.spawn_materializer_task(
-                domain,
-                &shutdown_tx,
-                relay,
-                state,
-                branch_ttl,
-                branch_capacity,
-                receiver,
-            ));
+        for spec in materializer_specs {
+            tasks.push(self.spawn_materializer_task(domain, &shutdown_tx, spec));
         }
 
         for (emitter, inputs) in emitter_specs {
@@ -8514,10 +8507,12 @@ impl Runtime {
                             domain,
                             generator,
                             output,
-                            output_schema.arrow_schema(),
-                            output_schema.vm_sensitivity(),
-                            source_schema.arrow_schema(),
-                            source_branch_schema.clone(),
+                            GeneratorSetProgramSchemas {
+                                output: output_schema.arrow_schema(),
+                                output_sensitivity: output_schema.vm_sensitivity(),
+                                source: source_schema.arrow_schema(),
+                                branch: source_branch_schema.clone(),
+                            },
                             Some(&udf_executor),
                         )?;
                         routes.push((output.clone(), program, output_schema));
@@ -8662,10 +8657,12 @@ impl Runtime {
             node_tasks.insert(
                 entity,
                 spawn_processor_node_runtime(
-                    self.clone(),
-                    domain.clone(),
+                    ProcessorRuntimeContext::new(
+                        self.clone(),
+                        domain.clone(),
+                        domain_graph.clone(),
+                    ),
                     &shutdown_tx,
-                    domain_graph.clone(),
                     template,
                     inputs,
                     self.branch_instance_expiration_scan_interval,
@@ -10608,12 +10605,15 @@ impl Runtime {
         &self,
         domain: &Domain,
         shutdown_tx: &watch::Sender<bool>,
-        relay: Identifier,
-        state: Arc<ReplicatedMaterializedRelayState>,
-        branch_ttl: Option<Duration>,
-        branch_capacity: Option<usize>,
-        mut receiver: RelayRuntimeFanIn,
+        spec: MaterializerTaskSpec,
     ) -> JoinHandle<()> {
+        let MaterializerTaskSpec {
+            relay,
+            state,
+            branch_ttl,
+            branch_capacity,
+            mut receiver,
+        } = spec;
         let runtime = self.clone();
         let domain = domain.clone();
         let expiration_scan_interval = self.branch_instance_expiration_scan_interval;

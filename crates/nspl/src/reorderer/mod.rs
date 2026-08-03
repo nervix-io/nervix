@@ -111,7 +111,8 @@ pub fn alter_reorderer_parser<'src>()
     let operation = choice((
         set_order_by,
         set_max_time,
-        alter_processor_operation().map(AlterReordererOperation::Processor),
+        alter_processor_operation()
+            .map(|operation| AlterReordererOperation::Processor(Box::new(operation))),
     ))
     .boxed();
 

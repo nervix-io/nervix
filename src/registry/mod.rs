@@ -517,7 +517,7 @@ impl Registry {
             match mutation {
                 RegistryMutation::Create(model) => {
                     let identifier = model.identifier().clone();
-                    let key = RegistryKey::from_model(&model);
+                    let key = RegistryKey::from_model(model);
 
                     info!(
                         domain = domain.as_str(),
@@ -5543,10 +5543,10 @@ fn expect_schema_model<'a>(
     }
 }
 
-fn expect_wire_schema_model<'a>(
+fn expect_wire_schema_model(
     domain: &Domain,
     identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
+    models: &HashMap<RegistryKey, Model>,
     wire_format: &CodecWireFormat,
     referenced: &Identifier,
 ) -> Result<WireSchemaDefinition, Report<RegistryError>> {

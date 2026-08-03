@@ -36,7 +36,6 @@ pub enum StoredModelVersioned {
     Codec(StoredCreateCodec),
     TransportKafka(StoredCreateClientKafka),
     TransportPulsar(StoredCreateClientPulsar),
-    RemovedTransport(StoredRemovedClient),
     TransportHttp(StoredCreateClientHttp),
     TransportSentry(StoredCreateClientSentry),
     TransportPrometheus(StoredCreateClientPrometheus),
@@ -79,8 +78,6 @@ pub enum StoredModelVersioned {
 pub enum StoredModelConversionError {
     #[error("stored model contains an invalid name")]
     InvalidName,
-    #[error("stored model uses the removed Kinesis integration")]
-    RemovedIntegration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -226,13 +223,6 @@ pub struct StoredCreateClientKafka {
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateClientPulsar {
-    pub name: String,
-    pub mount: Option<String>,
-    pub config: Vec<StoredClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredRemovedClient {
     pub name: String,
     pub mount: Option<String>,
     pub config: Vec<StoredClientConfigEntry>,
@@ -653,12 +643,6 @@ pub enum StoredIngestSource {
         client: String,
         every: String,
     },
-    RemovedIntegration {
-        client: String,
-        relay: String,
-        instances: u64,
-        mode: StoredRemovedIngestMode,
-    },
     Kafka {
         client: String,
         topic: String,
@@ -722,16 +706,6 @@ pub enum StoredIngestSource {
     },
 }
 
-impl StoredIngestSource {
-    fn is_removed_integration(&self) -> bool {
-        if let Self::RemovedIntegration { .. } = self {
-            true
-        } else {
-            false
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredKafkaOffsetMode {
     ConsumerGroup(String),
@@ -754,15 +728,6 @@ pub enum StoredKafkaIngestMode {
     },
     NoAckParallel {
         max: u64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredRemovedIngestMode {
-    AckSequential {
-        timeout: String,
-        retry_backoff: String,
-        retry_max_backoff: String,
     },
 }
 
@@ -1034,10 +999,6 @@ pub enum StoredEmitSink {
         client: String,
         topic: String,
     },
-    RemovedIntegration {
-        client: String,
-        relay: String,
-    },
     RabbitMq {
         client: String,
         queue: String,
@@ -1106,16 +1067,6 @@ pub enum StoredEmitSink {
         commit_each: String,
         max_commit_size: String,
     },
-}
-
-impl StoredEmitSink {
-    fn is_removed_integration(&self) -> bool {
-        if let Self::RemovedIntegration { .. } = self {
-            true
-        } else {
-            false
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1241,9 +1192,6 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Codec(v) => Ok(Model::Codec(convert_stored(v)?)),
             StoredModelVersioned::TransportKafka(v) => Ok(Model::ClientKafka(convert_stored(v)?)),
             StoredModelVersioned::TransportPulsar(v) => Ok(Model::ClientPulsar(convert_stored(v)?)),
-            StoredModelVersioned::RemovedTransport(_) => {
-                Err(Report::new(StoredModelConversionError::RemovedIntegration))
-            }
             StoredModelVersioned::TransportHttp(v) => Ok(Model::ClientHttp(convert_stored(v)?)),
             StoredModelVersioned::TransportSentry(v) => Ok(Model::ClientSentry(convert_stored(v)?)),
             StoredModelVersioned::TransportPrometheus(v) => {
@@ -1287,9 +1235,6 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Generator(v) => Ok(Model::Generator(convert_stored(v)?)),
             StoredModelVersioned::Inferencer(v) => Ok(Model::Inferencer(convert_stored(v)?)),
             StoredModelVersioned::WasmProcessor(v) => Ok(Model::WasmProcessor(convert_stored(v)?)),
-            StoredModelVersioned::Ingestor(v) if v.source.is_removed_integration() => {
-                Err(Report::new(StoredModelConversionError::RemovedIntegration))
-            }
             StoredModelVersioned::Ingestor(v) => Ok(Model::Ingestor(convert_stored(v)?)),
             StoredModelVersioned::Reingestor(v) => Ok(Model::Reingestor(convert_stored(v)?)),
             StoredModelVersioned::Relay(v) => Ok(Model::Relay(convert_stored(v)?)),
@@ -1300,9 +1245,6 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Junction(v) => Ok(Model::Junction(convert_stored(v)?)),
             StoredModelVersioned::WindowProcessor(v) => {
                 Ok(Model::WindowProcessor(convert_stored(v)?))
-            }
-            StoredModelVersioned::Emitter(v) if v.sink.is_removed_integration() => {
-                Err(Report::new(StoredModelConversionError::RemovedIntegration))
             }
             StoredModelVersioned::Emitter(v) => Ok(Model::Emitter(convert_stored(v)?)),
             StoredModelVersioned::Udf(v) => Ok(Model::Udf(convert_stored(v)?)),
@@ -3290,8 +3232,6 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 client: Identifier::parse(&client)?,
                 every,
             }),
-            StoredIngestSource::RemovedIntegration { .. } => Err(Report::new(NameError::Empty)
-                .attach_printable("stored model uses the removed Kinesis integration")),
             StoredIngestSource::Kafka {
                 client,
                 topic,
@@ -4324,8 +4264,6 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 client: Identifier::parse(&client)?,
                 topic: Identifier::parse(&topic)?,
             }),
-            StoredEmitSink::RemovedIntegration { .. } => Err(Report::new(NameError::Empty)
-                .attach_printable("stored model uses the removed Kinesis integration")),
             StoredEmitSink::RabbitMq { client, queue } => Ok(Self::RabbitMq {
                 client: Identifier::parse(&client)?,
                 queue: Identifier::parse(&queue)?,
@@ -4737,117 +4675,6 @@ mod tests {
             let stored = StoredModelVersioned::from(model.clone());
             let roundtrip = Model::try_from(stored).expect("stored model should roundtrip");
             assert_eq!(roundtrip, model);
-        }
-    }
-
-    /// Pre-alpha persisted models may break, but they must break loudly: signaling protocols
-    /// stored before jaq matchers, and before ordered phases, must fail to load rather than be
-    /// silently reinterpreted.
-    #[test]
-    fn stored_signaling_protocols_from_earlier_shapes_fail_to_load() {
-        #[derive(Archive, RkyvSerialize)]
-        struct BodySignalingProtocolOnConnect {
-            send_bodies: Vec<String>,
-            wait_bodies: Vec<String>,
-            timeout: String,
-        }
-
-        #[derive(Archive, RkyvSerialize)]
-        struct FlatJaqSignalingProtocolOnConnect {
-            send_programs: Vec<String>,
-            wait_matchers: Vec<String>,
-            fail_matchers: Vec<String>,
-            timeout: String,
-        }
-
-        #[derive(Archive, RkyvSerialize)]
-        struct LegacyStoredSignalingPhase {
-            sends: Vec<String>,
-            waits: Vec<LegacyStoredSignalingWait>,
-        }
-
-        #[derive(Archive, RkyvSerialize)]
-        struct LegacyStoredSignalingWait {
-            matcher: String,
-            capture: Option<String>,
-        }
-
-        #[derive(Archive, RkyvSerialize)]
-        struct PhasedSignalingProtocolOnConnect {
-            phases: Vec<LegacyStoredSignalingPhase>,
-            fail_matchers: Vec<String>,
-            timeout: String,
-        }
-
-        #[derive(Archive, RkyvSerialize)]
-        struct SteplessSignalingProtocolOnConnect {
-            steps: Vec<StoredSignalingStep>,
-            fail_matchers: Vec<String>,
-            timeout: String,
-        }
-
-        #[derive(Archive, RkyvSerialize)]
-        struct LegacyCreateSignalingProtocol<O> {
-            name: String,
-            on_connect: O,
-        }
-
-        let with_bodies = LegacyCreateSignalingProtocol {
-            name: "binance_ws".to_string(),
-            on_connect: BodySignalingProtocolOnConnect {
-                send_bodies: vec![r#"{"method":"SUBSCRIBE","id":1}"#.to_string()],
-                wait_bodies: vec![r#"{"id":1,"result":null}"#.to_string()],
-                timeout: "5s".to_string(),
-            },
-        };
-        let flat_jaq = LegacyCreateSignalingProtocol {
-            name: "binance_ws".to_string(),
-            on_connect: FlatJaqSignalingProtocolOnConnect {
-                send_programs: vec![r#"{method: "SUBSCRIBE", id: 1}"#.to_string()],
-                wait_matchers: vec![".id == 1".to_string()],
-                fail_matchers: Vec::new(),
-                timeout: "5s".to_string(),
-            },
-        };
-
-        let phased = LegacyCreateSignalingProtocol {
-            name: "binance_ws".to_string(),
-            on_connect: PhasedSignalingProtocolOnConnect {
-                phases: vec![LegacyStoredSignalingPhase {
-                    sends: vec!["{id: 1}".to_string()],
-                    waits: vec![LegacyStoredSignalingWait {
-                        matcher: ".id == 1".to_string(),
-                        capture: None,
-                    }],
-                }],
-                fail_matchers: Vec::new(),
-                timeout: "5s".to_string(),
-            },
-        };
-
-        for (shape, bytes) in [
-            (
-                "text bodies",
-                rkyv::to_bytes::<rkyv::rancor::Error>(&with_bodies)
-                    .expect("legacy value should serialize"),
-            ),
-            (
-                "flat jaq programs",
-                rkyv::to_bytes::<rkyv::rancor::Error>(&flat_jaq)
-                    .expect("legacy value should serialize"),
-            ),
-            (
-                "phases without a payload acceptance marker",
-                rkyv::to_bytes::<rkyv::rancor::Error>(&phased)
-                    .expect("legacy value should serialize"),
-            ),
-        ] {
-            assert!(
-                rkyv::from_bytes::<StoredCreateSignalingProtocol, rkyv::rancor::Error>(&bytes)
-                    .is_err(),
-                "a signaling protocol stored with {shape} must not deserialize into the current \
-                 model"
-            );
         }
     }
 

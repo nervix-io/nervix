@@ -202,9 +202,7 @@ pub(crate) use state_store::{
     RuntimeStateStore,
 };
 use test_hooks::EmitterFaultMode;
-pub use test_hooks::{
-    EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks, SchedulePublicationFaultInjector,
-};
+pub use test_hooks::{EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks};
 use tls::RustlsClientConfigSource;
 use wasm_state::ReplicatedWasmProcessorState;
 pub use websocket_signaling::CompiledSignalingProtocol;
@@ -2107,6 +2105,16 @@ struct EmitterTaskBuildDeps<'a> {
     deps: EmitterTaskDeps,
 }
 
+/// One materialized relay's runtime task: the relay it serves, the replicated state it maintains,
+/// the branch retention limits it enforces, and the fan-in it consumes.
+struct MaterializerTaskSpec {
+    relay: Identifier,
+    state: Arc<ReplicatedMaterializedRelayState>,
+    branch_ttl: Option<Duration>,
+    branch_capacity: Option<usize>,
+    receiver: RelayRuntimeFanIn,
+}
+
 struct GeneratorTaskSpec {
     generator: CreateGenerator,
     source_relay: Identifier,
@@ -2415,7 +2423,6 @@ pub struct Runtime {
     events: broadcast::Sender<RuntimeEvent>,
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
-    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,
@@ -7221,7 +7228,7 @@ enum ProcessorNodeCommand {
 
 enum EmitterTaskCommand {
     Reconfigure {
-        config: CreateEmitter,
+        config: Box<CreateEmitter>,
         response: oneshot::Sender<()>,
     },
     Stop {
@@ -7237,7 +7244,7 @@ struct ScheduledEmitterTask {
 impl ScheduledEmitterTask {
     async fn reconfigure_via(
         commands: &mpsc::Sender<EmitterTaskCommand>,
-        config: CreateEmitter,
+        config: Box<CreateEmitter>,
     ) -> Result<(), String> {
         let (response, receiver) = oneshot::channel();
         commands
@@ -7300,20 +7307,40 @@ impl ScheduledNodeTask {
     }
 }
 
-pub(in crate::runtime) fn spawn_processor_node_runtime(
+/// The domain-scoped execution context a processor task runs inside: the runtime it calls back
+/// into, the domain that owns it, and the active graph it evaluates against. Carrying the three as
+/// one value keeps a task's spawn and run halves provably agreed on which domain's graph they serve.
+#[derive(Clone)]
+pub(in crate::runtime) struct ProcessorRuntimeContext {
     runtime_handle: Runtime,
     domain: Domain,
-    shutdown_tx: &watch::Sender<bool>,
     graph: SharedActiveGraph,
+}
+
+impl ProcessorRuntimeContext {
+    pub(in crate::runtime) fn new(
+        runtime_handle: Runtime,
+        domain: Domain,
+        graph: SharedActiveGraph,
+    ) -> Self {
+        Self {
+            runtime_handle,
+            domain,
+            graph,
+        }
+    }
+}
+
+pub(in crate::runtime) fn spawn_processor_node_runtime(
+    context: ProcessorRuntimeContext,
+    shutdown_tx: &watch::Sender<bool>,
     template: BranchInstanceTemplate,
     inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
     expiration_scan_interval: Duration,
 ) -> ScheduledNodeTask {
     spawn_processor_node_runtime_with_handoffs(
-        runtime_handle,
-        domain,
+        context,
         shutdown_tx,
-        graph,
         template,
         inputs,
         Vec::new(),
@@ -7321,11 +7348,9 @@ pub(in crate::runtime) fn spawn_processor_node_runtime(
     )
 }
 
-fn spawn_processor_node_runtime_with_handoffs(
-    runtime_handle: Runtime,
-    domain: Domain,
+pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
+    context: ProcessorRuntimeContext,
     shutdown_tx: &watch::Sender<bool>,
-    graph: SharedActiveGraph,
     template: BranchInstanceTemplate,
     inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
     handoffs: Vec<ProcessorBranchHandoff>,
@@ -7334,9 +7359,7 @@ fn spawn_processor_node_runtime_with_handoffs(
     let shutdown_rx = shutdown_tx.subscribe();
     let (commands, command_rx) = mpsc::channel(1);
     let task = tokio::spawn(run_processor_node_runtime(
-        runtime_handle,
-        domain,
-        graph,
+        context,
         template,
         inputs,
         shutdown_rx,
@@ -7348,9 +7371,7 @@ fn spawn_processor_node_runtime_with_handoffs(
 }
 
 async fn run_processor_node_runtime(
-    runtime_handle: Runtime,
-    domain: Domain,
-    graph: SharedActiveGraph,
+    context: ProcessorRuntimeContext,
     template: BranchInstanceTemplate,
     inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -7358,6 +7379,11 @@ async fn run_processor_node_runtime(
     restored_handoffs: Vec<ProcessorBranchHandoff>,
     expiration_scan_interval: Duration,
 ) {
+    let ProcessorRuntimeContext {
+        runtime_handle,
+        domain,
+        graph,
+    } = context;
     let processor = template.source.clone();
     runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
     let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
@@ -7385,9 +7411,7 @@ async fn run_processor_node_runtime(
         for handoff in restored_handoffs {
             let key = handoff.key.clone();
             match spawn_processor_branch_task(
-                runtime_handle.clone(),
-                domain.clone(),
-                graph.clone(),
+                ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone(), graph.clone()),
                 &template,
                 key.clone(),
                 Some(handoff.restored_at),
@@ -7591,9 +7615,7 @@ async fn dispatch_processor_node_input(
     let key = batch.key.clone();
     let instance = match instances.get_or_try_create_with(key.clone(), now, |key| {
         spawn_processor_branch_task(
-            runtime_handle.clone(),
-            domain.clone(),
-            graph.clone(),
+            ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone(), graph.clone()),
             template,
             key.clone(),
             None,
@@ -7677,16 +7699,14 @@ async fn dispatch_processor_node_input(
 }
 
 fn spawn_processor_branch_task(
-    runtime_handle: Runtime,
-    domain: Domain,
-    graph: SharedActiveGraph,
+    context: ProcessorRuntimeContext,
     template: &BranchInstanceTemplate,
     key: Option<BranchKey>,
     restored_at: Option<Timestamp>,
     pending_materialized: VecDeque<(Identifier, RelayRecordBatch)>,
 ) -> Result<ProcessorBranchTask, String> {
     let mut branch = template
-        .instantiate(&runtime_handle, &domain, key)?
+        .instantiate(&context.runtime_handle, &context.domain, key)?
         .into_inner();
     if let Some(processor) = branch.processors.get_mut(&template.source) {
         processor.pending_materialized = pending_materialized;
@@ -7697,11 +7717,11 @@ fn spawn_processor_branch_task(
     let (input_tx, input_rx) = mpsc::channel(1);
     let (stop_tx, stop_rx) = mpsc::channel(1);
     let processor = template.source.clone();
-    let quiesce_counters = runtime_handle.node_quiesce_counters(&domain, &processor);
+    let quiesce_counters = context
+        .runtime_handle
+        .node_quiesce_counters(&context.domain, &processor);
     let task = tokio::spawn(run_processor_branch_task(
-        runtime_handle,
-        domain,
-        graph,
+        context,
         processor,
         branch,
         input_rx,
@@ -7716,15 +7736,18 @@ fn spawn_processor_branch_task(
 }
 
 async fn run_processor_branch_task(
-    runtime_handle: Runtime,
-    domain: Domain,
-    graph: SharedActiveGraph,
+    context: ProcessorRuntimeContext,
     processor: Identifier,
     mut branch: BranchRuntime,
     mut input: mpsc::Receiver<(Identifier, RelayRecordBatch)>,
     mut stop_rx: mpsc::Receiver<ProcessorBranchStopMode>,
     quiesce_counters: Arc<NodeQuiesceCounters>,
 ) {
+    let ProcessorRuntimeContext {
+        runtime_handle,
+        domain,
+        graph,
+    } = context;
     let mut force_flush_rx = runtime_handle.force_flush_receiver(&domain);
     let mut quiesce_gauges = BranchQuiesceGauges::new(quiesce_counters.clone());
     quiesce_gauges.observe(&branch, &processor);
@@ -8017,9 +8040,7 @@ fn restore_processor_branch_lru_snapshot(
     };
     for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
         let entry = spawn_processor_branch_task(
-            runtime.clone(),
-            domain.clone(),
-            graph.clone(),
+            ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
             template,
             key.clone(),
             Some(last_ingestion),
@@ -10877,16 +10898,28 @@ fn compile_ingestor_filter_map_program(
     }))
 }
 
+/// The schema surface a generator's set-only route compiles against: the output it constructs, that
+/// output's sensitivity, the materialized source it reads, and the branch it preserves.
+struct GeneratorSetProgramSchemas {
+    output: StdArc<arrow_schema::Schema>,
+    output_sensitivity: VmSchemaSensitivity,
+    source: StdArc<arrow_schema::Schema>,
+    branch: Option<StdArc<arrow_schema::Schema>>,
+}
+
 fn compile_generator_set_program(
     domain: &Domain,
     generator: &CreateGenerator,
     output: &ProcessorOutput,
-    output_schema: StdArc<arrow_schema::Schema>,
-    output_sensitivity: VmSchemaSensitivity,
-    source_schema: StdArc<arrow_schema::Schema>,
-    branch_schema: Option<StdArc<arrow_schema::Schema>>,
+    schemas: GeneratorSetProgramSchemas,
     udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+    let GeneratorSetProgramSchemas {
+        output: output_schema,
+        output_sensitivity,
+        source: source_schema,
+        branch: branch_schema,
+    } = schemas;
     let parsed =
         lower_set_only_route(&output.construction, output_schema.as_ref()).map_err(|reason| {
             RuntimeError::BuildDomainExecution {
