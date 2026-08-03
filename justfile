@@ -119,7 +119,7 @@ cargo-clippy:
 [parallel]
 lint-inner: cargo-clippy proto-lint
 
-lint: build-web-console proto-lint
+lint: lint-inner build-web-console proto-lint
 
 audit:
     cargo audit

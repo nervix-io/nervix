@@ -202,9 +202,7 @@ pub(crate) use state_store::{
     RuntimeStateStore,
 };
 use test_hooks::EmitterFaultMode;
-pub use test_hooks::{
-    EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks, SchedulePublicationFaultInjector,
-};
+pub use test_hooks::{EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks};
 use tls::RustlsClientConfigSource;
 use wasm_state::ReplicatedWasmProcessorState;
 pub(crate) use websocket_signaling::WebsocketSignalingSession;

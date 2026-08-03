@@ -229,13 +229,6 @@ pub struct StoredCreateClientPulsar {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredRemovedClient {
-    pub name: String,
-    pub mount: Option<String>,
-    pub config: Vec<StoredClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateClientHttp {
     pub name: String,
     pub mount: Option<String>,
@@ -697,15 +690,6 @@ pub enum StoredKafkaIngestMode {
     },
     NoAckParallel {
         max: u64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredRemovedIngestMode {
-    AckSequential {
-        timeout: String,
-        retry_backoff: String,
-        retry_max_backoff: String,
     },
 }
 

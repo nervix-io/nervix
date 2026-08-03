@@ -718,11 +718,6 @@ impl Runtime {
         self.active_domain_alters.contains_key(domain)
     }
 
-    #[cfg(feature = "testing")]
-    pub fn take_armed_schedule_publication_fault(&self, domain: &Domain) -> bool {
-        self.schedule_publication_faults.take_armed_fault(domain)
-    }
-
     pub(in crate::runtime) fn record_ingestor_transient_error(
         &self,
         domain: &Domain,

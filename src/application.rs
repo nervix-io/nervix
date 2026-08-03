@@ -8956,13 +8956,6 @@ impl SessionServiceImpl {
         domain: &Domain,
         graph: Option<ActiveGraph>,
     ) -> Result<(), String> {
-        #[cfg(feature = "testing")]
-        if self.runtime.take_armed_schedule_publication_fault(domain) {
-            return Err(format!(
-                "injected schedule publication fault for domain '{}'",
-                domain.as_str()
-            ));
-        }
         let live_node_ids = self.cluster.live_node_ids().await;
         let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
         let cluster_nodes = self
