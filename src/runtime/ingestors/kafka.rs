@@ -48,14 +48,14 @@ impl KafkaIngestor {
             | KafkaIngestMode::AckSequential { timeout, .. } => {
                 Some(Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?)
             }
-            KafkaIngestMode::NoAckParallel { .. } => None,
+            KafkaIngestMode::NoAckParallel => None,
         };
         let retry_policy = match &ack_mode {
             KafkaIngestMode::AckParallel { retry_policy, .. }
             | KafkaIngestMode::AckSequential { retry_policy, .. } => Some(
                 Runtime::parse_retry_policy(domain, &ingestor.name, retry_policy)?,
             ),
-            KafkaIngestMode::NoAckParallel { .. } => None,
+            KafkaIngestMode::NoAckParallel => None,
         };
         let batch_timeout = match &ack_mode {
             KafkaIngestMode::AckParallel { batch_timeout, .. } => {
@@ -108,7 +108,6 @@ impl KafkaIngestor {
             );
             watcher_config.set("enable.partition.eof", "false");
             watcher_config.set("enable.auto.commit", "false");
-            watcher_config.set("auto.offset.reset", "earliest");
             let watcher_consumer: StreamConsumer =
                 watcher_config
                     .create()
@@ -211,14 +210,12 @@ impl KafkaIngestor {
                 "enable.auto.commit",
                 if let KafkaOffsetMode::Domain = &offset_mode {
                     "false"
-                } else if let KafkaIngestMode::NoAckParallel { .. } = &ack_mode {
+                } else if let KafkaIngestMode::NoAckParallel = &ack_mode {
                     "true"
                 } else {
                     "false"
                 },
             );
-            client_config.set("auto.offset.reset", "earliest");
-
             let consumer: StreamConsumer =
                 client_config
                     .create()
@@ -311,6 +308,11 @@ impl KafkaIngestor {
                 let mut observed_start_version = initial_observed_start_version;
                 let mut consumer_ready = initial_consumer_ready;
                 let mut assignment_refresh_pending = false;
+                // Routed messages accumulate here across consecutive polls so a group of
+                // ingested records becomes one Arrow batch per (relay, branch key)
+                // instead of one single-row batch per record. Flushed on size or when
+                // the stream goes idle, so a partial group is never held indefinitely.
+                let mut ingest_collector = IngestRouteCollector::default();
 
                 'ingest: loop {
                     tokio::task::consume_budget().await;
@@ -410,8 +412,17 @@ impl KafkaIngestor {
                             }
                         }
                     }
+                    let next_flush = ingest_collector.next_flush();
+                    let flush_at =
+                        next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
+                            let _ = task_runtime.flush_ingest_collector(
+                                &task_domain,
+                                &task_ingestor,
+                                &task_branched_senders,
+                                &mut ingest_collector,
+                            ).await;
                             if changed.is_err() || *shutdown_rx.borrow() {
                                 break;
                             }
@@ -420,6 +431,21 @@ impl KafkaIngestor {
                             if changed.is_ok() {
                                 assignment_refresh_pending = true;
                                 continue;
+                            }
+                        }
+                        _ = sleep_until(flush_at), if next_flush.is_some() => {
+                            if let Err(error) = task_runtime.flush_ingest_collector(
+                                &task_domain,
+                                &task_ingestor,
+                                &task_branched_senders,
+                                &mut ingest_collector,
+                            ).await {
+                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    "failed to flush ingest group for ingestor '{}' in domain '{}': {}",
+                                    task_ingestor.as_str(),
+                                    task_domain.as_str(),
+                                    error
+                                )));
                             }
                         }
                         message = consumer.recv() => {
@@ -496,21 +522,20 @@ impl KafkaIngestor {
                                     };
 
                                     match &task_ack_mode {
-                                        KafkaIngestMode::NoAckParallel { .. } => {
+                                        KafkaIngestMode::NoAckParallel => {
                                             match build_entry(&message).await {
                                                 Ok(entry) => {
                                                     let mut output_routes =
                                                         task_output_routes.clone();
-                                                    if let Err(error) = task_runtime
+                                                    let dispatched = if let Err(error) = task_runtime
                                                         .dispatch_ingested_record(IngestDispatch {
+                                                            collector: &mut ingest_collector,
                                                             domain: &task_domain,
                                                             ingestor: &task_ingestor,
                                                             timestamp_source: task_timestamp_source
                                                                 .as_ref(),
                                                             output_routes: &mut output_routes,
                                                             filter_where: task_filter_where.as_ref(),
-                                                            branched_senders:
-                                                                &task_branched_senders,
                                                             record: entry.record,
                                                             filter_map_metadata: Some(
                                                                 entry.filter_map_metadata,
@@ -526,7 +551,38 @@ impl KafkaIngestor {
                                                             task_domain.as_str(),
                                                             error
                                                         )));
-                                                    } else if let Some(state) =
+                                                        false
+                                                    } else {
+                                                        true
+                                                    };
+                                                    let flushed = if dispatched
+                                                        && ingest_collector.len()
+                                                            >= INGEST_GROUP_MAX_ROWS
+                                                    {
+                                                        if let Err(error) = task_runtime
+                                                            .flush_ingest_collector(
+                                                                &task_domain,
+                                                                &task_ingestor,
+                                                                &task_branched_senders,
+                                                                &mut ingest_collector,
+                                                            )
+                                                            .await
+                                                        {
+                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                "failed to flush ingest group for ingestor '{}' in domain '{}': {}",
+                                                                task_ingestor.as_str(),
+                                                                task_domain.as_str(),
+                                                                error
+                                                            )));
+                                                            false
+                                                        } else {
+                                                            true
+                                                        }
+                                                    } else {
+                                                        dispatched
+                                                    };
+                                                    if flushed
+                                                        && let Some(state) =
                                                         task_kafka_offset_state.as_ref()
                                                         && let Err(error) = task_runtime
                                                             .commit_domain_kafka_offset(
@@ -586,21 +642,22 @@ impl KafkaIngestor {
                                             };
 
                                             loop {
-                                                tokio::task::consume_budget().await;
+                                            tokio::task::consume_budget().await;
                                                 let (acks, completion) =
                                                     task_runtime.tracked_ack_root(&task_domain);
                                                 let mut output_routes =
                                                     task_output_routes.clone();
-                                                let dispatched = task_runtime
+                                                let mut collector =
+                                                    IngestRouteCollector::default();
+                                                let dispatch_result = task_runtime
                                                     .dispatch_ingested_record(IngestDispatch {
+                                                        collector: &mut collector,
                                                         domain: &task_domain,
                                                         ingestor: &task_ingestor,
                                                         timestamp_source: task_timestamp_source
                                                             .as_ref(),
                                                         output_routes: &mut output_routes,
                                                         filter_where: task_filter_where.as_ref(),
-                                                        branched_senders:
-                                                            &task_branched_senders,
                                                         record: entry.record.clone(),
                                                         filter_map_metadata: Some(
                                                             entry.filter_map_metadata.clone(),
@@ -613,7 +670,17 @@ impl KafkaIngestor {
                                                             acks.clone()
                                                         },
                                                     })
-                                                    .await
+                                                    .await;
+                                                let flush_result = task_runtime
+                                                    .flush_ingest_collector(
+                                                        &task_domain,
+                                                        &task_ingestor,
+                                                        &task_branched_senders,
+                                                        &mut collector,
+                                                    )
+                                                    .await;
+                                                let dispatched = dispatch_result
+                                                    .and(flush_result)
                                                     .map(|()| true)
                                                     .unwrap_or_else(|error| {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
@@ -820,68 +887,31 @@ impl KafkaIngestor {
                                                     .or_insert(entry.offset);
                                             }
 
-                                            loop {
-                                                tokio::task::consume_budget().await;
+                                            tokio::task::consume_budget().await;
                                                 let mut completions = Vec::with_capacity(batch.len());
                                                 let mut batch_failure = None::<String>;
                                                 let ingested_at = current_timestamp();
-                                                let runtime_records = batch
-                                                    .iter()
-                                                    .map(|entry| {
-                                                        entry.record.clone().into_runtime_record(
-                                                            RuntimeRecordMetadata::from_ingested_at_watermarks(
-                                                                ingested_at,
-                                                                ingested_at,
-                                                            ),
-                                                        )
-                                                    })
-                                                    .collect::<Vec<_>>();
-                                                let filter_map_metadata = batch
-                                                    .iter()
-                                                    .map(|entry| entry.filter_map_metadata.clone())
-                                                    .collect::<Vec<_>>();
-                                                let selected_rows = match task_runtime
-                                                    .select_ingested_batch_rows(IngestBatchSelection {
-                                                        domain: &task_domain,
-                                                        filter_where: task_filter_where.as_ref(),
-                                                        records: &runtime_records,
-                                                        filter_map_metadata: Some(
-                                                            &filter_map_metadata,
-                                                        ),
-                                                    })
-                                                    .await
-                                                {
-                                                    Ok(selected_rows) => selected_rows,
-                                                    Err(error) => {
-                                                        batch_failure = Some(error);
-                                                        HashSet::default()
-                                                    }
-                                                };
+                                                let mut collector =
+                                                    IngestRouteCollector::default();
 
-                                                for (row, entry) in batch.iter().enumerate() {
+                                                for entry in batch {
                                                     tokio::task::consume_budget().await;
                                                     let (acks, completion) =
                                                         task_runtime.tracked_ack_root(&task_domain);
-                                                    if !selected_rows.contains(&row) {
-                                                        acks.ack_success();
-                                                        completions.push(completion);
-                                                        continue;
-                                                    }
                                                     let mut output_routes =
                                                         task_output_routes.clone();
                                                     let dispatched = task_runtime
                                                         .dispatch_ingested_record(IngestDispatch {
+                                                            collector: &mut collector,
                                                             domain: &task_domain,
                                                             ingestor: &task_ingestor,
                                                             timestamp_source: task_timestamp_source
                                                                 .as_ref(),
                                                             output_routes: &mut output_routes,
-                                                            filter_where: None,
-                                                            branched_senders:
-                                                                &task_branched_senders,
-                                                            record: entry.record.clone(),
+                                                            filter_where: task_filter_where.as_ref(),
+                                                            record: entry.record,
                                                             filter_map_metadata: Some(
-                                                                entry.filter_map_metadata.clone(),
+                                                                entry.filter_map_metadata,
                                                             ),
                                                             ingested_at,
                                                             acks: if !task_branched_senders.is_empty()
@@ -910,6 +940,18 @@ impl KafkaIngestor {
                                                             Some("kafka runtime dispatch failed".to_string());
                                                         break;
                                                     }
+                                                }
+
+                                                if let Err(error) = task_runtime
+                                                    .flush_ingest_collector(
+                                                        &task_domain,
+                                                        &task_ingestor,
+                                                        &task_branched_senders,
+                                                        &mut collector,
+                                                    )
+                                                    .await
+                                                {
+                                                    batch_failure = Some(error);
                                                 }
 
                                                 if batch_failure.is_none() {
@@ -955,8 +997,10 @@ impl KafkaIngestor {
                                                     sleep(retry_delay).await;
                                                     retry_delay =
                                                         next_retry_delay(retry_delay, retry_policy);
-                                                } else {
-                                                    retry_delay = retry_policy.backoff;
+                                                    continue 'ingest;
+                                                }
+
+                                                retry_delay = retry_policy.backoff;
                                                     for ((topic, partition), next_offset) in
                                                         &batch_commit_offsets
                                                     {
@@ -990,9 +1034,7 @@ impl KafkaIngestor {
                                                             break;
                                                         }
                                                     }
-                                                    if batch_failure.is_none() {
-                                                        break;
-                                                    }
+                                                if batch_failure.is_some() {
                                                     for ((topic, partition), offset) in &batch_start_offsets {
                                                         if let Err(seek_error) = Self::seek_offset(
                                                             &consumer,
@@ -1011,8 +1053,8 @@ impl KafkaIngestor {
                                                     sleep(retry_delay).await;
                                                     retry_delay =
                                                         next_retry_delay(retry_delay, retry_policy);
+                                                    continue 'ingest;
                                                 }
-                                            }
                                         }
                                     }
                                 }

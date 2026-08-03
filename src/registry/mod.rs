@@ -22,9 +22,9 @@ use nervix_models::{
     CreateMaterializer, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
     CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
     Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, OutputBranch,
-    ParseAsType, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode,
-    SchemaField, SignalingWireFormat, WireSchemaDefinition,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind,
+    MqttIngestMode, OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
+    RouteConstruction, ScheduledNode, SchemaField, SignalingWireFormat, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -3434,7 +3434,9 @@ fn validate_ingestor_source(
                 reason: "MQTT instances must be greater than 0".to_string(),
             }));
         }
-        if mode.max_inflight() == 0 {
+        if let MqttIngestMode::AckParallel { max, .. } = mode
+            && *max == 0
+        {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -12150,7 +12152,7 @@ mod tests {
                             Identifier::parse("cg").expect("valid identifier"),
                         ),
                         instances: 1,
-                        mode: KafkaIngestMode::NoAckParallel { max: 1 },
+                        mode: KafkaIngestMode::NoAckParallel,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -12267,7 +12269,7 @@ mod tests {
                                 Identifier::parse("cg").expect("valid identifier"),
                             ),
                             instances: 1,
-                            mode: KafkaIngestMode::NoAckParallel { max: 1 },
+                            mode: KafkaIngestMode::NoAckParallel,
                         },
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
@@ -12340,7 +12342,7 @@ mod tests {
                             Identifier::parse("cg").expect("valid identifier"),
                         ),
                         instances: 1,
-                        mode: KafkaIngestMode::NoAckParallel { max: 1 },
+                        mode: KafkaIngestMode::NoAckParallel,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -12425,7 +12427,7 @@ mod tests {
                             Identifier::parse("cg").expect("valid identifier"),
                         ),
                         instances: 1,
-                        mode: KafkaIngestMode::NoAckParallel { max: 1 },
+                        mode: KafkaIngestMode::NoAckParallel,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 

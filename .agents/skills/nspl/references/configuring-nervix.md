@@ -139,6 +139,12 @@ relay. Do not use them to scan across branches.
 - Every agent-generated UDF includes Roto `test` blocks. Those tests run during `CREATE UDF` and
   must pass before the declaration is persisted.
 - Every flush-based route has a flush policy and every route has a message error policy.
+- Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
+  capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
+  `NO_ACK`.
+- Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
+  group may need records that already exist; Nervix passes the setting through and does not supply
+  a hidden default.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts

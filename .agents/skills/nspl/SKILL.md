@@ -121,8 +121,11 @@ per-route branch selection, while generator route bodies remain set-only.
   independently. Never add it to an ingestor.
 - Add `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` to every flush-based
   route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
-  one-message batch guarantee. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by
-  the guest.
+  one-message batch guarantee. `MAX BATCH SIZE` counts logical Arrow value, offset, and validity
+  bytes, not unused buffer capacity or object overhead. Windows use `WIDTH` and `STEP`; WASM output
+  cadence is controlled by the guest.
+- Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; `NO_ACK` has no in-flight ACK window and
+  never accepts `MAX`.
 - Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
   MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
   branch guest's Wasmtime linear memory.

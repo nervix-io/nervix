@@ -3732,6 +3732,117 @@ impl Runtime {
             .map(|record| record.into_runtime_record(message.record.metadata().clone()))
     }
 
+    /// Builds one Arrow batch per (relay, branch key) from everything a poll group routed
+    /// and forwards each to its branch entrypoint.
+    ///
+    /// This is the counterpart to `IngestDispatch::collector`. Building the batch once per
+    /// group replaces N single-row batch constructions, N channel sends, and the
+    /// `spawn_blocking` hop the route task pays per message.
+    pub(in crate::runtime) async fn flush_ingest_collector(
+        &self,
+        domain: &Domain,
+        ingestor: &Identifier,
+        branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+        collector: &mut IngestRouteCollector,
+    ) -> Result<(), String> {
+        if collector.is_empty() {
+            return Ok(());
+        }
+        let groups = collector.drain_groups();
+        let Some(execution) = self.executions.get(domain) else {
+            let error = format!("domain '{}' is not running", domain.as_str());
+            for (_, messages) in &groups {
+                self.handle_general_error_for_acks(
+                    domain,
+                    ModelKind::Ingestor.as_str(),
+                    ingestor,
+                    &ErrorPolicies::handled_by_log(),
+                    messages.iter().map(|message| &message.acks),
+                    error.clone(),
+                );
+            }
+            return Err(error);
+        };
+        let relay_schemas = execution.relay_schemas.clone();
+        drop(execution);
+
+        let mut first_error = None;
+        for (relay, messages) in groups {
+            tokio::task::consume_budget().await;
+            let acks = messages
+                .iter()
+                .map(|message| message.acks.clone())
+                .collect::<Vec<_>>();
+            let Some(schema) = relay_schemas.get(&relay).cloned() else {
+                let error = format!(
+                    "stream '{}' schema is not instantiated in domain '{}'",
+                    relay.as_str(),
+                    domain.as_str()
+                );
+                self.handle_general_error_for_acks(
+                    domain,
+                    ModelKind::Ingestor.as_str(),
+                    ingestor,
+                    &ErrorPolicies::handled_by_log(),
+                    acks.iter(),
+                    error.clone(),
+                );
+                first_error.get_or_insert(error);
+                continue;
+            };
+            let batch = match RelayRecordBatch::from_messages(schema, messages) {
+                Ok(batch) => batch,
+                Err(error) => {
+                    self.handle_general_error_for_acks(
+                        domain,
+                        ModelKind::Ingestor.as_str(),
+                        ingestor,
+                        &ErrorPolicies::handled_by_log(),
+                        acks.iter(),
+                        error.clone(),
+                    );
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            let Some(sender) = branched_senders.get(&relay) else {
+                let error = format!(
+                    "ingestor '{}' has no branch entrypoint for relay '{}'",
+                    ingestor.as_str(),
+                    relay.as_str()
+                );
+                self.handle_general_error_for_acks(
+                    domain,
+                    ModelKind::Ingestor.as_str(),
+                    ingestor,
+                    &ErrorPolicies::handled_by_log(),
+                    batch.acks.iter(),
+                    error.clone(),
+                );
+                first_error.get_or_insert(error);
+                continue;
+            };
+            if let Err(error) = sender.send(batch).await {
+                let batch = error.0;
+                let reason = format!(
+                    "ingestor '{}' failed to forward batch to branch entrypoint for relay '{}'",
+                    ingestor.as_str(),
+                    relay.as_str()
+                );
+                self.handle_general_error_for_acks(
+                    domain,
+                    ModelKind::Ingestor.as_str(),
+                    ingestor,
+                    &ErrorPolicies::handled_by_log(),
+                    batch.acks.iter(),
+                    reason.clone(),
+                );
+                first_error.get_or_insert(reason);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     pub(in crate::runtime) async fn dispatch_ingested_record(
         &self,
         mut dispatch: IngestDispatch<'_>,
@@ -3838,9 +3949,6 @@ impl Runtime {
                 dispatch.domain.as_str()
             ));
         };
-        let relay_schemas = execution.relay_schemas.clone();
-        let relay_registries = execution.relay_registries.clone();
-        let relay_services = execution.relay_services.clone();
         let owner_nodes = execution.materialized_stream_owner_nodes.clone();
         drop(execution);
         self.metrics
@@ -3987,142 +4095,16 @@ impl Runtime {
                     }
                 }
             };
-            let Some(schema) = relay_schemas.get(&relay).cloned() else {
-                return Err(format!(
-                    "stream '{}' schema is not instantiated in domain '{}'",
-                    relay.as_str(),
-                    dispatch.domain.as_str()
-                ));
-            };
-            let batch = RelayRecordBatch::single(schema, key, output_record, acks)?;
-            if let Some(sender) = dispatch.branched_senders.get(&relay) {
-                if let Err(error) = sender.send(batch).await {
-                    let batch = error.0;
-                    self.handle_general_error_for_acks(
-                        dispatch.domain,
-                        ModelKind::Ingestor.as_str(),
-                        dispatch.ingestor,
-                        &ErrorPolicies::handled_by_log(),
-                        batch.acks.iter(),
-                        format!(
-                            "ingestor '{}' failed to forward record to branch entrypoint for \
-                             relay '{}'",
-                            dispatch.ingestor.as_str(),
-                            relay.as_str()
-                        ),
-                    );
-                }
-                continue;
-            }
-            if let Some(branch_key) = batch.key.as_ref() {
-                self.metrics.observe_branch_node_without_stream_received(
-                    branch_key.as_str(),
-                    NodeWithoutRelayObservation {
-                        domain: dispatch.domain,
-                        kind: ModelKind::Ingestor,
-                        node: dispatch.ingestor,
-                        physical_node_id: self.local_node_id.read().as_deref(),
-                        messages: batch.message_count(),
-                        bytes: batch.estimated_bytes(),
-                        domain_timestamp: batch.domain_timestamp(),
-                    },
-                );
-            }
-            self.metrics.observe_global_node_sent(NodeBatchObservation {
-                domain: dispatch.domain,
-                kind: ModelKind::Ingestor,
-                node: dispatch.ingestor,
-                relay: &relay,
-                physical_node_id: self.local_node_id.read().as_deref(),
-                messages: batch.message_count(),
-                bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
-            });
-            self.mark_branch_aggregated_metrics_updated(
-                dispatch.domain,
-                ModelKind::Ingestor,
-                dispatch.ingestor,
+            dispatch.collector.push(
+                relay,
+                RelayMessage {
+                    key,
+                    record: output_record,
+                    acks,
+                },
             );
-            let Some(registry) = relay_registries.get(&relay) else {
-                return Err(format!(
-                    "stream '{}' is not instantiated in domain '{}'",
-                    relay.as_str(),
-                    dispatch.domain.as_str()
-                ));
-            };
-            let Some(services) = relay_services.get(&relay) else {
-                return Err(format!(
-                    "stream '{}' services are not instantiated in domain '{}'",
-                    relay.as_str(),
-                    dispatch.domain.as_str()
-                ));
-            };
-            let _ = self
-                .ingest_stream_boundary_message(dispatch.domain, &relay, registry, services, &batch)
-                .await;
         }
         Ok(())
-    }
-
-    pub(in crate::runtime) async fn select_ingested_batch_rows(
-        &self,
-        selection: IngestBatchSelection<'_>,
-    ) -> Result<HashSet<usize>, String> {
-        let Some(filter_where) = selection.filter_where else {
-            return Ok((0..selection.records.len()).collect());
-        };
-        if !filter_where.materialized_interest.relays.is_empty() {
-            return Err("ingestor FILTER WHERE cannot access materialized state".to_string());
-        }
-
-        let execution_now = self
-            .current_stream_expiration_time(selection.domain)
-            .ok()
-            .flatten()
-            .unwrap_or_else(current_timestamp);
-        let input_records = augment_runtime_records_with_lookup_hash_maps(
-            selection.records.to_vec(),
-            filter_where,
-            execution_now,
-        )
-        .await?;
-        let vm_batch = vm_typed_batch_from_runtime_records_with_metadata(
-            &input_records,
-            selection.filter_map_metadata,
-            &filter_where.compiled.input_schema,
-        )?;
-        let result = execute_program_with_selection_in_context(
-            filter_where.compiled.as_ref(),
-            &vm_batch,
-            &VmExecutionContext {
-                now: execution_now,
-                injector: Some(IngestHeaderFunctionInjector::from_metadata(
-                    selection.filter_map_metadata,
-                    vm_batch.row_count(),
-                )),
-            },
-        )
-        .await
-        .map_err(|error| format!("FILTER WHERE execution failed: {error}"))?;
-        let mut selected_rows = HashSet::default();
-        for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
-            if let Some(side_error) = result.batch.errors()[output_row].first() {
-                return Err(format!(
-                    "FILTER WHERE side error {}: {} at {}",
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
-                ));
-            }
-            if input_row >= selection.records.len() {
-                return Err(format!(
-                    "FILTER WHERE selected row {input_row} outside input batch"
-                ));
-            }
-            selected_rows.insert(input_row);
-        }
-
-        Ok(selected_rows)
     }
 
     pub(in crate::runtime) fn resolve_ingested_record_timestamp(
@@ -7027,14 +7009,15 @@ impl Runtime {
             match decode_ingested_payload(binding.codec.clone(), payload).await {
                 Ok(record) => {
                     let mut output_routes = binding.output_routes.clone();
-                    if let Err(error) = self
+                    let mut collector = IngestRouteCollector::default();
+                    let dispatch_result = self
                         .dispatch_ingested_record(IngestDispatch {
+                            collector: &mut collector,
                             domain: &binding.domain,
                             ingestor: &binding.ingestor,
                             timestamp_source: binding.timestamp_source.as_ref(),
                             output_routes: &mut output_routes,
                             filter_where: binding.filter_where.as_ref(),
-                            branched_senders: &binding.branched_senders,
                             record,
                             filter_map_metadata: Some(IngestFilterMapMetadata::from_headers(
                                 headers.clone(),
@@ -7042,8 +7025,16 @@ impl Runtime {
                             ingested_at: current_timestamp(),
                             acks: AckSet::empty(),
                         })
-                        .await
-                    {
+                        .await;
+                    let flush_result = self
+                        .flush_ingest_collector(
+                            &binding.domain,
+                            &binding.ingestor,
+                            &binding.branched_senders,
+                            &mut collector,
+                        )
+                        .await;
+                    if let Err(error) = dispatch_result.and(flush_result) {
                         let _ = self.events.send(RuntimeEvent::Error(format!(
                             "failed to dispatch {protocol} message for ingestor '{}' in domain \
                              '{}': {}",
@@ -11379,7 +11370,7 @@ impl Runtime {
                     Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
                     Self::parse_retry_policy(domain, &ingestor.name, retry_policy)?;
                 }
-                KafkaIngestMode::NoAckParallel { .. } => {}
+                KafkaIngestMode::NoAckParallel => {}
             },
             IngestSource::Mqtt { mode, .. } => match mode {
                 MqttIngestMode::AckParallel {

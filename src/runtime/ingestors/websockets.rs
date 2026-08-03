@@ -350,21 +350,25 @@ impl WebsocketsIngestor {
         match decode_ingested_payload(codec.clone(), payload).await {
             Ok(record) => {
                 let mut output_routes = output_routes.clone();
-                if let Err(error) = runtime
+                let mut collector = IngestRouteCollector::default();
+                let dispatch_result = runtime
                     .dispatch_ingested_record(IngestDispatch {
+                        collector: &mut collector,
                         domain,
                         ingestor,
                         timestamp_source,
                         output_routes: &mut output_routes,
                         filter_where,
-                        branched_senders,
                         record,
                         filter_map_metadata: None,
                         ingested_at: current_timestamp(),
                         acks: AckSet::empty(),
                     })
-                    .await
-                {
+                    .await;
+                let flush_result = runtime
+                    .flush_ingest_collector(domain, ingestor, branched_senders, &mut collector)
+                    .await;
+                if let Err(error) = dispatch_result.and(flush_result) {
                     let _ = events.send(RuntimeEvent::Error(format!(
                         "failed to dispatch websocket payload for ingestor '{}' in domain '{}': {}",
                         ingestor.as_str(),

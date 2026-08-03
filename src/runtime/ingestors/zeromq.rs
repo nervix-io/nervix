@@ -48,6 +48,7 @@ impl ZeroMqIngestor {
         let task_events = runtime.events.clone();
         let task = tokio::spawn(async move {
             let mut backoff = RuntimeReconnectBackoff::default();
+            let mut collector = IngestRouteCollector::default();
             info!(
                 domain = task_domain.as_str(),
                 ingestor = task_ingestor.as_str(),
@@ -89,10 +90,39 @@ impl ZeroMqIngestor {
                 backoff.reset();
                 loop {
                     tokio::task::consume_budget().await;
+                    let next_flush = collector.next_flush();
+                    let flush_at =
+                        next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
+                                let _ = task_runtime
+                                    .flush_ingest_collector(
+                                        &task_domain,
+                                        &task_ingestor,
+                                        &branched_senders,
+                                        &mut collector,
+                                    )
+                                    .await;
                                 break 'outer;
+                            }
+                        }
+                        _ = sleep_until(flush_at), if next_flush.is_some() => {
+                            if let Err(error) = task_runtime
+                                .flush_ingest_collector(
+                                    &task_domain,
+                                    &task_ingestor,
+                                    &branched_senders,
+                                    &mut collector,
+                                )
+                                .await
+                            {
+                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    "failed to flush messages for ingestor '{}' in domain '{}': {}",
+                                    task_ingestor.as_str(),
+                                    task_domain.as_str(),
+                                    error
+                                )));
                             }
                         }
                         frame = socket.recv() => {
@@ -115,13 +145,12 @@ impl ZeroMqIngestor {
                                             let mut output_routes = output_routes.clone();
                                             if let Err(error) = task_runtime
                                                 .dispatch_ingested_record(IngestDispatch {
+                                                    collector: &mut collector,
                                                     domain: &task_domain,
                                                     ingestor: &task_ingestor,
                                                     timestamp_source: task_timestamp_source.as_ref(),
                                                     output_routes: &mut output_routes,
                                                     filter_where: filter_where.as_ref(),
-                                                    branched_senders:
-                                                        &branched_senders,
                                                     record,
                                                     filter_map_metadata: None,
                                                     ingested_at: current_timestamp(),
@@ -135,6 +164,25 @@ impl ZeroMqIngestor {
                                                     task_domain.as_str(),
                                                     error
                                                 )));
+                                            }
+                                            if collector.len() >= INGEST_GROUP_MAX_ROWS
+                                                && let Err(error) = task_runtime
+                                                    .flush_ingest_collector(
+                                                        &task_domain,
+                                                        &task_ingestor,
+                                                        &branched_senders,
+                                                        &mut collector,
+                                                    )
+                                                    .await
+                                            {
+                                                let _ = task_events.send(RuntimeEvent::Error(
+                                                    format!(
+                                                        "failed to flush messages for ingestor '{}' in domain '{}': {}",
+                                                        task_ingestor.as_str(),
+                                                        task_domain.as_str(),
+                                                        error
+                                                    ),
+                                                ));
                                             }
                                         }
                                         Err(error) => {
@@ -154,6 +202,14 @@ impl ZeroMqIngestor {
                                     }
                                 }
                                 Err(error) => {
+                                    let _ = task_runtime
+                                        .flush_ingest_collector(
+                                            &task_domain,
+                                            &task_ingestor,
+                                            &branched_senders,
+                                            &mut collector,
+                                        )
+                                        .await;
                                     task_runtime.record_ingestor_transient_error(
                                         &task_domain,
                                         &task_ingestor,

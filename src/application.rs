@@ -9860,7 +9860,6 @@ impl SessionServiceImpl {
                 );
                 client_config.set("enable.partition.eof", "false");
                 client_config.set("enable.auto.commit", "false");
-                client_config.set("auto.offset.reset", "earliest");
                 let consumer: StreamConsumer = match client_config.create() {
                     Ok(consumer) => consumer,
                     Err(error) => {
@@ -16823,7 +16822,7 @@ mod tests {
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR notifications_ingestor FROM KAFKA kafka_main TOPIC notifications \
-             OFFSET BY CONSUMER GROUP notifications_group MODE NO_ACK PARALLEL MAX 1 DECODE USING \
+             OFFSET BY CONSUMER GROUP notifications_group MODE NO_ACK PARALLEL DECODE USING \
              notification_codec TIMESTAMP NOW TO notifications INHERIT ALL UNBRANCHED FLUSH EACH \
              100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications DEDUPLICATE ON \
@@ -16999,11 +16998,11 @@ mod tests {
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR ingest_a FROM KAFKA kafka_main TOPIC notifications_a OFFSET BY \
-             CONSUMER GROUP notifications_a_group MODE NO_ACK PARALLEL MAX 1 DECODE USING \
+             CONSUMER GROUP notifications_a_group MODE NO_ACK PARALLEL DECODE USING \
              notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED FLUSH \
              EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE INGESTOR ingest_b FROM KAFKA kafka_main TOPIC notifications_b OFFSET BY \
-             CONSUMER GROUP notifications_b_group MODE NO_ACK PARALLEL MAX 1 DECODE USING \
+             CONSUMER GROUP notifications_b_group MODE NO_ACK PARALLEL DECODE USING \
              notification_codec TIMESTAMP NOW TO notifications_b INHERIT ALL UNBRANCHED FLUSH \
              EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO \
@@ -17170,9 +17169,9 @@ mod tests {
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR inbound_ingestor FROM KAFKA kafka_main TOPIC inbound OFFSET BY \
-             CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL MAX 1 DECODE USING \
-             transaction_codec TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms \
-             MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL DECODE USING transaction_codec \
+             TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
+             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX \
              TIME 10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
              MESSAGE ERROR LOG;",

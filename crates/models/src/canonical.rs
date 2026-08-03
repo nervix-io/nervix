@@ -2358,7 +2358,7 @@ fn kafka_mode_to_nspl(mode: &KafkaIngestMode) -> String {
             "ACK SEQUENTIAL ACK TIMEOUT {timeout} RETRY POLICY {}",
             retry_policy_to_nspl(retry_policy)
         ),
-        KafkaIngestMode::NoAckParallel { max } => format!("NO_ACK PARALLEL MAX {max}"),
+        KafkaIngestMode::NoAckParallel => "NO_ACK PARALLEL".to_string(),
     }
 }
 
@@ -2370,9 +2370,9 @@ fn mqtt_mode_to_nspl(mode: &MqttIngestMode) -> String {
                 mqtt_delivery_to_nspl(*session, *qos)
             )
         }
-        MqttIngestMode::NoAckParallel { max, session, qos } => {
+        MqttIngestMode::NoAckParallel { session, qos } => {
             format!(
-                "{}MODE NO_ACK PARALLEL MAX {max}",
+                "{}MODE NO_ACK PARALLEL",
                 mqtt_delivery_to_nspl(*session, *qos)
             )
         }

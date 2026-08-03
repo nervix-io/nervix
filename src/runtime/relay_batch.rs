@@ -300,8 +300,15 @@ impl RelayRecordBatch {
             .batch()
             .columns()
             .iter()
-            .map(|column| u64::try_from(column.get_array_memory_size()).unwrap_or(u64::MAX))
-            .sum()
+            .map(|column| {
+                column
+                    .to_data()
+                    .get_slice_memory_size()
+                    .ok()
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .unwrap_or(u64::MAX)
+            })
+            .fold(0_u64, u64::saturating_add)
     }
 
     pub(super) fn ack_success(&self) {

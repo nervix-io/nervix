@@ -523,9 +523,7 @@ mod tests {
                                 max_backoff: format!("{}s", g.bounded_u64(1, 300)),
                             },
                         },
-                        _ => KafkaIngestMode::NoAckParallel {
-                            max: g.bounded_u64(1, 1024),
-                        },
+                        _ => KafkaIngestMode::NoAckParallel,
                     };
 
                     if g.bool() {
@@ -574,8 +572,8 @@ mod tests {
                                         timeout,
                                         retry_policy,
                                     },
-                                    KafkaIngestMode::NoAckParallel { max } => {
-                                        PulsarIngestMode::NoAckParallel { max }
+                                    KafkaIngestMode::NoAckParallel => {
+                                        PulsarIngestMode::NoAckParallel
                                     }
                                 },
                             },

@@ -27,7 +27,8 @@ Feature: Server ingestor scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}'
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
         };
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
@@ -92,7 +93,8 @@ Feature: Server ingestor scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}'
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
         };
         CREATE VHOST edge ws-{{test_id}}.example.com;
         CREATE ENDPOINT ws_notifications_endpoint
@@ -157,7 +159,8 @@ Feature: Server ingestor scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}'
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
         };
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
@@ -226,7 +229,8 @@ Feature: Server ingestor scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}'
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
         };
         CREATE VHOST edge ws-{{test_id}}.example.com;
         CREATE ENDPOINT ws_notifications_endpoint
