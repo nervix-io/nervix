@@ -34,7 +34,8 @@ Feature: Cordon node
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}'
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
         };
 
       CREATE INGESTOR kafka_notifications

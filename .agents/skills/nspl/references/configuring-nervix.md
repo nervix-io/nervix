@@ -142,6 +142,9 @@ relay. Do not use them to scan across branches.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   `NO_ACK`.
+- Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
+  group may need records that already exist; Nervix passes the setting through and does not supply
+  a hidden default.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts

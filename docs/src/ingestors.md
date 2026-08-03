@@ -309,6 +309,10 @@ Offset modes:
 - `CONSUMER GROUP`: Kafka manages offsets
 - `DOMAIN`: Nervix stores the next offset in replicated runtime state and commits partition-to-instance assignment in the Raft-backed domain schedule
 
+Kafka client configuration is passed through to librdkafka. Nervix does not override
+`auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
+read records that may already exist.
+
 `OFFSET BY DOMAIN` is at-least-once because crash recovery may restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 
 Offset recovery details:

@@ -53,7 +53,8 @@ Feature: Deduplicator state replication
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}'
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
         };
         CREATE EMITTER kafka_notifications FROM ss2 TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING transaction_codec
         INHERIT ALL
