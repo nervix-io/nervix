@@ -2972,7 +2972,7 @@ pub struct AlterDeduplicator {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterDeduplicatorOperation {
-    Processor(AlterProcessorOperation),
+    Processor(Box<AlterProcessorOperation>),
     SetDeduplicateOn { expressions: Vec<crate::Expression> },
     SetMaxTime { max_time: String },
 }
@@ -3089,7 +3089,7 @@ pub struct AlterReorderer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterReordererOperation {
-    Processor(AlterProcessorOperation),
+    Processor(Box<AlterProcessorOperation>),
     SetOrderBy { expressions: Vec<crate::Expression> },
     SetMaxTime { max_time: String },
 }
@@ -4509,10 +4509,12 @@ mod tests {
             .apply_alter(&AlterDeduplicator {
                 deduplicator: identifier("dedup_events"),
                 operations: vec![
-                    AlterDeduplicatorOperation::Processor(AlterProcessorOperation::AddFrom {
-                        relay: identifier("secondary"),
-                        where_clause: Some(Expression::Literal(Literal::Bool(true))),
-                    }),
+                    AlterDeduplicatorOperation::Processor(Box::new(
+                        AlterProcessorOperation::AddFrom {
+                            relay: identifier("secondary"),
+                            where_clause: Some(Expression::Literal(Literal::Bool(true))),
+                        },
+                    )),
                     AlterDeduplicatorOperation::SetDeduplicateOn {
                         expressions: vec![Expression::Literal(Literal::I64(2))],
                     },
@@ -4525,9 +4527,11 @@ mod tests {
                     AlterDeduplicatorOperation::SetMaxTime {
                         max_time: "2m".to_string(),
                     },
-                    AlterDeduplicatorOperation::Processor(AlterProcessorOperation::SetMode {
-                        mode: AckMode::Detached,
-                    }),
+                    AlterDeduplicatorOperation::Processor(Box::new(
+                        AlterProcessorOperation::SetMode {
+                            mode: AckMode::Detached,
+                        },
+                    )),
                 ],
             })
             .expect("deduplicator ALTER should apply");
@@ -4563,9 +4567,11 @@ mod tests {
                     AlterReordererOperation::SetMaxTime {
                         max_time: "2m".to_string(),
                     },
-                    AlterReordererOperation::Processor(AlterProcessorOperation::SetFilterWhere {
-                        where_clause: Expression::Literal(Literal::Bool(true)),
-                    }),
+                    AlterReordererOperation::Processor(Box::new(
+                        AlterProcessorOperation::SetFilterWhere {
+                            where_clause: Expression::Literal(Literal::Bool(true)),
+                        },
+                    )),
                 ],
             })
             .expect("reorderer ALTER should apply");
@@ -4592,9 +4598,11 @@ mod tests {
                     AlterDeduplicatorOperation::SetMaxTime {
                         max_time: "1s".to_string(),
                     },
-                    AlterDeduplicatorOperation::Processor(AlterProcessorOperation::DropRoute {
-                        relay: identifier("missing"),
-                    },),
+                    AlterDeduplicatorOperation::Processor(Box::new(
+                        AlterProcessorOperation::DropRoute {
+                            relay: identifier("missing"),
+                        },
+                    )),
                 ],
             }),
             Err(AlterDeduplicatorError::Processor(

@@ -9593,10 +9593,12 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
         &domain("default"),
         &generator,
         &output,
-        output_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
-        source_schema.arrow_schema(),
-        None,
+        super::GeneratorSetProgramSchemas {
+            output: output_schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+            source: source_schema.arrow_schema(),
+            branch: None,
+        },
         None,
     )
     .expect("generator set program must compile");

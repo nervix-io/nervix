@@ -265,6 +265,19 @@ struct ClusterEntityGate {
     nodes: Vec<String>,
 }
 
+/// One entity-gate engagement the leader asks a node to perform: the operation it belongs to, the
+/// domain relays and entities it freezes, how long the node may take, and why. The local and remote
+/// paths consume the same value, so the two cannot describe different gates.
+#[derive(Clone, Copy)]
+struct EntityGateEngagement<'a> {
+    operation_id: u64,
+    domain: &'a Domain,
+    relays: &'a [Identifier],
+    affected_entities: &'a [crate::registry::RegistryEntity],
+    deadline: tokio::time::Instant,
+    reason: &'a str,
+}
+
 struct OnnxModelMetadata {
     inputs: HashMap<String, OnnxTensorMetadata>,
     outputs: HashMap<String, OnnxTensorMetadata>,
@@ -5416,13 +5429,16 @@ impl SessionServiceImpl {
     async fn engage_entity_gate_on_node(
         &self,
         node_id: &str,
-        operation_id: u64,
-        domain: &Domain,
-        relays: &[Identifier],
-        affected_entities: &[crate::registry::RegistryEntity],
-        deadline: tokio::time::Instant,
-        reason: &str,
+        engagement: EntityGateEngagement<'_>,
     ) -> Result<(), String> {
+        let EntityGateEngagement {
+            operation_id,
+            domain,
+            relays,
+            affected_entities,
+            deadline,
+            reason,
+        } = engagement;
         if node_id == self.consensus.local_node_id() {
             return self
                 .runtime
@@ -5620,12 +5636,14 @@ impl SessionServiceImpl {
             if let Err(error) = self
                 .engage_entity_gate_on_node(
                     node,
-                    operation_id,
-                    domain,
-                    relays,
-                    affected_entities,
-                    deadline,
-                    "leader-orchestrated entity alteration",
+                    EntityGateEngagement {
+                        operation_id,
+                        domain,
+                        relays,
+                        affected_entities,
+                        deadline,
+                        reason: "leader-orchestrated entity alteration",
+                    },
                 )
                 .await
             {

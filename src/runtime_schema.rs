@@ -753,22 +753,20 @@ impl RuntimeRecordBatch {
             .fields()
             .iter()
             .enumerate()
-            .filter_map(|(column_index, field)| {
+            .map(|(column_index, field)| {
                 let field_name = field.name().clone();
                 let column = self.batch.column(column_index);
-                Some(
-                    parse_as_type_from_arrow(field.data_type())
-                        .and_then(|ty| {
-                            runtime_value_from_arrow_array(
-                                column.as_ref(),
-                                &ty,
-                                field.is_nullable(),
-                                row,
-                                &field_name,
-                            )
-                        })
-                        .map(|value| value.map(|value| (field_name, value))),
-                )
+                parse_as_type_from_arrow(field.data_type())
+                    .and_then(|ty| {
+                        runtime_value_from_arrow_array(
+                            column.as_ref(),
+                            &ty,
+                            field.is_nullable(),
+                            row,
+                            &field_name,
+                        )
+                    })
+                    .map(|value| value.map(|value| (field_name, value)))
             })
             .collect::<Result<Vec<_>, String>>()?
             .into_iter()

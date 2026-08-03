@@ -58,7 +58,7 @@ pub enum DynamicModelUpdate {
     },
     Emitter {
         emitter: Identifier,
-        config: CreateEmitter,
+        config: Box<CreateEmitter>,
     },
 }
 
@@ -1330,7 +1330,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
             ModelChangeAspect::EmitterFlushPolicy,
             DynamicModelUpdate::Emitter {
                 emitter: candidate_name.clone(),
-                config: candidate.clone(),
+                config: Box::new(candidate.clone()),
             },
         );
     }
