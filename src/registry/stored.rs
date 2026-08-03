@@ -4763,6 +4763,15 @@ mod tests {
             },
         };
 
+        let stepless = LegacyCreateSignalingProtocol {
+            name: "binance_ws".to_string(),
+            on_connect: SteplessSignalingProtocolOnConnect {
+                steps: vec![StoredSignalingStep::Send(vec!["{id: 1}".to_string()])],
+                fail_matchers: Vec::new(),
+                timeout: "5s".to_string(),
+            },
+        };
+
         for (shape, bytes) in [
             (
                 "text bodies",
@@ -4777,6 +4786,11 @@ mod tests {
             (
                 "phases without a payload acceptance marker",
                 rkyv::to_bytes::<rkyv::rancor::Error>(&phased)
+                    .expect("legacy value should serialize"),
+            ),
+            (
+                "steps without a payload acceptance marker",
+                rkyv::to_bytes::<rkyv::rancor::Error>(&stepless)
                     .expect("legacy value should serialize"),
             ),
         ] {
