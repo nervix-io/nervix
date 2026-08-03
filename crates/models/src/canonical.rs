@@ -1632,7 +1632,8 @@ impl CreateWasmProcessor {
             .map(|version| format!(" VERSION {version}"))
             .unwrap_or_default();
         Ok(format!(
-            "CREATE {} WASM PROCESSOR {} FROM {}{} USING RESOURCE {}{} FILE {} {}{}{} {};",
+            "CREATE {} WASM PROCESSOR {} FROM {}{} USING RESOURCE {}{} FILE {} MAX FUEL {} MAX \
+             MEMORY {}B {}{}{} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             processor_inputs_to_nspl(&self.from)?,
@@ -1640,6 +1641,8 @@ impl CreateWasmProcessor {
             self.resource.as_str(),
             version,
             string_literal(&self.file)?,
+            self.limits.max_fuel,
+            self.limits.max_memory_bytes,
             branch_selection_to_nspl(&self.branched_by),
             materialized_state_dependencies_suffix(&self.materialized_state)?,
             processor_outputs_to_nspl(&self.output_routes)?,
@@ -3358,8 +3361,8 @@ mod tests {
             "CREATE SIGNALING PROTOCOL orders_ws FORMAT PROTOBUF USING RESOURCE proto_bundle \
              VERSION 2 CONFIG {'file' = 'signaling.proto'} SEND MESSAGE 'nervix.test.Subscribe' \
              WAIT MESSAGE 'nervix.test.Ack' FAIL JAQ '.error' ON CONNECT SEND JAQ '{id: 1}' WAIT \
-             JAQ '.authed' FAIL JAQ '.denied' CAPTURE '{token: .token}' ACCEPT DATA SEND JAQ '{id: \
-             2, token: $state.token}' WAIT JAQ '.id == 2' TIMEOUT 5s;"
+             JAQ '.authed' FAIL JAQ '.denied' CAPTURE '{token: .token}' ACCEPT DATA SEND JAQ \
+             '{id: 2, token: $state.token}' WAIT JAQ '.id == 2' TIMEOUT 5s;"
         );
 
         let codec = CreateCodec {

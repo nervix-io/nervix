@@ -2217,12 +2217,19 @@ pub struct CreateWasmProcessor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_version: Option<u64>,
     pub file: String,
+    pub limits: WasmProcessorLimits,
     pub global_error_policy: GeneralErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_where: Option<crate::Expression>,
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmProcessorLimits {
+    pub max_fuel: u64,
+    pub max_memory_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

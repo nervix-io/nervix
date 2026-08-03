@@ -149,6 +149,7 @@ pub(super) enum BranchedProcessorOperationSpec {
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
+        limits: nervix_models::WasmProcessorLimits,
     },
 }
 
@@ -295,6 +296,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
+        limits: nervix_models::WasmProcessorLimits,
         compiled: Option<WasmCompiledBranchProcessor>,
     },
 }
@@ -426,6 +428,7 @@ pub(super) enum RelayProcessorOperationNode {
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
+        limits: nervix_models::WasmProcessorLimits,
         compiled: Option<WasmCompiledBranchProcessor>,
         instance: Option<Box<WasmBranchInstance>>,
         replicated_state: Arc<ReplicatedWasmProcessorState>,
@@ -921,6 +924,7 @@ pub(super) struct WasmFlushContext<'a> {
     pub(super) resource: &'a Identifier,
     pub(super) resource_version: Option<u64>,
     pub(super) file: &'a str,
+    pub(super) limits: nervix_models::WasmProcessorLimits,
     pub(super) replicated_state: &'a ReplicatedWasmProcessorState,
 }
 

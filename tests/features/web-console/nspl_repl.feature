@@ -1115,7 +1115,7 @@ Feature: Web console NSPL REPL
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT raw_events_endpoint ON edge PATH '/raw' TYPE HTTP;
       CREATE INGESTOR ingest_events FROM ENDPOINT raw_events_endpoint MODE NO_ACK SEQUENTIAL DECODE USING event_codec TO raw_events INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_events FROM raw_events USING RESOURCE wasm_filter VERSION 1 FILE 'processors/filter_even.wasm' UNBRANCHED TO filtered_events SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_events FROM raw_events USING RESOURCE wasm_filter VERSION 1 FILE 'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO filtered_events SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"

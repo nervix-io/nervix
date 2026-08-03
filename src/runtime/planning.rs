@@ -337,6 +337,7 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         resource: processor.resource.clone(),
                         resource_version: processor.resource_version,
                         file: processor.file.clone(),
+                        limits: processor.limits,
                     },
                 };
                 processors.push(processor_node_spec(spec, &processor.branched_by, &branches));
@@ -755,11 +756,13 @@ fn materialize_nodes(
                     resource,
                     resource_version,
                     file,
+                    limits,
                 } => RelayProcessorOperationTemplate::WasmProcessor {
                     output_routes: materialize_outputs(output_routes)?,
                     resource: resource.clone(),
                     resource_version: *resource_version,
                     file: file.clone(),
+                    limits: *limits,
                     compiled: None,
                 },
             },

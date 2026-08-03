@@ -7124,6 +7124,10 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                     resource: identifier("filter_resource"),
                     resource_version: None,
                     file: "filter.wasm".to_string(),
+                    limits: nervix_models::WasmProcessorLimits {
+                        max_fuel: 1_000_000_000,
+                        max_memory_bytes: 64 * 1024 * 1024,
+                    },
                     global_error_policy: GeneralErrorPolicy::Ignore,
                     mode: AckMode::Attached,
                     filter_where: None,

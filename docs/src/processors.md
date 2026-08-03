@@ -335,6 +335,8 @@ CREATE WASM PROCESSOR normalize_events
   FROM events
   USING RESOURCE normalizer VERSION 1
   FILE "processor.wasm"
+  MAX FUEL 1000000000
+  MAX MEMORY 64MiB
   BRANCHED BY by_tenant
   TO normalized_events
     SET tenant = tenant,
@@ -345,7 +347,11 @@ CREATE WASM PROCESSOR normalize_events
 ```
 
 Generated guest state is immutable across routes. WASM processors do not declare `FLUSH`; guest
-output and guest-requested timeouts own emission cadence.
+output and guest-requested timeouts own emission cadence. `MAX FUEL` and `MAX MEMORY` are both
+required, in that order immediately after `FILE`. Fuel bounds one logical guest operation, while
+memory bounds the branch instance's Wasmtime linear memory. See
+[WASM Processor Guests](wasm-processor-guests.md#execution-limits) for exact accounting and
+failure behavior.
 
 ## Correlator
 

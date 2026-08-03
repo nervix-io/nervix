@@ -86,8 +86,9 @@ pub use statement::{
     ShowRelayMaterializedState, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect,
     SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsIngestMode,
     StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
-    SubscriptionLiteral, UncordonNode, UploadResource, VhostTlsResource, WebsocketsConfigEntry,
-    WebsocketsIngestMode, WindowBound, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    SubscriptionLiteral, UncordonNode, UploadResource, VhostTlsResource, WasmProcessorLimits,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, ZeroMqConfigEntry, ZeroMqIngestMode,
+    default_relay_buffer,
 };
 pub use timestamp::Timestamp;
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

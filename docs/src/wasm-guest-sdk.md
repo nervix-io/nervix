@@ -223,6 +223,8 @@ CREATE WASM PROCESSOR normalize_events
   FROM events
   USING RESOURCE normalizer VERSION 1
   FILE "processor.wasm"
+  MAX FUEL 1000000000
+  MAX MEMORY 64MiB
   BRANCHED BY by_tenant
   TO normalized_events
     SET tenant = tenant,
