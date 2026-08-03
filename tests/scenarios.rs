@@ -11321,8 +11321,11 @@ async fn run_scenarios() -> Option<String> {
                 }
             })
         })
-        .fail_on_skipped()
         .with_writer(writer)
+        // Must wrap the configured writer, not precede it: `with_writer` replaces the writer it is
+        // given, so calling this first silently discards the guard and lets an unmatched step skip
+        // its scenario while the suite still reports green.
+        .fail_on_skipped()
         .run(SCENARIOS_PATH)
         .await;
 
