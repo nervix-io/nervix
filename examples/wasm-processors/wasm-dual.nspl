@@ -77,6 +77,8 @@ CREATE WASM PROCESSOR rust_filter_even_rows
   FROM raw_metrics
   USING RESOURCE rust_wasm_filter VERSION 1
   FILE 'nervix_wasm_processor_rust_guest.wasm'
+  MAX FUEL 1000000000
+  MAX MEMORY 64MiB
   UNBRANCHED
   TO rust_filtered_metrics SET value = value ON MESSAGE ERROR LOG
   TO rust_positive_metrics SET value = value WHERE output.value > 0 AS I32 ON MESSAGE ERROR LOG
@@ -86,6 +88,8 @@ CREATE WASM PROCESSOR go_filter_even_rows
   FROM rust_filtered_metrics
   USING RESOURCE go_wasm_filter VERSION 1
   FILE 'nervix_wasm_processor_go_guest.wasm'
+  MAX FUEL 1000000000
+  MAX MEMORY 64MiB
   UNBRANCHED
   TO go_filtered_metrics SET value = value ON MESSAGE ERROR LOG
   TO go_positive_metrics SET value = value WHERE output.value > 0 AS I32 ON MESSAGE ERROR LOG

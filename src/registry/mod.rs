@@ -1681,6 +1681,25 @@ impl DomainState {
                     )?;
                 }
                 Model::WasmProcessor(processor) => {
+                    if processor.limits.max_fuel == 0 {
+                        return Err(Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: "WASM processor MAX FUEL must be greater than zero".to_string(),
+                        }));
+                    }
+                    if processor.limits.max_memory_bytes == 0
+                        || usize::try_from(processor.limits.max_memory_bytes).is_err()
+                    {
+                        return Err(Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: format!(
+                                "WASM processor MAX MEMORY {} bytes is not supported on this node",
+                                processor.limits.max_memory_bytes
+                            ),
+                        }));
+                    }
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -10032,6 +10051,10 @@ mod tests {
             resource: identifier("wasm_filter"),
             resource_version: Some(1),
             file: "processors/filter_even.wasm".to_string(),
+            limits: nervix_models::WasmProcessorLimits {
+                max_fuel: 1_000_000_000,
+                max_memory_bytes: 64 * 1024 * 1024,
+            },
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
             filter_where: None,
@@ -11213,6 +11236,7 @@ mod tests {
               FILTER WHERE input.value >= 0
               USING RESOURCE wasm_filter VERSION 1
               FILE 'processors/filter_even.wasm'
+              MAX FUEL 1000000000 MAX MEMORY 64MiB
               UNBRANCHED
               TO even_metrics
                 SET value = value, source = source
@@ -11364,6 +11388,7 @@ mod tests {
               FROM raw_metrics
               USING RESOURCE wasm_filter VERSION 1
               FILE 'processors/filter_even.wasm'
+              MAX FUEL 1000000000 MAX MEMORY 64MiB
               UNBRANCHED
               TO projected_metrics SET value = value ON MESSAGE ERROR LOG
               TO projected_metrics SET value = value WHERE value >= 0 ON MESSAGE ERROR LOG

@@ -142,7 +142,8 @@ relay. Do not use them to scan across branches.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts
-  `nervix_process_batch(ptr, size)`, and validates that exact range against its reusable buffer.
+  `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
+  declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`.
 - Paced ingestors declare their timestamp source.
 - External sensitive values use the required explicit leakage operation.
 - Transactions queue multiple server statements, while only consecutive one-domain model-mutation

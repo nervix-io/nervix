@@ -11,15 +11,15 @@ use std::{
 
 use bytes::Bytes;
 use flatbuffers::{Allocator, FlatBufferBuilder};
-use nervix_models::{ParseAsType, Timestamp};
+use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
 use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use triomphe::Arc;
 use wasmtime::{
-    Caller, Config, Engine, Instance, InstancePre, Linker, Memory, Module, OptLevel, Store,
-    TypedFunc,
+    Caller, Config, Engine, Instance, InstancePre, Linker, Memory, Module, OptLevel,
+    ResourceLimiter, Store, Trap, TypedFunc,
 };
 
 const ENV_MODULE: &str = "env";
@@ -43,6 +43,28 @@ pub enum WasmProcessorError {
     Link(#[source] wasmtime::Error),
     #[error("failed to instantiate wasm module: {0}")]
     Instantiate(#[source] wasmtime::Error),
+    #[error("MAX FUEL must be greater than zero")]
+    InvalidMaxFuel,
+    #[error("MAX MEMORY {limit} bytes is not supported on this host")]
+    InvalidMaxMemory { limit: u64 },
+    #[error("failed to reset MAX FUEL {limit} before {operation}: {source}")]
+    ResetFuel {
+        limit: u64,
+        operation: &'static str,
+        #[source]
+        source: wasmtime::Error,
+    },
+    #[error("wasm guest exhausted MAX FUEL {limit} during {operation}")]
+    FuelExhausted { limit: u64, operation: &'static str },
+    #[error(
+        "wasm guest exceeded MAX MEMORY {limit} bytes during {operation} (linear-memory total \
+         would be {desired} bytes)"
+    )]
+    MemoryLimitExceeded {
+        limit: u64,
+        desired: u64,
+        operation: &'static str,
+    },
     #[error("missing required export '{0}'")]
     MissingExport(&'static str),
     #[error("failed to call wasm export '{name}': {source}")]
@@ -78,6 +100,117 @@ pub enum WasmProcessorError {
     InvalidGuestGlobalError(#[source] std::string::FromUtf8Error),
     #[error("guest buffer size {size} exceeds configured limit {limit}")]
     GuestBufferTooLarge { size: usize, limit: usize },
+}
+
+impl WasmProcessorError {
+    pub fn is_resource_limit_exceeded(&self) -> bool {
+        matches!(
+            self,
+            Self::FuelExhausted { .. } | Self::MemoryLimitExceeded { .. }
+        )
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("guest linear memory total of {desired} bytes exceeds {limit} bytes")]
+struct GuestMemoryLimitExceeded {
+    desired: usize,
+    limit: usize,
+}
+
+#[derive(Debug)]
+struct GuestMemoryLimiter {
+    max_memory_bytes: usize,
+    allocated_memory_bytes: usize,
+    pending_growth_bytes: usize,
+}
+
+impl GuestMemoryLimiter {
+    fn new(max_memory_bytes: usize) -> Self {
+        Self {
+            max_memory_bytes,
+            allocated_memory_bytes: 0,
+            pending_growth_bytes: 0,
+        }
+    }
+}
+
+impl ResourceLimiter for GuestMemoryLimiter {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        // Wasmtime calls `memory_grow_failed` synchronously after a permitted growth fails. If
+        // another growth begins, the preceding one therefore succeeded and needs no rollback.
+        self.pending_growth_bytes = 0;
+        let growth_bytes = desired.saturating_sub(current);
+        let desired_total = self.allocated_memory_bytes.saturating_add(growth_bytes);
+        if desired_total > self.max_memory_bytes {
+            Err(wasmtime::Error::new(GuestMemoryLimitExceeded {
+                desired: desired_total,
+                limit: self.max_memory_bytes,
+            }))
+        } else {
+            self.allocated_memory_bytes = desired_total;
+            self.pending_growth_bytes = growth_bytes;
+            Ok(true)
+        }
+    }
+
+    fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.allocated_memory_bytes = self
+            .allocated_memory_bytes
+            .saturating_sub(self.pending_growth_bytes);
+        self.pending_growth_bytes = 0;
+        Ok(())
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(true)
+    }
+}
+
+fn wasm_limit_error(
+    limits: WasmProcessorLimits,
+    operation: &'static str,
+    source: &wasmtime::Error,
+) -> Option<WasmProcessorError> {
+    if source.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) {
+        return Some(WasmProcessorError::FuelExhausted {
+            limit: limits.max_fuel,
+            operation,
+        });
+    }
+    source
+        .downcast_ref::<GuestMemoryLimitExceeded>()
+        .map(|exceeded| WasmProcessorError::MemoryLimitExceeded {
+            limit: u64::try_from(exceeded.limit).unwrap_or(u64::MAX),
+            desired: u64::try_from(exceeded.desired).unwrap_or(u64::MAX),
+            operation,
+        })
+}
+
+fn wasm_call_error(
+    limits: WasmProcessorLimits,
+    name: &'static str,
+    source: wasmtime::Error,
+) -> WasmProcessorError {
+    wasm_limit_error(limits, name, &source).unwrap_or(WasmProcessorError::Call { name, source })
+}
+
+fn wasm_instantiate_error(
+    limits: WasmProcessorLimits,
+    source: wasmtime::Error,
+) -> WasmProcessorError {
+    wasm_limit_error(limits, "module instantiation", &source)
+        .unwrap_or(WasmProcessorError::Instantiate(source))
 }
 
 enum GuestBufferAllocator<'a> {
@@ -169,6 +302,7 @@ pub struct WasmRuntime {
 impl WasmRuntime {
     pub fn new(config: WasmRuntimeConfig) -> Result<Self, WasmProcessorError> {
         let mut wasmtime_config = Config::new();
+        wasmtime_config.consume_fuel(true);
         wasmtime_config.epoch_interruption(true);
         // Runtime instances already compile independently on blocking workers. Letting each
         // Cranelift invocation fan out across the global CPU pool can starve Raft and Tokio
@@ -932,6 +1066,7 @@ impl WasmRoutedOutput {
 
 struct BranchStore {
     clock: Box<dyn DomainClock>,
+    memory_limiter: GuestMemoryLimiter,
     timeout_requests: Vec<WasmTimeoutRequest>,
     next_timeout_handle: i64,
     emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
@@ -940,10 +1075,12 @@ struct BranchStore {
 impl BranchStore {
     fn new(
         clock: Box<dyn DomainClock>,
+        max_memory_bytes: usize,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Self {
         Self {
             clock,
+            memory_limiter: GuestMemoryLimiter::new(max_memory_bytes),
             timeout_requests: Vec::new(),
             next_timeout_handle: 1,
             emitted_batch_sender,
@@ -982,31 +1119,57 @@ pub struct CompiledWasmProcessor {
 impl CompiledWasmProcessor {
     pub async fn instantiate_branch(
         &self,
+        limits: WasmProcessorLimits,
         init: WasmBranchInit,
         clock: Box<dyn DomainClock>,
         restored_state: Option<&[u8]>,
     ) -> Result<WasmBranchInstance, WasmProcessorError> {
-        self.instantiate_branch_with_emitter(init, clock, restored_state, None)
+        self.instantiate_branch_with_emitter(limits, init, clock, restored_state, None)
             .await
     }
 
     pub async fn instantiate_branch_with_emitter(
         &self,
+        limits: WasmProcessorLimits,
         init: WasmBranchInit,
         clock: Box<dyn DomainClock>,
         restored_state: Option<&[u8]>,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Result<WasmBranchInstance, WasmProcessorError> {
-        let mut store = Store::new(&self.engine, BranchStore::new(clock, emitted_batch_sender));
+        if limits.max_fuel == 0 {
+            return Err(WasmProcessorError::InvalidMaxFuel);
+        }
+        let max_memory_bytes = usize::try_from(limits.max_memory_bytes).map_err(|_| {
+            WasmProcessorError::InvalidMaxMemory {
+                limit: limits.max_memory_bytes,
+            }
+        })?;
+        if max_memory_bytes == 0 {
+            return Err(WasmProcessorError::InvalidMaxMemory {
+                limit: limits.max_memory_bytes,
+            });
+        }
+        let mut store = Store::new(
+            &self.engine,
+            BranchStore::new(clock, max_memory_bytes, emitted_batch_sender),
+        );
+        store.limiter(|state| &mut state.memory_limiter);
+        store
+            .set_fuel(limits.max_fuel)
+            .map_err(|source| WasmProcessorError::ResetFuel {
+                limit: limits.max_fuel,
+                operation: "module instantiation",
+                source,
+            })?;
         store.set_epoch_deadline(self.epoch_deadline_ticks);
         store.epoch_deadline_async_yield_and_update(self.epoch_deadline_ticks);
         let instance = self
             .instance_pre
             .instantiate_async(&mut store)
             .await
-            .map_err(WasmProcessorError::Instantiate)?;
+            .map_err(|source| wasm_instantiate_error(limits, source))?;
         let mut branch =
-            WasmBranchInstance::load_exports(store, instance, self.max_guest_buffer_bytes)?;
+            WasmBranchInstance::load_exports(store, instance, self.max_guest_buffer_bytes, limits)?;
         branch.init(init).await?;
         if let Some(restored_state) = restored_state {
             branch.load_state(restored_state).await?;
@@ -1032,6 +1195,7 @@ pub struct WasmBranchInstance {
     global_error: Option<WasmGlobalErrorExports>,
     guest_buffer_capacity: usize,
     max_guest_buffer_bytes: usize,
+    limits: WasmProcessorLimits,
 }
 
 struct WasmGlobalErrorExports {
@@ -1051,6 +1215,7 @@ impl WasmBranchInstance {
         mut store: Store<BranchStore>,
         instance: Instance,
         max_guest_buffer_bytes: usize,
+        limits: WasmProcessorLimits,
     ) -> Result<Self, WasmProcessorError> {
         let memory = instance
             .get_memory(&mut store, EXPORT_MEMORY)
@@ -1074,12 +1239,24 @@ impl WasmBranchInstance {
             global_error: optional_global_error_exports(&mut store, &instance)?,
             guest_buffer_capacity: 0,
             max_guest_buffer_bytes,
+            limits,
             store,
             memory,
         })
     }
 
+    fn begin_operation(&mut self, operation: &'static str) -> Result<(), WasmProcessorError> {
+        self.store
+            .set_fuel(self.limits.max_fuel)
+            .map_err(|source| WasmProcessorError::ResetFuel {
+                limit: self.limits.max_fuel,
+                operation,
+                source,
+            })
+    }
+
     pub async fn init(&mut self, init: WasmBranchInit) -> Result<(), WasmProcessorError> {
+        self.begin_operation("initialization")?;
         let capacity_hint = init.serialized_capacity_hint();
         let encoding = init.to_protocol();
         let (ptr, size) = self
@@ -1089,21 +1266,18 @@ impl WasmBranchInstance {
             .init
             .call_async(&mut self.store, (ptr, size))
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_init",
-                source,
-            })?;
+            .map_err(|source| wasm_call_error(self.limits, "nervix_init", source))?;
         ensure_success("nervix_init", code)
     }
 
     pub async fn current_domain_time(&mut self) -> Result<Timestamp, WasmProcessorError> {
+        self.begin_operation("domain-time read")?;
         let nanos = self
             .current_domain_time_nanos
             .call_async(&mut self.store, ())
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_current_domain_time_nanos",
-                source,
+            .map_err(|source| {
+                wasm_call_error(self.limits, "nervix_current_domain_time_nanos", source)
             })?;
         Ok(Timestamp::from_unix_nanos(nanos))
     }
@@ -1120,6 +1294,7 @@ impl WasmBranchInstance {
         &mut self,
         envelope: &WasmEnvelope,
     ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
+        self.begin_operation("batch processing")?;
         let (ptr, size) = self.write_envelope_to_guest(envelope).await?;
         let call_result = self
             .process_batch
@@ -1128,13 +1303,14 @@ impl WasmBranchInstance {
         let code = match call_result {
             Ok(code) => code,
             Err(source) => {
+                if let Some(error) = wasm_limit_error(self.limits, "nervix_process_batch", &source)
+                {
+                    return Err(error);
+                }
                 if let Some(reason) = self.take_global_error().await? {
                     return Err(WasmProcessorError::GuestGlobalError(reason));
                 }
-                return Err(WasmProcessorError::Call {
-                    name: "nervix_process_batch",
-                    source,
-                });
+                return Err(wasm_call_error(self.limits, "nervix_process_batch", source));
             }
         };
         if let Some(reason) = self.take_global_error().await? {
@@ -1151,6 +1327,7 @@ impl WasmBranchInstance {
         &mut self,
         handle: WasmTimeoutHandle,
     ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
+        self.begin_operation("timeout callback")?;
         let call_result = self
             .on_timeout
             .call_async(&mut self.store, handle.raw())
@@ -1158,13 +1335,13 @@ impl WasmBranchInstance {
         let code = match call_result {
             Ok(code) => code,
             Err(source) => {
+                if let Some(error) = wasm_limit_error(self.limits, "nervix_on_timeout", &source) {
+                    return Err(error);
+                }
                 if let Some(reason) = self.take_global_error().await? {
                     return Err(WasmProcessorError::GuestGlobalError(reason));
                 }
-                return Err(WasmProcessorError::Call {
-                    name: "nervix_on_timeout",
-                    source,
-                });
+                return Err(wasm_call_error(self.limits, "nervix_on_timeout", source));
             }
         };
         if let Some(reason) = self.take_global_error().await? {
@@ -1181,17 +1358,18 @@ impl WasmBranchInstance {
     /// branch. Returns the output envelopes the guest emitted, which the caller must dispatch
     /// before snapshotting so a handoff neither loses nor duplicates them.
     pub async fn flush(&mut self) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
+        self.begin_operation("flush")?;
         let call_result = self.flush.call_async(&mut self.store, ()).await;
         let code = match call_result {
             Ok(code) => code,
             Err(source) => {
+                if let Some(error) = wasm_limit_error(self.limits, "nervix_flush", &source) {
+                    return Err(error);
+                }
                 if let Some(reason) = self.take_global_error().await? {
                     return Err(WasmProcessorError::GuestGlobalError(reason));
                 }
-                return Err(WasmProcessorError::Call {
-                    name: "nervix_flush",
-                    source,
-                });
+                return Err(wasm_call_error(self.limits, "nervix_flush", source));
             }
         };
         if let Some(reason) = self.take_global_error().await? {
@@ -1202,39 +1380,33 @@ impl WasmBranchInstance {
     }
 
     pub async fn save_state(&mut self) -> Result<Vec<u8>, WasmProcessorError> {
+        self.begin_operation("state snapshot")?;
         let size = self
             .dump_state
             .call_async(&mut self.store, ())
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_dump_state",
-                source,
-            })?;
+            .map_err(|source| wasm_call_error(self.limits, "nervix_dump_state", source))?;
         self.read_guest_buffer(size).await
     }
 
     pub async fn load_state(&mut self, state: &[u8]) -> Result<(), WasmProcessorError> {
+        self.begin_operation("state restore")?;
         let (ptr, size) = self.write_to_guest_buffer(state).await?;
         let code = self
             .load_state
             .call_async(&mut self.store, (ptr, size))
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_load_state",
-                source,
-            })?;
+            .map_err(|source| wasm_call_error(self.limits, "nervix_load_state", source))?;
         ensure_success("nervix_load_state", code)
     }
 
     pub async fn reset_state(&mut self) -> Result<(), WasmProcessorError> {
+        self.begin_operation("state reset")?;
         let code = self
             .reset_state
             .call_async(&mut self.store, ())
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_reset_state",
-                source,
-            })?;
+            .map_err(|source| wasm_call_error(self.limits, "nervix_reset_state", source))?;
         ensure_success("nervix_reset_state", code)
     }
 
@@ -1264,7 +1436,7 @@ impl WasmBranchInstance {
         due
     }
 
-    pub async fn take_global_error(&mut self) -> Result<Option<String>, WasmProcessorError> {
+    async fn take_global_error(&mut self) -> Result<Option<String>, WasmProcessorError> {
         let Some(exports) = &self.global_error else {
             return Ok(None);
         };
@@ -1272,10 +1444,7 @@ impl WasmBranchInstance {
             .len
             .call_async(&mut self.store, ())
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_global_error_len",
-                source,
-            })?;
+            .map_err(|source| wasm_call_error(self.limits, "nervix_global_error_len", source))?;
         if size == 0 {
             return Ok(None);
         }
@@ -1290,10 +1459,7 @@ impl WasmBranchInstance {
             .ptr
             .call_async(&mut self.store, ())
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_global_error_ptr",
-                source,
-            })?;
+            .map_err(|source| wasm_call_error(self.limits, "nervix_global_error_ptr", source))?;
         let ptr = usize::try_from(ptr).map_err(|_| WasmProcessorError::InvalidOffset(ptr))?;
         let mut bytes = vec![0; size];
         self.memory
@@ -1303,10 +1469,7 @@ impl WasmBranchInstance {
             .clear
             .call_async(&mut self.store, ())
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_clear_global_error",
-                source,
-            })?;
+            .map_err(|source| wasm_call_error(self.limits, "nervix_clear_global_error", source))?;
         ensure_success("nervix_clear_global_error", code)?;
         let reason =
             String::from_utf8(bytes).map_err(WasmProcessorError::InvalidGuestGlobalError)?;
@@ -1420,10 +1583,7 @@ impl WasmBranchInstance {
             .alloc
             .call_async(&mut self.store, size)
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_alloc",
-                source,
-            })?;
+            .map_err(|source| wasm_call_error(self.limits, "nervix_alloc", source))?;
         if ptr < 0 {
             return Err(WasmProcessorError::GuestError {
                 name: "nervix_alloc",
@@ -1458,10 +1618,7 @@ impl WasmBranchInstance {
             .buffer_ptr
             .call_async(&mut self.store, ())
             .await
-            .map_err(|source| WasmProcessorError::Call {
-                name: "nervix_buffer_ptr",
-                source,
-            })?;
+            .map_err(|source| wasm_call_error(self.limits, "nervix_buffer_ptr", source))?;
         let ptr = usize::try_from(ptr).map_err(|_| WasmProcessorError::InvalidOffset(ptr))?;
         let mut out = vec![0; size];
         self.memory
@@ -1477,10 +1634,7 @@ impl WasmBranchInstance {
                 .read_emit
                 .call_async(&mut self.store, ())
                 .await
-                .map_err(|source| WasmProcessorError::Call {
-                    name: "nervix_read_emit",
-                    source,
-                })?;
+                .map_err(|source| wasm_call_error(self.limits, "nervix_read_emit", source))?;
             if size == 0 {
                 break;
             }
@@ -1770,6 +1924,29 @@ mod tests {
         )
     "#;
 
+    const MEMORY_GROWING_WASM: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (memory 1)
+            (global $read_ptr (mut i32) (i32.const 1024))
+            (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
+            (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+            (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+            (func (export "nervix_process_batch") (param i32 i32) (result i32)
+                i32.const 1
+                memory.grow 1
+                drop
+                i32.const 0)
+            (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+            (func (export "nervix_flush") (result i32) i32.const 0)
+            (func (export "nervix_read_emit") (result i32) i32.const 0)
+            (func (export "nervix_dump_state") (result i32) i32.const 0)
+            (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+            (func (export "nervix_reset_state") (result i32) i32.const 0)
+        )
+    "#;
+
     fn init() -> WasmBranchInit {
         WasmBranchInit {
             domain_name: "events".to_string(),
@@ -1993,6 +2170,7 @@ mod tests {
             .expect("module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2170,6 +2348,13 @@ mod tests {
         WasmRuntime::new(WasmRuntimeConfig::default()).expect("runtime must initialize")
     }
 
+    fn limits() -> WasmProcessorLimits {
+        WasmProcessorLimits {
+            max_fuel: 1_000_000_000,
+            max_memory_bytes: 64 * 1024 * 1024,
+        }
+    }
+
     #[tokio::test]
     async fn load_state_rejection_is_reported() {
         let wasm = r#"
@@ -2195,6 +2380,7 @@ mod tests {
             .expect("module should compile");
         let error = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 Some(b"bad state"),
@@ -2255,6 +2441,7 @@ mod tests {
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2285,6 +2472,7 @@ mod tests {
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2315,6 +2503,7 @@ mod tests {
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2345,6 +2534,7 @@ mod tests {
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2375,6 +2565,7 @@ mod tests {
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2420,6 +2611,7 @@ mod tests {
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2474,6 +2666,7 @@ mod tests {
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2500,6 +2693,7 @@ mod tests {
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -2541,6 +2735,7 @@ mod tests {
             .expect("module should compile");
         let error = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2578,6 +2773,7 @@ mod tests {
             .expect("module should compile");
         let error = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
                 None,
@@ -2630,6 +2826,7 @@ mod tests {
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -2698,6 +2895,7 @@ mod tests {
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 string_passthrough_init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -2760,6 +2958,7 @@ mod tests {
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 shared_generated_init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -2828,6 +3027,7 @@ mod tests {
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -2898,6 +3098,7 @@ mod tests {
 
         let mut flushed_branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -2924,6 +3125,7 @@ mod tests {
 
         let mut stranded_branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -2941,6 +3143,7 @@ mod tests {
 
         let mut resumed = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(2_345))),
                 Some(&drained_snapshot),
@@ -2960,6 +3163,7 @@ mod tests {
 
         let mut resumed_without_flush = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(2_345))),
                 Some(&stranded_snapshot),
@@ -2988,6 +3192,7 @@ mod tests {
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -3038,6 +3243,7 @@ mod tests {
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -3087,6 +3293,7 @@ mod tests {
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -3143,6 +3350,7 @@ mod tests {
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
@@ -3167,6 +3375,7 @@ mod tests {
 
         let mut restored = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_678))),
                 Some(&state),
@@ -3214,11 +3423,11 @@ mod tests {
         let right_clock = FixedDomainClock::new(Timestamp::from_unix_nanos(200));
 
         let mut left = compiled
-            .instantiate_branch(init(), Box::new(left_clock.clone()), None)
+            .instantiate_branch(limits(), init(), Box::new(left_clock.clone()), None)
             .await
             .expect("left branch must instantiate");
         let mut right = compiled
-            .instantiate_branch(init(), Box::new(right_clock.clone()), None)
+            .instantiate_branch(limits(), init(), Box::new(right_clock.clone()), None)
             .await
             .expect("right branch must instantiate");
 
@@ -3267,7 +3476,7 @@ mod tests {
             .expect("module must compile");
         let clock = FixedDomainClock::new(Timestamp::from_unix_nanos(700));
         let mut branch = compiled
-            .instantiate_branch(init(), Box::new(clock.clone()), None)
+            .instantiate_branch(limits(), init(), Box::new(clock.clone()), None)
             .await
             .expect("branch must instantiate");
         branch
@@ -3278,7 +3487,7 @@ mod tests {
 
         clock.set(Timestamp::from_unix_nanos(900));
         let mut restored = compiled
-            .instantiate_branch(init(), Box::new(clock), Some(&state))
+            .instantiate_branch(limits(), init(), Box::new(clock), Some(&state))
             .await
             .expect("restored branch must instantiate");
         let restored_state = restored.save_state().await.expect("state must dump");
@@ -3297,6 +3506,7 @@ mod tests {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut branch = compiled
             .instantiate_branch_with_emitter(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
                 None,
@@ -3357,6 +3567,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn max_fuel_traps_a_cpu_bound_guest() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(CPU_BOUND_WASM)
+            .await
+            .expect("module must compile");
+        let configured_limits = WasmProcessorLimits {
+            max_fuel: 1_000,
+            max_memory_bytes: 64 * 1024 * 1024,
+        };
+        let mut branch = compiled
+            .instantiate_branch(
+                configured_limits,
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                None,
+            )
+            .await
+            .expect("branch must instantiate");
+
+        let error = branch
+            .process_batch(b"cpu")
+            .await
+            .expect_err("CPU-bound guest must exhaust its fuel budget");
+
+        assert!(matches!(
+            error,
+            WasmProcessorError::FuelExhausted {
+                limit: 1_000,
+                operation: "nervix_process_batch"
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn max_fuel_is_reset_for_each_logical_guest_operation() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(TEST_WASM)
+            .await
+            .expect("module must compile");
+        let configured_limits = WasmProcessorLimits {
+            max_fuel: 10_000,
+            max_memory_bytes: 64 * 1024 * 1024,
+        };
+        let mut branch = compiled
+            .instantiate_branch(
+                configured_limits,
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                None,
+            )
+            .await
+            .expect("branch must instantiate");
+
+        branch
+            .process_batch(b"first")
+            .await
+            .expect("first operation must fit its fuel budget");
+        let first_remaining = branch.store.get_fuel().expect("fuel must be enabled");
+        branch
+            .process_batch(b"second")
+            .await
+            .expect("second operation must receive a fresh fuel budget");
+        let second_remaining = branch.store.get_fuel().expect("fuel must be enabled");
+
+        assert!(first_remaining < configured_limits.max_fuel);
+        assert_eq!(second_remaining, first_remaining);
+    }
+
+    #[tokio::test]
+    async fn max_memory_traps_guest_linear_memory_growth() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(MEMORY_GROWING_WASM)
+            .await
+            .expect("module must compile");
+        let configured_limits = WasmProcessorLimits {
+            max_fuel: 100_000,
+            max_memory_bytes: 128 * 1024,
+        };
+        let mut branch = compiled
+            .instantiate_branch(
+                configured_limits,
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                None,
+            )
+            .await
+            .expect("two-page branch must instantiate at its total memory limit");
+
+        let error = branch
+            .process_batch(b"grow")
+            .await
+            .expect_err("guest memory growth must exceed MAX MEMORY");
+
+        assert!(matches!(
+            error,
+            WasmProcessorError::MemoryLimitExceeded {
+                limit: 131_072,
+                desired: 196_608,
+                operation: "nervix_process_batch"
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn max_memory_rejects_guest_initial_linear_memory() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(MEMORY_GROWING_WASM)
+            .await
+            .expect("module must compile");
+        let configured_limits = WasmProcessorLimits {
+            max_fuel: 100_000,
+            max_memory_bytes: 64 * 1024,
+        };
+
+        let error = compiled
+            .instantiate_branch(
+                configured_limits,
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                None,
+            )
+            .await
+            .expect_err("two initial pages must exceed MAX MEMORY");
+
+        assert!(matches!(
+            error,
+            WasmProcessorError::MemoryLimitExceeded {
+                limit: 65_536,
+                desired: 131_072,
+                operation: "module instantiation"
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn epoch_driver_yields_cpu_bound_guest_to_async_executor() {
         let runtime = WasmRuntime::new(WasmRuntimeConfig {
             optimize: true,
@@ -3371,6 +3720,7 @@ mod tests {
             .expect("module must compile");
         let mut branch = compiled
             .instantiate_branch(
+                limits(),
                 init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
                 None,

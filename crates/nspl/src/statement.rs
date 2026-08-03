@@ -2009,8 +2009,8 @@ mod tests {
              } OUTPUT SCHEMA { \"score\" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = \
              score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
             "CREATE WASM PROCESSOR filter_even FROM raw USING RESOURCE wasm_filter VERSION 1 FILE \
-             'processors/filter_even.wasm' UNBRANCHED TO projected ON MESSAGE ERROR LOG ON GLOBAL \
-             ERROR LOG;",
+             'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO \
+             projected ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;",
         ] {
             parse_statement(statement).unwrap_or_else(|error| {
                 panic!("statement should parse: {statement}\n{error:?}");
@@ -2517,6 +2517,30 @@ mod tests {
             panic!("expected create statement");
         };
         let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::Create(parsed), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_wasm_processor_preserves_exact_limits() {
+        let input = r#"
+            CREATE WASM PROCESSOR normalize_events
+                FROM events
+                USING RESOURCE normalizer VERSION 1
+                FILE "processor.wasm"
+                MAX FUEL 1000000
+                MAX MEMORY 64MiB
+                UNBRANCHED
+                TO normalized_events ON MESSAGE ERROR LOG
+                ON GLOBAL ERROR LOG;
+        "#;
+
+        let parsed = parse_statement(input).expect("parse should succeed");
+        let Statement::Create(parsed) = parsed else {
+            panic!("expected create statement");
+        };
+        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        assert!(canonical.contains("MAX FUEL 1000000 MAX MEMORY 67108864B"));
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::Create(parsed), reparsed);
     }

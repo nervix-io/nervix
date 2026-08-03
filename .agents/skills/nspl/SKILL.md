@@ -22,8 +22,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Source and sink: connector kinds, externally provisioned entity names, endpoints, delivery/ACK
   expectations, ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit.
-- Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference, WASM,
-  correlation, materialized state, lookup, generation, or repartitioning.
+- Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
+  WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
+  repartitioning.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
   subscriptions, and whether an existing schema must be evolved atomically with its dependents.
 
@@ -109,6 +110,9 @@ per-route branch selection, while generator route bodies remain set-only.
   route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
   one-message batch guarantee. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by
   the guest.
+- Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
+  MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
+  branch guest's Wasmtime linear memory.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.

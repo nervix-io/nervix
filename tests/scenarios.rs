@@ -2096,6 +2096,25 @@ async fn given_node_has_trapping_wasm_processor_fixture_resource_directory(
     .await;
 }
 
+#[given(
+    expr = "node {string} has {string} limit-exhausting WASM processor fixture resource directory \
+            {string}"
+)]
+async fn given_node_has_limit_exhausting_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    limit: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        limit_exhausting_wasm_fixture(&limit, "limited_events"),
+    )
+    .await;
+}
+
 async fn place_generated_wasm_processor_fixture(
     world: &mut ScenarioWorld,
     node_id: &str,
@@ -2240,6 +2259,95 @@ fn trapping_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_reset_state") (result i32) (i32.const 0))
     )"#
+}
+
+fn limit_exhausting_wasm_fixture(limit: &str, output_relay: &str) -> Vec<u8> {
+    let encoded = WasmEnvelope::output(
+        Vec::new(),
+        vec![WasmRoutedOutput::new(
+            output_relay,
+            vec![
+                WasmOutputColumnRef::uninitialized(),
+                WasmOutputColumnRef::uninitialized(),
+            ],
+            WasmAckSidecar {
+                rows: vec![WasmOutputRow::default()],
+                ..WasmAckSidecar::default()
+            },
+        )],
+    )
+    .encode()
+    .expect("limit-exhausting WASM output fixture must encode");
+    let encoded_wat = encoded
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let encoded_len = encoded.len();
+    let failure = match limit {
+        "fuel" => {
+            r#"
+            loop $spin
+              br $spin
+            end
+        "#
+        }
+        "memory" => {
+            r#"
+            i32.const 1
+            memory.grow
+            drop
+        "#
+        }
+        other => panic!("unsupported WASM limit fixture '{other}'"),
+    };
+
+    format!(
+        r#"(module
+          (memory (export "memory") 1)
+          (global $emitted (mut i32) (i32.const 0))
+          (global $read_ptr (mut i32) (i32.const 0))
+          (data (i32.const 32768) "{encoded_wat}")
+          (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
+          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
+          (func (export "nervix_buffer_capacity") (result i32) (i32.const 65536))
+          (func (export "nervix_alloc") (param i32) (result i32)
+            i32.const 0
+            global.set $read_ptr
+            i32.const 0)
+          (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
+          (func (export "nervix_process_batch") (param i32) (param $size i32) (result i32)
+            local.get $size
+            i32.const 2048
+            i32.gt_u
+            if
+              {failure}
+            end
+            i32.const 1
+            global.set $emitted
+            i32.const 0)
+          (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+          (func (export "nervix_flush") (result i32) (i32.const 0))
+          (func (export "nervix_read_emit") (result i32)
+            global.get $emitted
+            if (result i32)
+              i32.const 0
+              global.set $emitted
+              i32.const 32768
+              global.set $read_ptr
+              i32.const {encoded_len}
+            else
+              i32.const 0
+            end)
+          (func (export "nervix_dump_state") (result i32) (i32.const 0))
+          (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_reset_state") (result i32)
+            i32.const 0
+            global.set $emitted
+            i32.const 0)
+        )"#
+    )
+    .into_bytes()
 }
 
 fn ensure_onnx_runtime_loaded() {
@@ -8685,6 +8793,35 @@ async fn when_large_http_payload_is_posted(
         .publish_http("node-1", &host, &path, &payload)
         .await
         .expect("failed to post large http payload");
+}
+
+#[when(
+    expr = "http payload for tenant {string} with a {int} byte message is posted to host {string} \
+            path {string}"
+)]
+async fn when_large_tenant_http_payload_is_posted(
+    world: &mut ScenarioWorld,
+    tenant: String,
+    message_size: usize,
+    host: String,
+    path: String,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = serde_json::json!({
+        "tenant": tenant,
+        "message": "x".repeat(message_size),
+    })
+    .to_string();
+    append_cucumber_log_line(&format!(
+        "http publish large tenant payload: node=node-1 host={host} path={path} \
+         message_size={message_size}"
+    ));
+    world
+        .cluster()
+        .publish_http("node-1", &host, &path, &payload)
+        .await
+        .expect("failed to post large tenant http payload");
 }
 
 #[when(expr = "http payloads are posted concurrently to host {string} path {string}")]
