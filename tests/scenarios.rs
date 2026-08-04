@@ -8560,6 +8560,29 @@ async fn when_nats_message_is_published(
         .expect("failed to publish nats message");
 }
 
+#[when(expr = "{int} sequential NATS messages are published to subject {string}")]
+async fn when_sequential_nats_messages_are_published(
+    world: &mut ScenarioWorld,
+    count: usize,
+    subject: String,
+    #[step] step: &Step,
+) {
+    let subject = expand_placeholders(world, &subject);
+    let template = expand_placeholders(world, docstring(step));
+    assert!(
+        template.contains("{{sequence}}"),
+        "sequential NATS payload template must contain {{{{sequence}}}}"
+    );
+    let payloads = (1..=count)
+        .map(|sequence| template.replace("{{sequence}}", &sequence.to_string()))
+        .collect::<Vec<_>>();
+    world
+        .cluster()
+        .publish_nats_payloads(&subject, &payloads)
+        .await
+        .expect("failed to publish sequential nats messages");
+}
+
 #[when("ZeroMQ message is published")]
 async fn when_zeromq_message_is_published(world: &mut ScenarioWorld, #[step] step: &Step) {
     let payload = expand_placeholders(world, docstring(step));
@@ -11078,6 +11101,91 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
             }
         }
     }
+}
+
+#[then(
+    expr = "within {string} the observed broker receives {int} messages in sequence by field \
+            {string} with headers"
+)]
+async fn then_observed_broker_receives_sequential_messages_with_headers(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+    field: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let expected_headers = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split_once('=').unwrap_or_else(|| {
+                panic!("expected broker header assertion '{line}' to use name=value")
+            })
+        })
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect::<Vec<_>>();
+    assert!(
+        !expected_headers.is_empty(),
+        "sequential broker assertion must include at least one header"
+    );
+
+    let deadline = Instant::now() + duration;
+    for expected_sequence in 1..=count {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out after receiving {} of {count} sequential broker messages",
+            expected_sequence - 1
+        );
+        let message = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
+            .try_next_message(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for sequential broker message")
+            .unwrap_or_else(|| {
+                panic!("timed out waiting for broker message {expected_sequence} of {count}")
+            });
+        let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
+            .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}"));
+        let actual_sequence = payload
+            .get(&field)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| {
+                panic!(
+                    "broker payload field '{field}' is not an unsigned integer: {}",
+                    message.payload
+                )
+            });
+        assert_eq!(
+            actual_sequence,
+            u64::try_from(expected_sequence).expect("expected sequence must fit u64"),
+            "broker messages were duplicated, lost, or reordered"
+        );
+        assert_eq!(
+            message.headers, expected_headers,
+            "broker message {expected_sequence} headers changed"
+        );
+        world.last_broker_payload = Some(message.payload);
+        world.last_broker_headers = message.headers;
+    }
+
+    let duplicate = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion")
+        .try_next_message(Duration::from_millis(500))
+        .await
+        .expect("failed while checking for a duplicate broker message");
+    assert!(
+        duplicate.is_none(),
+        "observed a duplicate broker message after the expected sequence: {duplicate:?}"
+    );
 }
 
 #[then(expr = "the observed broker does not receive a payload within {string}")]

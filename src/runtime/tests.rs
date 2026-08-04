@@ -8847,7 +8847,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     let batch =
         super::RelayRecordBatch::from_messages(input_schema, messages).expect("batch must build");
 
-    let plan = super::plan_emitter_filter_map_messages(
+    let plan = super::plan_emitter_filter_map_batch(
         &emitter.name,
         &program,
         batch,
@@ -8857,9 +8857,15 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     .await
     .expect("emitter filter-map must execute");
 
-    assert_eq!(plan.messages.len(), 1);
+    let output = plan
+        .batch
+        .expect("selected emitter output must remain a batch");
+    assert_eq!(output.batch.batch().num_rows(), 1);
+    let output_record = output
+        .runtime_record(0)
+        .expect("test may inspect the selected output row");
     assert_eq!(
-        plan.messages[0].record.value("normalized"),
+        output_record.value("normalized"),
         Some(&RuntimeValue::String("fast-lane".to_string()))
     );
     assert_eq!(

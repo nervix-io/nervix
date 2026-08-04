@@ -902,6 +902,14 @@ impl Cluster {
         publish_nats(&self.dependencies, subject, payload).await
     }
 
+    pub(crate) async fn publish_nats_payloads(
+        &self,
+        subject: &str,
+        payloads: &[String],
+    ) -> io::Result<()> {
+        publish_nats_payloads(&self.dependencies, subject, payloads).await
+    }
+
     pub(crate) async fn publish_nats_with_headers(
         &self,
         subject: &str,
@@ -2269,8 +2277,17 @@ impl BrokerObserver {
         &mut self,
         duration: Duration,
     ) -> io::Result<Option<String>> {
+        self.try_next_message(duration)
+            .await
+            .map(|message| message.map(|message| message.payload))
+    }
+
+    pub(crate) async fn try_next_message(
+        &mut self,
+        duration: Duration,
+    ) -> io::Result<Option<BrokerMessage>> {
         match timeout(duration, self.payload_rx.recv()).await {
-            Ok(Some(message)) => Ok(Some(message.payload)),
+            Ok(Some(message)) => Ok(Some(message)),
             Ok(None) => Err(io::Error::other(
                 "broker observer closed before delivering payload",
             )),
@@ -3452,6 +3469,23 @@ async fn publish_nats(
     Ok(())
 }
 
+async fn publish_nats_payloads(
+    dependencies: &DependencyEndpoints,
+    subject: &str,
+    payloads: &[String],
+) -> io::Result<()> {
+    let client = nats_client(dependencies).await?;
+    let subject = async_nats::Subject::from(subject.to_string());
+    for payload in payloads {
+        tokio::task::consume_budget().await;
+        client
+            .publish(subject.clone(), payload.as_bytes().to_vec().into())
+            .await
+            .map_err(io::Error::other)?;
+    }
+    client.flush().await.map_err(io::Error::other)
+}
+
 async fn publish_nats_with_headers(
     dependencies: &DependencyEndpoints,
     subject: &str,
@@ -3855,10 +3889,30 @@ async fn observe_nats(
     let (payload_tx, payload_rx) = mpsc::channel(1);
 
     let task = tokio::spawn(async move {
-        if let Some(message) = subscriber.next().await {
+        while let Some(message) = subscriber.next().await {
             tokio::task::consume_budget().await;
             let payload = String::from_utf8_lossy(message.payload.as_ref()).to_string();
-            let _ = payload_tx.send(BrokerMessage::payload(payload)).await;
+            let headers = message
+                .headers
+                .as_ref()
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .flat_map(|(name, values)| {
+                            values
+                                .iter()
+                                .map(|value| (name.to_string(), value.as_str().to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if payload_tx
+                .send(BrokerMessage { payload, headers })
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     });
 

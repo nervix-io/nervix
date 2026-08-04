@@ -29,7 +29,7 @@ use arrow_select::{
 use chrono::{TimeDelta, TimeZone, Utc};
 use dashmap::DashMap;
 use fjall::Database;
-use futures_util::stream::FuturesUnordered;
+use futures_util::stream::{FuturesOrdered, FuturesUnordered};
 use nervix_interconnect::{
     Envelope, RelayPayload, RelayPayloadKind, Transport, TransportMode as InterconnectTransportMode,
 };
@@ -114,7 +114,7 @@ use crate::{
         CodecError, CompiledCodec, CompiledSchema, DecodedRecord, ProtobufDescriptorPool,
         RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
         compile_codec_with_protobuf, compile_schema, decode_with_codec, decode_with_codec_owned,
-        encode_with_codec, parse_as_type_from_arrow, runtime_value_from_arrow_array,
+        parse_as_type_from_arrow, runtime_value_from_arrow_array,
     },
 };
 
@@ -1880,6 +1880,34 @@ impl RuntimeReconnectBackoff {
                 changed = shutdown_rx.changed() => {
                     return !(changed.is_err() || *shutdown_rx.borrow());
                 }
+                _ = sleep(remaining.min(Duration::from_millis(100))) => {}
+            }
+        }
+    }
+
+    pub(in crate::runtime) async fn wait_with_ack_alive_or_change(
+        &mut self,
+        shutdown_rx: &mut watch::Receiver<bool>,
+        acks: &AckSet,
+        change_rx: &mut watch::Receiver<u64>,
+    ) -> bool {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(self.max);
+        let deadline = Instant::now() + delay;
+        loop {
+            tokio::task::consume_budget().await;
+            acks.ack_alive();
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return true;
+            }
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    return !(changed.is_err() || *shutdown_rx.borrow());
+                }
+                _ = change_rx.changed() => return true,
                 _ = sleep(remaining.min(Duration::from_millis(100))) => {}
             }
         }
@@ -12280,43 +12308,26 @@ async fn plan_filter_map_messages(
 }
 
 struct EmitterFilterMapPlan {
-    messages: Vec<RelayMessage>,
+    batch: Option<RelayRecordBatch>,
     headers: Vec<EmitterHeaders>,
     message_errors: Vec<PlannedMessageError>,
 }
 
-async fn plan_emitter_filter_map_messages(
+async fn plan_emitter_filter_map_batch(
     emitter: &Identifier,
     program: &CompiledEmitterFilterMapProgram,
-    batch: RelayRecordBatch,
+    mut input: RelayRecordBatch,
     execution_now: Timestamp,
     side_inputs: &HashMap<String, RuntimeValue>,
 ) -> Result<EmitterFilterMapPlan, PlannedGeneralError> {
-    let source_records = batch
-        .runtime_records()
-        .map_err(|error| PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: format!(
-                "emitter '{}' failed to materialize its node-local input rows: {}",
-                emitter.as_str(),
-                error
-            ),
-        })?;
-    let RelayRecordBatch {
-        key: _,
-        keys,
-        batch: carrier,
-        metadata: _,
-        acks,
-        ..
-    } = batch;
+    let acks = std::mem::take(&mut input.acks);
     let body_result = execute_filter_map_program_on_batch(
         "emitter",
         emitter,
         &program.body,
         FilterMapBatchInputs {
-            carrier: &carrier,
-            keys: &keys,
+            carrier: &input.batch,
+            keys: &input.keys,
             side_inputs,
         },
         execution_now,
@@ -12338,18 +12349,31 @@ async fn plan_emitter_filter_map_messages(
         }
     }
 
-    let mut messages = Vec::new();
+    let mut successful_output_rows = Vec::new();
+    let mut successful_input_rows = Vec::new();
     let mut headers = Vec::new();
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in body_result.selected_rows.iter().enumerate() {
+        let source_record = |context: &str| {
+            input
+                .runtime_record(input_row)
+                .map_err(|error| PlannedGeneralError {
+                    acks: acks.clone(),
+                    reason: format!(
+                        "emitter '{}' failed to materialize {context} input row: {error}",
+                        emitter.as_str()
+                    ),
+                })
+        };
         if let Some(side_error) = body_result.batch.errors()[output_row].first() {
+            let source_record = source_record("FILTER-MAP error")?;
             let partial_output = program
                 .codec_route
                 .then(|| {
                     vm_partial_output_row_to_runtime_record(
                         &body_result.batch,
                         output_row,
-                        source_records[input_row].metadata().clone(),
+                        source_record.metadata().clone(),
                     )
                     .ok()
                 })
@@ -12363,8 +12387,8 @@ async fn plan_emitter_filter_map_messages(
             );
             message_errors.push(planned_structured_message_error(
                 RelayMessage {
-                    key: keys[input_row].clone(),
-                    record: source_records[input_row].clone(),
+                    key: input.keys[input_row].clone(),
+                    record: source_record,
                     acks: std::mem::take(&mut acks[input_row]),
                 },
                 program.body.structured_side_error(
@@ -12385,21 +12409,22 @@ async fn plan_emitter_filter_map_messages(
             match emitter_headers_from_invocations(&body_result.invocations, output_row) {
                 Ok(headers) => headers,
                 Err(error) => {
+                    let source_record = source_record("FILTER-MAP header error")?;
                     let partial_output = program
                         .codec_route
                         .then(|| {
                             vm_partial_output_row_to_runtime_record(
                                 &body_result.batch,
                                 output_row,
-                                source_records[input_row].metadata().clone(),
+                                source_record.metadata().clone(),
                             )
                             .ok()
                         })
                         .flatten();
                     message_errors.push(planned_structured_message_error(
                         RelayMessage {
-                            key: keys[input_row].clone(),
-                            record: source_records[input_row].clone(),
+                            key: input.keys[input_row].clone(),
+                            record: source_record,
                             acks: std::mem::take(&mut acks[input_row]),
                         },
                         structured_message_error(
@@ -12419,57 +12444,92 @@ async fn plan_emitter_filter_map_messages(
                     continue;
                 }
             };
-        let record = match vm_output_row_to_decoded_record(&body_result.batch, output_row) {
-            Ok(record) => record.into_runtime_record(source_records[input_row].metadata().clone()),
-            Err(error) => {
-                let partial_output = program
-                    .codec_route
-                    .then(|| {
-                        vm_partial_output_row_to_runtime_record(
-                            &body_result.batch,
-                            output_row,
-                            source_records[input_row].metadata().clone(),
-                        )
-                        .ok()
-                    })
-                    .flatten();
-                message_errors.push(planned_structured_message_error(
-                    RelayMessage {
-                        key: keys[input_row].clone(),
-                        record: source_records[input_row].clone(),
-                        acks: std::mem::take(&mut acks[input_row]),
-                    },
-                    structured_message_error(
-                        MessageErrorCode::Validation,
-                        format!(
-                            "emitter '{}' failed to materialize FILTER-MAP output row: {}",
-                            emitter.as_str(),
-                            error
-                        ),
-                        if program.codec_route {
-                            MessageErrorOperation::Finalize
-                        } else {
-                            MessageErrorOperation::Values
-                        },
-                        None,
-                        invalid_output_fields(&body_result.batch, output_row),
+        let invalid_fields = invalid_output_fields(&body_result.batch, output_row);
+        if !invalid_fields.is_empty() {
+            let source_record = source_record("FILTER-MAP validation error")?;
+            let partial_output = program
+                .codec_route
+                .then(|| {
+                    vm_partial_output_row_to_runtime_record(
+                        &body_result.batch,
+                        output_row,
+                        source_record.metadata().clone(),
+                    )
+                    .ok()
+                })
+                .flatten();
+            message_errors.push(planned_structured_message_error(
+                RelayMessage {
+                    key: input.keys[input_row].clone(),
+                    record: source_record,
+                    acks: std::mem::take(&mut acks[input_row]),
+                },
+                structured_message_error(
+                    MessageErrorCode::Validation,
+                    format!(
+                        "emitter '{}' FILTER-MAP output row has uninitialized required fields",
+                        emitter.as_str()
                     ),
-                    partial_output,
-                    state_snapshot.clone(),
-                ));
-                continue;
-            }
-        };
-        messages.push(RelayMessage {
-            key: keys[input_row].clone(),
-            record,
-            acks: std::mem::take(&mut acks[input_row]),
-        });
+                    if program.codec_route {
+                        MessageErrorOperation::Finalize
+                    } else {
+                        MessageErrorOperation::Values
+                    },
+                    None,
+                    invalid_fields,
+                ),
+                partial_output,
+                state_snapshot.clone(),
+            ));
+            continue;
+        }
+        successful_output_rows.push(output_row);
+        successful_input_rows.push(input_row);
         headers.push(message_headers);
     }
 
+    let batch = if successful_output_rows.is_empty() {
+        None
+    } else {
+        let output_batch = vm_typed_batch_selected_rows_to_runtime_batch(
+            &body_result.batch,
+            &successful_output_rows,
+        )
+        .map_err(|error| PlannedGeneralError {
+            acks: acks.clone(),
+            reason: format!(
+                "emitter '{}' failed to finalize FILTER-MAP output batch: {error}",
+                emitter.as_str()
+            ),
+        })?;
+        let metadata = successful_input_rows
+            .iter()
+            .map(|input_row| input.metadata[*input_row].clone())
+            .collect::<Vec<_>>();
+        let output_acks = successful_input_rows
+            .iter()
+            .map(|input_row| std::mem::take(&mut acks[*input_row]))
+            .collect::<Vec<_>>();
+        let error_acks = output_acks.clone();
+        Some(
+            RelayRecordBatch::from_filtered_parts(
+                input.key.clone(),
+                output_batch,
+                metadata,
+                output_acks,
+            )
+            .map_err(|error| PlannedGeneralError {
+                acks: error_acks,
+                reason: format!(
+                    "emitter '{}' failed to build FILTER-MAP output batch: {error}",
+                    emitter.as_str()
+                ),
+            })?,
+        )
+    };
+
     Ok(EmitterFilterMapPlan {
-        messages,
+        batch,
         headers,
         message_errors,
     })
@@ -18416,23 +18476,6 @@ async fn decode_ingested_payload_owned(
         .map_err(|error| CodecError::InvalidCodec {
             codec: codec_name,
             reason: format!("blocking decode task failed: {error}"),
-        })?
-}
-
-async fn encode_emitted_payload(
-    codec: Arc<CompiledCodec>,
-    record: RuntimeRecord,
-) -> Result<Vec<u8>, CodecError> {
-    if !codec.requires_blocking_encode() {
-        return encode_with_codec(&codec, &record);
-    }
-
-    let codec_name = codec.name.as_str().to_string();
-    tokio::task::spawn_blocking(move || encode_with_codec(&codec, &record))
-        .await
-        .map_err(|error| CodecError::InvalidCodec {
-            codec: codec_name,
-            reason: format!("blocking encode task failed: {error}"),
         })?
 }
 

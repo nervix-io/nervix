@@ -50,13 +50,16 @@ impl ZeroMqEmitter {
             .unwrap_or(false)
     }
 
-    pub(in crate::runtime) async fn publish(&mut self, payload: &[u8]) -> EmitterRuntimeResult<()> {
+    pub(in crate::runtime) async fn publish(
+        &mut self,
+        payload: Vec<u8>,
+    ) -> EmitterRuntimeResult<()> {
         let Some(socket) = self.socket.as_mut() else {
             return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
                 .attach_printable("no initialized zeromq sink client"));
         };
         socket
-            .send(payload.to_vec().into())
+            .send(payload.into())
             .await
             .map_err(emitter_publish_error)
     }

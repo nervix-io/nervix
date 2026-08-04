@@ -36,6 +36,10 @@ use sentry::SentryEmitter;
 use sqs::SqsEmitter;
 use zeromq::ZeroMqEmitter;
 
+const ENCODE_CHUNK_ROWS: usize = 1_024;
+const BLOCKING_ENCODE_CHUNKS: usize = 2;
+const PUBLISH_IN_FLIGHT: usize = 256;
+
 pub(in crate::runtime) struct EmitterTask;
 
 #[derive(Clone)]
@@ -64,7 +68,6 @@ struct EmitterBatchContext<'a> {
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
     materialized_stream_owner_nodes: &'a HashMap<Identifier, Option<String>>,
-    schema: Arc<CompiledSchema>,
 }
 
 #[derive(Clone)]
@@ -957,12 +960,16 @@ impl SinkEmitter {
                     Err(error) => Self::missing_after_emitter_init_error("redis", context, &error),
                 }
             }
-            (EmitSink::Mqtt { .. }, Some(Model::ClientMqtt(client)), _) => {
-                Self::from_result("mqtt", context, MqttEmitter::new(client, resolved, context))
-                    .map(Self::Mqtt)
+            (EmitSink::Mqtt { topic, .. }, Some(Model::ClientMqtt(client)), _) => {
+                Self::from_result(
+                    "mqtt",
+                    context,
+                    MqttEmitter::new(client, resolved, topic, context),
+                )
+                .map(Self::Mqtt)
             }
-            (EmitSink::Nats { .. }, Some(Model::ClientNats(client)), _) => {
-                match NatsEmitter::new(client, resolved).await {
+            (EmitSink::Nats { subject, .. }, Some(Model::ClientNats(client)), _) => {
+                match NatsEmitter::new(client, resolved, subject).await {
                     Ok(emitter) => Self::Nats(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("nats", context, &error),
                 }
@@ -973,8 +980,8 @@ impl SinkEmitter {
                     Err(error) => Self::missing_after_emitter_init_error("zeromq", context, &error),
                 }
             }
-            (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client)), _) => {
-                match SqsEmitter::new(client, resolved).await {
+            (EmitSink::Sqs { queue, .. }, Some(Model::ClientSqs(client)), _) => {
+                match SqsEmitter::new(client, resolved, queue).await {
                     Ok(emitter) => Self::Sqs(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("sqs", context, &error),
                 }
@@ -1331,6 +1338,7 @@ impl SinkEmitter {
         match (&mut *self, sink) {
             (Self::ClickHouse(emitter), EmitSink::ClickHouse { table, values, .. }) => {
                 for batch in batches {
+                    tokio::task::consume_budget().await;
                     emitter.publish_batch(table, values, &batch.batch).await?;
                 }
                 return Ok(());
@@ -1345,6 +1353,7 @@ impl SinkEmitter {
                 },
             ) => {
                 for batch in batches {
+                    tokio::task::consume_budget().await;
                     emitter
                         .publish_batch(table, values, conflict_action, &batch.batch)
                         .await?;
@@ -1361,6 +1370,7 @@ impl SinkEmitter {
                 },
             ) => {
                 for batch in batches {
+                    tokio::task::consume_budget().await;
                     emitter
                         .publish_batch(table, values, conflict_action, &batch.batch)
                         .await?;
@@ -1377,6 +1387,7 @@ impl SinkEmitter {
                 },
             ) => {
                 for batch in batches {
+                    tokio::task::consume_budget().await;
                     emitter
                         .publish_batch(collection, values, conflict_action, &batch.batch)
                         .await?;
@@ -1391,84 +1402,182 @@ impl SinkEmitter {
                 .attach_printable("encoded emitter has no compiled codec"));
         };
         for batch in batches {
-            let records = batch.batch.runtime_records().map_err(|error| {
-                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                    "emitter '{}' failed to materialize codec input rows: {error}",
-                    context.emitter.as_str()
-                ))
-            })?;
-            for ((record, key), headers) in records
-                .iter()
-                .zip(batch.batch.keys.iter())
-                .zip(batch.headers.iter())
-            {
-                let payload = encode_emitted_payload(codec.clone(), record.clone())
-                    .await
-                    .map_err(|error| {
-                        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                            "emitter '{}' failed to encode message: {error}",
-                            context.emitter.as_str()
-                        ))
-                    })?;
-                self.publish_encoded_payload(sink, key, record, &payload, headers)
-                    .await?;
-                trace!(
-                    domain = context.domain.as_str(),
-                    emitter = context.emitter.as_str(),
-                    key = branch_key_display(key),
-                    payload = String::from_utf8_lossy(&payload).to_string(),
-                    "emitter published message"
-                );
-            }
+            tokio::task::consume_budget().await;
+            self.publish_encoded_batch(sink, context, codec.clone(), batch)
+                .await?;
         }
         Ok(())
     }
 
-    async fn publish_encoded_payload(
+    async fn publish_encoded_batch(
         &mut self,
         sink: &EmitSink,
-        key: &Option<BranchKey>,
-        record: &RuntimeRecord,
-        payload: &[u8],
-        headers: &EmitterHeaders,
+        context: &EmitterSinkContext,
+        codec: Arc<CompiledCodec>,
+        batch: &EmitterPublishBatch,
     ) -> EmitterRuntimeResult<()> {
-        match (self, sink) {
+        let row_count = batch.batch.batch.batch().num_rows();
+        if batch.batch.keys.len() != row_count || batch.headers.len() != row_count {
+            return Err(
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "emitter '{}' encoded batch row, branch key, and header counts differ",
+                    context.emitter.as_str()
+                )),
+            );
+        }
+        if codec.requires_blocking_encode() {
+            return self
+                .publish_blocking_encoded_batch(sink, context, codec, batch, row_count)
+                .await;
+        }
+
+        for start in (0..row_count).step_by(ENCODE_CHUNK_ROWS) {
+            tokio::task::consume_budget().await;
+            let end = start.saturating_add(ENCODE_CHUNK_ROWS).min(row_count);
+            let payloads = codec
+                .encode_batch(&batch.batch.batch, start..end)
+                .map_err(|error| Self::encode_batch_error(context, error))?;
+            self.publish_encoded_chunk(sink, context, batch, start, payloads)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_blocking_encoded_batch(
+        &mut self,
+        sink: &EmitSink,
+        context: &EmitterSinkContext,
+        codec: Arc<CompiledCodec>,
+        batch: &EmitterPublishBatch,
+        row_count: usize,
+    ) -> EmitterRuntimeResult<()> {
+        let (encoded_tx, mut encoded_rx) = mpsc::channel(BLOCKING_ENCODE_CHUNKS);
+        let arrow_batch = batch.batch.batch.clone();
+        let codec_name = codec.name.as_str().to_string();
+        let encoder = tokio::task::spawn_blocking(move || {
+            for start in (0..row_count).step_by(ENCODE_CHUNK_ROWS) {
+                let end = start.saturating_add(ENCODE_CHUNK_ROWS).min(row_count);
+                let payloads = codec.encode_batch(&arrow_batch, start..end);
+                let failed = payloads.is_err();
+                if encoded_tx.blocking_send((start, payloads)).is_err() || failed {
+                    break;
+                }
+            }
+        });
+
+        while let Some((start, payloads)) = encoded_rx.recv().await {
+            tokio::task::consume_budget().await;
+            let payloads = match payloads {
+                Ok(payloads) => payloads,
+                Err(error) => {
+                    drop(encoded_rx);
+                    let _ = encoder.await;
+                    return Err(Self::encode_batch_error(context, error));
+                }
+            };
+            if let Err(error) = self
+                .publish_encoded_chunk(sink, context, batch, start, payloads)
+                .await
+            {
+                drop(encoded_rx);
+                let _ = encoder.await;
+                return Err(error);
+            }
+        }
+        encoder.await.map_err(|error| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "emitter '{}' blocking codec task for '{}' failed: {error}",
+                context.emitter.as_str(),
+                codec_name
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn encode_batch_error(
+        context: &EmitterSinkContext,
+        error: CodecError,
+    ) -> Report<EmitterRuntimeError> {
+        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+            "emitter '{}' failed to encode columnar batch: {error}",
+            context.emitter.as_str()
+        ))
+    }
+
+    async fn publish_encoded_chunk(
+        &mut self,
+        sink: &EmitSink,
+        context: &EmitterSinkContext,
+        batch: &EmitterPublishBatch,
+        start: usize,
+        payloads: Vec<Vec<u8>>,
+    ) -> EmitterRuntimeResult<()> {
+        let message_count = payloads.len();
+        let end = start.saturating_add(message_count);
+        let keys = batch.batch.keys.get(start..end).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch)
+                .attach_printable("encoded payload range is outside emitter branch keys")
+        })?;
+        let headers = batch.headers.get(start..end).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch)
+                .attach_printable("encoded payload range is outside emitter headers")
+        })?;
+
+        match (&mut *self, sink) {
             (Self::Kafka(emitter), EmitSink::Kafka { topic, .. }) => {
-                let message = RelayMessage {
-                    key: key.clone(),
-                    record: record.clone(),
-                    acks: AckSet::empty(),
-                };
-                emitter.publish(topic, &message, payload, headers).await
+                emitter
+                    .publish_chunk(topic, keys, payloads, headers, PUBLISH_IN_FLIGHT)
+                    .await?;
             }
             (Self::Pulsar(emitter), EmitSink::Pulsar { .. }) => {
-                let message = RelayMessage {
-                    key: key.clone(),
-                    record: record.clone(),
-                    acks: AckSet::empty(),
-                };
-                emitter.publish(&message, payload, headers).await
+                emitter
+                    .publish_chunk(keys, payloads, headers, PUBLISH_IN_FLIGHT)
+                    .await?;
             }
             (Self::RabbitMq(emitter), EmitSink::RabbitMq { queue, .. }) => {
-                emitter.publish(queue, payload, headers).await
+                emitter
+                    .publish_chunk(queue, payloads, headers, PUBLISH_IN_FLIGHT)
+                    .await?;
             }
             (Self::Redis(emitter), EmitSink::Redis { channel, .. }) => {
-                emitter.publish(channel, payload).await
+                emitter.publish_chunk(channel, payloads).await?;
             }
-            (Self::Mqtt(emitter), EmitSink::Mqtt { topic, .. }) => {
-                emitter.publish(topic, payload).await
+            (Self::Mqtt(emitter), EmitSink::Mqtt { .. }) => {
+                emitter.publish_chunk(payloads).await?;
             }
-            (Self::Nats(emitter), EmitSink::Nats { subject, .. }) => {
-                emitter.publish(subject, payload, headers).await
+            (Self::Nats(emitter), EmitSink::Nats { .. }) => {
+                emitter.publish_chunk(payloads, headers).await?;
             }
-            (Self::ZeroMq(emitter), EmitSink::ZeroMq { .. }) => emitter.publish(payload).await,
-            (Self::Sqs(emitter), EmitSink::Sqs { queue, .. }) => {
-                emitter.publish(queue, payload, headers).await
+            (Self::ZeroMq(emitter), EmitSink::ZeroMq { .. }) => {
+                for payload in payloads {
+                    tokio::task::consume_budget().await;
+                    emitter.publish(payload).await?;
+                }
             }
-            (Self::Sentry(emitter), EmitSink::Sentry { .. }) => emitter.publish(payload).await,
-            _ => Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("emitter has no initialized sink client")),
+            (Self::Sqs(emitter), EmitSink::Sqs { .. }) => {
+                for (offset, payload) in payloads.into_iter().enumerate() {
+                    tokio::task::consume_budget().await;
+                    emitter.publish(payload, &headers[offset]).await?;
+                }
+            }
+            (Self::Sentry(emitter), EmitSink::Sentry { .. }) => {
+                for payload in payloads {
+                    tokio::task::consume_budget().await;
+                    emitter.publish(payload).await?;
+                }
+            }
+            _ => {
+                return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
+                    .attach_printable("emitter has no initialized sink client"));
+            }
         }
+        trace!(
+            domain = context.domain.as_str(),
+            emitter = context.emitter.as_str(),
+            rows = message_count,
+            "emitter published encoded chunk"
+        );
+        Ok(())
     }
 
     async fn wait_for_fault_injector(
@@ -1477,6 +1586,7 @@ impl SinkEmitter {
         control: &mut EmitterPublishControl<'_>,
         acks: &AckSet,
     ) -> EmitterRuntimeResult<()> {
+        let mut fault_changes = control.fault_injector.subscribe();
         loop {
             tokio::task::consume_budget().await;
             match control.fault_injector.fault_mode(&context.emitter) {
@@ -1522,7 +1632,11 @@ impl SinkEmitter {
                     );
                     if !control
                         .backoff
-                        .wait_with_ack_alive(control.shutdown_rx, acks)
+                        .wait_with_ack_alive_or_change(
+                            control.shutdown_rx,
+                            acks,
+                            &mut fault_changes,
+                        )
                         .await
                     {
                         return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled));
@@ -1784,7 +1898,6 @@ impl EmitterTask {
                 filter_map: filter_map.as_ref(),
                 materialized_state: &task_materialized_state,
                 materialized_stream_owner_nodes: &materialized_stream_owner_nodes,
-                schema: output_compiled_schema.clone(),
             };
             let mut force_flush_pending = false;
 
@@ -2454,7 +2567,7 @@ impl EmitterBatchContext<'_> {
                 return None;
             }
         };
-        match plan_emitter_filter_map_messages(
+        match plan_emitter_filter_map_batch(
             self.emitter,
             filter_map,
             batch,
@@ -2477,28 +2590,9 @@ impl EmitterBatchContext<'_> {
                         plan.message_errors,
                     )
                     .await;
-                if plan.messages.is_empty() {
-                    return None;
-                }
-                match RelayRecordBatch::from_messages(self.schema.clone(), plan.messages) {
-                    Ok(batch) => match EmitterPublishBatch::new(batch, plan.headers) {
-                        Ok(batch) => Some(batch),
-                        Err(error) => {
-                            self.runtime.handle_general_error_for_acks(
-                                self.domain,
-                                "emitter",
-                                self.emitter,
-                                self.error_policies,
-                                std::iter::empty::<&AckSet>(),
-                                format!(
-                                    "emitter '{}' failed to build filtered header batch: {}",
-                                    self.emitter.as_str(),
-                                    error
-                                ),
-                            );
-                            None
-                        }
-                    },
+                let batch = plan.batch?;
+                match EmitterPublishBatch::new(batch, plan.headers) {
+                    Ok(batch) => Some(batch),
                     Err(error) => {
                         self.runtime.handle_general_error_for_acks(
                             self.domain,
@@ -2507,7 +2601,7 @@ impl EmitterBatchContext<'_> {
                             self.error_policies,
                             std::iter::empty::<&AckSet>(),
                             format!(
-                                "emitter '{}' failed to build filtered arrow batch: {}",
+                                "emitter '{}' failed to build filtered header batch: {}",
                                 self.emitter.as_str(),
                                 error
                             ),

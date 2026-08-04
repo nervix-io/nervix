@@ -1,7 +1,8 @@
 use rdkafka::{
     config::ClientConfig,
+    error::{KafkaError, RDKafkaErrorCode},
     message::{Header as KafkaHeader, OwnedHeaders},
-    producer::{FutureProducer, FutureRecord},
+    producer::{DeliveryFuture, FutureProducer, FutureRecord},
 };
 
 use super::*;
@@ -35,37 +36,87 @@ impl KafkaEmitter {
         client_config.create().map_err(emitter_init_error)
     }
 
-    pub(in crate::runtime) async fn publish(
+    async fn await_delivery(delivery: DeliveryFuture) -> EmitterRuntimeResult<()> {
+        delivery
+            .await
+            .map_err(|source| {
+                emitter_publish_error(format!("kafka delivery channel closed: {source}"))
+            })?
+            .map(|_| ())
+            .map_err(|(source, _)| emitter_publish_error(source))
+    }
+
+    pub(in crate::runtime) async fn publish_chunk(
         &self,
         topic: &Identifier,
-        message: &RelayMessage,
-        payload: &[u8],
-        headers: &EmitterHeaders,
+        keys: &[Option<BranchKey>],
+        payloads: Vec<Vec<u8>>,
+        headers: &[EmitterHeaders],
+        max_in_flight: usize,
     ) -> EmitterRuntimeResult<()> {
         let Some(producer) = self.producer.as_ref() else {
             return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
                 .attach_printable("no initialized kafka sink client"));
         };
-        let mut record = FutureRecord::<str, [u8]>::to(topic.as_str()).payload(payload);
-        if let Some(key) = message.key.as_ref() {
-            record = record.key(key.as_str());
+        if payloads.len() != keys.len() || payloads.len() != headers.len() {
+            return Err(emitter_publish_error(
+                "kafka encoded payload, branch key, and header counts differ",
+            ));
         }
-        if !headers.is_empty() {
-            let owned_headers = headers.iter().fold(
-                OwnedHeaders::new_with_capacity(headers.len()),
-                |owned_headers, (key, value)| {
-                    owned_headers.insert(KafkaHeader {
-                        key,
-                        value: Some(value.as_str()),
-                    })
-                },
-            );
-            record = record.headers(owned_headers);
+
+        let mut deliveries = FuturesOrdered::new();
+        for ((payload, key), headers) in payloads.into_iter().zip(keys).zip(headers) {
+            tokio::task::consume_budget().await;
+            let mut record = FutureRecord::<str, [u8]>::to(topic.as_str()).payload(&payload);
+            if let Some(key) = key.as_ref() {
+                record = record.key(key.as_str());
+            }
+            if !headers.is_empty() {
+                let owned_headers = headers.iter().fold(
+                    OwnedHeaders::new_with_capacity(headers.len()),
+                    |owned_headers, (key, value)| {
+                        owned_headers.insert(KafkaHeader {
+                            key,
+                            value: Some(value.as_str()),
+                        })
+                    },
+                );
+                record = record.headers(owned_headers);
+            }
+
+            let queue_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let delivery = loop {
+                match producer.send_result(record) {
+                    Ok(delivery) => break delivery,
+                    Err((source, returned_record)) => {
+                        if let KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull) = &source
+                            && std::time::Instant::now() < queue_deadline
+                        {
+                            record = returned_record;
+                            if let Some(delivery) = deliveries.next().await {
+                                delivery?;
+                            } else {
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
+                            continue;
+                        }
+                        return Err(emitter_publish_error(source));
+                    }
+                }
+            };
+            deliveries.push_back(Self::await_delivery(delivery));
+            if deliveries.len() >= max_in_flight {
+                let delivery = deliveries
+                    .next()
+                    .await
+                    .expect("kafka delivery queue must contain an in-flight publish");
+                delivery?;
+            }
         }
-        producer
-            .send(record, std::time::Duration::from_secs(5))
-            .await
-            .map(|_| ())
-            .map_err(|(source, _)| emitter_publish_error(source))
+        while let Some(delivery) = deliveries.next().await {
+            tokio::task::consume_budget().await;
+            delivery?;
+        }
+        Ok(())
     }
 }
