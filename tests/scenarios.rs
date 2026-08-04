@@ -218,6 +218,34 @@ impl ScenarioWorld {
             .as_ref()
             .expect("cluster must be created before using it")
     }
+
+    async fn wait_for_observability_metric_value(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        expected_value: i64,
+        wait: Option<Duration>,
+        step: &Step,
+    ) {
+        let node_id = expand_placeholders(self, node_id);
+        let metric_name = expand_placeholders(self, metric_name);
+        let label_fragments = docstring(step)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| expand_placeholders(self, line))
+            .collect::<Vec<_>>();
+        self.cluster()
+            .wait_for_observability_metric_value(
+                &node_id,
+                &metric_name,
+                &label_fragments,
+                expected_value,
+                wait,
+            )
+            .await
+            .expect("observability endpoint did not report the expected metric value");
+    }
 }
 
 fn initialize_scenario_identity(world: &mut ScenarioWorld) {
@@ -7751,24 +7779,34 @@ async fn then_node_observability_metric_with_labels_eventually_equals(
     expected_value: i64,
     #[step] step: &Step,
 ) {
-    let node_id = expand_placeholders(world, &node_id);
-    let metric_name = expand_placeholders(world, &metric_name);
-    let label_fragments = docstring(step)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| expand_placeholders(world, line))
-        .collect::<Vec<_>>();
     world
-        .cluster()
+        .wait_for_observability_metric_value(&node_id, &metric_name, expected_value, None, step)
+        .await;
+}
+
+#[then(
+    expr = "within {string} node {string} observability metric {string} with labels eventually \
+            equals {int}"
+)]
+async fn then_within_duration_node_observability_metric_with_labels_eventually_equals(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    metric_name: String,
+    expected_value: i64,
+    #[step] step: &Step,
+) {
+    let wait =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    world
         .wait_for_observability_metric_value(
             &node_id,
             &metric_name,
-            &label_fragments,
             expected_value,
+            Some(wait),
+            step,
         )
-        .await
-        .expect("observability endpoint did not report the expected metric value");
+        .await;
 }
 
 #[then(expr = "within {string} node {string} eventually reports describe relay as {string}")]
@@ -8558,6 +8596,29 @@ async fn when_nats_message_is_published(
         .publish_nats(&subject, &payload)
         .await
         .expect("failed to publish nats message");
+}
+
+#[when(expr = "{int} sequential NATS messages are published to subject {string}")]
+async fn when_sequential_nats_messages_are_published(
+    world: &mut ScenarioWorld,
+    count: usize,
+    subject: String,
+    #[step] step: &Step,
+) {
+    let subject = expand_placeholders(world, &subject);
+    let template = expand_placeholders(world, docstring(step));
+    assert!(
+        template.contains("{{sequence}}"),
+        "sequential NATS payload template must contain {{{{sequence}}}}"
+    );
+    let payloads = (1..=count)
+        .map(|sequence| template.replace("{{sequence}}", &sequence.to_string()))
+        .collect::<Vec<_>>();
+    world
+        .cluster()
+        .publish_nats_payloads(&subject, &payloads)
+        .await
+        .expect("failed to publish sequential nats messages");
 }
 
 #[when("ZeroMQ message is published")]
@@ -11078,6 +11139,98 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
             }
         }
     }
+}
+
+#[then(
+    expr = "within {string} the observed broker receives {int} messages in sequence by field \
+            {string} with headers"
+)]
+async fn then_observed_broker_receives_sequential_messages_with_headers(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+    field: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let expected_headers = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split_once('=').unwrap_or_else(|| {
+                panic!("expected broker header assertion '{line}' to use name=value")
+            })
+        })
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect::<Vec<_>>();
+    assert!(
+        !expected_headers.is_empty(),
+        "sequential broker assertion must include at least one header"
+    );
+
+    let deadline = Instant::now() + duration;
+    for expected_sequence in 1..=count {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out after receiving {} of {count} sequential broker messages",
+            expected_sequence - 1
+        );
+        let message = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
+            .try_next_message(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for sequential broker message")
+            .unwrap_or_else(|| {
+                panic!("timed out waiting for broker message {expected_sequence} of {count}")
+            });
+        let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
+            .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}"));
+        let actual_sequence = payload
+            .get(&field)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| {
+                panic!(
+                    "broker payload field '{field}' is not an unsigned integer: {}",
+                    message.payload
+                )
+            });
+        let expected_u64 =
+            u64::try_from(expected_sequence).expect("expected sequence must fit u64");
+        assert_eq!(
+            actual_sequence,
+            expected_u64,
+            "broker messages were duplicated, lost, or reordered: expected sequence \
+             {expected_u64} but observed {actual_sequence} ({} messages behind, {} of {} consumed \
+             so far)",
+            actual_sequence.abs_diff(expected_u64),
+            expected_sequence,
+            count
+        );
+        assert_eq!(
+            message.headers, expected_headers,
+            "broker message {expected_sequence} headers changed"
+        );
+        world.last_broker_payload = Some(message.payload);
+        world.last_broker_headers = message.headers;
+    }
+
+    let duplicate = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion")
+        .try_next_message(Duration::from_millis(500))
+        .await
+        .expect("failed while checking for a duplicate broker message");
+    assert!(
+        duplicate.is_none(),
+        "observed a duplicate broker message after the expected sequence: {duplicate:?}"
+    );
 }
 
 #[then(expr = "the observed broker does not receive a payload within {string}")]

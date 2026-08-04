@@ -230,12 +230,15 @@ impl NatsIngestor {
                                                         timestamp_source: task_timestamp_source.as_ref(),
                                                         output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
-                            records: vec![record],
-                            metadata: vec![IngestFilterMapMetadata::from_headers(
+                                                        records: vec![record],
+                                                        metadata: vec![
+                                                            IngestFilterMapMetadata::from_headers(
                                                                 headers.clone(),
-                                                            )],
+                                                            ),
+                                                        ],
                                                         ingested_at: current_timestamp(),
-                            acks: vec![AckSet::empty()],})
+                                                        acks: vec![AckSet::empty()],
+                                                    })
                                                     .await
                                                 {
                                                     let _ = task_events.send(RuntimeEvent::Error(format!(

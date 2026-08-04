@@ -36,7 +36,54 @@ use sentry::SentryEmitter;
 use sqs::SqsEmitter;
 use zeromq::ZeroMqEmitter;
 
+const ENCODE_CHUNK_ROWS: usize = 1_024;
+const BLOCKING_ENCODE_CHUNKS: usize = 2;
+const PUBLISH_IN_FLIGHT: usize = 256;
+const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
+
 pub(in crate::runtime) struct EmitterTask;
+
+#[derive(Debug)]
+struct EmitterBufferedMessages {
+    reported: Arc<AtomicUsize>,
+    generic: AtomicUsize,
+    iceberg: AtomicUsize,
+}
+
+impl EmitterBufferedMessages {
+    fn new(reported: Arc<AtomicUsize>) -> Self {
+        Self {
+            reported,
+            generic: AtomicUsize::new(0),
+            iceberg: AtomicUsize::new(0),
+        }
+    }
+
+    fn set_generic(&self, messages: usize) {
+        self.generic.store(messages, Ordering::Release);
+        self.report_total();
+    }
+
+    fn set_iceberg(&self, messages: usize) {
+        self.iceberg.store(messages, Ordering::Release);
+        self.report_total();
+    }
+
+    fn report_total(&self) {
+        self.reported.store(
+            self.generic
+                .load(Ordering::Acquire)
+                .saturating_add(self.iceberg.load(Ordering::Acquire)),
+            Ordering::Release,
+        );
+    }
+}
+
+impl Default for EmitterBufferedMessages {
+    fn default() -> Self {
+        Self::new(Arc::new(AtomicUsize::new(0)))
+    }
+}
 
 #[derive(Clone)]
 pub(in crate::runtime) struct EmitterSinkContext {
@@ -50,7 +97,6 @@ pub(in crate::runtime) struct EmitterSinkContext {
 struct EmitterPublishControl<'a> {
     runtime: &'a Runtime,
     fault_injector: &'a EmitterFaultInjector,
-    shutdown_rx: &'a mut watch::Receiver<bool>,
     backoff: &'a mut RuntimeReconnectBackoff,
 }
 
@@ -64,7 +110,6 @@ struct EmitterBatchContext<'a> {
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
     materialized_stream_owner_nodes: &'a HashMap<Identifier, Option<String>>,
-    schema: Arc<CompiledSchema>,
 }
 
 #[derive(Clone)]
@@ -125,168 +170,6 @@ impl EmitterPublishBatch {
     }
 }
 
-type EmitterTaggedInputStream =
-    std::pin::Pin<Box<dyn futures_util::Stream<Item = (Identifier, RelayRecordBatch)> + Send>>;
-
-enum EmitterInputEvent {
-    Batch {
-        relay: Identifier,
-        batch: RelayRecordBatch,
-    },
-    Wake,
-    Shutdown,
-    Closed,
-}
-
-struct EmitterTaskInputs {
-    receiver: futures_util::stream::SelectAll<EmitterTaggedInputStream>,
-    collections: Vec<(Identifier, RuntimeTaskInputCollection)>,
-}
-
-impl EmitterTaskInputs {
-    fn new(
-        inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
-        collect_policy: Option<RuntimeInputCollectPolicy>,
-        quiesce_counters: Arc<NodeQuiesceCounters>,
-    ) -> Self {
-        let collections = inputs
-            .iter()
-            .map(|(relay, _receiver)| {
-                (
-                    relay.clone(),
-                    RuntimeTaskInputCollection::with_quiesce_counters(
-                        collect_policy,
-                        quiesce_counters.clone(),
-                    ),
-                )
-            })
-            .collect();
-        let receiver = futures_util::stream::select_all(inputs.into_iter().map(
-            |(relay, fan_in)| -> EmitterTaggedInputStream {
-                Box::pin(futures_util::stream::unfold(
-                    (relay, fan_in),
-                    |(relay, mut fan_in)| async move {
-                        fan_in
-                            .recv()
-                            .await
-                            .map(|batch| ((relay.clone(), batch), (relay, fan_in)))
-                    },
-                ))
-            },
-        ));
-        Self {
-            receiver,
-            collections,
-        }
-    }
-
-    fn collection_mut(
-        &mut self,
-        relay: &Identifier,
-    ) -> Result<&mut RuntimeTaskInputCollection, String> {
-        self.collections
-            .iter_mut()
-            .find_map(|(candidate, collection)| (candidate == relay).then_some(collection))
-            .ok_or_else(|| {
-                format!(
-                    "emitter received undeclared input relay '{}'",
-                    relay.as_str()
-                )
-            })
-    }
-
-    fn take_any(&mut self) -> Result<Option<(Identifier, RelayRecordBatch)>, String> {
-        for (relay, collection) in &mut self.collections {
-            if let Some(batch) = collection.take_any()? {
-                return Ok(Some((relay.clone(), batch)));
-            }
-        }
-        Ok(None)
-    }
-
-    fn take_due(&mut self) -> Result<Option<(Identifier, RelayRecordBatch)>, String> {
-        for (relay, collection) in &mut self.collections {
-            if let Some(batch) = collection.take_due()? {
-                return Ok(Some((relay.clone(), batch)));
-            }
-        }
-        Ok(None)
-    }
-
-    fn next_deadline(&self) -> Option<Instant> {
-        self.collections
-            .iter()
-            .filter_map(|(_relay, collection)| collection.next_deadline())
-            .min()
-    }
-
-    async fn recv(
-        &mut self,
-        shutdown_rx: &mut watch::Receiver<bool>,
-        wake_at: Option<Instant>,
-    ) -> EmitterInputEvent {
-        loop {
-            tokio::task::consume_budget().await;
-            if *shutdown_rx.borrow() {
-                return self
-                    .take_any()
-                    .expect("same-source emitter batches must concatenate")
-                    .map(|(relay, batch)| EmitterInputEvent::Batch { relay, batch })
-                    .unwrap_or(EmitterInputEvent::Shutdown);
-            }
-            if let Some((relay, batch)) = self
-                .take_due()
-                .expect("same-source emitter batches must concatenate")
-            {
-                return EmitterInputEvent::Batch { relay, batch };
-            }
-            let collect_at = self.next_deadline();
-            tokio::select! {
-                biased;
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        return self
-                            .take_any()
-                            .expect("same-source emitter batches must concatenate")
-                            .map(|(relay, batch)| EmitterInputEvent::Batch { relay, batch })
-                            .unwrap_or(EmitterInputEvent::Shutdown);
-                    }
-                }
-                _ = async {
-                    if let Some(deadline) = wake_at {
-                        sleep_until(deadline).await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => return EmitterInputEvent::Wake,
-                _ = async {
-                    if let Some(deadline) = collect_at {
-                        sleep_until(deadline).await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {}
-                message = self.receiver.next() => {
-                    let Some((relay, batch)) = message else {
-                        return self
-                            .take_any()
-                            .expect("same-source emitter batches must concatenate")
-                            .map(|(relay, batch)| EmitterInputEvent::Batch { relay, batch })
-                            .unwrap_or(EmitterInputEvent::Closed);
-                    };
-                    if let Some(batch) = self
-                        .collection_mut(&relay)
-                        .and_then(|collection| collection.push(batch))
-                        .expect("same-source emitter batches must concatenate")
-                    {
-                        return EmitterInputEvent::Batch { relay, batch };
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub(in crate::runtime) struct PublishReport {
     messages: u64,
     bytes: u64,
@@ -300,6 +183,66 @@ pub(in crate::runtime) struct CompiledSqlValuesProgram {
 
 pub(in crate::runtime) type EmitterRuntimeResult<T> = Result<T, Report<EmitterRuntimeError>>;
 
+type EmitterPublishResult = Result<Option<PublishReport>, EmitterPublishFailure>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmitterPublishBatchOwner {
+    Caller,
+    Buffer,
+    Sink,
+}
+
+struct EmitterPublishFailure {
+    error: Report<EmitterRuntimeError>,
+    batch_owner: EmitterPublishBatchOwner,
+}
+
+impl EmitterPublishFailure {
+    fn caller(error: Report<EmitterRuntimeError>) -> Self {
+        Self {
+            error,
+            batch_owner: EmitterPublishBatchOwner::Caller,
+        }
+    }
+
+    fn buffer(error: Report<EmitterRuntimeError>) -> Self {
+        Self {
+            error,
+            batch_owner: EmitterPublishBatchOwner::Buffer,
+        }
+    }
+
+    fn sink(error: Report<EmitterRuntimeError>) -> Self {
+        Self {
+            error,
+            batch_owner: EmitterPublishBatchOwner::Sink,
+        }
+    }
+
+    fn drain_failed_batches(
+        self,
+        current: &mut Option<EmitterPublishBatch>,
+        buffer: &mut EmitterBatchBuffer,
+    ) -> (Report<EmitterRuntimeError>, Vec<EmitterPublishBatch>) {
+        let batches = match self.batch_owner {
+            EmitterPublishBatchOwner::Caller => {
+                let mut batches = buffer.drain_pending();
+                batches.extend(current.take());
+                batches
+            }
+            EmitterPublishBatchOwner::Buffer => {
+                current.take();
+                buffer.drain_pending()
+            }
+            EmitterPublishBatchOwner::Sink => {
+                current.take();
+                Vec::new()
+            }
+        };
+        (self.error, batches)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(in crate::runtime) enum EmitterRuntimeError {
     #[error("invalid emitter sink configuration")]
@@ -312,23 +255,22 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     FlushPolicyNotInitialized,
     #[error("fault injector failed emitter publish")]
     FaultInjected,
-    #[error("emitter shutdown while stalled")]
-    ShutdownWhileStalled,
     #[error("failed to encode emitter batch")]
     EncodeBatch,
     #[error("failed to publish emitter batch")]
     PublishBatch,
+    #[error("emitter publish is stalled")]
+    PublishStalled,
 }
 
 impl EmitterRuntimeError {
     fn is_retryable_publish_failure(self) -> bool {
         match self {
-            Self::SinkNotInitialized | Self::PublishBatch => true,
+            Self::SinkNotInitialized | Self::PublishBatch | Self::PublishStalled => true,
             Self::FlushPolicyNotInitialized
             | Self::InvalidSinkConfig
             | Self::InitializeSink
             | Self::FaultInjected
-            | Self::ShutdownWhileStalled
             | Self::EncodeBatch => false,
         }
     }
@@ -342,6 +284,22 @@ impl PublishReport {
             domain_timestamp,
         }
     }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            messages: self.messages.saturating_add(other.messages),
+            bytes: self.bytes.saturating_add(other.bytes),
+            domain_timestamp: self.domain_timestamp.max(other.domain_timestamp),
+        }
+    }
+
+    fn merge_optional(left: Option<Self>, right: Option<Self>) -> Option<Self> {
+        match (left, right) {
+            (Some(left), Some(right)) => Some(left.merge(right)),
+            (Some(report), None) | (None, Some(report)) => Some(report),
+            (None, None) => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -350,7 +308,7 @@ struct EmitterBatchBuffer {
     pending: Vec<EmitterPublishBatch>,
     pending_bytes: u64,
     flush_at: Option<Instant>,
-    buffered_messages: Arc<AtomicUsize>,
+    buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
 impl EmitterBatchBuffer {
@@ -358,7 +316,7 @@ impl EmitterBatchBuffer {
         context: &EmitterSinkContext,
         flush_each: &str,
         max_batch_size: Option<&str>,
-        buffered_messages: Arc<AtomicUsize>,
+        buffered_messages: Arc<EmitterBufferedMessages>,
     ) -> Self {
         Self {
             flush_policy: context.parse_flush_policy_with_max(
@@ -379,10 +337,8 @@ impl EmitterBatchBuffer {
             .iter()
             .map(EmitterPublishBatch::message_count)
             .fold(0_u64, u64::saturating_add);
-        self.buffered_messages.store(
-            usize::try_from(messages).unwrap_or(usize::MAX),
-            Ordering::Release,
-        );
+        self.buffered_messages
+            .set_generic(usize::try_from(messages).unwrap_or(usize::MAX));
     }
 
     fn reconfigure(
@@ -425,10 +381,24 @@ impl EmitterBatchBuffer {
             .is_some_and(|deadline| deadline <= Instant::now())
     }
 
+    fn should_flush(&self, force: bool) -> bool {
+        !self.pending.is_empty() && (force || self.is_due())
+    }
+
     fn defer_retry(&mut self, delay: Duration) {
         if !self.pending.is_empty() {
             self.flush_at = Some(Instant::now() + delay);
         }
+    }
+
+    fn retain_for_retry(
+        &mut self,
+        batch: EmitterPublishBatch,
+        delay: Duration,
+    ) -> EmitterRuntimeResult<()> {
+        self.push(batch)?;
+        self.defer_retry(delay);
+        Ok(())
     }
 
     fn pending_acks(&self) -> AckSet {
@@ -478,7 +448,92 @@ impl EmitterBatchBuffer {
 
 impl Drop for EmitterBatchBuffer {
     fn drop(&mut self) {
-        self.buffered_messages.store(0, Ordering::Release);
+        self.pending_acks().no_ack("emitter dropped buffered batch");
+        self.buffered_messages.set_generic(0);
+    }
+}
+
+#[derive(Default)]
+struct EmitterRetrySchedule {
+    retry_at: Option<Instant>,
+    ack_alive_at: Option<Instant>,
+    acks: AckSet,
+    waiting_for_stall_clear: bool,
+}
+
+impl EmitterRetrySchedule {
+    fn is_active(&self) -> bool {
+        self.retry_at.is_some()
+    }
+
+    fn schedule(&mut self, delay: Duration, acks: AckSet, waiting_for_stall_clear: bool) {
+        let now = Instant::now();
+        let retry_at = now + delay;
+        self.retry_at = Some(retry_at);
+        if !acks.is_empty() {
+            self.acks = acks;
+        }
+        self.ack_alive_at =
+            (!self.acks.is_empty()).then(|| (now + RETRY_ACK_ALIVE_EACH).min(retry_at));
+        self.waiting_for_stall_clear = waiting_for_stall_clear;
+    }
+
+    fn include_acks(&mut self, acks: AckSet) {
+        if acks.is_empty() {
+            return;
+        }
+        self.acks = AckSet::merged([std::mem::take(&mut self.acks), acks]);
+        if let Some(retry_at) = self.retry_at
+            && self.ack_alive_at.is_none()
+        {
+            self.ack_alive_at = Some((Instant::now() + RETRY_ACK_ALIVE_EACH).min(retry_at));
+        }
+    }
+
+    fn deadline(&self, ordinary: Option<Instant>) -> Option<Instant> {
+        let retry = match (self.retry_at, self.ack_alive_at) {
+            (Some(retry_at), Some(ack_alive_at)) => Some(retry_at.min(ack_alive_at)),
+            (Some(retry_at), None) => Some(retry_at),
+            (None, _) => None,
+        };
+        if retry.is_some() { retry } else { ordinary }
+    }
+
+    fn retry_is_due(&mut self) -> bool {
+        let Some(retry_at) = self.retry_at else {
+            return true;
+        };
+        let now = Instant::now();
+        if now >= retry_at {
+            self.retry_at = None;
+            self.ack_alive_at = None;
+            return true;
+        }
+        if self
+            .ack_alive_at
+            .is_some_and(|ack_alive_at| now >= ack_alive_at)
+        {
+            self.acks.ack_alive();
+            self.ack_alive_at = Some((now + RETRY_ACK_ALIVE_EACH).min(retry_at));
+        }
+        false
+    }
+
+    fn release_if_stall_cleared(&mut self, fault: Option<EmitterFaultMode>) -> bool {
+        if !self.waiting_for_stall_clear || fault.is_some() {
+            return false;
+        }
+        self.retry_at = None;
+        self.ack_alive_at = None;
+        self.waiting_for_stall_clear = false;
+        true
+    }
+
+    fn clear(&mut self) {
+        self.retry_at = None;
+        self.ack_alive_at = None;
+        self.acks = AckSet::empty();
+        self.waiting_for_stall_clear = false;
     }
 }
 
@@ -922,16 +977,50 @@ enum SinkEmitter {
     Missing { reason: String },
 }
 
+#[derive(Clone)]
+struct SinkEmitterRuntime {
+    input_schema: Arc<CompiledSchema>,
+    buffered_messages: Arc<EmitterBufferedMessages>,
+}
+
+struct SinkEmitterInit<'a> {
+    sink: &'a EmitSink,
+    client: Option<&'a Model>,
+    resolved: Option<&'a ResolvedClientConfig>,
+    catalog_client: Option<&'a Model>,
+    catalog_resolved: Option<&'a ResolvedClientConfig>,
+    context: &'a EmitterSinkContext,
+    runtime: SinkEmitterRuntime,
+}
+
 impl SinkEmitter {
-    async fn new(
-        sink: &EmitSink,
-        client: Option<&Model>,
-        resolved: Option<&ResolvedClientConfig>,
-        catalog_client: Option<&Model>,
-        catalog_resolved: Option<&ResolvedClientConfig>,
-        context: &EmitterSinkContext,
-        input_schema: Arc<CompiledSchema>,
+    async fn new_until_cancelled(
+        init: SinkEmitterInit<'_>,
+        work_cancel_rx: &mut watch::Receiver<bool>,
     ) -> Self {
+        tokio::select! {
+            biased;
+            _ = wait_for_emitter_work_cancel(work_cancel_rx) => Self::Missing {
+                reason: "emitter sink initialization canceled while stopping".to_string(),
+            },
+            emitter = Self::new(init) => emitter,
+        }
+    }
+
+    async fn new(init: SinkEmitterInit<'_>) -> Self {
+        let SinkEmitterInit {
+            sink,
+            client,
+            resolved,
+            catalog_client,
+            catalog_resolved,
+            context,
+            runtime,
+        } = init;
+        let SinkEmitterRuntime {
+            input_schema,
+            buffered_messages,
+        } = runtime;
         match (sink, client, catalog_client) {
             (EmitSink::Kafka { .. }, Some(Model::ClientKafka(client)), _) => {
                 Self::from_result("kafka", context, KafkaEmitter::new(client, resolved))
@@ -957,12 +1046,16 @@ impl SinkEmitter {
                     Err(error) => Self::missing_after_emitter_init_error("redis", context, &error),
                 }
             }
-            (EmitSink::Mqtt { .. }, Some(Model::ClientMqtt(client)), _) => {
-                Self::from_result("mqtt", context, MqttEmitter::new(client, resolved, context))
-                    .map(Self::Mqtt)
+            (EmitSink::Mqtt { topic, .. }, Some(Model::ClientMqtt(client)), _) => {
+                Self::from_result(
+                    "mqtt",
+                    context,
+                    MqttEmitter::new(client, resolved, topic, context),
+                )
+                .map(Self::Mqtt)
             }
-            (EmitSink::Nats { .. }, Some(Model::ClientNats(client)), _) => {
-                match NatsEmitter::new(client, resolved).await {
+            (EmitSink::Nats { subject, .. }, Some(Model::ClientNats(client)), _) => {
+                match NatsEmitter::new(client, resolved, subject).await {
                     Ok(emitter) => Self::Nats(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("nats", context, &error),
                 }
@@ -973,8 +1066,8 @@ impl SinkEmitter {
                     Err(error) => Self::missing_after_emitter_init_error("zeromq", context, &error),
                 }
             }
-            (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client)), _) => {
-                match SqsEmitter::new(client, resolved).await {
+            (EmitSink::Sqs { queue, .. }, Some(Model::ClientSqs(client)), _) => {
+                match SqsEmitter::new(client, resolved, queue).await {
                     Ok(emitter) => Self::Sqs(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("sqs", context, &error),
                 }
@@ -1058,6 +1151,7 @@ impl SinkEmitter {
                     commit_each,
                     max_commit_size,
                     input_schema,
+                    buffered_messages: buffered_messages.clone(),
                 })
                 .await,
             ),
@@ -1093,6 +1187,7 @@ impl SinkEmitter {
                     commit_each,
                     max_commit_size,
                     input_schema,
+                    buffered_messages: buffered_messages.clone(),
                 })
                 .await,
             ),
@@ -1128,6 +1223,7 @@ impl SinkEmitter {
                     commit_each,
                     max_commit_size,
                     input_schema,
+                    buffered_messages,
                 })
                 .await,
             ),
@@ -1177,9 +1273,14 @@ impl SinkEmitter {
     }
 
     fn flush_deadline(&self, buffer: &EmitterBatchBuffer) -> Option<Instant> {
-        match self {
+        let sink_deadline = match self {
             Self::Iceberg(emitter) => emitter.flush_deadline(),
-            _ => buffer.deadline(),
+            _ => None,
+        };
+        match (sink_deadline, buffer.deadline()) {
+            (Some(sink), Some(buffer)) => Some(sink.min(buffer)),
+            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
         }
     }
 
@@ -1188,6 +1289,23 @@ impl SinkEmitter {
             Some(reason.as_str())
         } else {
             None
+        }
+    }
+
+    fn pending_acks(&self, buffer: &EmitterBatchBuffer) -> AckSet {
+        let sink_acks = if let Self::Iceberg(emitter) = self {
+            emitter.pending_acks()
+        } else {
+            AckSet::empty()
+        };
+        AckSet::merged([buffer.pending_acks(), sink_acks])
+    }
+
+    fn reconnect_after(&self, error: &Report<EmitterRuntimeError>) -> bool {
+        if let EmitterRuntimeError::PublishStalled = error.current_context() {
+            false
+        } else {
+            !matches!(self, Self::Iceberg(_))
         }
     }
 
@@ -1212,12 +1330,24 @@ impl SinkEmitter {
         control: &mut EmitterPublishControl<'_>,
         codec: Option<Arc<CompiledCodec>>,
         buffer: &mut EmitterBatchBuffer,
+        retry: bool,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
-        if let Self::Iceberg(emitter) = self
+        if let Self::Iceberg(_) = self
             && let EmitSink::Iceberg { .. } = sink
         {
-            return match emitter.flush_due().await {
-                Ok(published) => Ok(published),
+            let accepted = self
+                .transfer_retry_buffer_to_iceberg(context, control, buffer, retry)
+                .await?;
+            let Self::Iceberg(emitter) = self else {
+                unreachable!("checked Iceberg emitter must remain Iceberg")
+            };
+            let flushed = if retry {
+                emitter.finish().await
+            } else {
+                emitter.flush_due().await
+            };
+            return match flushed {
+                Ok(published) => Ok(PublishReport::merge_optional(accepted, published)),
                 Err(error) => {
                     let message = iceberg_error_message(&error);
                     context.report_flush_error(sink.label(), &message);
@@ -1225,7 +1355,7 @@ impl SinkEmitter {
                 }
             };
         }
-        if !buffer.is_due() {
+        if !buffer.should_flush(retry) {
             return Ok(None);
         }
         self.flush_buffer(sink, context, control, codec, buffer)
@@ -1239,31 +1369,27 @@ impl SinkEmitter {
         control: &mut EmitterPublishControl<'_>,
         codec: Option<Arc<CompiledCodec>>,
         buffer: &mut EmitterBatchBuffer,
-    ) -> Option<PublishReport> {
+    ) -> EmitterRuntimeResult<Option<PublishReport>> {
         if let EmitSink::Iceberg { .. } = sink
-            && let Self::Iceberg(emitter) = self
+            && let Self::Iceberg(_) = self
         {
-            return match emitter.finish().await {
-                Ok(published) => published,
-                Err(error) => {
-                    let message = iceberg_error_message(&error);
-                    context.report_flush_error(sink.label(), &message);
-                    None
-                }
+            let accepted = self
+                .transfer_retry_buffer_to_iceberg(context, control, buffer, true)
+                .await?;
+            let Self::Iceberg(emitter) = self else {
+                unreachable!("checked Iceberg emitter must remain Iceberg")
             };
-        } else {
-            return match self
-                .flush_buffer(sink, context, control, codec, buffer)
+            return emitter
+                .finish()
                 .await
-            {
-                Ok(published) => published,
-                Err(error) => {
-                    let message = emitter_error_message(&error);
-                    context.report_flush_error(sink.label(), &message);
-                    None
-                }
-            };
+                .map(|published| PublishReport::merge_optional(accepted, published))
+                .map_err(|error| {
+                    Report::new(EmitterRuntimeError::PublishBatch)
+                        .attach_printable(iceberg_error_message(&error))
+                });
         }
+        self.flush_buffer(sink, context, control, codec, buffer)
+            .await
     }
 
     async fn publish_batch(
@@ -1274,15 +1400,23 @@ impl SinkEmitter {
         codec: Option<Arc<CompiledCodec>>,
         buffer: &mut EmitterBatchBuffer,
         batch: EmitterPublishBatch,
-    ) -> EmitterRuntimeResult<Option<PublishReport>> {
-        self.wait_for_fault_injector(context, control, &batch.merged_acks())
-            .await?;
-        if let (Self::Iceberg(emitter), EmitSink::Iceberg { .. }) = (&mut *self, sink) {
+    ) -> EmitterPublishResult {
+        if let EmitSink::Iceberg { .. } = sink
+            && let Self::Iceberg(_) = self
+        {
+            self.wait_for_fault_injector(context, control, &batch.merged_acks())
+                .await
+                .map_err(EmitterPublishFailure::caller)?;
+            let Self::Iceberg(emitter) = self else {
+                unreachable!("checked Iceberg emitter must remain Iceberg")
+            };
             return match emitter.publish_batch(batch.batch).await {
                 Ok(report) => Ok(report),
                 Err(error) if error.current_context().is_retryable_publish_failure() => {
-                    Err(Report::new(EmitterRuntimeError::PublishBatch)
-                        .attach_printable(iceberg_error_message(&error)))
+                    Err(EmitterPublishFailure::sink(
+                        Report::new(EmitterRuntimeError::PublishBatch)
+                            .attach_printable(iceberg_error_message(&error)),
+                    ))
                 }
                 Err(error) => {
                     let message = iceberg_error_message(&error);
@@ -1292,12 +1426,50 @@ impl SinkEmitter {
             };
         }
 
-        if buffer.push(batch)? {
+        if buffer.push(batch).map_err(EmitterPublishFailure::caller)? {
             self.flush_buffer(sink, context, control, codec, buffer)
                 .await
+                .map_err(EmitterPublishFailure::buffer)
         } else {
             Ok(None)
         }
+    }
+
+    async fn transfer_retry_buffer_to_iceberg(
+        &mut self,
+        context: &EmitterSinkContext,
+        control: &mut EmitterPublishControl<'_>,
+        buffer: &mut EmitterBatchBuffer,
+        force: bool,
+    ) -> EmitterRuntimeResult<Option<PublishReport>> {
+        if !buffer.should_flush(force) {
+            return Ok(None);
+        }
+        self.wait_for_fault_injector(context, control, &buffer.pending_acks())
+            .await?;
+        let Self::Iceberg(emitter) = self else {
+            return Ok(None);
+        };
+        let pending = buffer.drain_pending();
+        let mut pending = pending.into_iter();
+        let mut report = None;
+        while let Some(batch) = pending.next() {
+            tokio::task::consume_budget().await;
+            match emitter.publish_batch(batch.batch).await {
+                Ok(published) => {
+                    report = PublishReport::merge_optional(report, published);
+                }
+                Err(error) => {
+                    for batch in pending {
+                        tokio::task::consume_budget().await;
+                        buffer.push(batch)?;
+                    }
+                    return Err(Report::new(EmitterRuntimeError::PublishBatch)
+                        .attach_printable(iceberg_error_message(&error)));
+                }
+            }
+        }
+        Ok(report)
     }
 
     async fn flush_buffer(
@@ -1331,6 +1503,7 @@ impl SinkEmitter {
         match (&mut *self, sink) {
             (Self::ClickHouse(emitter), EmitSink::ClickHouse { table, values, .. }) => {
                 for batch in batches {
+                    tokio::task::consume_budget().await;
                     emitter.publish_batch(table, values, &batch.batch).await?;
                 }
                 return Ok(());
@@ -1345,6 +1518,7 @@ impl SinkEmitter {
                 },
             ) => {
                 for batch in batches {
+                    tokio::task::consume_budget().await;
                     emitter
                         .publish_batch(table, values, conflict_action, &batch.batch)
                         .await?;
@@ -1361,6 +1535,7 @@ impl SinkEmitter {
                 },
             ) => {
                 for batch in batches {
+                    tokio::task::consume_budget().await;
                     emitter
                         .publish_batch(table, values, conflict_action, &batch.batch)
                         .await?;
@@ -1377,6 +1552,7 @@ impl SinkEmitter {
                 },
             ) => {
                 for batch in batches {
+                    tokio::task::consume_budget().await;
                     emitter
                         .publish_batch(collection, values, conflict_action, &batch.batch)
                         .await?;
@@ -1391,84 +1567,182 @@ impl SinkEmitter {
                 .attach_printable("encoded emitter has no compiled codec"));
         };
         for batch in batches {
-            let records = batch.batch.runtime_records().map_err(|error| {
-                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                    "emitter '{}' failed to materialize codec input rows: {error}",
-                    context.emitter.as_str()
-                ))
-            })?;
-            for ((record, key), headers) in records
-                .iter()
-                .zip(batch.batch.keys.iter())
-                .zip(batch.headers.iter())
-            {
-                let payload = encode_emitted_payload(codec.clone(), record.clone())
-                    .await
-                    .map_err(|error| {
-                        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                            "emitter '{}' failed to encode message: {error}",
-                            context.emitter.as_str()
-                        ))
-                    })?;
-                self.publish_encoded_payload(sink, key, record, &payload, headers)
-                    .await?;
-                trace!(
-                    domain = context.domain.as_str(),
-                    emitter = context.emitter.as_str(),
-                    key = branch_key_display(key),
-                    payload = String::from_utf8_lossy(&payload).to_string(),
-                    "emitter published message"
-                );
-            }
+            tokio::task::consume_budget().await;
+            self.publish_encoded_batch(sink, context, codec.clone(), batch)
+                .await?;
         }
         Ok(())
     }
 
-    async fn publish_encoded_payload(
+    async fn publish_encoded_batch(
         &mut self,
         sink: &EmitSink,
-        key: &Option<BranchKey>,
-        record: &RuntimeRecord,
-        payload: &[u8],
-        headers: &EmitterHeaders,
+        context: &EmitterSinkContext,
+        codec: Arc<CompiledCodec>,
+        batch: &EmitterPublishBatch,
     ) -> EmitterRuntimeResult<()> {
-        match (self, sink) {
+        let row_count = batch.batch.batch.batch().num_rows();
+        if batch.batch.keys.len() != row_count || batch.headers.len() != row_count {
+            return Err(
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "emitter '{}' encoded batch row, branch key, and header counts differ",
+                    context.emitter.as_str()
+                )),
+            );
+        }
+        if codec.requires_blocking_encode() {
+            return self
+                .publish_blocking_encoded_batch(sink, context, codec, batch, row_count)
+                .await;
+        }
+
+        for start in (0..row_count).step_by(ENCODE_CHUNK_ROWS) {
+            tokio::task::consume_budget().await;
+            let end = start.saturating_add(ENCODE_CHUNK_ROWS).min(row_count);
+            let payloads = codec
+                .encode_batch(&batch.batch.batch, start..end)
+                .map_err(|error| Self::encode_batch_error(context, error))?;
+            self.publish_encoded_chunk(sink, context, batch, start, payloads)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_blocking_encoded_batch(
+        &mut self,
+        sink: &EmitSink,
+        context: &EmitterSinkContext,
+        codec: Arc<CompiledCodec>,
+        batch: &EmitterPublishBatch,
+        row_count: usize,
+    ) -> EmitterRuntimeResult<()> {
+        let (encoded_tx, mut encoded_rx) = mpsc::channel(BLOCKING_ENCODE_CHUNKS);
+        let arrow_batch = batch.batch.batch.clone();
+        let codec_name = codec.name.as_str().to_string();
+        let encoder = tokio::task::spawn_blocking(move || {
+            for start in (0..row_count).step_by(ENCODE_CHUNK_ROWS) {
+                let end = start.saturating_add(ENCODE_CHUNK_ROWS).min(row_count);
+                let payloads = codec.encode_batch(&arrow_batch, start..end);
+                let failed = payloads.is_err();
+                if encoded_tx.blocking_send((start, payloads)).is_err() || failed {
+                    break;
+                }
+            }
+        });
+
+        while let Some((start, payloads)) = encoded_rx.recv().await {
+            tokio::task::consume_budget().await;
+            let payloads = match payloads {
+                Ok(payloads) => payloads,
+                Err(error) => {
+                    drop(encoded_rx);
+                    let _ = encoder.await;
+                    return Err(Self::encode_batch_error(context, error));
+                }
+            };
+            if let Err(error) = self
+                .publish_encoded_chunk(sink, context, batch, start, payloads)
+                .await
+            {
+                drop(encoded_rx);
+                let _ = encoder.await;
+                return Err(error);
+            }
+        }
+        encoder.await.map_err(|error| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "emitter '{}' blocking codec task for '{}' failed: {error}",
+                context.emitter.as_str(),
+                codec_name
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn encode_batch_error(
+        context: &EmitterSinkContext,
+        error: CodecError,
+    ) -> Report<EmitterRuntimeError> {
+        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+            "emitter '{}' failed to encode columnar batch: {error}",
+            context.emitter.as_str()
+        ))
+    }
+
+    async fn publish_encoded_chunk(
+        &mut self,
+        sink: &EmitSink,
+        context: &EmitterSinkContext,
+        batch: &EmitterPublishBatch,
+        start: usize,
+        payloads: Vec<Vec<u8>>,
+    ) -> EmitterRuntimeResult<()> {
+        let message_count = payloads.len();
+        let end = start.saturating_add(message_count);
+        let keys = batch.batch.keys.get(start..end).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch)
+                .attach_printable("encoded payload range is outside emitter branch keys")
+        })?;
+        let headers = batch.headers.get(start..end).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch)
+                .attach_printable("encoded payload range is outside emitter headers")
+        })?;
+
+        match (&mut *self, sink) {
             (Self::Kafka(emitter), EmitSink::Kafka { topic, .. }) => {
-                let message = RelayMessage {
-                    key: key.clone(),
-                    record: record.clone(),
-                    acks: AckSet::empty(),
-                };
-                emitter.publish(topic, &message, payload, headers).await
+                emitter
+                    .publish_chunk(topic, keys, payloads, headers, PUBLISH_IN_FLIGHT)
+                    .await?;
             }
             (Self::Pulsar(emitter), EmitSink::Pulsar { .. }) => {
-                let message = RelayMessage {
-                    key: key.clone(),
-                    record: record.clone(),
-                    acks: AckSet::empty(),
-                };
-                emitter.publish(&message, payload, headers).await
+                emitter
+                    .publish_chunk(keys, payloads, headers, PUBLISH_IN_FLIGHT)
+                    .await?;
             }
             (Self::RabbitMq(emitter), EmitSink::RabbitMq { queue, .. }) => {
-                emitter.publish(queue, payload, headers).await
+                emitter
+                    .publish_chunk(queue, payloads, headers, PUBLISH_IN_FLIGHT)
+                    .await?;
             }
             (Self::Redis(emitter), EmitSink::Redis { channel, .. }) => {
-                emitter.publish(channel, payload).await
+                emitter.publish_chunk(channel, payloads).await?;
             }
-            (Self::Mqtt(emitter), EmitSink::Mqtt { topic, .. }) => {
-                emitter.publish(topic, payload).await
+            (Self::Mqtt(emitter), EmitSink::Mqtt { .. }) => {
+                emitter.publish_chunk(payloads).await?;
             }
-            (Self::Nats(emitter), EmitSink::Nats { subject, .. }) => {
-                emitter.publish(subject, payload, headers).await
+            (Self::Nats(emitter), EmitSink::Nats { .. }) => {
+                emitter.publish_chunk(payloads, headers).await?;
             }
-            (Self::ZeroMq(emitter), EmitSink::ZeroMq { .. }) => emitter.publish(payload).await,
-            (Self::Sqs(emitter), EmitSink::Sqs { queue, .. }) => {
-                emitter.publish(queue, payload, headers).await
+            (Self::ZeroMq(emitter), EmitSink::ZeroMq { .. }) => {
+                for payload in payloads {
+                    tokio::task::consume_budget().await;
+                    emitter.publish(payload).await?;
+                }
             }
-            (Self::Sentry(emitter), EmitSink::Sentry { .. }) => emitter.publish(payload).await,
-            _ => Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("emitter has no initialized sink client")),
+            (Self::Sqs(emitter), EmitSink::Sqs { .. }) => {
+                for (offset, payload) in payloads.into_iter().enumerate() {
+                    tokio::task::consume_budget().await;
+                    emitter.publish(payload, &headers[offset]).await?;
+                }
+            }
+            (Self::Sentry(emitter), EmitSink::Sentry { .. }) => {
+                for payload in payloads {
+                    tokio::task::consume_budget().await;
+                    emitter.publish(payload).await?;
+                }
+            }
+            _ => {
+                return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
+                    .attach_printable("emitter has no initialized sink client"));
+            }
         }
+        trace!(
+            domain = context.domain.as_str(),
+            emitter = context.emitter.as_str(),
+            rows = message_count,
+            "emitter published encoded chunk"
+        );
+        Ok(())
     }
 
     async fn wait_for_fault_injector(
@@ -1477,62 +1751,50 @@ impl SinkEmitter {
         control: &mut EmitterPublishControl<'_>,
         acks: &AckSet,
     ) -> EmitterRuntimeResult<()> {
-        loop {
-            tokio::task::consume_budget().await;
-            match control.fault_injector.fault_mode(&context.emitter) {
-                Some(EmitterFaultMode::Fail) => {
-                    let reason = format!(
-                        "fault injector failed emitter '{}'",
-                        context.emitter.as_str()
-                    );
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
-                        "{} in domain '{}'",
-                        reason,
-                        context.domain.as_str()
-                    )));
-                    warn!(
-                        domain = context.domain.as_str(),
-                        emitter = context.emitter.as_str(),
-                        "fault injector failed emitter publish"
-                    );
-                    return Err(
-                        Report::new(EmitterRuntimeError::FaultInjected).attach_printable(reason)
-                    );
-                }
-                Some(EmitterFaultMode::Stall) => {
-                    let wait = control.backoff.next_delay();
-                    control.runtime.record_emitter_transient_error_with_backoff(
-                        &context.domain,
-                        &context.emitter,
-                        "fault injector stalled emitter publish",
-                        wait,
-                    );
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
-                        "fault injector stalled emitter '{}' in domain '{}' before reconnect \
-                         retry in {}",
-                        context.emitter.as_str(),
-                        context.domain.as_str(),
-                        humantime::format_duration(wait),
-                    )));
-                    warn!(
-                        domain = context.domain.as_str(),
-                        emitter = context.emitter.as_str(),
-                        reconnect_backoff = %humantime::format_duration(wait),
-                        "fault injector stalled emitter publish"
-                    );
-                    if !control
-                        .backoff
-                        .wait_with_ack_alive(control.shutdown_rx, acks)
-                        .await
-                    {
-                        return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled));
-                    }
-                }
-                None => {
-                    control.backoff.reset();
-                    return Ok(());
-                }
+        match control.fault_injector.fault_mode(&context.emitter) {
+            Some(EmitterFaultMode::Fail) => {
+                let reason = format!(
+                    "fault injector failed emitter '{}'",
+                    context.emitter.as_str()
+                );
+                let _ = context.events.send(RuntimeEvent::Error(format!(
+                    "{} in domain '{}'",
+                    reason,
+                    context.domain.as_str()
+                )));
+                warn!(
+                    domain = context.domain.as_str(),
+                    emitter = context.emitter.as_str(),
+                    "fault injector failed emitter publish"
+                );
+                Err(Report::new(EmitterRuntimeError::FaultInjected).attach_printable(reason))
             }
+            Some(EmitterFaultMode::Stall) => {
+                let wait = control.backoff.next_delay();
+                control.runtime.record_emitter_transient_error_with_backoff(
+                    &context.domain,
+                    &context.emitter,
+                    "fault injector stalled emitter publish",
+                    wait,
+                );
+                let _ = context.events.send(RuntimeEvent::Error(format!(
+                    "fault injector stalled emitter '{}' in domain '{}' before reconnect retry in \
+                     {}",
+                    context.emitter.as_str(),
+                    context.domain.as_str(),
+                    humantime::format_duration(wait),
+                )));
+                warn!(
+                    domain = context.domain.as_str(),
+                    emitter = context.emitter.as_str(),
+                    reconnect_backoff = %humantime::format_duration(wait),
+                    "fault injector stalled emitter publish"
+                );
+                acks.ack_alive();
+                Err(Report::new(EmitterRuntimeError::PublishStalled)
+                    .attach_printable("fault injector stalled emitter publish"))
+            }
+            None => Ok(()),
         }
     }
 }
@@ -1551,6 +1813,32 @@ fn emitter_error_message(error: &Report<EmitterRuntimeError>) -> String {
             FrameKind::Context(_) | FrameKind::Attachment(_) => None,
         })
         .unwrap_or_else(|| error.current_context().to_string())
+}
+
+fn emitter_unavailable_reason(
+    sink: &SinkEmitter,
+    fault_injector: &EmitterFaultInjector,
+    emitter: &Identifier,
+) -> Option<String> {
+    sink.missing_reason().map(str::to_owned).or_else(|| {
+        if let Some(EmitterFaultMode::Stall) = fault_injector.fault_mode(emitter) {
+            Some("fault injector stalled emitter publish".to_string())
+        } else {
+            None
+        }
+    })
+}
+
+async fn wait_for_emitter_work_cancel(work_cancel_rx: &mut watch::Receiver<bool>) {
+    loop {
+        tokio::task::consume_budget().await;
+        if *work_cancel_rx.borrow() {
+            return;
+        }
+        if work_cancel_rx.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 enum SinkEmitterResult<T> {
@@ -1710,13 +1998,19 @@ impl EmitterTask {
         let task_events = runtime.events.clone();
         let fault_injector = runtime.emitter_faults.clone();
         let runtime = runtime.clone();
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        let mut force_flush_rx = runtime.force_flush_receiver(domain);
+        let shutdown_rx = shutdown_tx.subscribe();
+        let mut domain_work_cancel_rx = shutdown_tx.subscribe();
+        let (work_cancel, mut work_cancel_rx) = watch::channel(false);
+        let task_work_cancel = work_cancel.clone();
+        let quiesce_counters = runtime.node_quiesce_counters(domain, &emitter.name);
+        let force_flush = runtime.force_flush_participant(domain, quiesce_counters.clone());
         let emitter_buffer_count = runtime
             .emitter_buffers
             .entry(RuntimeKey::new(domain.clone(), emitter.name.clone()))
             .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
             .clone();
+        let buffered_messages =
+            Arc::new(EmitterBufferedMessages::new(emitter_buffer_count.clone()));
         let resolved_client =
             resolve_emitter_client(&runtime, domain, &emitter.sink, client.as_deref())?;
         let resolved_catalog_client = resolve_emitter_catalog_client(
@@ -1731,15 +2025,34 @@ impl EmitterTask {
             &emitter.name,
             emitter.from.collect_policy.as_ref(),
         )?;
-        let quiesce_counters = runtime.node_quiesce_counters(domain, &emitter.name);
-        let (commands, mut command_rx) = mpsc::channel(4);
+        let (commands, command_rx) = mpsc::channel(4);
 
         let task = tokio::spawn(async move {
+            let work_cancel_forwarder = AbortOnDropHandle::new(tokio::spawn(async move {
+                if *domain_work_cancel_rx.borrow()
+                    || domain_work_cancel_rx.changed().await.is_err()
+                    || *domain_work_cancel_rx.borrow()
+                {
+                    task_work_cancel.send_replace(true);
+                }
+            }));
             let _client_mounts = resolved_client
                 .as_ref()
                 .and_then(|config| config.mounts.clone());
-            let mut inputs =
-                EmitterTaskInputs::new(inputs, input_collect_policy, quiesce_counters.clone());
+            let interaction_inputs = inputs
+                .into_iter()
+                .map(|(relay, receiver)| {
+                    RelayInteractionInput::new(relay, receiver, input_collect_policy)
+                })
+                .collect();
+            let mut interaction = RelayInteraction::with_commands(
+                interaction_inputs,
+                shutdown_rx,
+                Some(force_flush),
+                Some(quiesce_counters),
+                command_rx,
+            )
+            .expect("validated emitter inputs must build a relay interaction");
             let context = EmitterSinkContext {
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
@@ -1752,24 +2065,35 @@ impl EmitterTask {
                 &context,
                 &task_flush_each,
                 task_max_batch_size.as_deref(),
-                emitter_buffer_count,
+                buffered_messages.clone(),
             );
-            let mut sink = SinkEmitter::new(
-                &task_sink,
-                client.as_deref(),
-                resolved_client.as_ref(),
-                catalog_client.as_deref(),
-                resolved_catalog_client.as_ref(),
-                &context,
-                input_schema.clone(),
+            let sink_runtime = SinkEmitterRuntime {
+                input_schema: input_schema.clone(),
+                buffered_messages,
+            };
+            let mut sink = SinkEmitter::new_until_cancelled(
+                SinkEmitterInit {
+                    sink: &task_sink,
+                    client: client.as_deref(),
+                    resolved: resolved_client.as_ref(),
+                    catalog_client: catalog_client.as_deref(),
+                    catalog_resolved: resolved_catalog_client.as_ref(),
+                    context: &context,
+                    runtime: sink_runtime.clone(),
+                },
+                &mut work_cancel_rx,
             )
             .await;
+            let mut reconnect_on_wake = sink.missing_reason().is_some();
+            let mut retry_schedule = EmitterRetrySchedule::default();
             if let Some(reason) = sink.missing_reason() {
+                let wait = publish_backoff.take_next_delay();
+                retry_schedule.schedule(wait, AckSet::empty(), false);
                 runtime.record_emitter_transient_error_with_backoff(
                     &task_domain,
                     &task_emitter,
                     reason,
-                    publish_backoff.next_delay(),
+                    wait,
                 );
             } else {
                 runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
@@ -1784,126 +2108,76 @@ impl EmitterTask {
                 filter_map: filter_map.as_ref(),
                 materialized_state: &task_materialized_state,
                 materialized_stream_owner_nodes: &materialized_stream_owner_nodes,
-                schema: output_compiled_schema.clone(),
             };
-            let mut force_flush_pending = false;
-
             loop {
                 tokio::task::consume_budget().await;
-                let input_event = if force_flush_pending {
-                    match inputs.take_any() {
-                        Ok(Some((relay, batch))) => Some(EmitterInputEvent::Batch { relay, batch }),
-                        Ok(None) => {
-                            force_flush_pending = false;
-                            None
-                        }
-                        Err(reason) => {
+                let wake_at = retry_schedule.deadline(sink.flush_deadline(&emitter_buffer));
+                let receive_input = !retry_schedule.is_active()
+                    || emitter_buffer_count.load(Ordering::Acquire) == 0;
+                let work = match interaction.next_with_input(wake_at, receive_input).await {
+                    Ok(work) => work,
+                    Err(error) => {
+                        let reason = error.to_string();
+                        context.report_flush_error(task_sink.label(), &reason);
+                        runtime.handle_internal_processor_error_for_acks(
+                            &task_domain,
+                            "emitter",
+                            &task_emitter,
+                            &task_error_policies,
+                            error.acks(),
+                            reason,
+                        );
+                        continue;
+                    }
+                };
+                let (input_event, _work) = work.into_parts();
+                match input_event {
+                    RelayInteractionEvent::Command(EmitterTaskCommand::Reconfigure {
+                        config,
+                        response,
+                    }) => {
+                        emitter_buffer.reconfigure(
+                            &context,
+                            &config.flush_each,
+                            config.max_batch_size.as_deref(),
+                        );
+                        sink.reconfigure_flush_policy(
+                            &context,
+                            &config.flush_each,
+                            config.max_batch_size.as_deref(),
+                        );
+                        let _ = response.send(());
+                    }
+                    RelayInteractionEvent::Command(EmitterTaskCommand::Stop { response }) => {
+                        if emitter_buffer_count.load(Ordering::Acquire) > 0
+                            && let Some(reason) =
+                                emitter_unavailable_reason(&sink, &fault_injector, &task_emitter)
+                        {
+                            runtime.record_emitter_transient_error(
+                                &task_domain,
+                                &task_emitter,
+                                reason.clone(),
+                            );
                             context.report_flush_error(task_sink.label(), &reason);
+                            let pending = emitter_buffer.drain_pending();
+                            batch_context
+                                .handle_publish_error_batches(
+                                    pending,
+                                    reason.clone(),
+                                    MessageErrorOperation::Publish,
+                                )
+                                .await;
+                            let _ =
+                                response.send(Err(format!("emitter final flush failed: {reason}")));
                             break;
                         }
-                    }
-                } else {
-                    tokio::select! {
-                        biased;
-                        command = command_rx.recv() => {
-                            match command {
-                                Some(EmitterTaskCommand::Reconfigure { config, response }) => {
-                                    emitter_buffer.reconfigure(
-                                        &context,
-                                        &config.flush_each,
-                                        config.max_batch_size.as_deref(),
-                                    );
-                                    sink.reconfigure_flush_policy(
-                                        &context,
-                                        &config.flush_each,
-                                        config.max_batch_size.as_deref(),
-                                    );
-                                    let _ = response.send(());
-                                    continue;
-                                }
-                                Some(EmitterTaskCommand::Stop { response }) => {
-                                    let mut control = EmitterPublishControl {
-                                        runtime: &runtime,
-                                        fault_injector: &fault_injector,
-                                        shutdown_rx: &mut shutdown_rx,
-                                        backoff: &mut publish_backoff,
-                                    };
-                                    let _ = sink
-                                        .flush_all(
-                                            &task_sink,
-                                            &context,
-                                            &mut control,
-                                            codec.clone(),
-                                            &mut emitter_buffer,
-                                        )
-                                        .await;
-                                    let _ = response.send(());
-                                    break;
-                                }
-                                None => break,
-                            }
-                        }
-                        event = inputs.recv(
-                            &mut shutdown_rx,
-                            sink.flush_deadline(&emitter_buffer),
-                        ) => Some(event),
-                        changed = force_flush_rx.changed() => {
-                            if changed.is_err() {
-                                break;
-                            }
-                            force_flush_pending = true;
-                            continue;
-                        }
-                    }
-                };
-                let Some(input_event) = input_event else {
-                    let _work = NodeQuiesceWorkGuard::begin(quiesce_counters.clone());
-                    let mut control = EmitterPublishControl {
-                        runtime: &runtime,
-                        fault_injector: &fault_injector,
-                        shutdown_rx: &mut shutdown_rx,
-                        backoff: &mut publish_backoff,
-                    };
-                    let _ = sink
-                        .flush_all(
-                            &task_sink,
-                            &context,
-                            &mut control,
-                            codec.clone(),
-                            &mut emitter_buffer,
-                        )
-                        .await;
-                    continue;
-                };
-                let _work = NodeQuiesceWorkGuard::begin(quiesce_counters.clone());
-                match input_event {
-                    EmitterInputEvent::Shutdown | EmitterInputEvent::Closed => {
                         let mut control = EmitterPublishControl {
                             runtime: &runtime,
                             fault_injector: &fault_injector,
-                            shutdown_rx: &mut shutdown_rx,
                             backoff: &mut publish_backoff,
                         };
-                        let _ = sink
+                        let stop_result = match sink
                             .flush_all(
-                                &task_sink,
-                                &context,
-                                &mut control,
-                                codec.clone(),
-                                &mut emitter_buffer,
-                            )
-                            .await;
-                        break;
-                    }
-                    EmitterInputEvent::Wake => {
-                        let mut control = EmitterPublishControl {
-                            runtime: &runtime,
-                            fault_injector: &fault_injector,
-                            shutdown_rx: &mut shutdown_rx,
-                            backoff: &mut publish_backoff,
-                        };
-                        match sink
-                            .flush_due(
                                 &task_sink,
                                 &context,
                                 &mut control,
@@ -1914,14 +2188,104 @@ impl EmitterTask {
                         {
                             Ok(Some(report)) => {
                                 publish_backoff.reset();
+                                retry_schedule.clear();
+                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
+                                batch_context.observe_sent(&report);
+                                Ok(())
+                            }
+                            Ok(None) => {
+                                publish_backoff.reset();
+                                retry_schedule.clear();
+                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
+                                Ok(())
+                            }
+                            Err(error) => {
+                                let reason = emitter_error_message(&error);
+                                runtime.record_emitter_transient_error(
+                                    &task_domain,
+                                    &task_emitter,
+                                    reason.clone(),
+                                );
+                                context.report_flush_error(task_sink.label(), &reason);
+                                let pending = emitter_buffer.drain_pending();
+                                let operation =
+                                    emitter_message_error_operation(&error, codec.is_some());
+                                batch_context
+                                    .handle_publish_error_batches(
+                                        pending,
+                                        reason.clone(),
+                                        operation,
+                                    )
+                                    .await;
+                                Err(format!("emitter final flush failed: {reason}"))
+                            }
+                        };
+                        let _ = response.send(stop_result);
+                        break;
+                    }
+                    RelayInteractionEvent::ForceFlush(completion) => {
+                        if emitter_buffer_count.load(Ordering::Acquire) > 0
+                            && let Some(reason) =
+                                emitter_unavailable_reason(&sink, &fault_injector, &task_emitter)
+                        {
+                            retry_schedule.include_acks(sink.pending_acks(&emitter_buffer));
+                            let wait = if retry_schedule.is_active() {
+                                publish_backoff.next_delay()
+                            } else {
+                                let wait = publish_backoff.take_next_delay();
+                                retry_schedule.schedule(
+                                    wait,
+                                    sink.pending_acks(&emitter_buffer),
+                                    fault_injector.fault_mode(&task_emitter)
+                                        == Some(EmitterFaultMode::Stall),
+                                );
+                                wait
+                            };
+                            runtime.record_emitter_transient_error_with_backoff(
+                                &task_domain,
+                                &task_emitter,
+                                reason.clone(),
+                                wait,
+                            );
+                            context.report_flush_error(task_sink.label(), &reason);
+                            completion.complete();
+                            continue;
+                        }
+                        let mut control = EmitterPublishControl {
+                            runtime: &runtime,
+                            fault_injector: &fault_injector,
+                            backoff: &mut publish_backoff,
+                        };
+                        match sink
+                            .flush_all(
+                                &task_sink,
+                                &context,
+                                &mut control,
+                                codec.clone(),
+                                &mut emitter_buffer,
+                            )
+                            .await
+                        {
+                            Ok(Some(report)) => {
+                                publish_backoff.reset();
+                                retry_schedule.clear();
                                 runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
                                 batch_context.observe_sent(&report);
                             }
-                            Ok(None) => {}
+                            Ok(None) => {
+                                publish_backoff.reset();
+                                retry_schedule.clear();
+                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
+                            }
                             Err(error) if emitter_publish_error_is_retryable(&error) => {
                                 let reason = emitter_error_message(&error);
-                                let wait = publish_backoff.next_delay();
-                                emitter_buffer.defer_retry(wait);
+                                let wait = publish_backoff.take_next_delay();
+                                retry_schedule.schedule(
+                                    wait,
+                                    sink.pending_acks(&emitter_buffer),
+                                    *error.current_context() == EmitterRuntimeError::PublishStalled,
+                                );
+                                reconnect_on_wake = sink.reconnect_after(&error);
                                 runtime.record_emitter_transient_error_with_backoff(
                                     &task_domain,
                                     &task_emitter,
@@ -1930,6 +2294,69 @@ impl EmitterTask {
                                 );
                                 context.report_flush_error(task_sink.label(), &reason);
                             }
+                            Err(error) => {
+                                retry_schedule.clear();
+                                let reason = emitter_error_message(&error);
+                                runtime.record_emitter_transient_error(
+                                    &task_domain,
+                                    &task_emitter,
+                                    reason.clone(),
+                                );
+                                context.report_flush_error(task_sink.label(), &reason);
+                                let pending = emitter_buffer.drain_pending();
+                                let operation =
+                                    emitter_message_error_operation(&error, codec.is_some());
+                                batch_context
+                                    .handle_publish_error_batches(pending, reason, operation)
+                                    .await;
+                            }
+                        }
+                        completion.complete();
+                    }
+                    RelayInteractionEvent::Stopped(reason) => {
+                        debug!(
+                            domain = task_domain.as_str(),
+                            emitter = task_emitter.as_str(),
+                            ?reason,
+                            "emitter relay interaction stopped"
+                        );
+                        if emitter_buffer_count.load(Ordering::Acquire) > 0
+                            && let Some(reason) =
+                                emitter_unavailable_reason(&sink, &fault_injector, &task_emitter)
+                        {
+                            runtime.record_emitter_transient_error(
+                                &task_domain,
+                                &task_emitter,
+                                reason.clone(),
+                            );
+                            context.report_flush_error(task_sink.label(), &reason);
+                            let pending = emitter_buffer.drain_pending();
+                            batch_context
+                                .handle_publish_error_batches(
+                                    pending,
+                                    reason,
+                                    MessageErrorOperation::Publish,
+                                )
+                                .await;
+                            break;
+                        }
+                        let mut control = EmitterPublishControl {
+                            runtime: &runtime,
+                            fault_injector: &fault_injector,
+                            backoff: &mut publish_backoff,
+                        };
+                        match sink
+                            .flush_all(
+                                &task_sink,
+                                &context,
+                                &mut control,
+                                codec.clone(),
+                                &mut emitter_buffer,
+                            )
+                            .await
+                        {
+                            Ok(Some(report)) => batch_context.observe_sent(&report),
+                            Ok(None) => {}
                             Err(error) => {
                                 let reason = emitter_error_message(&error);
                                 runtime.record_emitter_transient_error(
@@ -1946,8 +2373,113 @@ impl EmitterTask {
                                     .await;
                             }
                         }
+                        break;
                     }
-                    EmitterInputEvent::Batch {
+                    RelayInteractionEvent::Wake => {
+                        let retry_was_active = retry_schedule.is_active();
+                        let retry_is_due = retry_schedule.retry_is_due();
+                        let stall_cleared = retry_schedule
+                            .release_if_stall_cleared(fault_injector.fault_mode(&task_emitter));
+                        if !retry_is_due && !stall_cleared {
+                            continue;
+                        }
+                        let retry_attempt = retry_was_active && (retry_is_due || stall_cleared);
+                        if reconnect_on_wake || sink.missing_reason().is_some() {
+                            sink = SinkEmitter::new_until_cancelled(
+                                SinkEmitterInit {
+                                    sink: &task_sink,
+                                    client: client.as_deref(),
+                                    resolved: resolved_client.as_ref(),
+                                    catalog_client: catalog_client.as_deref(),
+                                    catalog_resolved: resolved_catalog_client.as_ref(),
+                                    context: &context,
+                                    runtime: sink_runtime.clone(),
+                                },
+                                &mut work_cancel_rx,
+                            )
+                            .await;
+                            if let Some(reason) = sink.missing_reason() {
+                                let wait = publish_backoff.take_next_delay();
+                                retry_schedule.schedule(
+                                    wait,
+                                    sink.pending_acks(&emitter_buffer),
+                                    false,
+                                );
+                                runtime.record_emitter_transient_error_with_backoff(
+                                    &task_domain,
+                                    &task_emitter,
+                                    reason,
+                                    wait,
+                                );
+                                reconnect_on_wake = true;
+                                continue;
+                            }
+                            reconnect_on_wake = false;
+                            runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
+                        }
+                        let mut control = EmitterPublishControl {
+                            runtime: &runtime,
+                            fault_injector: &fault_injector,
+                            backoff: &mut publish_backoff,
+                        };
+                        match sink
+                            .flush_due(
+                                &task_sink,
+                                &context,
+                                &mut control,
+                                codec.clone(),
+                                &mut emitter_buffer,
+                                retry_attempt,
+                            )
+                            .await
+                        {
+                            Ok(Some(report)) => {
+                                publish_backoff.reset();
+                                retry_schedule.clear();
+                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
+                                batch_context.observe_sent(&report);
+                            }
+                            Ok(None) => {
+                                publish_backoff.reset();
+                                retry_schedule.clear();
+                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
+                            }
+                            Err(error) if emitter_publish_error_is_retryable(&error) => {
+                                let reason = emitter_error_message(&error);
+                                let wait = publish_backoff.take_next_delay();
+                                retry_schedule.schedule(
+                                    wait,
+                                    sink.pending_acks(&emitter_buffer),
+                                    *error.current_context() == EmitterRuntimeError::PublishStalled,
+                                );
+                                reconnect_on_wake = sink.reconnect_after(&error);
+                                runtime.record_emitter_transient_error_with_backoff(
+                                    &task_domain,
+                                    &task_emitter,
+                                    reason.clone(),
+                                    wait,
+                                );
+                                context.report_flush_error(task_sink.label(), &reason);
+                            }
+                            Err(error) => {
+                                retry_schedule.clear();
+                                let reason = emitter_error_message(&error);
+                                runtime.record_emitter_transient_error(
+                                    &task_domain,
+                                    &task_emitter,
+                                    reason.clone(),
+                                );
+                                context.report_flush_error(task_sink.label(), &reason);
+                                let pending = emitter_buffer.drain_pending();
+                                let operation =
+                                    emitter_message_error_operation(&error, codec.is_some());
+                                batch_context
+                                    .handle_publish_error_batches(pending, reason, operation)
+                                    .await;
+                            }
+                        }
+                    }
+                    RelayInteractionEvent::Batch {
                         relay: input_relay,
                         batch,
                     } => {
@@ -1990,197 +2522,177 @@ impl EmitterTask {
                                 &task_emitter,
                             );
                         }
+                        let wait_for_required_state = !interaction.is_terminal_drain();
                         let publish_batch = match batch_context
-                            .process(&input_relay, batch, &mut shutdown_rx)
+                            .process(
+                                &input_relay,
+                                batch,
+                                &mut work_cancel_rx,
+                                wait_for_required_state,
+                            )
                             .await
                         {
                             Some(batch) => batch,
                             None => continue,
                         };
 
+                        if interaction.is_draining() {
+                            let wait = publish_backoff.next_delay();
+                            if let Err(error) =
+                                emitter_buffer.retain_for_retry(publish_batch.clone(), wait)
+                            {
+                                let reason = emitter_error_message(&error);
+                                let operation =
+                                    emitter_message_error_operation(&error, codec.is_some());
+                                batch_context
+                                    .handle_publish_error_batch(publish_batch, reason, operation)
+                                    .await;
+                            } else if !interaction.is_terminal_drain() {
+                                retry_schedule.include_acks(publish_batch.merged_acks());
+                            }
+                            continue;
+                        }
+
+                        if retry_schedule.is_active()
+                            || emitter_unavailable_reason(&sink, &fault_injector, &task_emitter)
+                                .is_some()
                         {
-                            let mut pending_batch = Some(publish_batch);
-                            loop {
-                                tokio::task::consume_budget().await;
-                                let batch = pending_batch
-                                    .as_ref()
-                                    .or_else(|| emitter_buffer.pending.first())
-                                    .expect("pending emitter batch must exist");
-                                let batch_acks = batch.merged_acks();
-                                while let Some(reason) = sink.missing_reason().map(str::to_owned) {
-                                    tokio::task::consume_budget().await;
-                                    let wait = publish_backoff.next_delay();
+                            let unavailable =
+                                emitter_unavailable_reason(&sink, &fault_injector, &task_emitter);
+                            if let Err(error) = emitter_buffer
+                                .retain_for_retry(publish_batch.clone(), Duration::ZERO)
+                            {
+                                let reason = emitter_error_message(&error);
+                                let operation =
+                                    emitter_message_error_operation(&error, codec.is_some());
+                                batch_context
+                                    .handle_publish_error_batch(publish_batch, reason, operation)
+                                    .await;
+                                continue;
+                            }
+                            retry_schedule.include_acks(publish_batch.merged_acks());
+                            if !retry_schedule.is_active() {
+                                let wait = publish_backoff.take_next_delay();
+                                retry_schedule.schedule(
+                                    wait,
+                                    sink.pending_acks(&emitter_buffer),
+                                    fault_injector.fault_mode(&task_emitter)
+                                        == Some(EmitterFaultMode::Stall),
+                                );
+                                if let Some(reason) = unavailable.as_deref() {
                                     runtime.record_emitter_transient_error_with_backoff(
                                         &task_domain,
                                         &task_emitter,
-                                        &reason,
+                                        reason,
                                         wait,
                                     );
-                                    if !publish_backoff
-                                        .wait_with_ack_alive(&mut shutdown_rx, &batch_acks)
-                                        .await
-                                    {
-                                        break;
-                                    }
-                                    sink = SinkEmitter::new(
-                                        &task_sink,
-                                        client.as_deref(),
-                                        resolved_client.as_ref(),
-                                        catalog_client.as_deref(),
-                                        resolved_catalog_client.as_ref(),
-                                        &context,
-                                        input_schema.clone(),
-                                    )
-                                    .await;
-                                    if sink.missing_reason().is_none() {
-                                        publish_backoff.reset();
-                                        runtime.clear_emitter_transient_error(
-                                            &task_domain,
-                                            &task_emitter,
-                                        );
-                                    }
+                                    context.report_publish_error(task_sink.label(), reason);
                                 }
-                                if sink.missing_reason().is_some() {
-                                    break;
-                                }
-                                let mut control = EmitterPublishControl {
-                                    runtime: &runtime,
-                                    fault_injector: &fault_injector,
-                                    shutdown_rx: &mut shutdown_rx,
-                                    backoff: &mut publish_backoff,
-                                };
-                                let publish_result = if let Some(batch) = pending_batch.as_ref() {
-                                    sink.publish_batch(
-                                        &task_sink,
-                                        &context,
-                                        &mut control,
-                                        codec.clone(),
-                                        &mut emitter_buffer,
-                                        batch.clone(),
-                                    )
-                                    .await
-                                } else {
-                                    sink.flush_buffer(
-                                        &task_sink,
-                                        &context,
-                                        &mut control,
-                                        codec.clone(),
-                                        &mut emitter_buffer,
-                                    )
-                                    .await
-                                };
-                                match publish_result {
-                                    Ok(Some(report)) => {
-                                        publish_backoff.reset();
-                                        runtime.clear_emitter_transient_error(
-                                            &task_domain,
-                                            &task_emitter,
-                                        );
-                                        batch_context.observe_sent(&report);
-                                        pending_batch.take();
-                                        break;
-                                    }
-                                    Ok(None) => {
-                                        pending_batch.take();
-                                        break;
-                                    }
-                                    Err(error) if emitter_publish_error_is_retryable(&error) => {
-                                        if !emitter_buffer.is_empty() {
-                                            pending_batch.take();
-                                        }
-                                        let reason = emitter_error_message(&error);
-                                        let wait = publish_backoff.next_delay();
-                                        runtime.record_emitter_transient_error_with_backoff(
-                                            &task_domain,
-                                            &task_emitter,
-                                            reason.clone(),
-                                            wait,
-                                        );
-                                        context.report_publish_error(task_sink.label(), &reason);
-                                        if !publish_backoff
-                                            .wait_with_ack_alive(&mut shutdown_rx, &batch_acks)
-                                            .await
-                                        {
-                                            if let Some(batch) = pending_batch.take() {
-                                                runtime.handle_general_error_for_acks(
-                                                    &task_domain,
-                                                    "emitter",
-                                                    &task_emitter,
-                                                    &task_error_policies,
-                                                    batch.batch.acks.iter(),
-                                                    reason,
-                                                );
-                                            } else {
-                                                let pending_acks = emitter_buffer
-                                                    .pending
-                                                    .iter()
-                                                    .flat_map(|batch| {
-                                                        batch.batch.acks.iter().cloned()
-                                                    })
-                                                    .collect::<Vec<_>>();
-                                                runtime.handle_general_error_for_acks(
-                                                    &task_domain,
-                                                    "emitter",
-                                                    &task_emitter,
-                                                    &task_error_policies,
-                                                    pending_acks.iter(),
-                                                    reason,
-                                                );
-                                                emitter_buffer.clear();
-                                            }
-                                            break;
-                                        }
-                                        sink = SinkEmitter::new(
-                                            &task_sink,
-                                            client.as_deref(),
-                                            resolved_client.as_ref(),
-                                            catalog_client.as_deref(),
-                                            resolved_catalog_client.as_ref(),
-                                            &context,
-                                            input_schema.clone(),
-                                        )
+                            }
+                            reconnect_on_wake |= sink.missing_reason().is_some();
+                            continue;
+                        }
+
+                        let mut pending_batch = Some(publish_batch);
+                        let mut control = EmitterPublishControl {
+                            runtime: &runtime,
+                            fault_injector: &fault_injector,
+                            backoff: &mut publish_backoff,
+                        };
+                        let publish_result = sink
+                            .publish_batch(
+                                &task_sink,
+                                &context,
+                                &mut control,
+                                codec.clone(),
+                                &mut emitter_buffer,
+                                pending_batch
+                                    .as_ref()
+                                    .expect("pending emitter batch must exist")
+                                    .clone(),
+                            )
+                            .await;
+                        match publish_result {
+                            Ok(Some(report)) => {
+                                publish_backoff.reset();
+                                retry_schedule.clear();
+                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
+                                batch_context.observe_sent(&report);
+                                pending_batch.take();
+                            }
+                            Ok(None) => {
+                                publish_backoff.reset();
+                                retry_schedule.clear();
+                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
+                                pending_batch.take();
+                            }
+                            Err(failure) if emitter_publish_error_is_retryable(&failure.error) => {
+                                let EmitterPublishFailure { error, batch_owner } = failure;
+                                let wait = publish_backoff.take_next_delay();
+                                if let EmitterPublishBatchOwner::Caller = batch_owner
+                                    && let Some(batch) = pending_batch.take()
+                                    && let Err(retain_error) = emitter_buffer
+                                        .retain_for_retry(batch.clone(), Duration::ZERO)
+                                {
+                                    retry_schedule.clear();
+                                    let reason = emitter_error_message(&retain_error);
+                                    let operation = emitter_message_error_operation(
+                                        &retain_error,
+                                        codec.is_some(),
+                                    );
+                                    batch_context
+                                        .handle_publish_error_batch(batch, reason, operation)
                                         .await;
-                                    }
-                                    Err(error) => {
-                                        let reason = emitter_error_message(&error);
-                                        runtime.record_emitter_transient_error(
-                                            &task_domain,
-                                            &task_emitter,
-                                            reason.clone(),
-                                        );
-                                        context.report_publish_error(task_sink.label(), &reason);
-                                        if let Some(batch) = pending_batch.take() {
-                                            let operation = emitter_message_error_operation(
-                                                &error,
-                                                codec.is_some(),
-                                            );
-                                            batch_context
-                                                .handle_publish_error_batch(
-                                                    batch, reason, operation,
-                                                )
-                                                .await;
-                                        } else {
-                                            let pending = emitter_buffer.drain_pending();
-                                            let operation = emitter_message_error_operation(
-                                                &error,
-                                                codec.is_some(),
-                                            );
-                                            batch_context
-                                                .handle_publish_error_batches(
-                                                    pending, reason, operation,
-                                                )
-                                                .await;
-                                        }
-                                        break;
-                                    }
+                                    continue;
                                 }
+                                if let EmitterPublishBatchOwner::Buffer
+                                | EmitterPublishBatchOwner::Sink = batch_owner
+                                {
+                                    pending_batch.take();
+                                }
+                                retry_schedule.schedule(
+                                    wait,
+                                    sink.pending_acks(&emitter_buffer),
+                                    *error.current_context() == EmitterRuntimeError::PublishStalled,
+                                );
+                                reconnect_on_wake = sink.reconnect_after(&error);
+                                let reason = emitter_error_message(&error);
+                                runtime.record_emitter_transient_error_with_backoff(
+                                    &task_domain,
+                                    &task_emitter,
+                                    reason.clone(),
+                                    wait,
+                                );
+                                context.report_publish_error(task_sink.label(), &reason);
+                            }
+                            Err(failure) => {
+                                retry_schedule.clear();
+                                let (error, failed_batches) = failure
+                                    .drain_failed_batches(&mut pending_batch, &mut emitter_buffer);
+                                let reason = emitter_error_message(&error);
+                                runtime.record_emitter_transient_error(
+                                    &task_domain,
+                                    &task_emitter,
+                                    reason.clone(),
+                                );
+                                context.report_publish_error(task_sink.label(), &reason);
+                                let operation =
+                                    emitter_message_error_operation(&error, codec.is_some());
+                                batch_context
+                                    .handle_publish_error_batches(failed_batches, reason, operation)
+                                    .await;
                             }
                         }
                     }
                 }
             }
+            drop(work_cancel_forwarder);
         });
-        Ok(ScheduledEmitterTask { commands, task })
+        Ok(ScheduledEmitterTask {
+            commands,
+            work_cancel,
+            task,
+        })
     }
 }
 
@@ -2393,6 +2905,7 @@ impl EmitterBatchContext<'_> {
         input_relay: &Identifier,
         batch: RelayRecordBatch,
         shutdown_rx: &mut watch::Receiver<bool>,
+        wait_for_required_state: bool,
     ) -> Option<EmitterPublishBatch> {
         let dependency_error_acks = batch.acks.clone();
         let batch = match self
@@ -2403,6 +2916,7 @@ impl EmitterBatchContext<'_> {
                 self.materialized_state,
                 batch,
                 shutdown_rx,
+                wait_for_required_state,
             )
             .await
         {
@@ -2454,7 +2968,7 @@ impl EmitterBatchContext<'_> {
                 return None;
             }
         };
-        match plan_emitter_filter_map_messages(
+        match plan_emitter_filter_map_batch(
             self.emitter,
             filter_map,
             batch,
@@ -2477,28 +2991,9 @@ impl EmitterBatchContext<'_> {
                         plan.message_errors,
                     )
                     .await;
-                if plan.messages.is_empty() {
-                    return None;
-                }
-                match RelayRecordBatch::from_messages(self.schema.clone(), plan.messages) {
-                    Ok(batch) => match EmitterPublishBatch::new(batch, plan.headers) {
-                        Ok(batch) => Some(batch),
-                        Err(error) => {
-                            self.runtime.handle_general_error_for_acks(
-                                self.domain,
-                                "emitter",
-                                self.emitter,
-                                self.error_policies,
-                                std::iter::empty::<&AckSet>(),
-                                format!(
-                                    "emitter '{}' failed to build filtered header batch: {}",
-                                    self.emitter.as_str(),
-                                    error
-                                ),
-                            );
-                            None
-                        }
-                    },
+                let batch = plan.batch?;
+                match EmitterPublishBatch::new(batch, plan.headers) {
+                    Ok(batch) => Some(batch),
                     Err(error) => {
                         self.runtime.handle_general_error_for_acks(
                             self.domain,
@@ -2507,7 +3002,7 @@ impl EmitterBatchContext<'_> {
                             self.error_policies,
                             std::iter::empty::<&AckSet>(),
                             format!(
-                                "emitter '{}' failed to build filtered arrow batch: {}",
+                                "emitter '{}' failed to build filtered header batch: {}",
                                 self.emitter.as_str(),
                                 error
                             ),
@@ -2604,5 +3099,968 @@ impl EmitterBatchContext<'_> {
             )
             .await;
         plan.batch
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::OnceLock;
+
+    use nervix_models::{CreateSchema, ParseAsType};
+
+    use super::*;
+
+    fn input_schema() -> Arc<CompiledSchema> {
+        static SCHEMA: OnceLock<Arc<CompiledSchema>> = OnceLock::new();
+        let value = Identifier::parse("value").expect("valid field name");
+        SCHEMA
+            .get_or_init(|| {
+                Arc::new(compile_schema(&CreateSchema {
+                    name: Identifier::parse("emitter_input").expect("valid schema name"),
+                    fields: vec![nervix_models::SchemaField {
+                        name: value,
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                }))
+            })
+            .clone()
+    }
+
+    fn input_batch_with(value: i64, timestamp: i64, acks: AckSet) -> RelayRecordBatch {
+        RelayRecordBatch::single(
+            input_schema(),
+            None,
+            RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I64(value))])
+                .with_ingested_at_watermarks(Timestamp::from_unix_nanos(timestamp)),
+            acks,
+        )
+        .expect("valid emitter input batch")
+    }
+
+    fn input_batch() -> RelayRecordBatch {
+        input_batch_with(1, 0, AckSet::empty())
+    }
+
+    fn input_value(batch: &RelayRecordBatch) -> i64 {
+        let record = batch.runtime_record(0).expect("batch must contain one row");
+        let Some(RuntimeValue::I64(value)) = record.value("value") else {
+            panic!("test batch must contain an I64 value")
+        };
+        *value
+    }
+
+    fn sink_context() -> EmitterSinkContext {
+        let (events, _) = broadcast::channel(4);
+        EmitterSinkContext {
+            domain: Domain::parse("emitter_tests").expect("valid domain"),
+            emitter: Identifier::parse("output").expect("valid emitter name"),
+            temp_dir: Arc::new(PathBuf::new()),
+            events,
+            udfs: None,
+        }
+    }
+
+    #[test]
+    fn publish_batch_requires_one_header_row_per_record() {
+        let batch = input_batch();
+        let from_batch = EmitterPublishBatch::from_batch(batch.clone());
+        assert_eq!(from_batch.headers, vec![EmitterHeaders::new()]);
+        assert_eq!(from_batch.message_count(), 1);
+        assert_eq!(
+            from_batch.domain_timestamp(),
+            Some(Timestamp::from_unix_nanos(0))
+        );
+
+        let headers = vec![vec![("route".to_string(), "fast".to_string())]];
+        let with_headers = EmitterPublishBatch::new(batch.clone(), headers.clone())
+            .expect("row-aligned headers must build");
+        assert_eq!(with_headers.headers, headers);
+        assert_eq!(
+            with_headers.estimated_bytes(),
+            batch.estimated_bytes() + u64::try_from("routefast".len()).unwrap()
+        );
+
+        let error = match EmitterPublishBatch::new(batch, Vec::new()) {
+            Err(error) => error,
+            Ok(_) => panic!("missing row headers must be rejected"),
+        };
+        assert!(error.contains("header count 0 does not match row count 1"));
+    }
+
+    #[tokio::test]
+    async fn publish_batch_ack_helpers_preserve_and_complete_all_roots() {
+        let (acks, completion) = AckSet::root();
+        let batch = EmitterPublishBatch::from_batch(input_batch_with(1, 0, acks));
+
+        assert!(!batch.merged_acks().is_empty());
+        batch.ack_success();
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+    }
+
+    #[test]
+    fn batch_buffer_rejects_input_without_an_initialized_flush_policy() {
+        let mut buffer = EmitterBatchBuffer::default();
+        let error = buffer
+            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .expect_err("an unconfigured buffer must reject input");
+
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::FlushPolicyNotInitialized
+        );
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.pending_bytes, 0);
+        assert!(buffer.deadline().is_none());
+    }
+
+    #[test]
+    fn batch_buffer_tracks_size_messages_deadline_and_latest_timestamp() {
+        let reported_messages = Arc::new(AtomicUsize::new(0));
+        let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+            interval: Duration::from_secs(60),
+            max_batch_size: u64::MAX,
+        });
+        buffer.buffered_messages = buffered_messages.clone();
+        let first = EmitterPublishBatch::from_batch(input_batch_with(1, 10, AckSet::empty()));
+        let second = EmitterPublishBatch::new(
+            input_batch_with(2, 20, AckSet::empty()),
+            vec![vec![("name".to_string(), "value".to_string())]],
+        )
+        .expect("headers must align");
+        let expected_bytes = first
+            .estimated_bytes()
+            .saturating_add(second.estimated_bytes());
+
+        assert!(!buffer.push(first).expect("first batch must buffer"));
+        let first_deadline = buffer.deadline().expect("first push must set a deadline");
+        assert!(!buffer.push(second).expect("second batch must buffer"));
+
+        assert_eq!(buffer.deadline(), Some(first_deadline));
+        assert_eq!(reported_messages.load(Ordering::Acquire), 2);
+        let report = buffer
+            .report()
+            .expect("pending batches must produce a report");
+        assert_eq!(report.messages, 2);
+        assert_eq!(report.bytes, expected_bytes);
+        assert_eq!(report.domain_timestamp, Timestamp::from_unix_nanos(20));
+        assert_eq!(buffer.pending_bytes, expected_bytes);
+    }
+
+    #[test]
+    fn batch_buffer_honors_size_boundary_and_retry_deadline() {
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+            interval: Duration::from_secs(60),
+            max_batch_size: 1,
+        });
+
+        assert!(
+            buffer
+                .push(EmitterPublishBatch::from_batch(input_batch()))
+                .expect("batch must buffer")
+        );
+        let original = buffer.deadline().expect("push must set a deadline");
+        buffer.defer_retry(Duration::from_secs(120));
+        let deferred = buffer.deadline().expect("retry must retain a deadline");
+        assert!(deferred > original);
+
+        buffer.flush_at = Some(Instant::now());
+        assert!(buffer.is_due());
+        buffer.flush_at = Some(Instant::now() + Duration::from_secs(60));
+        assert!(!buffer.is_due());
+    }
+
+    #[test]
+    fn forced_retry_ignores_the_ordinary_buffer_deadline() {
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+            interval: Duration::from_secs(60),
+            max_batch_size: u64::MAX,
+        });
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .expect("retry batch must buffer");
+        assert!(!buffer.is_due());
+
+        assert!(buffer.should_flush(true));
+        assert!(!buffer.should_flush(false));
+    }
+
+    #[tokio::test]
+    async fn retry_wake_attempts_a_buffer_before_its_ordinary_deadline() {
+        let runtime = Runtime::default();
+        let fault_injector = EmitterFaultInjector::default();
+        let mut backoff = RuntimeReconnectBackoff::default();
+        let mut control = EmitterPublishControl {
+            runtime: &runtime,
+            fault_injector: &fault_injector,
+            backoff: &mut backoff,
+        };
+        let context = sink_context();
+        let sink_config = EmitSink::Nats {
+            client: Identifier::parse("client").expect("valid client name"),
+            subject: Identifier::parse("subject").expect("valid subject name"),
+        };
+        let mut sink = SinkEmitter::Missing {
+            reason: "test sink intentionally has no client".to_string(),
+        };
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+            interval: Duration::from_secs(60),
+            max_batch_size: u64::MAX,
+        });
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .expect("retry batch must buffer");
+
+        assert!(
+            sink.flush_due(
+                &sink_config,
+                &context,
+                &mut control,
+                None,
+                &mut buffer,
+                false,
+            )
+            .await
+            .expect("ordinary wake must remain idle")
+            .is_none()
+        );
+        let error = match sink
+            .flush_due(
+                &sink_config,
+                &context,
+                &mut control,
+                None,
+                &mut buffer,
+                true,
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("retry wake must attempt the buffered batch"),
+        };
+
+        assert_eq!(*error.current_context(), EmitterRuntimeError::EncodeBatch);
+        assert_eq!(buffer.pending.len(), 1);
+    }
+
+    #[test]
+    fn generic_and_iceberg_buffer_counts_are_summed_independently() {
+        let reported = Arc::new(AtomicUsize::new(0));
+        let buffered = EmitterBufferedMessages::new(reported.clone());
+
+        buffered.set_generic(2);
+        buffered.set_iceberg(3);
+        assert_eq!(reported.load(Ordering::Acquire), 5);
+
+        buffered.set_generic(0);
+        assert_eq!(reported.load(Ordering::Acquire), 3);
+        buffered.set_iceberg(0);
+        assert_eq!(reported.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn batch_buffer_drain_clear_reconfigure_and_drop_reset_accounting() {
+        let context = sink_context();
+        let reported_messages = Arc::new(AtomicUsize::new(0));
+        let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
+        let mut buffer =
+            EmitterBatchBuffer::new(&context, "10s", Some("1MiB"), buffered_messages.clone());
+        assert!(buffer.flush_policy.is_some());
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .expect("configured buffer must accept input");
+        buffer.reconfigure(&context, "IMMEDIATE", None);
+        assert_eq!(buffer.flush_policy, Some(RuntimeFlushPolicy::Immediate));
+        assert!(buffer.deadline().is_some());
+
+        let drained = buffer.drain_pending();
+        assert_eq!(drained.len(), 1);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.pending_bytes, 0);
+        assert!(buffer.deadline().is_none());
+        assert_eq!(reported_messages.load(Ordering::Acquire), 0);
+
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .expect("reconfigured buffer must accept input");
+        buffer.clear();
+        assert!(buffer.report().is_none());
+        assert_eq!(reported_messages.load(Ordering::Acquire), 0);
+
+        buffered_messages.set_generic(7);
+        drop(buffer);
+        assert_eq!(reported_messages.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_buffer_ack_helpers_merge_and_complete_pending_batches() {
+        let (first_acks, first_completion) = AckSet::root();
+        let (second_acks, second_completion) = AckSet::root();
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch_with(
+                1, 0, first_acks,
+            )))
+            .expect("first batch must buffer");
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch_with(
+                2,
+                0,
+                second_acks,
+            )))
+            .expect("second batch must buffer");
+
+        assert!(!buffer.pending_acks().is_empty());
+        buffer.ack_pending_success();
+        assert_eq!(first_completion.wait().await, AckOutcome::Ack);
+        assert_eq!(second_completion.wait().await, AckOutcome::Ack);
+    }
+
+    #[tokio::test]
+    async fn retained_batch_clone_owns_exactly_one_attached_ack_share() {
+        let (root, mut completion) = AckSet::root();
+        let attached = root.attached();
+        let batch = EmitterPublishBatch::from_batch(input_batch_with(1, 0, attached));
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+
+        buffer
+            .retain_for_retry(batch.clone(), Duration::from_secs(1))
+            .expect("retry buffer must retain the batch");
+        root.ack_success();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), completion.wait_for_progress())
+                .await
+                .is_err(),
+            "the retained attached share must keep the root pending"
+        );
+
+        buffer.ack_pending_success();
+        buffer.clear();
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        drop(batch);
+    }
+
+    #[test]
+    fn retry_schedule_preserves_its_deadline_until_a_retry_attempt() {
+        let mut retry = EmitterRetrySchedule::default();
+        retry.schedule(Duration::from_secs(10), AckSet::empty(), false);
+        let retry_at = retry.retry_at.expect("retry must have a deadline");
+
+        assert_eq!(retry.deadline(Some(Instant::now())), Some(retry_at));
+        assert_eq!(retry.deadline(Some(Instant::now())), Some(retry_at));
+        assert_eq!(retry.retry_at, Some(retry_at));
+    }
+
+    #[test]
+    fn retry_schedule_releases_a_stall_as_soon_as_the_fault_clears() {
+        let mut retry = EmitterRetrySchedule::default();
+        retry.schedule(Duration::from_secs(30), AckSet::empty(), true);
+
+        assert!(!retry.release_if_stall_cleared(Some(EmitterFaultMode::Stall)));
+        assert!(retry.is_active());
+        assert!(retry.release_if_stall_cleared(None));
+        assert!(!retry.is_active());
+    }
+
+    #[tokio::test]
+    async fn retry_schedule_heartbeats_acks_added_by_a_force_drain() {
+        let (existing, mut existing_completion) = AckSet::root();
+        let (force_drained, mut force_completion) = AckSet::root();
+        let mut retry = EmitterRetrySchedule::default();
+        retry.schedule(Duration::from_secs(30), existing, false);
+        retry.include_acks(force_drained);
+        retry.ack_alive_at = Some(Instant::now());
+
+        assert!(!retry.retry_is_due());
+
+        assert_eq!(
+            existing_completion.wait_for_progress().await,
+            AckProgress::Alive
+        );
+        assert_eq!(
+            force_completion.wait_for_progress().await,
+            AckProgress::Alive
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_buffer_drop_no_acks_every_retained_batch() {
+        let (first_acks, first_completion) = AckSet::root();
+        let (second_acks, second_completion) = AckSet::root();
+        let reported_messages = Arc::new(AtomicUsize::new(0));
+        let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        buffer.buffered_messages = buffered_messages.clone();
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch_with(
+                1, 0, first_acks,
+            )))
+            .expect("first batch must buffer");
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch_with(
+                2,
+                0,
+                second_acks,
+            )))
+            .expect("second batch must buffer");
+
+        drop(buffer);
+
+        assert_eq!(
+            first_completion.wait().await,
+            AckOutcome::NoAck("emitter dropped buffered batch".to_string())
+        );
+        assert_eq!(
+            second_completion.wait().await,
+            AckOutcome::NoAck("emitter dropped buffered batch".to_string())
+        );
+        assert_eq!(reported_messages.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn flush_all_returns_the_failure_and_retains_unpublished_batches() {
+        let runtime = Runtime::default();
+        let fault_injector = EmitterFaultInjector::default();
+        let mut backoff = RuntimeReconnectBackoff::default();
+        let mut control = EmitterPublishControl {
+            runtime: &runtime,
+            fault_injector: &fault_injector,
+            backoff: &mut backoff,
+        };
+        let context = sink_context();
+        let sink_config = EmitSink::Nats {
+            client: Identifier::parse("client").expect("valid client name"),
+            subject: Identifier::parse("subject").expect("valid subject name"),
+        };
+        let mut sink = SinkEmitter::Missing {
+            reason: "test sink intentionally has no client".to_string(),
+        };
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .expect("batch must buffer");
+
+        let error = match sink
+            .flush_all(&sink_config, &context, &mut control, None, &mut buffer)
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an unencodable buffered batch must fail final flush"),
+        };
+
+        assert_eq!(*error.current_context(), EmitterRuntimeError::EncodeBatch);
+        assert_eq!(buffer.pending.len(), 1);
+        assert_eq!(buffer.pending[0].message_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn scheduled_emitter_stop_returns_final_flush_failure_after_task_exit() {
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let (work_cancel, mut work_cancel_rx) = watch::channel(false);
+        let finished = Arc::new(AtomicBool::new(false));
+        let task_finished = finished.clone();
+        let task = tokio::spawn(async move {
+            work_cancel_rx
+                .changed()
+                .await
+                .expect("stop must cancel in-progress emitter work");
+            assert!(*work_cancel_rx.borrow());
+            let Some(EmitterTaskCommand::Stop { response }) = command_rx.recv().await else {
+                panic!("scheduled emitter must receive its stop command")
+            };
+            let _ = response.send(Err(
+                "emitter final flush failed: broker unavailable".to_string()
+            ));
+            task_finished.store(true, Ordering::Release);
+        });
+        let scheduled = ScheduledEmitterTask {
+            commands,
+            work_cancel,
+            task,
+        };
+
+        let error = scheduled
+            .stop()
+            .await
+            .expect_err("final flush failure must reach the stopping caller");
+
+        assert_eq!(
+            error,
+            "emitter final flush failed: broker unavailable".to_string()
+        );
+        assert!(finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn scheduled_emitter_stop_aborts_a_task_that_drops_its_response() {
+        struct Dropped(Arc<AtomicBool>);
+
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let (work_cancel, _) = watch::channel(false);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = dropped.clone();
+        let task = tokio::spawn(async move {
+            let _dropped = Dropped(task_dropped);
+            let Some(EmitterTaskCommand::Stop { response }) = command_rx.recv().await else {
+                panic!("scheduled emitter must receive its stop command")
+            };
+            drop(response);
+            std::future::pending::<()>().await;
+        });
+        let scheduled = ScheduledEmitterTask {
+            commands,
+            work_cancel,
+            task,
+        };
+
+        let error = scheduled
+            .stop()
+            .await
+            .expect_err("a dropped response must fail stopping");
+
+        assert_eq!(
+            error,
+            "scheduled emitter task dropped its stop response".to_string()
+        );
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn scheduled_emitter_stop_timeout_aborts_and_joins_the_task() {
+        struct Dropped(Arc<AtomicBool>);
+
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let (work_cancel, _) = watch::channel(false);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = dropped.clone();
+        let task = tokio::spawn(async move {
+            let _dropped = Dropped(task_dropped);
+            let Some(EmitterTaskCommand::Stop { response }) = command_rx.recv().await else {
+                panic!("scheduled emitter must receive its stop command")
+            };
+            let _response = response;
+            std::future::pending::<()>().await;
+        });
+        let scheduled = ScheduledEmitterTask {
+            commands,
+            work_cancel,
+            task,
+        };
+
+        let error = scheduled
+            .stop_with_grace(Duration::from_millis(5))
+            .await
+            .expect_err("a missing stop response must time out");
+
+        assert_eq!(
+            error,
+            "scheduled emitter task timed out stopping".to_string()
+        );
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn publish_failure_drains_exactly_the_batches_owned_by_the_buffer() {
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+            interval: Duration::from_secs(60),
+            max_batch_size: u64::MAX,
+        });
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch_with(
+                1,
+                0,
+                AckSet::empty(),
+            )))
+            .expect("older batch must buffer");
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch_with(
+                2,
+                0,
+                AckSet::empty(),
+            )))
+            .expect("current clone must buffer");
+        let mut current = Some(EmitterPublishBatch::from_batch(input_batch_with(
+            2,
+            0,
+            AckSet::empty(),
+        )));
+        let failure = EmitterPublishFailure::buffer(Report::new(EmitterRuntimeError::EncodeBatch));
+
+        let (error, failed) = failure.drain_failed_batches(&mut current, &mut buffer);
+
+        assert_eq!(*error.current_context(), EmitterRuntimeError::EncodeBatch);
+        assert!(current.is_none());
+        assert!(buffer.is_empty());
+        assert_eq!(
+            failed.len(),
+            2,
+            "the current caller clone must not be duplicated"
+        );
+        assert_eq!(input_value(&failed[0].batch), 1);
+        assert_eq!(input_value(&failed[1].batch), 2);
+    }
+
+    #[test]
+    fn caller_owned_publish_failure_includes_current_after_older_buffered_batches() {
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        buffer
+            .push(EmitterPublishBatch::from_batch(input_batch_with(
+                1,
+                0,
+                AckSet::empty(),
+            )))
+            .expect("older batch must buffer");
+        let mut current = Some(EmitterPublishBatch::from_batch(input_batch_with(
+            2,
+            0,
+            AckSet::empty(),
+        )));
+        let failure = EmitterPublishFailure::caller(Report::new(
+            EmitterRuntimeError::FlushPolicyNotInitialized,
+        ));
+
+        let (_error, failed) = failure.drain_failed_batches(&mut current, &mut buffer);
+
+        assert!(current.is_none());
+        assert!(buffer.is_empty());
+        assert_eq!(failed.len(), 2);
+        assert_eq!(input_value(&failed[0].batch), 1);
+        assert_eq!(input_value(&failed[1].batch), 2);
+    }
+
+    #[tokio::test]
+    async fn buffering_does_not_wait_for_sink_fault_until_a_flush_is_required() {
+        let runtime = Runtime::default();
+        let fault_injector = EmitterFaultInjector::default();
+        fault_injector.fail_emitter("output");
+        let mut backoff = RuntimeReconnectBackoff::default();
+        let mut control = EmitterPublishControl {
+            runtime: &runtime,
+            fault_injector: &fault_injector,
+            backoff: &mut backoff,
+        };
+        let context = sink_context();
+        let client = Identifier::parse("client").expect("valid client name");
+        let subject = Identifier::parse("subject").expect("valid subject name");
+        let sink_config = EmitSink::Nats { client, subject };
+        let mut sink = SinkEmitter::Missing {
+            reason: "test sink intentionally has no client".to_string(),
+        };
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+            interval: Duration::from_secs(60),
+            max_batch_size: u64::MAX,
+        });
+
+        let published = match sink
+            .publish_batch(
+                &sink_config,
+                &context,
+                &mut control,
+                None,
+                &mut buffer,
+                EmitterPublishBatch::from_batch(input_batch()),
+            )
+            .await
+        {
+            Ok(published) => published,
+            Err(failure) => panic!(
+                "a batch below the flush boundary must only be buffered: {}",
+                emitter_error_message(&failure.error)
+            ),
+        };
+
+        assert!(published.is_none());
+        assert_eq!(buffer.pending.len(), 1);
+        assert_eq!(buffer.pending[0].message_count(), 1);
+    }
+
+    #[test]
+    fn emitter_error_classification_is_explicit_for_every_context() {
+        for retryable in [
+            EmitterRuntimeError::SinkNotInitialized,
+            EmitterRuntimeError::PublishBatch,
+            EmitterRuntimeError::PublishStalled,
+        ] {
+            assert!(retryable.is_retryable_publish_failure());
+            assert!(emitter_publish_error_is_retryable(&Report::new(retryable)));
+        }
+        for terminal in [
+            EmitterRuntimeError::InvalidSinkConfig,
+            EmitterRuntimeError::InitializeSink,
+            EmitterRuntimeError::FlushPolicyNotInitialized,
+            EmitterRuntimeError::FaultInjected,
+            EmitterRuntimeError::EncodeBatch,
+        ] {
+            assert!(!terminal.is_retryable_publish_failure());
+            assert!(!emitter_publish_error_is_retryable(&Report::new(terminal)));
+        }
+
+        assert_eq!(
+            emitter_message_error_operation(&Report::new(EmitterRuntimeError::EncodeBatch), true),
+            MessageErrorOperation::Encode
+        );
+        assert_eq!(
+            emitter_message_error_operation(&Report::new(EmitterRuntimeError::EncodeBatch), false),
+            MessageErrorOperation::Values
+        );
+        assert_eq!(
+            emitter_message_error_operation(&Report::new(EmitterRuntimeError::PublishBatch), true),
+            MessageErrorOperation::Publish
+        );
+    }
+
+    #[test]
+    fn emitter_error_message_prefers_printable_context() {
+        let attached = Report::new(EmitterRuntimeError::PublishBatch)
+            .attach_printable("specific broker failure");
+        assert_eq!(emitter_error_message(&attached), "specific broker failure");
+
+        let bare = Report::new(EmitterRuntimeError::EncodeBatch);
+        assert_eq!(
+            emitter_error_message(&bare),
+            "failed to encode emitter batch"
+        );
+    }
+
+    #[test]
+    fn runtime_values_convert_to_json_without_losing_exact_scalar_types() {
+        let datetime =
+            chrono::DateTime::parse_from_rfc3339("2026-08-04T12:34:56Z").expect("valid datetime");
+        let cases = [
+            (RuntimeValue::U8(1), serde_json::json!(1)),
+            (RuntimeValue::I8(-2), serde_json::json!(-2)),
+            (RuntimeValue::U16(3), serde_json::json!(3)),
+            (RuntimeValue::I16(-4), serde_json::json!(-4)),
+            (RuntimeValue::U32(5), serde_json::json!(5)),
+            (RuntimeValue::I32(-6), serde_json::json!(-6)),
+            (RuntimeValue::U64(7), serde_json::json!(7)),
+            (RuntimeValue::I64(-8), serde_json::json!(-8)),
+            (RuntimeValue::Bool(true), serde_json::json!(true)),
+            (
+                RuntimeValue::String("value".to_string()),
+                serde_json::json!("value"),
+            ),
+            (
+                RuntimeValue::Datetime(datetime),
+                serde_json::json!("2026-08-04T12:34:56+00:00"),
+            ),
+            (
+                RuntimeValue::F32(OrderedFloat(1.25)),
+                serde_json::json!(1.25),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(-2.5)),
+                serde_json::json!(-2.5),
+            ),
+            (
+                RuntimeValue::Array(vec![RuntimeValue::I64(1)]),
+                serde_json::json!([1]),
+            ),
+            (
+                RuntimeValue::Vec(vec![RuntimeValue::String("x".to_string())]),
+                serde_json::json!(["x"]),
+            ),
+        ];
+
+        for (value, expected) in cases {
+            assert_eq!(runtime_value_to_json(&value), expected);
+        }
+    }
+
+    #[test]
+    fn every_sink_has_a_stable_diagnostic_label() {
+        let id = Identifier::parse("target").expect("valid identifier");
+        let catalog = IcebergCatalog::Rest { client: id.clone() };
+        let sinks = vec![
+            (
+                EmitSink::Kafka {
+                    client: id.clone(),
+                    topic: id.clone(),
+                },
+                "kafka",
+            ),
+            (
+                EmitSink::Pulsar {
+                    client: id.clone(),
+                    topic: id.clone(),
+                },
+                "pulsar",
+            ),
+            (
+                EmitSink::RabbitMq {
+                    client: id.clone(),
+                    queue: id.clone(),
+                },
+                "rabbitmq",
+            ),
+            (
+                EmitSink::Redis {
+                    client: id.clone(),
+                    channel: id.clone(),
+                },
+                "redis",
+            ),
+            (
+                EmitSink::Mqtt {
+                    client: id.clone(),
+                    topic: id.clone(),
+                },
+                "mqtt",
+            ),
+            (
+                EmitSink::Nats {
+                    client: id.clone(),
+                    subject: id.clone(),
+                },
+                "nats",
+            ),
+            (EmitSink::ZeroMq { client: id.clone() }, "zeromq"),
+            (
+                EmitSink::Sqs {
+                    client: id.clone(),
+                    queue: id.clone(),
+                },
+                "sqs",
+            ),
+            (EmitSink::Sentry { client: id.clone() }, "sentry"),
+            (
+                EmitSink::ClickHouse {
+                    client: id.clone(),
+                    table: id.clone(),
+                    values: Vec::new(),
+                    flush_each: "1s".to_string(),
+                },
+                "clickhouse",
+            ),
+            (
+                EmitSink::Postgres {
+                    client: id.clone(),
+                    table: id.clone(),
+                    values: Vec::new(),
+                    conflict_action: PostgresConflictAction::None,
+                    max_batch: 1,
+                    flush_each: "1s".to_string(),
+                },
+                "postgres",
+            ),
+            (
+                EmitSink::MySql {
+                    client: id.clone(),
+                    table: id.clone(),
+                    values: Vec::new(),
+                    conflict_action: MySqlConflictAction::None,
+                    max_batch: 1,
+                    flush_each: "1s".to_string(),
+                },
+                "mysql",
+            ),
+            (
+                EmitSink::MongoDb {
+                    client: id.clone(),
+                    collection: id.clone(),
+                    values: Vec::new(),
+                    conflict_action: MongoDbConflictAction::None,
+                    max_batch: 1,
+                    flush_each: "1s".to_string(),
+                },
+                "mongodb",
+            ),
+            (
+                EmitSink::Iceberg {
+                    backend: IcebergStorageBackend::S3,
+                    client: id.clone(),
+                    table: id,
+                    values: Vec::new(),
+                    location: "s3://bucket/table".to_string(),
+                    catalog,
+                    flush_each: "1s".to_string(),
+                    max_batch_size: Some("1MiB".to_string()),
+                    commit_each: "1s".to_string(),
+                    max_commit_size: "1MiB".to_string(),
+                },
+                "iceberg",
+            ),
+        ];
+
+        for (sink, expected) in sinks {
+            assert_eq!(sink.label(), expected);
+        }
+    }
+
+    #[test]
+    fn sink_context_reports_configuration_and_publish_failures() {
+        let context = sink_context();
+        let mut events = context.events.subscribe();
+
+        context.report_init_error("nats", "init failed");
+        context.report_publish_error("nats", "publish failed");
+        context.report_flush_error("nats", "flush failed");
+        assert!(
+            context
+                .parse_flush_policy_with_max("emitter", "not-a-duration", Some("1MiB"))
+                .is_none()
+        );
+
+        let messages = (0..4)
+            .map(|_| {
+                let RuntimeEvent::Error(message) =
+                    events.try_recv().expect("error event must be emitted");
+                message
+            })
+            .collect::<Vec<_>>();
+        assert!(messages[0].contains("failed to initialize nats emitter"));
+        assert!(messages[1].contains("failed to publish nats message"));
+        assert!(messages[2].contains("failed to flush nats rows"));
+        assert!(messages[3].contains("invalid flush_each 'not-a-duration'"));
+    }
+
+    #[test]
+    fn sql_value_compilers_reject_empty_mappings_before_compilation() {
+        let domain = Domain::parse("emitter_tests").expect("valid domain");
+        let emitter = Identifier::parse("output").expect("valid emitter name");
+        let schema = input_schema().arrow_schema();
+
+        let errors = [
+            compile_clickhouse_values_program(&domain, &emitter, &[], schema.clone(), None),
+            compile_postgres_values_program(&domain, &emitter, &[], schema.clone(), None),
+            compile_mysql_values_program(&domain, &emitter, &[], schema.clone(), None),
+            compile_mongodb_values_program(&domain, &emitter, &[], schema.clone(), None),
+            compile_iceberg_values_program(&domain, &emitter, &[], schema, None),
+        ];
+        for result in errors {
+            let Err(error) = result else {
+                panic!("empty VALUES mappings must fail before compilation")
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires at least one VALUES mapping")
+            );
+        }
     }
 }

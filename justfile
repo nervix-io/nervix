@@ -79,6 +79,12 @@ test-coverage: tests-deps
     cargo llvm-cov --all-targets --all-features --features testing --workspace --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
 
+# Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
+# `just bench --test` to execute each benchmark body once without recording runner timings.
+bench *args:
+    cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+    cargo bench --package nervix-vm --bench vm -- {{ args }}
+
 cargo-fmt:
     cargo +nightly fmt
 

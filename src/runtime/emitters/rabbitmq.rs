@@ -75,13 +75,8 @@ impl RabbitMqEmitter {
         }
     }
 
-    async fn publish_message(
-        channel: &lapin::Channel,
-        queue: &str,
-        payload: &[u8],
-        headers: &EmitterHeaders,
-    ) -> EmitterRuntimeResult<()> {
-        let properties = if headers.is_empty() {
+    fn properties(headers: &EmitterHeaders) -> lapin::BasicProperties {
+        if headers.is_empty() {
             lapin::BasicProperties::default()
         } else {
             let mut table = FieldTable::default();
@@ -92,32 +87,51 @@ impl RabbitMqEmitter {
                 );
             }
             lapin::BasicProperties::default().with_headers(table)
-        };
-        channel
-            .basic_publish(
-                "".into(),
-                queue.into(),
-                BasicPublishOptions::default(),
-                payload,
-                properties,
-            )
-            .await
-            .map_err(emitter_publish_error)?
-            .await
-            .map_err(emitter_publish_error)?;
-        Ok(())
+        }
     }
 
-    pub(in crate::runtime) async fn publish(
+    pub(in crate::runtime) async fn publish_chunk(
         &self,
         queue: &Identifier,
-        payload: &[u8],
-        headers: &EmitterHeaders,
+        payloads: Vec<Vec<u8>>,
+        headers: &[EmitterHeaders],
+        max_in_flight: usize,
     ) -> EmitterRuntimeResult<()> {
         let Some(channel) = self.channel.as_ref() else {
             return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
                 .attach_printable("no initialized rabbitmq sink client"));
         };
-        Self::publish_message(channel, queue.as_str(), payload, headers).await
+        if payloads.len() != headers.len() {
+            return Err(emitter_publish_error(
+                "rabbitmq encoded payload and header counts differ",
+            ));
+        }
+        let mut confirms = FuturesOrdered::new();
+        for (payload, headers) in payloads.into_iter().zip(headers) {
+            tokio::task::consume_budget().await;
+            let confirm = channel
+                .basic_publish(
+                    "".into(),
+                    queue.as_str().into(),
+                    BasicPublishOptions::default(),
+                    &payload,
+                    Self::properties(headers),
+                )
+                .await
+                .map_err(emitter_publish_error)?;
+            confirms.push_back(confirm);
+            if confirms.len() >= max_in_flight {
+                confirms
+                    .next()
+                    .await
+                    .expect("rabbitmq confirm queue must contain an in-flight publish")
+                    .map_err(emitter_publish_error)?;
+            }
+        }
+        while let Some(confirm) = confirms.next().await {
+            tokio::task::consume_budget().await;
+            confirm.map_err(emitter_publish_error)?;
+        }
+        Ok(())
     }
 }

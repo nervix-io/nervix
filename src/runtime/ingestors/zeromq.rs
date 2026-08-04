@@ -150,10 +150,11 @@ impl ZeroMqIngestor {
                                                     timestamp_source: task_timestamp_source.as_ref(),
                                                     output_routes: &output_routes,
                                                     filter_where: filter_where.as_ref(),
-                            records: vec![record],
-                            metadata: Vec::new(),
+                                                    records: vec![record],
+                                                    metadata: Vec::new(),
                                                     ingested_at: current_timestamp(),
-                            acks: vec![AckSet::empty()],})
+                                                    acks: vec![AckSet::empty()],
+                                                })
                                                 .await
                                             {
                                                 let _ = task_events.send(RuntimeEvent::Error(format!(

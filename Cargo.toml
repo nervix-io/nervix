@@ -7,8 +7,15 @@ version.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+bench = false
+name = "nervix-server"
+path = "src/main.rs"
+
 [features]
 default = []
+# Exposes opaque benchmark drivers without making runtime internals part of the normal API.
+benchmarks = []
 # Test-only feature used by the standard test recipes for random multinode scheduling and to lower
 # intentionally expensive password hashing parameters.
 testing = []
@@ -168,6 +175,7 @@ webpki-roots = { workspace = true }
 zeromq = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 loom = { workspace = true }
 nervix-client-core = { workspace = true }
@@ -179,6 +187,11 @@ testcontainers = { workspace = true }
 [[test]]
 harness = false
 name = "scenarios"
+
+[[bench]]
+harness = false
+name = "relay_interaction"
+required-features = ["benchmarks"]
 
 [workspace]
 members = [

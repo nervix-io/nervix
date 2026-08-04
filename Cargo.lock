@@ -6578,6 +6578,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "clickhouse",
+ "criterion",
  "cucumber",
  "dashmap 6.2.1",
  "ed25519-dalek",

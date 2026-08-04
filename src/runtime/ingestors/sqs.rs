@@ -166,16 +166,19 @@ impl SqsIngestor {
                                                                 timestamp_source: task_timestamp_source.as_ref(),
                                                                 output_routes: &task_output_routes,
                                                                 filter_where: task_filter_where.as_ref(),
-                            records: vec![record],
-                            metadata: vec![IngestFilterMapMetadata::from_headers(
+                                                                records: vec![record],
+                                                                metadata: vec![
+                                                                    IngestFilterMapMetadata::from_headers(
                                                                         headers.clone(),
-                                                                    )],
+                                                                    ),
+                                                                ],
                                                                 ingested_at: current_timestamp(),
-                            acks: vec![if !task_branched_senders.is_empty() {
+                                                                acks: vec![if !task_branched_senders.is_empty() {
                                                                     acks.attached()
                                                                 } else {
                                                                     acks.clone()
-                                                                }],})
+                                                                }],
+                                                            })
                                                             .await;
                                                         let flush_result = task_runtime
                                                             .flush_ingest_collector(
