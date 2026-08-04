@@ -154,32 +154,30 @@ impl SqsIngestor {
                                             Ok(record) => {
                                                 match &task_ack_mode {
                                                     SqsIngestMode::AckSequential { .. } => {
-                                                        let mut output_routes =
-                                                            task_output_routes.clone();
                                                         let mut collector =
                                                             IngestRouteCollector::default();
                                                         let (acks, completion) =
                                                             task_runtime.tracked_ack_root(&task_domain);
                                                         let dispatch_result = task_runtime
-                                                            .dispatch_ingested_record(IngestDispatch {
+                                                            .dispatch_ingested_records(IngestGroupDispatch {
                                                                 collector: &mut collector,
                                                                 domain: &task_domain,
                                                                 ingestor: &task_ingestor,
                                                                 timestamp_source: task_timestamp_source.as_ref(),
-                                                                output_routes: &mut output_routes,
+                                                                output_routes: &task_output_routes,
                                                                 filter_where: task_filter_where.as_ref(),
-                                                                record,
-                                                                filter_map_metadata: Some(
+                                                                records: vec![record],
+                                                                metadata: vec![
                                                                     IngestFilterMapMetadata::from_headers(
                                                                         headers.clone(),
                                                                     ),
-                                                                ),
+                                                                ],
                                                                 ingested_at: current_timestamp(),
-                                                                acks: if !task_branched_senders.is_empty() {
+                                                                acks: vec![if !task_branched_senders.is_empty() {
                                                                     acks.attached()
                                                                 } else {
                                                                     acks.clone()
-                                                                },
+                                                                }],
                                                             })
                                                             .await;
                                                         let flush_result = task_runtime

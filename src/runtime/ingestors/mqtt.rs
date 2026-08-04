@@ -931,20 +931,19 @@ impl MqttIngestor {
         acks: AckSet,
         collector: &mut IngestRouteCollector,
     ) -> Result<(), String> {
-        let mut output_routes = context.output_routes.clone();
         context
             .runtime
-            .dispatch_ingested_record(IngestDispatch {
+            .dispatch_ingested_records(IngestGroupDispatch {
                 collector,
                 domain: &context.domain,
                 ingestor: &context.ingestor,
                 timestamp_source: context.timestamp_source.as_ref(),
-                output_routes: &mut output_routes,
+                output_routes: &context.output_routes,
                 filter_where: context.filter_where.as_ref(),
-                record,
-                filter_map_metadata: None,
+                records: vec![record],
+                metadata: Vec::new(),
                 ingested_at: current_timestamp(),
-                acks,
+                acks: vec![acks],
             })
             .await
     }

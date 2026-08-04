@@ -862,20 +862,96 @@ struct IngestorDependencies {
     branched_templates: HashMap<Identifier, (SharedActiveGraph, IngestorRouteTemplate)>,
 }
 
-struct IngestDispatch<'a> {
+/// One group of decoded messages to dispatch together.
+///
+/// A group is whatever the source polled in one go; a single decoded request is a group
+/// of one. Dispatching a whole group at once is what lets the ingestor `FILTER WHERE`
+/// and each route's filter-map run as one columnar VM execution rather than one per
+/// record.
+struct IngestGroupDispatch<'a> {
     domain: &'a Domain,
     ingestor: &'a Identifier,
     timestamp_source: Option<&'a IngestTimestampSource>,
-    output_routes: &'a mut RelayProcessorOutputsNode,
+    output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    record: DecodedRecord,
-    filter_map_metadata: Option<IngestFilterMapMetadata>,
+    records: Vec<DecodedRecord>,
+    /// Row-aligned with `records`, or empty when the source carries no ingest metadata.
+    metadata: Vec<IngestFilterMapMetadata>,
+    /// Row-aligned with `records`. An empty set is replaced by a tracked ack root.
+    acks: Vec<AckSet>,
     ingested_at: Timestamp,
-    acks: AckSet,
     /// Routed messages always enter a source-owned collector. Sources differ only in
     /// when they flush it: stream sources group by size/idle time, while request-scoped
     /// sources flush at the end of the request or response.
     collector: &'a mut IngestRouteCollector,
+}
+
+/// Row-aligned ingest group state.
+///
+/// Records, ingest metadata and acks are only ever selected or dropped together, which
+/// is what keeps a message error attributable to the record that produced it and keeps
+/// each record's ack identity its own once the group has been filtered.
+struct IngestGroupRows {
+    records: Vec<RuntimeRecord>,
+    /// Empty when the source carries no ingest metadata, otherwise row-aligned.
+    metadata: Vec<IngestFilterMapMetadata>,
+    acks: Vec<AckSet>,
+}
+
+impl IngestGroupRows {
+    fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    fn metadata_row(&self, row: usize) -> Option<&IngestFilterMapMetadata> {
+        self.metadata.get(row)
+    }
+
+    fn metadata_rows(&self) -> Option<&[IngestFilterMapMetadata]> {
+        (!self.metadata.is_empty()).then_some(self.metadata.as_slice())
+    }
+
+    /// Keeps only the rows selected by `keep`, moving records, metadata and acks
+    /// together so the three stay row-aligned.
+    fn select(self, keep: &[bool]) -> Self {
+        let selected = |row: usize| keep.get(row).copied().unwrap_or(false);
+        Self {
+            records: self
+                .records
+                .into_iter()
+                .enumerate()
+                .filter_map(|(row, record)| selected(row).then_some(record))
+                .collect(),
+            metadata: self
+                .metadata
+                .into_iter()
+                .enumerate()
+                .filter_map(|(row, metadata)| selected(row).then_some(metadata))
+                .collect(),
+            acks: self
+                .acks
+                .into_iter()
+                .enumerate()
+                .filter_map(|(row, acks)| selected(row).then_some(acks))
+                .collect(),
+        }
+    }
+}
+
+/// An ingestor `FILTER WHERE` message error, with the row it came from.
+struct IngestorFilterWhereError<'a> {
+    domain: &'a Domain,
+    ingestor: &'a Identifier,
+    output_routes: &'a RelayProcessorOutputsNode,
+    record: &'a RuntimeRecord,
+    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
+    acks: AckSet,
+    error: StructuredMessageError,
+    materialized_state: HashMap<String, RuntimeValue>,
 }
 
 /// Accumulates routed ingest messages so a whole poll group can be built as one Arrow
@@ -11085,15 +11161,18 @@ pub(crate) async fn execute_filter_map_on_record(
     filter_map_metadata: Option<&IngestFilterMapMetadata>,
     execution_now: Timestamp,
 ) -> Result<Option<RuntimeRecord>, String> {
-    match evaluate_filter_map_on_record(
+    let outcome = evaluate_filter_map_on_records(
         filter_map,
-        record,
+        vec![record],
         branch_key,
-        filter_map_metadata,
+        filter_map_metadata.map(std::slice::from_ref),
         execution_now,
     )
     .await?
-    {
+    .into_iter()
+    .next()
+    .expect("filter-map returns one outcome per input record");
+    match outcome {
         SingleRecordFilterMapOutcome::Filtered => Ok(None),
         SingleRecordFilterMapOutcome::Output(record) => Ok(Some(record)),
         SingleRecordFilterMapOutcome::MessageError { error, .. } => {
@@ -11102,21 +11181,42 @@ pub(crate) async fn execute_filter_map_on_record(
     }
 }
 
-async fn evaluate_filter_map_on_record(
+/// Runs one filter-map program over a whole group of records in a single VM execution
+/// and returns one outcome per input record, in input row order.
+///
+/// The columnar VM already filters many rows at once: `ExecutionResult::selected_rows`
+/// carries the input row index behind every surviving output row. Walking that mapping
+/// is what keeps message-error attribution and ack identity tied to the record each
+/// outcome came from, so a group never has to be evaluated a row at a time.
+async fn evaluate_filter_map_on_records(
     filter_map: &CompiledProgramWithMaterializedInterest,
-    record: RuntimeRecord,
+    records: Vec<RuntimeRecord>,
     branch_key: Option<&BranchKey>,
-    filter_map_metadata: Option<&IngestFilterMapMetadata>,
+    filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
     execution_now: Timestamp,
-) -> Result<SingleRecordFilterMapOutcome, String> {
-    let metadata = record.metadata().clone();
-    let record = augment_runtime_record_with_branch_key(record, branch_key);
-    let record =
-        augment_runtime_records_with_lookup_hash_maps(vec![record], filter_map, execution_now)
-            .await?
-            .into_iter()
-            .next()
-            .expect("single lookup-augmented record must remain");
+) -> Result<Vec<SingleRecordFilterMapOutcome>, String> {
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let row_count = records.len();
+    if let Some(metadata) = filter_map_metadata
+        && metadata.len() != row_count
+    {
+        return Err(format!(
+            "FILTER-MAP received {} ingest metadata rows for {row_count} records",
+            metadata.len()
+        ));
+    }
+    let record_metadata = records
+        .iter()
+        .map(|record| record.metadata().clone())
+        .collect::<Vec<_>>();
+    let records = records
+        .into_iter()
+        .map(|record| augment_runtime_record_with_branch_key(record, branch_key))
+        .collect::<Vec<_>>();
+    let records =
+        augment_runtime_records_with_lookup_hash_maps(records, filter_map, execution_now).await?;
     let uninitialized = VmUninitializedInput {
         fields: filter_map
             .compiled
@@ -11128,8 +11228,8 @@ async fn evaluate_filter_map_on_record(
             .collect(),
     };
     let batch = vm_typed_batch_from_runtime_records_with_metadata_and_uninitialized(
-        std::slice::from_ref(&record),
-        filter_map_metadata.map(std::slice::from_ref),
+        &records,
+        filter_map_metadata,
         &filter_map.compiled.input_schema,
         Some(&uninitialized),
     )?;
@@ -11139,42 +11239,63 @@ async fn evaluate_filter_map_on_record(
         &VmExecutionContext {
             now: execution_now,
             injector: Some(IngestHeaderFunctionInjector::from_metadata(
-                filter_map_metadata.map(std::slice::from_ref),
+                filter_map_metadata,
                 batch.row_count(),
             )),
         },
     )
     .await
     .map_err(|error| format!("FILTER-MAP execution failed: {error}"))?;
-    if result.batch.row_count() == 0 {
-        return Ok(SingleRecordFilterMapOutcome::Filtered);
-    }
-    if result.batch.row_count() != 1 {
+    if result.selected_rows.len() != result.batch.row_count() {
         return Err(format!(
-            "FILTER-MAP produced {} rows for a single input record",
-            result.batch.row_count()
+            "FILTER-MAP produced {} rows for {} selected rows",
+            result.batch.row_count(),
+            result.selected_rows.len()
         ));
     }
-    if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-        let partial_output =
-            vm_partial_output_row_to_runtime_record(&result.batch, 0, metadata.clone()).ok();
-        return Ok(SingleRecordFilterMapOutcome::MessageError {
-            error: filter_map.structured_side_error(
-                format!(
-                    "FILTER-MAP side error {}: {} at {}",
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
+    // Rows the program filtered out never appear in `selected_rows`, so starting every
+    // record at `Filtered` and overwriting the survivors keeps the result row-aligned
+    // with the input without a second pass over the predicate.
+    let mut outcomes = (0..row_count)
+        .map(|_| SingleRecordFilterMapOutcome::Filtered)
+        .collect::<Vec<_>>();
+    for (output_row, input_row) in result.selected_rows.iter().copied().enumerate() {
+        let (Some(slot), Some(metadata)) = (
+            outcomes.get_mut(input_row),
+            record_metadata.get(input_row).cloned(),
+        ) else {
+            return Err(format!(
+                "FILTER-MAP selected row {input_row} outside its {row_count}-record input"
+            ));
+        };
+        if let Some(side_error) = result.batch.errors()[output_row].first() {
+            *slot = SingleRecordFilterMapOutcome::MessageError {
+                error: filter_map.structured_side_error(
+                    format!(
+                        "FILTER-MAP side error {}: {} at {}",
+                        side_error.code.as_str(),
+                        side_error.message,
+                        side_error.span
+                    ),
+                    side_error.span,
+                    MessageErrorOperation::Set,
                 ),
-                side_error.span,
-                MessageErrorOperation::Set,
-            ),
-            partial_output,
-            materialized_state: materialized_state_snapshot(&record),
-        });
+                partial_output: vm_partial_output_row_to_runtime_record(
+                    &result.batch,
+                    output_row,
+                    metadata,
+                )
+                .ok(),
+                materialized_state: materialized_state_snapshot(&records[input_row]),
+            };
+            continue;
+        }
+        *slot = SingleRecordFilterMapOutcome::Output(
+            vm_output_row_to_decoded_record(&result.batch, output_row)?
+                .into_runtime_record(metadata),
+        );
     }
-    vm_output_row_to_decoded_record(&result.batch, 0)
-        .map(|record| SingleRecordFilterMapOutcome::Output(record.into_runtime_record(metadata)))
+    Ok(outcomes)
 }
 
 #[derive(Debug, Clone, Copy)]

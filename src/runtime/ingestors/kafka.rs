@@ -525,23 +525,19 @@ impl KafkaIngestor {
                                         KafkaIngestMode::NoAckParallel => {
                                             match build_entry(&message).await {
                                                 Ok(entry) => {
-                                                    let mut output_routes =
-                                                        task_output_routes.clone();
                                                     let dispatched = if let Err(error) = task_runtime
-                                                        .dispatch_ingested_record(IngestDispatch {
+                                                        .dispatch_ingested_records(IngestGroupDispatch {
                                                             collector: &mut ingest_collector,
                                                             domain: &task_domain,
                                                             ingestor: &task_ingestor,
                                                             timestamp_source: task_timestamp_source
                                                                 .as_ref(),
-                                                            output_routes: &mut output_routes,
+                                                            output_routes: &task_output_routes,
                                                             filter_where: task_filter_where.as_ref(),
-                                                            record: entry.record,
-                                                            filter_map_metadata: Some(
-                                                                entry.filter_map_metadata,
-                                                            ),
+                                                            records: vec![entry.record],
+                                                            metadata: vec![entry.filter_map_metadata],
                                                             ingested_at: current_timestamp(),
-                                                            acks: AckSet::empty(),
+                                                            acks: vec![AckSet::empty()],
                                                         })
                                                         .await
                                                     {
@@ -645,30 +641,27 @@ impl KafkaIngestor {
                                             tokio::task::consume_budget().await;
                                                 let (acks, completion) =
                                                     task_runtime.tracked_ack_root(&task_domain);
-                                                let mut output_routes =
-                                                    task_output_routes.clone();
                                                 let mut collector =
                                                     IngestRouteCollector::default();
                                                 let dispatch_result = task_runtime
-                                                    .dispatch_ingested_record(IngestDispatch {
+                                                    .dispatch_ingested_records(IngestGroupDispatch {
                                                         collector: &mut collector,
                                                         domain: &task_domain,
                                                         ingestor: &task_ingestor,
                                                         timestamp_source: task_timestamp_source
                                                             .as_ref(),
-                                                        output_routes: &mut output_routes,
+                                                        output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
-                                                        record: entry.record.clone(),
-                                                        filter_map_metadata: Some(
+                                                        records: vec![entry.record.clone()],
+                                                        metadata: vec![
                                                             entry.filter_map_metadata.clone(),
-                                                        ),
+                                                        ],
                                                         ingested_at: current_timestamp(),
-                                                        acks: if !task_branched_senders.is_empty()
-                                                        {
+                                                        acks: vec![if !task_branched_senders.is_empty() {
                                                             acks.attached()
                                                         } else {
                                                             acks.clone()
-                                                        },
+                                                        }],
                                                     })
                                                     .await;
                                                 let flush_result = task_runtime
@@ -894,52 +887,62 @@ impl KafkaIngestor {
                                                 let mut collector =
                                                     IngestRouteCollector::default();
 
+                                                // Every message keeps its own ack root; the group only
+                                                // shares the dispatch call, so an ack still resolves per
+                                                // message.
+                                                let mut roots = Vec::with_capacity(batch.len());
+                                                let mut records = Vec::with_capacity(batch.len());
+                                                let mut metadata = Vec::with_capacity(batch.len());
+                                                let mut dispatch_acks = Vec::with_capacity(batch.len());
                                                 for entry in batch {
                                                     tokio::task::consume_budget().await;
                                                     let (acks, completion) =
                                                         task_runtime.tracked_ack_root(&task_domain);
-                                                    let mut output_routes =
-                                                        task_output_routes.clone();
-                                                    let dispatched = task_runtime
-                                                        .dispatch_ingested_record(IngestDispatch {
-                                                            collector: &mut collector,
-                                                            domain: &task_domain,
-                                                            ingestor: &task_ingestor,
-                                                            timestamp_source: task_timestamp_source
-                                                                .as_ref(),
-                                                            output_routes: &mut output_routes,
-                                                            filter_where: task_filter_where.as_ref(),
-                                                            record: entry.record,
-                                                            filter_map_metadata: Some(
-                                                                entry.filter_map_metadata,
-                                                            ),
-                                                            ingested_at,
-                                                            acks: if !task_branched_senders.is_empty()
-                                                            {
-                                                                acks.attached()
-                                                            } else {
-                                                                acks.clone()
-                                                            },
-                                                        })
-                                                        .await
-                                                        .map(|()| true)
-                                                        .unwrap_or_else(|error| {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                                "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                                                                task_ingestor.as_str(),
-                                                                task_domain.as_str(),
-                                                                error
-                                                            )));
-                                                            false
-                                                        });
-                                                    if dispatched {
-                                                        acks.ack_success();
-                                                        completions.push(completion);
-                                                    } else {
-                                                        batch_failure =
-                                                            Some("kafka runtime dispatch failed".to_string());
-                                                        break;
-                                                    }
+                                                    dispatch_acks.push(
+                                                        if !task_branched_senders.is_empty() {
+                                                            acks.attached()
+                                                        } else {
+                                                            acks.clone()
+                                                        },
+                                                    );
+                                                    roots.push(acks);
+                                                    completions.push(completion);
+                                                    records.push(entry.record);
+                                                    metadata.push(entry.filter_map_metadata);
+                                                }
+                                                let dispatched = task_runtime
+                                                    .dispatch_ingested_records(IngestGroupDispatch {
+                                                        collector: &mut collector,
+                                                        domain: &task_domain,
+                                                        ingestor: &task_ingestor,
+                                                        timestamp_source: task_timestamp_source
+                                                            .as_ref(),
+                                                        output_routes: &task_output_routes,
+                                                        filter_where: task_filter_where.as_ref(),
+                                                        records,
+                                                        metadata,
+                                                        acks: dispatch_acks,
+                                                        ingested_at,
+                                                    })
+                                                    .await
+                                                    .map(|()| true)
+                                                    .unwrap_or_else(|error| {
+                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            "failed to dispatch message group for ingestor '{}' in domain '{}': {}",
+                                                            task_ingestor.as_str(),
+                                                            task_domain.as_str(),
+                                                            error
+                                                        )));
+                                                        false
+                                                    });
+                                                // Dispatch has taken its own reference to every message,
+                                                // so the root each one was created with is released here.
+                                                for acks in roots {
+                                                    acks.ack_success();
+                                                }
+                                                if !dispatched {
+                                                    batch_failure =
+                                                        Some("kafka runtime dispatch failed".to_string());
                                                 }
 
                                                 if let Err(error) = task_runtime
