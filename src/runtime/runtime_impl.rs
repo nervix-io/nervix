@@ -3735,7 +3735,7 @@ impl Runtime {
     /// Builds one Arrow batch per (relay, branch key) from everything a poll group routed
     /// and forwards each to its branch entrypoint.
     ///
-    /// This is the counterpart to `IngestDispatch::collector`. Building the batch once per
+    /// This is the counterpart to `IngestGroupDispatch::collector`. Building the batch once per
     /// group replaces N single-row batch constructions, N channel sends, and the
     /// `spawn_blocking` hop the route task pays per message.
     pub(in crate::runtime) async fn flush_ingest_collector(
@@ -3843,189 +3843,365 @@ impl Runtime {
         first_error.map_or(Ok(()), Err)
     }
 
-    pub(in crate::runtime) async fn dispatch_ingested_record(
+    /// Dispatches a whole poll group of ingested messages.
+    ///
+    /// The ingestor `FILTER WHERE` runs once over the group and each route's filter-map
+    /// runs once over the rows that survived it, so the columnar VM is entered a fixed
+    /// number of times per group instead of twice per record. Records, ingest metadata
+    /// and acks stay row-aligned throughout: that is what lets a message error still
+    /// name the record that produced it and lets every record keep its own acks.
+    pub(in crate::runtime) async fn dispatch_ingested_records(
         &self,
-        mut dispatch: IngestDispatch<'_>,
+        dispatch: IngestGroupDispatch<'_>,
     ) -> Result<(), String> {
-        let _unobserved_completion = if dispatch.acks.is_empty() {
-            let (acks, completion) = self.tracked_ack_root(dispatch.domain);
-            dispatch.acks = acks;
-            Some(completion)
-        } else {
-            None
+        let IngestGroupDispatch {
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            records,
+            metadata,
+            mut acks,
+            ingested_at,
+            collector,
+        } = dispatch;
+        if records.is_empty() {
+            return Ok(());
+        }
+        if !metadata.is_empty() && metadata.len() != records.len() {
+            return Err(format!(
+                "ingestor '{}' received {} ingest metadata rows for {} records",
+                ingestor.as_str(),
+                metadata.len(),
+                records.len()
+            ));
+        }
+        if acks.len() != records.len() {
+            return Err(format!(
+                "ingestor '{}' received {} ack sets for {} records",
+                ingestor.as_str(),
+                acks.len(),
+                records.len()
+            ));
+        }
+
+        // Sources that do not track acks themselves still need a root for downstream
+        // resolution to land on. Those completions are deliberately never observed.
+        let mut _unobserved_completions = Vec::new();
+        for slot in acks.iter_mut().filter(|slot| slot.is_empty()) {
+            let (tracked, completion) = self.tracked_ack_root(domain);
+            *slot = tracked;
+            _unobserved_completions.push(completion);
+        }
+        let mut rows = IngestGroupRows {
+            records: records
+                .into_iter()
+                .map(|record| {
+                    record.into_runtime_record(RuntimeRecordMetadata::from_ingested_at_watermarks(
+                        ingested_at,
+                        ingested_at,
+                    ))
+                })
+                .collect(),
+            metadata,
+            acks,
         };
-        let mut record = dispatch.record.into_runtime_record(
-            RuntimeRecordMetadata::from_ingested_at_watermarks(
-                dispatch.ingested_at,
-                dispatch.ingested_at,
-            ),
-        );
-        if let Some(filter_where) = dispatch.filter_where {
-            let branch_key = None;
+
+        // One execution clock for the whole group: a batch is evaluated against the
+        // state it was admitted with.
+        let execution_now = self
+            .current_stream_expiration_time(domain)
+            .ok()
+            .flatten()
+            .unwrap_or_else(current_timestamp);
+
+        if let Some(filter_where) = filter_where {
             let side_inputs = self
                 .load_materialized_side_inputs(
-                    dispatch.domain,
-                    &branch_key,
+                    domain,
+                    &None,
                     &filter_where.materialized_interest,
                     &self
                         .executions
-                        .get(dispatch.domain)
+                        .get(domain)
                         .map(|execution| execution.materialized_stream_owner_nodes.clone())
                         .unwrap_or_default(),
                 )
                 .await?;
-            let execution_now = self
-                .current_stream_expiration_time(dispatch.domain)
-                .ok()
-                .flatten()
-                .unwrap_or_else(current_timestamp);
-            let outcome = evaluate_filter_map_on_record(
+            let outcomes = evaluate_filter_map_on_records(
                 filter_where,
-                augment_runtime_record_with_side_inputs(record.clone(), &side_inputs),
+                augment_runtime_records_with_side_inputs(rows.records.clone(), &side_inputs),
                 None,
-                dispatch.filter_map_metadata.as_ref(),
+                rows.metadata_rows(),
                 execution_now,
             )
             .await?;
-            match outcome {
-                SingleRecordFilterMapOutcome::Filtered => {
-                    dispatch.acks.ack_success();
-                    return Ok(());
-                }
-                SingleRecordFilterMapOutcome::Output(transformed) => record = transformed,
-                SingleRecordFilterMapOutcome::MessageError {
-                    error,
-                    materialized_state,
-                    ..
-                } => {
-                    let route_count = dispatch.output_routes.routes.len();
-                    if route_count == 0 {
-                        dispatch.acks.no_ack(error.message);
-                        return Ok(());
+            let mut keep = vec![false; rows.len()];
+            let mut transformed = Vec::new();
+            for (row, outcome) in outcomes.into_iter().enumerate() {
+                tokio::task::consume_budget().await;
+                match outcome {
+                    SingleRecordFilterMapOutcome::Filtered => rows.acks[row].ack_success(),
+                    SingleRecordFilterMapOutcome::Output(record) => {
+                        keep[row] = true;
+                        transformed.push((row, record));
                     }
-                    let mut ack_queue = VecDeque::with_capacity(route_count);
-                    for _ in 1..route_count {
-                        ack_queue.push_back(dispatch.acks.attached());
-                    }
-                    ack_queue.push_front(dispatch.acks);
-                    for output in &dispatch.output_routes.routes {
-                        let acks = ack_queue
-                            .pop_front()
-                            .expect("ack queue must match ingestor output routes");
-                        self.handle_structured_message_error(MessageErrorHandling {
-                            domain: dispatch.domain,
-                            node_kind: ModelKind::Ingestor.as_str(),
-                            node: dispatch.ingestor,
-                            source_route: Some(&output.relay),
-                            policy: &output.message_error_policy,
-                            message: RelayMessage {
-                                key: None,
-                                record: record.clone(),
-                                acks,
-                            },
-                            error: error.clone(),
-                            partial_output: None,
-                            materialized_state: materialized_state.clone(),
-                            ingest_metadata: dispatch.filter_map_metadata.as_ref(),
+                    SingleRecordFilterMapOutcome::MessageError {
+                        error,
+                        materialized_state,
+                        ..
+                    } => {
+                        let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
+                        self.handle_ingestor_filter_where_error(IngestorFilterWhereError {
+                            domain,
+                            ingestor,
+                            output_routes,
+                            record: &rows.records[row],
+                            ingest_metadata: rows.metadata_row(row),
+                            acks,
+                            error,
+                            materialized_state,
                         })
                         .await;
                     }
-                    return Ok(());
                 }
             }
+            for (row, record) in transformed {
+                rows.records[row] = record;
+            }
+            rows = rows.select(&keep);
         }
-        let event_timestamp = self.resolve_ingested_record_timestamp(
-            dispatch.domain,
-            dispatch.ingestor,
-            dispatch.timestamp_source,
-            &record,
-        )?;
-        self.ensure_domain_allows_ingestion(dispatch.domain, dispatch.ingestor, event_timestamp)?;
-        record = record.with_ingested_at_watermarks(event_timestamp);
+        if rows.is_empty() {
+            return Ok(());
+        }
 
-        let Some(execution) = self.executions.get(dispatch.domain) else {
-            return Err(format!(
-                "domain '{}' is not instantiated",
-                dispatch.domain.as_str()
-            ));
+        let Some(execution) = self.executions.get(domain) else {
+            return Err(format!("domain '{}' is not instantiated", domain.as_str()));
         };
         let owner_nodes = execution.materialized_stream_owner_nodes.clone();
         drop(execution);
-        self.metrics
-            .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
-                domain: dispatch.domain,
-                kind: ModelKind::Ingestor,
-                node: dispatch.ingestor,
-                physical_node_id: self.local_node_id.read().as_deref(),
-                messages: 1,
-                bytes: record.estimated_bytes(),
-                domain_timestamp: Some(event_timestamp),
-            });
-        self.mark_branch_aggregated_metrics_updated(
-            dispatch.domain,
-            ModelKind::Ingestor,
-            dispatch.ingestor,
-        );
-        let mut routed_records = Vec::new();
-        let mut route_errors = Vec::new();
-        for (output_index, output) in dispatch.output_routes.routes.iter().enumerate() {
-            let outcome = if let Some(filter_map) = output.compiled_program.as_ref() {
-                let branch_key = None;
+
+        // Timestamp resolution and admission stay per record: `TIMESTAMP AT` reads a
+        // field of the record itself, and a paced domain admits each event on its own
+        // merits. Either rejection fails the group, exactly as the per-record path did.
+        let mut event_timestamps = Vec::with_capacity(rows.len());
+        for record in &rows.records {
+            let event_timestamp =
+                self.resolve_ingested_record_timestamp(domain, ingestor, timestamp_source, record)?;
+            self.ensure_domain_allows_ingestion(domain, ingestor, event_timestamp)?;
+            event_timestamps.push(event_timestamp);
+        }
+        rows.records = std::mem::take(&mut rows.records)
+            .into_iter()
+            .zip(&event_timestamps)
+            .map(|(record, event_timestamp)| record.with_ingested_at_watermarks(*event_timestamp))
+            .collect();
+        let physical_node_id = self.local_node_id.read().clone();
+        for (record, event_timestamp) in rows.records.iter().zip(&event_timestamps) {
+            self.metrics
+                .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
+                    domain,
+                    kind: ModelKind::Ingestor,
+                    node: ingestor,
+                    physical_node_id: physical_node_id.as_deref(),
+                    messages: 1,
+                    bytes: record.estimated_bytes(),
+                    domain_timestamp: Some(*event_timestamp),
+                });
+        }
+        self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Ingestor, ingestor);
+
+        // Every route filters the same surviving group in one VM execution. Outcomes are
+        // transposed back onto their originating row so each record's ack split still
+        // counts only the routes that actually took it.
+        let mut routed = (0..rows.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+        for (output_index, output) in output_routes.routes.iter().enumerate() {
+            tokio::task::consume_budget().await;
+            let outcomes = if let Some(filter_map) = output.compiled_program.as_ref() {
                 let side_inputs = self
                     .load_materialized_side_inputs(
-                        dispatch.domain,
-                        &branch_key,
+                        domain,
+                        &None,
                         &filter_map.materialized_interest,
                         &owner_nodes,
                     )
                     .await?;
-                let execution_now = self
-                    .current_stream_expiration_time(dispatch.domain)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(current_timestamp);
-                evaluate_filter_map_on_record(
+                evaluate_filter_map_on_records(
                     filter_map,
-                    augment_runtime_record_with_side_inputs(record.clone(), &side_inputs),
+                    augment_runtime_records_with_side_inputs(rows.records.clone(), &side_inputs),
                     None,
-                    dispatch.filter_map_metadata.as_ref(),
+                    rows.metadata_rows(),
                     execution_now,
                 )
                 .await?
             } else {
-                SingleRecordFilterMapOutcome::Output(record.clone())
+                rows.records
+                    .iter()
+                    .cloned()
+                    .map(SingleRecordFilterMapOutcome::Output)
+                    .collect()
             };
-            match outcome {
-                SingleRecordFilterMapOutcome::Filtered => {}
-                SingleRecordFilterMapOutcome::Output(output_record) => {
-                    routed_records.push((output_index, output_record));
+            for (row, outcome) in outcomes.into_iter().enumerate() {
+                if let SingleRecordFilterMapOutcome::Filtered = outcome {
+                    continue;
                 }
-                SingleRecordFilterMapOutcome::MessageError {
+                routed[row].push((output_index, outcome));
+            }
+        }
+
+        for (row, outcomes) in routed.into_iter().enumerate() {
+            tokio::task::consume_budget().await;
+            let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
+            if outcomes.is_empty() {
+                acks.ack_success();
+                continue;
+            }
+            let mut route_errors = Vec::new();
+            let mut route_outputs = Vec::new();
+            for (output_index, outcome) in outcomes {
+                match outcome {
+                    SingleRecordFilterMapOutcome::Filtered => {}
+                    SingleRecordFilterMapOutcome::Output(record) => {
+                        route_outputs.push((output_index, record));
+                    }
+                    SingleRecordFilterMapOutcome::MessageError {
+                        error,
+                        partial_output,
+                        materialized_state,
+                    } => {
+                        route_errors.push((output_index, error, partial_output, materialized_state))
+                    }
+                }
+            }
+            let routed_count = route_errors.len() + route_outputs.len();
+            let mut ack_queue = VecDeque::with_capacity(routed_count);
+            for _ in 1..routed_count {
+                ack_queue.push_back(acks.attached());
+            }
+            ack_queue.push_front(acks);
+            for (output_index, error, partial_output, materialized_state) in route_errors {
+                let acks = ack_queue
+                    .pop_front()
+                    .expect("ack queue must match ingestor route outcomes");
+                let output = &output_routes.routes[output_index];
+                self.handle_structured_message_error(MessageErrorHandling {
+                    domain,
+                    node_kind: ModelKind::Ingestor.as_str(),
+                    node: ingestor,
+                    source_route: Some(&output.relay),
+                    policy: &output.message_error_policy,
+                    message: RelayMessage {
+                        key: None,
+                        record: rows.records[row].clone(),
+                        acks,
+                    },
                     error,
                     partial_output,
                     materialized_state,
-                } => route_errors.push((output_index, error, partial_output, materialized_state)),
+                    ingest_metadata: rows.metadata_row(row),
+                })
+                .await;
+            }
+            for (output_index, output_record) in route_outputs {
+                let acks = ack_queue
+                    .pop_front()
+                    .expect("ack queue must match ingestor route outcomes");
+                let output = &output_routes.routes[output_index];
+                let relay = output.relay.clone();
+                let key = match output.branch.as_ref().ok_or_else(|| {
+                    format!(
+                        "ingestor '{}' output '{}' has no branch declaration",
+                        ingestor.as_str(),
+                        relay.as_str()
+                    )
+                })? {
+                    nervix_models::OutputBranch::Unbranched => None,
+                    nervix_models::OutputBranch::BranchedBy { assignments, .. } => {
+                        match planning::resolve_concrete_branch_from_assignments_blocking(
+                            &output_record,
+                            Some(&rows.records[row]),
+                            None,
+                            assignments,
+                            ingestor,
+                            self.udf_executor(domain).as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(branch) => branch.into_relay_key(),
+                            Err(reason) => {
+                                self.handle_structured_message_error(MessageErrorHandling {
+                                    domain,
+                                    node_kind: ModelKind::Ingestor.as_str(),
+                                    node: ingestor,
+                                    source_route: Some(&relay),
+                                    policy: &output.message_error_policy,
+                                    message: RelayMessage {
+                                        key: None,
+                                        record: rows.records[row].clone(),
+                                        acks,
+                                    },
+                                    error: structured_message_error(
+                                        MessageErrorCode::Evaluation,
+                                        reason,
+                                        MessageErrorOperation::BranchSet,
+                                        None,
+                                        std::iter::empty(),
+                                    ),
+                                    partial_output: Some(output_record),
+                                    materialized_state: HashMap::default(),
+                                    ingest_metadata: rows.metadata_row(row),
+                                })
+                                .await;
+                                continue;
+                            }
+                        }
+                    }
+                };
+                collector.push(
+                    relay,
+                    RelayMessage {
+                        key,
+                        record: output_record,
+                        acks,
+                    },
+                );
             }
         }
-        let routed_count = routed_records.len() + route_errors.len();
-        if routed_count == 0 {
-            dispatch.acks.ack_success();
-            return Ok(());
+        Ok(())
+    }
+
+    /// Fans an ingestor `FILTER WHERE` message error out to every output route's error
+    /// policy, splitting acks the same way a routed message would have.
+    async fn handle_ingestor_filter_where_error(&self, handling: IngestorFilterWhereError<'_>) {
+        let IngestorFilterWhereError {
+            domain,
+            ingestor,
+            output_routes,
+            record,
+            ingest_metadata,
+            acks,
+            error,
+            materialized_state,
+        } = handling;
+        let route_count = output_routes.routes.len();
+        if route_count == 0 {
+            acks.no_ack(error.message);
+            return;
         }
-        let mut ack_queue = VecDeque::with_capacity(routed_count);
-        for _ in 1..routed_count {
-            ack_queue.push_back(dispatch.acks.attached());
+        let mut ack_queue = VecDeque::with_capacity(route_count);
+        for _ in 1..route_count {
+            ack_queue.push_back(acks.attached());
         }
-        ack_queue.push_front(dispatch.acks);
-        for (output_index, error, partial_output, materialized_state) in route_errors {
+        ack_queue.push_front(acks);
+        for output in &output_routes.routes {
             let acks = ack_queue
                 .pop_front()
-                .expect("ack queue must match ingestor route outcomes");
-            let output = &dispatch.output_routes.routes[output_index];
+                .expect("ack queue must match ingestor output routes");
             self.handle_structured_message_error(MessageErrorHandling {
-                domain: dispatch.domain,
+                domain,
                 node_kind: ModelKind::Ingestor.as_str(),
-                node: dispatch.ingestor,
+                node: ingestor,
                 source_route: Some(&output.relay),
                 policy: &output.message_error_policy,
                 message: RelayMessage {
@@ -4033,78 +4209,13 @@ impl Runtime {
                     record: record.clone(),
                     acks,
                 },
-                error,
-                partial_output,
-                materialized_state,
-                ingest_metadata: dispatch.filter_map_metadata.as_ref(),
+                error: error.clone(),
+                partial_output: None,
+                materialized_state: materialized_state.clone(),
+                ingest_metadata,
             })
             .await;
         }
-        for (output_index, output_record) in routed_records {
-            let acks = ack_queue
-                .pop_front()
-                .expect("ack queue must match ingestor route outcomes");
-            let output = &dispatch.output_routes.routes[output_index];
-            let relay = output.relay.clone();
-            let key = match output.branch.as_ref().ok_or_else(|| {
-                format!(
-                    "ingestor '{}' output '{}' has no branch declaration",
-                    dispatch.ingestor.as_str(),
-                    relay.as_str()
-                )
-            })? {
-                nervix_models::OutputBranch::Unbranched => None,
-                nervix_models::OutputBranch::BranchedBy { assignments, .. } => {
-                    match planning::resolve_concrete_branch_from_assignments_blocking(
-                        &output_record,
-                        Some(&record),
-                        None,
-                        assignments,
-                        dispatch.ingestor,
-                        self.udf_executor(dispatch.domain).as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(branch) => branch.into_relay_key(),
-                        Err(reason) => {
-                            self.handle_structured_message_error(MessageErrorHandling {
-                                domain: dispatch.domain,
-                                node_kind: ModelKind::Ingestor.as_str(),
-                                node: dispatch.ingestor,
-                                source_route: Some(&relay),
-                                policy: &output.message_error_policy,
-                                message: RelayMessage {
-                                    key: None,
-                                    record: record.clone(),
-                                    acks,
-                                },
-                                error: structured_message_error(
-                                    MessageErrorCode::Evaluation,
-                                    reason,
-                                    MessageErrorOperation::BranchSet,
-                                    None,
-                                    std::iter::empty(),
-                                ),
-                                partial_output: Some(output_record),
-                                materialized_state: HashMap::default(),
-                                ingest_metadata: dispatch.filter_map_metadata.as_ref(),
-                            })
-                            .await;
-                            continue;
-                        }
-                    }
-                }
-            };
-            dispatch.collector.push(
-                relay,
-                RelayMessage {
-                    key,
-                    record: output_record,
-                    acks,
-                },
-            );
-        }
-        Ok(())
     }
 
     pub(in crate::runtime) fn resolve_ingested_record_timestamp(
@@ -7008,22 +7119,19 @@ impl Runtime {
         for binding in &bindings {
             match decode_ingested_payload(binding.codec.clone(), payload).await {
                 Ok(record) => {
-                    let mut output_routes = binding.output_routes.clone();
                     let mut collector = IngestRouteCollector::default();
                     let dispatch_result = self
-                        .dispatch_ingested_record(IngestDispatch {
+                        .dispatch_ingested_records(IngestGroupDispatch {
                             collector: &mut collector,
                             domain: &binding.domain,
                             ingestor: &binding.ingestor,
                             timestamp_source: binding.timestamp_source.as_ref(),
-                            output_routes: &mut output_routes,
+                            output_routes: &binding.output_routes,
                             filter_where: binding.filter_where.as_ref(),
-                            record,
-                            filter_map_metadata: Some(IngestFilterMapMetadata::from_headers(
-                                headers.clone(),
-                            )),
+                            records: vec![record],
+                            metadata: vec![IngestFilterMapMetadata::from_headers(headers.clone())],
                             ingested_at: current_timestamp(),
-                            acks: AckSet::empty(),
+                            acks: vec![AckSet::empty()],
                         })
                         .await;
                     let flush_result = self

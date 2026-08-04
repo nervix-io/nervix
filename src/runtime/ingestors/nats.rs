@@ -222,24 +222,20 @@ impl NatsIngestor {
 
                                         match decode_ingested_payload(task_codec.clone(), payload).await {
                                             Ok(record) => {
-                                                let mut output_routes = task_output_routes.clone();
                                                 if let Err(error) = task_runtime
-                                                    .dispatch_ingested_record(IngestDispatch {
+                                                    .dispatch_ingested_records(IngestGroupDispatch {
                                                         collector: &mut collector,
                                                         domain: &task_domain,
                                                         ingestor: &task_ingestor,
                                                         timestamp_source: task_timestamp_source.as_ref(),
-                                                        output_routes: &mut output_routes,
+                                                        output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
-                                                        record,
-                                                        filter_map_metadata: Some(
-                                                            IngestFilterMapMetadata::from_headers(
+                            records: vec![record],
+                            metadata: vec![IngestFilterMapMetadata::from_headers(
                                                                 headers.clone(),
-                                                            ),
-                                                        ),
+                                                            )],
                                                         ingested_at: current_timestamp(),
-                                                        acks: AckSet::empty(),
-                                                    })
+                            acks: vec![AckSet::empty()],})
                                                     .await
                                                 {
                                                     let _ = task_events.send(RuntimeEvent::Error(format!(
