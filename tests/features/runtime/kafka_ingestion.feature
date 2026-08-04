@@ -126,6 +126,104 @@ Feature: Kafka ingestion
       | 1            | 0             |
       | 3            | 1             |
 
+  Scenario Outline: Kafka ACK PARALLEL applies FILTER WHERE and route WHERE across a whole batch of interleaved branches
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA event (
+        user_id I64,
+        tenant I64,
+        level I64
+      );
+        CREATE SCHEMA routed_event (
+        user_id I64,
+        tenant I64,
+        level I64,
+        source_offset I64 OPTIONAL
+      );
+        CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
+        user_id integer,
+        tenant integer,
+        level integer
+      );
+        CREATE CODEC event_codec
+        FROM WIRE JSON SCHEMA event_wire
+        TO SCHEMA event;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant I64 );
+        CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+        CREATE RELAY events SCHEMA routed_event BRANCHED BY by_tenant;
+        CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+        CREATE INGESTOR event_source
+        FROM KAFKA kafka_main TOPIC events_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        DECODE USING event_codec
+        FILTER WHERE input.level > 0
+        TO events
+        INHERIT ALL
+        SET source_offset = metadata.offset
+        WHERE message.user_id > 10
+        BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION events_subscription TO events;
+      """
+    And Kafka message is published to topic "events_{{test_id}}" partition 0
+      """
+      {"user_id":11,"tenant":1,"level":1}
+      """
+    And Kafka message is published to topic "events_{{test_id}}" partition 0
+      """
+      {"user_id":12,"tenant":2,"level":1}
+      """
+    And Kafka message is published to topic "events_{{test_id}}" partition 0
+      """
+      {"user_id":13,"tenant":1,"level":0}
+      """
+    And Kafka message is published to topic "events_{{test_id}}" partition 0
+      """
+      {"user_id":5,"tenant":2,"level":1}
+      """
+    And Kafka message is published to topic "events_{{test_id}}" partition 0
+      """
+      {"user_id":14,"tenant":2,"level":1}
+      """
+    And Kafka message is published to topic "events_{{test_id}}" partition 0
+      """
+      {"user_id":15,"tenant":1,"level":1}
+      """
+    # The whole corpus is already on the topic when the consumer joins, so the first
+    # ACK PARALLEL poll fills one batch of six rather than six batches of one. That is
+    # what puts records from both branches, both filter stages and both surviving and
+    # dropped rows into a single dispatched group.
+    And these NSPL commands are executed
+      """
+      START;
+      """
+    Then within "20s" the relay subscription receives payloads containing all fragments
+      """
+      "user_id":11 | "tenant":1 | "level":1 | "source_offset":0
+      "user_id":12 | "tenant":2 | "level":1 | "source_offset":1
+      "user_id":14 | "tenant":2 | "level":1 | "source_offset":4
+      "user_id":15 | "tenant":1 | "level":1 | "source_offset":5
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+      | 3            | 1             |
+
   Scenario Outline: Kafka ACK PARALLEL blocks downstream publish after immediate NoAck
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

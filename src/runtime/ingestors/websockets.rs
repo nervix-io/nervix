@@ -349,20 +349,19 @@ impl WebsocketsIngestor {
         } = *context;
         match decode_ingested_payload(codec.clone(), payload).await {
             Ok(record) => {
-                let mut output_routes = output_routes.clone();
                 let mut collector = IngestRouteCollector::default();
                 let dispatch_result = runtime
-                    .dispatch_ingested_record(IngestDispatch {
+                    .dispatch_ingested_records(IngestGroupDispatch {
                         collector: &mut collector,
                         domain,
                         ingestor,
                         timestamp_source,
-                        output_routes: &mut output_routes,
+                        output_routes,
                         filter_where,
-                        record,
-                        filter_map_metadata: None,
+                        records: vec![record],
+                        metadata: Vec::new(),
                         ingested_at: current_timestamp(),
-                        acks: AckSet::empty(),
+                        acks: vec![AckSet::empty()],
                     })
                     .await;
                 let flush_result = runtime
