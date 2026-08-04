@@ -218,6 +218,34 @@ impl ScenarioWorld {
             .as_ref()
             .expect("cluster must be created before using it")
     }
+
+    async fn wait_for_observability_metric_value(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        expected_value: i64,
+        wait: Option<Duration>,
+        step: &Step,
+    ) {
+        let node_id = expand_placeholders(self, node_id);
+        let metric_name = expand_placeholders(self, metric_name);
+        let label_fragments = docstring(step)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| expand_placeholders(self, line))
+            .collect::<Vec<_>>();
+        self.cluster()
+            .wait_for_observability_metric_value(
+                &node_id,
+                &metric_name,
+                &label_fragments,
+                expected_value,
+                wait,
+            )
+            .await
+            .expect("observability endpoint did not report the expected metric value");
+    }
 }
 
 fn initialize_scenario_identity(world: &mut ScenarioWorld) {
@@ -7751,24 +7779,34 @@ async fn then_node_observability_metric_with_labels_eventually_equals(
     expected_value: i64,
     #[step] step: &Step,
 ) {
-    let node_id = expand_placeholders(world, &node_id);
-    let metric_name = expand_placeholders(world, &metric_name);
-    let label_fragments = docstring(step)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| expand_placeholders(world, line))
-        .collect::<Vec<_>>();
     world
-        .cluster()
+        .wait_for_observability_metric_value(&node_id, &metric_name, expected_value, None, step)
+        .await;
+}
+
+#[then(
+    expr = "within {string} node {string} observability metric {string} with labels eventually \
+            equals {int}"
+)]
+async fn then_within_duration_node_observability_metric_with_labels_eventually_equals(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    metric_name: String,
+    expected_value: i64,
+    #[step] step: &Step,
+) {
+    let wait =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    world
         .wait_for_observability_metric_value(
             &node_id,
             &metric_name,
-            &label_fragments,
             expected_value,
+            Some(wait),
+            step,
         )
-        .await
-        .expect("observability endpoint did not report the expected metric value");
+        .await;
 }
 
 #[then(expr = "within {string} node {string} eventually reports describe relay as {string}")]
@@ -11162,10 +11200,17 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
                     message.payload
                 )
             });
+        let expected_u64 =
+            u64::try_from(expected_sequence).expect("expected sequence must fit u64");
         assert_eq!(
             actual_sequence,
-            u64::try_from(expected_sequence).expect("expected sequence must fit u64"),
-            "broker messages were duplicated, lost, or reordered"
+            expected_u64,
+            "broker messages were duplicated, lost, or reordered: expected sequence \
+             {expected_u64} but observed {actual_sequence} ({} messages behind, {} of {} consumed \
+             so far)",
+            actual_sequence.abs_diff(expected_u64),
+            expected_sequence,
+            count
         );
         assert_eq!(
             message.headers, expected_headers,

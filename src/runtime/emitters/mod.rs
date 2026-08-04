@@ -237,6 +237,9 @@ impl EmitterTaskInputs {
                     .map(|(relay, batch)| EmitterInputEvent::Batch { relay, batch })
                     .unwrap_or(EmitterInputEvent::Shutdown);
             }
+            if wake_at.is_some_and(|deadline| deadline <= Instant::now()) {
+                return EmitterInputEvent::Wake;
+            }
             if let Some((relay, batch)) = self
                 .take_due()
                 .expect("same-source emitter batches must concatenate")
@@ -2698,5 +2701,84 @@ impl EmitterBatchContext<'_> {
             )
             .await;
         plan.batch
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::{CreateSchema, ParseAsType};
+
+    use super::*;
+
+    fn input_batch() -> RelayRecordBatch {
+        let value = Identifier::parse("value").expect("valid field name");
+        let schema = Arc::new(compile_schema(&CreateSchema {
+            name: Identifier::parse("emitter_input").expect("valid schema name"),
+            fields: vec![nervix_models::SchemaField {
+                name: value.clone(),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }));
+        RelayRecordBatch::single(
+            schema,
+            None,
+            RuntimeRecord::from_fields([(value.as_str().to_string(), RuntimeValue::I64(1))]),
+            AckSet::empty(),
+        )
+        .expect("valid emitter input batch")
+    }
+
+    #[tokio::test]
+    async fn output_wake_wins_when_input_collection_is_also_due() {
+        let relay = Identifier::parse("input").expect("valid relay name");
+        let mut collection = RuntimeTaskInputCollection::new(Some(RuntimeInputCollectPolicy {
+            interval: Duration::from_secs(60),
+            max_batch_size: None,
+        }));
+        assert!(
+            collection
+                .push(input_batch())
+                .expect("input collection must accept the batch")
+                .is_none()
+        );
+        for pending in collection.pending.values_mut() {
+            pending.deadline = Some(Instant::now());
+        }
+        let mut inputs = EmitterTaskInputs {
+            receiver: futures_util::stream::SelectAll::new(),
+            collections: vec![(relay.clone(), collection)],
+        };
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+        match inputs.recv(&mut shutdown_rx, Some(Instant::now())).await {
+            EmitterInputEvent::Wake => {}
+            EmitterInputEvent::Batch { .. } => {
+                panic!("due input collection preempted the output flush deadline")
+            }
+            EmitterInputEvent::Shutdown | EmitterInputEvent::Closed => {
+                panic!("emitter inputs closed unexpectedly")
+            }
+        }
+
+        match inputs
+            .recv(
+                &mut shutdown_rx,
+                Some(Instant::now() + Duration::from_secs(60)),
+            )
+            .await
+        {
+            EmitterInputEvent::Batch {
+                relay: received_relay,
+                batch,
+            } => {
+                assert_eq!(received_relay, relay);
+                assert_eq!(batch.message_count(), 1);
+            }
+            EmitterInputEvent::Wake | EmitterInputEvent::Shutdown | EmitterInputEvent::Closed => {
+                panic!("due input collection was not preserved")
+            }
+        }
     }
 }
