@@ -153,7 +153,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,wild-linker
+          tool: just,toml-cli,wild-linker
 
       - name: Install Latest LLVM
         run: |
