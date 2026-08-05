@@ -9,8 +9,8 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use nervix_benchmark::{
-    BenchmarkCatalog, BenchmarkDependency, ContainerImplementation, Implementation,
-    KafkaRenderInputs, LoadedBenchmark, RunSettings, provision_topics,
+    BenchmarkCatalog, BenchmarkComparison, BenchmarkDependency, ContainerImplementation,
+    Implementation, KafkaRenderInputs, LoadedBenchmark, RunSettings, provision_topics,
 };
 use nervix_client_core::{Client, ConnectOptions};
 use nervix_test_environment::{
@@ -147,7 +147,9 @@ async fn run() -> Result<()> {
     match args.command {
         BenchmarkCommand::List => list_benchmarks(&catalog),
         BenchmarkCommand::Run(run_args) => {
-            run_benchmark(&repository_root, &catalog, *run_args).await
+            run_benchmark(&repository_root, &catalog, *run_args)
+                .await
+                .map(|_| ())
         }
         BenchmarkCommand::RunAll(options) => {
             run_all_benchmarks(&repository_root, &catalog, *options).await
@@ -181,10 +183,16 @@ async fn run_all_benchmarks(
 ) -> Result<()> {
     let benchmarks = catalog.discover()?;
     ensure!(!benchmarks.is_empty(), "benchmark catalog is empty");
+    let artifacts_root = options
+        .artifacts_root
+        .as_deref()
+        .map(|path| absolute_or_repository_path(repository_root, path))
+        .unwrap_or_else(|| repository_root.join(DEFAULT_ARTIFACTS_ROOT));
+    let mut run_directories = Vec::new();
     for benchmark in benchmarks {
         for implementation in benchmark.definition().implementations.keys() {
             tokio::task::consume_budget().await;
-            run_benchmark(
+            let run_directory = run_benchmark(
                 repository_root,
                 catalog,
                 RunArgs {
@@ -194,8 +202,13 @@ async fn run_all_benchmarks(
                 },
             )
             .await?;
+            run_directories.push(run_directory);
         }
     }
+    let comparison = BenchmarkComparison::from_run_directories(&run_directories)?;
+    let comparison_path = artifacts_root.join("benchmark-comparison.md");
+    comparison.write_markdown(&comparison_path)?;
+    println!("comparison={}", comparison_path.display());
     Ok(())
 }
 
@@ -203,7 +216,7 @@ async fn run_benchmark(
     repository_root: &Path,
     catalog: &BenchmarkCatalog,
     args: RunArgs,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let benchmark = catalog.load(&args.benchmark)?;
     let implementation = benchmark
         .definition()
@@ -262,7 +275,8 @@ async fn run_benchmark(
     };
     let status = if outcome.is_ok() { "pass\n" } else { "fail\n" };
     fs::write(resolved.run_directory.join("status.txt"), status)?;
-    outcome
+    outcome?;
+    Ok(resolved.run_directory)
 }
 
 async fn execute_run(

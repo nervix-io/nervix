@@ -91,6 +91,10 @@ benchmark *args:
     cargo build --release --package nervix-benchmark --bins
     "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }}
 
+# Focused validation for the benchmark framework without building product binaries.
+test-benchmark-framework *args:
+    cargo test --package nervix-benchmark {{ args }}
+
 # Build and benchmark the current local Nervix checkout.
 benchmark-nervix-local benchmark_name="kafka-filter-map" *args: build-web-console
     cargo build --release \
