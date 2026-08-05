@@ -7,7 +7,7 @@ from pathlib import Path
 class BenchmarkWorkflowTests(unittest.TestCase):
     def test_reporter_job_is_separate_least_privilege_and_always_updates_pr(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()
-        _, reporter = workflow.split("\n  benchmark-comment:", maxsplit=1)
+        reporter = workflow.split("\n  benchmark-comment:", maxsplit=1)[1]
         reporter = reporter.split("\n  publish-manifest:", maxsplit=1)[0]
 
         self.assertIn("needs: [build-arch, benchmark]", reporter)
@@ -24,7 +24,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
 
     def test_benchmark_job_keeps_read_only_repository_permissions(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()
-        _, benchmark = workflow.split("\n  benchmark:", maxsplit=1)
+        benchmark = workflow.split("\n  benchmark:", maxsplit=1)[1]
         benchmark = benchmark.split("\n  benchmark-comment:", maxsplit=1)[0]
 
         self.assertIn("contents: read", benchmark)

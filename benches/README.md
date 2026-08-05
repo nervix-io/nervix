@@ -47,8 +47,10 @@ normal amd64 Nervix runtime image. A separate downstream job then pulls that exa
 runs the benchmark catalog against it. The downstream job builds only the benchmark harness; both
 server startup and control-plane configuration target the completed image, with no CLI subprocess.
 Adding the label starts a Docker build and benchmark run; subsequent commits rerun the complete
-catalog. Fork PRs remain excluded because their untrusted workflow tokens cannot push the image that
-this job consumes.
+catalog. A least-privilege reporter job downloads the resulting artifact and updates one stable PR
+comment with the comparison table; failed reruns replace stale results with the failure state.
+Fork PRs remain excluded because their untrusted workflow tokens cannot push the image that this job
+consumes.
 
 The underlying image-only entry point is available for reproducing that CI path:
 
@@ -132,8 +134,10 @@ target/benchmarks/<workload>/<implementation>/<run-id>/
 ```
 
 Artifacts include the resolved parameters, rendered configuration, subject log, image identity for
-container runs, load-driver log, and the count/rate report. A run passes only after the output topic
-equals the broker-acknowledged input count and remains stable for a confirmation interval.
+container runs, load-driver log, and the count/rate report. `run-all` also writes
+`benchmark-comparison.md` from the exact run directories produced by that invocation; it never
+selects unrelated runs by timestamp. A run passes only after the output topic equals the
+broker-acknowledged input count and remains stable for a confirmation interval.
 
 This is a single-host end-to-end benchmark. Its rate includes Kafka, the load driver, the selected
 product, and the output drain. Compare products only with identical workload inputs, and do not use

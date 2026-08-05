@@ -147,9 +147,8 @@ async fn run() -> Result<()> {
     match args.command {
         BenchmarkCommand::List => list_benchmarks(&catalog),
         BenchmarkCommand::Run(run_args) => {
-            run_benchmark(&repository_root, &catalog, *run_args)
-                .await
-                .map(|_| ())
+            run_benchmark(&repository_root, &catalog, *run_args).await?;
+            Ok(())
         }
         BenchmarkCommand::RunAll(options) => {
             run_all_benchmarks(&repository_root, &catalog, *options).await

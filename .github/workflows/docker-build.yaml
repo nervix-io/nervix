@@ -189,7 +189,6 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run benchmarks
-        id: benchmark
         run: >-
           just benchmark-ci
           "${NERVIX_BENCHMARK_IMAGE}"

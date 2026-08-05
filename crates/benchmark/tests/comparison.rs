@@ -144,10 +144,12 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
         "**Configuration:** 30 s · 16 partitions · 128 B values (140 B wire) · backlog cap 4,096"
     ));
     assert!(markdown.contains(
-        "| Nervix | **1,200 msg/s** | **0.16 MiB/s** | **1,250 msg/s** | 4.500 s | ✅ 36,000 | ⚠️ 4,096 (100.0%) | baseline |"
+        "| Nervix | **1,200 msg/s** | **0.16 MiB/s** | **1,250 msg/s** | 4.500 s | ✅ 36,000 | ⚠️ \
+         4,096 (100.0%) | baseline |"
     ));
     assert!(markdown.contains(
-        "| Vector | 1,000 msg/s | 0.13 MiB/s | 1,020 msg/s | **0.100 s** | ✅ 30,000 | 512 (12.5%) | −16.7% |"
+        "| Vector | 1,000 msg/s | 0.13 MiB/s | 1,020 msg/s | **0.100 s** | ✅ 30,000 | 512 \
+         (12.5%) | −16.7% |"
     ));
     assert!(markdown.contains("Nervix reached the configured backlog cap"));
     assert!(markdown.contains("`ghcr.io/nervix-io/nervix:pr-109`"));
@@ -199,6 +201,31 @@ fn rejects_runs_with_different_workload_configuration() {
         .expect_err("different partition counts must not compare");
     assert!(matches!(
         error,
-        ComparisonError::MismatchedConfiguration { field: "partitions", .. }
+        ComparisonError::MismatchedConfiguration {
+            field: "partitions",
+            ..
+        }
     ));
+}
+
+#[test]
+fn rejects_a_successful_run_without_messages() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let nervix = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 0,
+            generation_rate: 0.0,
+            end_to_end_rate: 0.0,
+            payload_rate: 0.0,
+            drain_seconds: 0.0,
+            peak_backlog: 0,
+        },
+    );
+
+    let error = BenchmarkComparison::from_run_directories(&[nervix])
+        .expect_err("a run without measured messages must not compare");
+    assert!(matches!(error, ComparisonError::InvalidReport { .. }));
 }

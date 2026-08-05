@@ -109,9 +109,7 @@ pub enum ComparisonError {
         implementation: String,
     },
 
-    #[error(
-        "benchmark '{benchmark}' implementation '{implementation}' has a different {field}"
-    )]
+    #[error("benchmark '{benchmark}' implementation '{implementation}' has a different {field}")]
     MismatchedConfiguration {
         benchmark: String,
         implementation: String,
@@ -191,9 +189,7 @@ impl BenchmarkRuns {
             .position(|run| run.manifest.implementation == "nervix")
             .unwrap_or(0);
         let baseline_name = display_name(&self.runs[baseline].manifest.implementation);
-        let baseline_rate = self.runs[baseline]
-            .report
-            .end_to_end_messages_per_second;
+        let baseline_rate = self.runs[baseline].report.end_to_end_messages_per_second;
         let best_end_to_end = self
             .runs
             .iter()
@@ -217,7 +213,8 @@ impl BenchmarkRuns {
         let first = &self.runs[0];
 
         let mut markdown = format!(
-            "\n### {}\n\n{}\n\n**Configuration:** {} s · {} partitions · {} B values ({} B wire) · backlog cap {}\n\n",
+            "\n### {}\n\n{}\n\n**Configuration:** {} s · {} partitions · {} B values ({} B wire) \
+             · backlog cap {}\n\n",
             display_name(&self.slug),
             single_line(&self.description),
             first.manifest.duration_seconds,
@@ -227,7 +224,8 @@ impl BenchmarkRuns {
             format_count(first.manifest.max_backlog_messages),
         );
         markdown.push_str(&format!(
-            "| Implementation | End-to-end | Payload | During generation | Drain ↓ | Parity | Peak backlog | vs. {baseline_name} |\n"
+            "| Implementation | End-to-end | Payload | During generation | Drain ↓ | Parity | \
+             Peak backlog | vs. {baseline_name} |\n"
         ));
         markdown.push_str("|:--|--:|--:|--:|--:|--:|--:|--:|\n");
         for (index, run) in self.runs.iter().enumerate() {
@@ -235,10 +233,7 @@ impl BenchmarkRuns {
                 "{} msg/s",
                 format_count(run.report.end_to_end_messages_per_second.round() as u64)
             );
-            let payload = format!(
-                "{:.2} MiB/s",
-                run.report.end_to_end_payload_mib_per_second
-            );
+            let payload = format!("{:.2} MiB/s", run.report.end_to_end_payload_mib_per_second);
             let generation = format!(
                 "{} msg/s",
                 format_count(
@@ -251,8 +246,7 @@ impl BenchmarkRuns {
             let backlog_percentage = run.report.peak_backlog_messages as f64
                 / run.report.max_backlog_messages as f64
                 * 100.0;
-            let cap_marker = if run.report.peak_backlog_messages
-                == run.report.max_backlog_messages
+            let cap_marker = if run.report.peak_backlog_messages == run.report.max_backlog_messages
             {
                 "⚠️ "
             } else {
@@ -266,16 +260,25 @@ impl BenchmarkRuns {
                 )
             };
             markdown.push_str(&format!(
-                "| {} | {} | {} | {} | {} | ✅ {} | {}{} ({backlog_percentage:.1}%) | {relative} |\n",
+                "| {} | {} | {} | {} | {} | ✅ {} | {}{} ({backlog_percentage:.1}%) | {relative} \
+                 |\n",
                 display_name(&run.manifest.implementation),
-                emphasize_best(end_to_end, run.report.end_to_end_messages_per_second, best_end_to_end),
-                emphasize_best(payload, run.report.end_to_end_payload_mib_per_second, best_payload),
+                emphasize_best(
+                    end_to_end,
+                    run.report.end_to_end_messages_per_second,
+                    best_end_to_end
+                ),
+                emphasize_best(
+                    payload,
+                    run.report.end_to_end_payload_mib_per_second,
+                    best_payload
+                ),
                 emphasize_best(
                     generation,
                     run.report.output_messages_per_second_during_generation,
                     best_generation,
                 ),
-                emphasize_best(drain, best_drain, run.report.drain_seconds),
+                emphasize_best(drain, run.report.drain_seconds, best_drain),
                 format_count(run.report.input_messages),
                 cap_marker,
                 format_count(run.report.peak_backlog_messages),
@@ -290,12 +293,14 @@ impl BenchmarkRuns {
             .collect::<Vec<_>>();
         if !saturated.is_empty() {
             markdown.push_str(&format!(
-                "\n> [!WARNING]\n> {} reached the configured backlog cap. Treat this as a bounded-pressure comparison, not a definitive maximum-throughput result.\n",
-                saturated.join(", ")
+                "\n> [!WARNING]\n> {} reached the configured backlog cap. Treat this as a \
+                 bounded-pressure comparison, not a definitive maximum-throughput result.\n",
+                human_list(&saturated)
             ));
         }
         markdown.push_str(
-            "\n> [!NOTE]\n> Single-host end-to-end rates include Kafka and the load driver. Implementations retain their native delivery and batch-size semantics.\n",
+            "\n> [!NOTE]\n> Single-host end-to-end rates include Kafka and the load driver. \
+             Implementations retain their native delivery and batch-size semantics.\n",
         );
         markdown.push_str("\n<details>\n<summary>Parameters and provenance</summary>\n\n");
         markdown.push_str(&format!(
@@ -454,13 +459,27 @@ fn validate_report(
         ));
     }
     if report.partitions != manifest.partitions {
-        return Err(invalid("partition count does not match run.toml".to_string()));
+        return Err(invalid(
+            "partition count does not match run.toml".to_string(),
+        ));
     }
     if report.max_backlog_messages != manifest.max_backlog_messages {
         return Err(invalid("backlog cap does not match run.toml".to_string()));
     }
     if report.peak_backlog_messages > report.max_backlog_messages {
-        return Err(invalid("peak backlog exceeds its configured cap".to_string()));
+        return Err(invalid(
+            "peak backlog exceeds its configured cap".to_string(),
+        ));
+    }
+    if report.input_messages == 0 {
+        return Err(invalid(
+            "a successful benchmark must measure at least one message".to_string(),
+        ));
+    }
+    if report.end_to_end_messages_per_second == 0.0 {
+        return Err(invalid(
+            "end-to-end message rate must be positive".to_string(),
+        ));
     }
     if report.input_messages != report.output_messages {
         return Err(invalid(format!(
@@ -546,6 +565,19 @@ fn single_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn human_list(values: &[String]) -> String {
+    match values {
+        [] => String::new(),
+        [value] => value.clone(),
+        [left, right] => format!("{left} and {right}"),
+        values => format!(
+            "{}, and {}",
+            values[..values.len() - 1].join(", "),
+            values.last().expect("non-empty list has a last value")
+        ),
+    }
+}
+
 fn format_count(value: u64) -> String {
     let digits = value.to_string();
     let first_group = digits.len() % 3;
@@ -553,7 +585,7 @@ fn format_count(value: u64) -> String {
     if first_group > 0 {
         formatted.push_str(&digits[..first_group]);
     }
-    for (index, chunk) in digits[first_group..].as_bytes().chunks(3).enumerate() {
+    for (index, chunk) in digits.as_bytes()[first_group..].chunks(3).enumerate() {
         if first_group > 0 || index > 0 {
             formatted.push(',');
         }
@@ -581,7 +613,8 @@ fn emphasize_best(rendered: String, value: f64, best: f64) -> String {
 fn render_parameters(parameters: &toml::Table) -> String {
     let mut entries = parameters
         .iter()
-        .filter(|(name, _)| {
+        .filter(|entry| {
+            let name = entry.0;
             !(*name == "emitter_flush_seconds" && parameters.contains_key("emitter_flush_each"))
                 && !(*name == "emitter_max_batch_bytes"
                     && parameters.contains_key("emitter_max_batch_size"))
