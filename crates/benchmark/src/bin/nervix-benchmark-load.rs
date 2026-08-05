@@ -24,7 +24,7 @@ const GENERATION_QUERY_DEADLINE_TOLERANCE: Duration = Duration::from_secs(1);
 const PARITY_STABILITY_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Parser)]
-#[command(about = "Drive the Nervix Kafka-to-Kafka end-to-end benchmark")]
+#[command(about = "Drive a Kafka-to-Kafka end-to-end streaming benchmark")]
 struct Args {
     #[arg(long)]
     bootstrap_servers: String,
@@ -32,6 +32,10 @@ struct Args {
     input_topic: String,
     #[arg(long)]
     output_topic: String,
+    #[arg(long)]
+    consumer_group: String,
+    #[arg(long)]
+    minimum_consumers: usize,
     #[arg(long, default_value_t = 30)]
     duration_seconds: u64,
     #[arg(long, default_value_t = 128)]
@@ -195,6 +199,10 @@ impl BenchmarkReport {
 impl BenchmarkRunner {
     fn new(args: Args) -> Result<Self> {
         ensure!(args.duration_seconds > 0, "duration must be positive");
+        ensure!(
+            args.minimum_consumers > 0,
+            "minimum consumer count must be positive"
+        );
         ensure!(args.value_bytes > 0, "value byte count must be positive");
         ensure!(
             args.max_backlog_messages > 0,
@@ -218,6 +226,7 @@ impl BenchmarkRunner {
         let producer = ClientConfig::new()
             .set("bootstrap.servers", &args.bootstrap_servers)
             .set("acks", "all")
+            .set("enable.idempotence", "true")
             .set("delivery.timeout.ms", "60000")
             .set("linger.ms", "5")
             .set("batch.size", "1048576")
@@ -255,6 +264,7 @@ impl BenchmarkRunner {
             self.topic_message_count(&self.args.output_topic, &output_partitions)? == 0,
             "output topic is not empty"
         );
+        self.wait_for_consumer_group()?;
         let warmup_messages = u64::try_from(input_partitions.len())
             .context("Kafka partition count does not fit in u64")?;
         let warmup_deadline = Instant::now() + self.wait_timeout;
@@ -476,6 +486,57 @@ impl BenchmarkRunner {
             );
             if Instant::now() >= deadline {
                 bail!("timed out waiting for {expected} Kafka delivery callbacks; got {observed}");
+            }
+            thread::sleep(OFFSET_POLL_INTERVAL);
+        }
+    }
+
+    fn wait_for_consumer_group(&self) -> Result<()> {
+        let deadline = Instant::now() + self.wait_timeout;
+        let mut stable_since = None;
+        loop {
+            let groups = match self
+                .producer
+                .client()
+                .fetch_group_list(Some(&self.args.consumer_group), KAFKA_QUERY_TIMEOUT)
+            {
+                Ok(groups) => groups,
+                Err(_) if Instant::now() < deadline => {
+                    thread::sleep(OFFSET_POLL_INTERVAL);
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to inspect Kafka consumer group '{}' before timeout",
+                            self.args.consumer_group
+                        )
+                    });
+                }
+            };
+            let group = groups
+                .groups()
+                .iter()
+                .find(|group| group.name() == self.args.consumer_group);
+            let observed = group.map_or(0, |group| group.members().len());
+            let is_stable = group.is_some_and(|group| group.state() == "Stable")
+                && observed >= self.args.minimum_consumers;
+            if is_stable {
+                let stable_since = stable_since.get_or_insert_with(Instant::now);
+                if stable_since.elapsed() >= PARITY_STABILITY_INTERVAL {
+                    return Ok(());
+                }
+            } else {
+                stable_since = None;
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "timed out waiting for Kafka consumer group '{}' to stabilize at no fewer \
+                     than {} members; observed {observed} in state {}",
+                    self.args.consumer_group,
+                    self.args.minimum_consumers,
+                    group.map_or("missing", |group| group.state())
+                );
             }
             thread::sleep(OFFSET_POLL_INTERVAL);
         }

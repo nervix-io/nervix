@@ -3,13 +3,12 @@ use std::time::Duration;
 use ahash::RandomState;
 use dashmap::DashMap;
 use nervix_models::Identifier;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::broadcast;
 use triomphe::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct EmitterFaultInjector {
     emitters: DashMap<String, EmitterFaultMode, RandomState>,
-    changes: watch::Sender<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -81,48 +80,24 @@ impl EmitterFaultInjector {
     pub fn fail_emitter(&self, emitter: &str) {
         self.emitters
             .insert(emitter.to_ascii_lowercase(), EmitterFaultMode::Fail);
-        self.notify_change();
     }
 
     pub fn stall_emitter(&self, emitter: &str) {
         self.emitters
             .insert(emitter.to_ascii_lowercase(), EmitterFaultMode::Stall);
-        self.notify_change();
     }
 
     pub fn clear_emitter(&self, emitter: &str) {
         self.emitters.remove(&emitter.to_ascii_lowercase());
-        self.notify_change();
     }
 
     pub fn clear_all(&self) {
         self.emitters.clear();
-        self.notify_change();
     }
 
     pub(super) fn fault_mode(&self, emitter: &Identifier) -> Option<EmitterFaultMode> {
         self.emitters
             .get(&emitter.as_str().to_ascii_lowercase())
             .map(|mode| *mode)
-    }
-
-    pub(super) fn subscribe(&self) -> watch::Receiver<u64> {
-        self.changes.subscribe()
-    }
-
-    fn notify_change(&self) {
-        self.changes.send_modify(|generation| {
-            *generation = generation.wrapping_add(1);
-        });
-    }
-}
-
-impl Default for EmitterFaultInjector {
-    fn default() -> Self {
-        let (changes, _) = watch::channel(0);
-        Self {
-            emitters: DashMap::default(),
-            changes,
-        }
     }
 }

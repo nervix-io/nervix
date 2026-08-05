@@ -85,18 +85,48 @@ bench *args:
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
-# Build and exercise a real release server through Kafka for a fixed load interval, then wait for
-# exact output parity and retain a performance report under target/benchmarks/kafka-e2e/.
-bench-kafka-e2e duration_seconds="auto" partitions="16" value_bytes="128" max_backlog_messages="4194304" ingestor_flush_each="10ms" ingestor_max_batch_size="8MiB" emitter_flush_each="10ms" emitter_max_batch_size="8MiB":
-    bash benches/kafka_e2e/run.sh \
-        --duration-seconds {{ quote(duration_seconds) }} \
-        --partitions {{ quote(partitions) }} \
-        --value-bytes {{ quote(value_bytes) }} \
-        --max-backlog-messages {{ quote(max_backlog_messages) }} \
-        --ingestor-flush-each {{ quote(ingestor_flush_each) }} \
-        --ingestor-max-batch-size {{ quote(ingestor_max_batch_size) }} \
-        --emitter-flush-each {{ quote(emitter_flush_each) }} \
-        --emitter-max-batch-size {{ quote(emitter_max_batch_size) }}
+# Build the reusable harness and forward its CLI arguments. This is enough for container subjects
+# such as Vector; local Nervix has a dedicated recipe below because it also builds the server.
+benchmark *args:
+    cargo build --release --package nervix-benchmark --bins
+    "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }}
+
+# Build and benchmark the current local Nervix checkout.
+benchmark-nervix-local benchmark_name="kafka-filter-map" *args: build-web-console
+    cargo build --release \
+        --package nervix-server --bin nervix-server \
+        --package nervix-benchmark --bins
+    "{{ cargo_target_dir }}/release/nervix-benchmark" run {{ quote(benchmark_name) }} \
+        --implementation nervix --nervix-mode local \
+        --server-binary "{{ cargo_target_dir }}/release/nervix-server" {{ args }}
+
+# Run a tagged Nervix server image; the harness configures it through the client-core API.
+benchmark-nervix-image image benchmark_name="kafka-filter-map" *args:
+    cargo build --release --package nervix-benchmark --bins
+    "{{ cargo_target_dir }}/release/nervix-benchmark" run {{ quote(benchmark_name) }} \
+        --implementation nervix --nervix-mode image --nervix-image {{ quote(image) }} {{ args }}
+
+# Build once, then run every declared workload implementation sequentially with local Nervix.
+benchmark-all-local *args: build-web-console
+    cargo build --release \
+        --package nervix-server --bin nervix-server \
+        --package nervix-benchmark --bins
+    "{{ cargo_target_dir }}/release/nervix-benchmark" run-all \
+        --nervix-mode local \
+        --server-binary "{{ cargo_target_dir }}/release/nervix-server" {{ args }}
+
+# Build only the benchmark harness, then run it against an already-built Nervix image. The harness
+# configures the server directly through client-core and never rebuilds a product binary.
+benchmark-ci nervix_image artifacts_root *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -S /var/run/docker.sock
+    docker image inspect {{ quote(nervix_image) }} >/dev/null
+    cargo build --release --package nervix-benchmark --bins
+    "{{ cargo_target_dir }}/release/nervix-benchmark" \
+        --repository-root "{{ justfile_directory() }}" \
+        run-all --nervix-mode image --nervix-image {{ quote(nervix_image) }} \
+        --artifacts-root {{ quote(artifacts_root) }} {{ args }}
 
 cargo-fmt:
     cargo +nightly fmt

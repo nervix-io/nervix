@@ -2365,7 +2365,7 @@ dependencies = [
  "convert_case 0.6.0",
  "pathdiff",
  "serde_core",
- "toml",
+ "toml 1.1.4+spec-1.1.0",
  "winnow 1.0.4",
 ]
 
@@ -6386,6 +6386,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
+name = "nervix-benchmark"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "clap",
+ "humantime",
+ "nervix-client-core",
+ "nervix-nspl",
+ "nervix-test-environment",
+ "parking_lot",
+ "rdkafka",
+ "reqwest 0.13.4",
+ "serde",
+ "tempfile",
+ "testcontainers",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml 0.8.2",
+ "triomphe",
+ "upon",
+ "uuid",
+]
+
+[[package]]
 name = "nervix-cli"
 version = "0.1.0-dev"
 dependencies = [
@@ -6614,6 +6638,7 @@ dependencies = [
  "nervix-nspl",
  "nervix-proto",
  "nervix-roto",
+ "nervix-test-environment",
  "nervix-vm",
  "nervix-wasm",
  "opendal 0.56.0",
@@ -6649,7 +6674,6 @@ dependencies = [
  "sorted-vec",
  "storekey",
  "tempfile",
- "testcontainers",
  "thiserror 2.0.19",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
@@ -6672,6 +6696,18 @@ dependencies = [
  "uuid",
  "webpki-roots 1.0.9",
  "zeromq",
+]
+
+[[package]]
+name = "nervix-test-environment"
+version = "0.1.0-dev"
+dependencies = [
+ "blake3",
+ "reqwest 0.13.4",
+ "serde_json",
+ "tempfile",
+ "testcontainers",
+ "tokio",
 ]
 
 [[package]]
@@ -10089,6 +10125,15 @@ dependencies = [
 
 [[package]]
 name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "serde_spanned"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
@@ -11242,12 +11287,24 @@ dependencies = [
 
 [[package]]
 name = "toml"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "185d8ab0dfbb35cf1399a6344d8484209c088f75f8f68230da55d48d95d43e3d"
+dependencies = [
+ "serde",
+ "serde_spanned 0.6.9",
+ "toml_datetime 0.6.3",
+ "toml_edit 0.20.2",
+]
+
+[[package]]
+name = "toml"
 version = "1.1.4+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
 dependencies = [
  "serde_core",
- "serde_spanned",
+ "serde_spanned 1.1.1",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
  "winnow 1.0.4",
@@ -11267,6 +11324,9 @@ name = "toml_datetime"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cda73e2f1397b1262d6dfdcef8aafae14d1de7748d66822d3bfeeb6d03e5e4b"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "toml_datetime"
@@ -11284,6 +11344,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "396e4d48bbb2b7554c944bde63101b5ae446cff6ec4a24227428f15eb72ef338"
 dependencies = [
  "indexmap 2.14.0",
+ "serde",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.3",
  "winnow 0.5.40",
 ]

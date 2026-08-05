@@ -12,12 +12,6 @@ bench = false
 name = "nervix-server"
 path = "src/main.rs"
 
-[[bin]]
-bench = false
-name = "nervix-kafka-e2e-driver"
-path = "benches/kafka_e2e/driver.rs"
-required-features = ["benchmarks"]
-
 [features]
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
@@ -185,10 +179,10 @@ criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 loom = { workspace = true }
 nervix-client-core = { workspace = true }
+nervix-test-environment = { workspace = true }
 playwright-rs = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
-testcontainers = { workspace = true }
 
 [[test]]
 harness = false
@@ -202,6 +196,7 @@ required-features = ["benchmarks"]
 [workspace]
 members = [
   ".",
+  "crates/benchmark",
   "crates/client-core",
   "crates/consensus",
   "crates/dataflow-graph",
@@ -215,6 +210,7 @@ members = [
   "crates/nspl",
   "crates/models",
   "crates/proto",
+  "crates/test-environment",
   "crates/nervix-cli",
 ]
 
@@ -332,6 +328,7 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
 ] }
 nervix-proto = { package = "nervix-proto", path = "crates/proto" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
+nervix-test-environment = { package = "nervix-test-environment", path = "crates/test-environment" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
 nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }
@@ -425,6 +422,7 @@ tokio-rustls = "0.26"
 tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
 tonic-build = "0.13"

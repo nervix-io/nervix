@@ -75,9 +75,10 @@ use crate::common::{
         WebsocketExchangeAction, client_connect_options,
     },
     dependencies::{
-        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, MONGODB_ADDR,
-        MONGODB_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, REDIS_ADDR,
-        RUSTFS_ADDR, TestDependencies,
+        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
+        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MONGODB_ADDR, MONGODB_TLS_ADDR, MYSQL_ADDR,
+        MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR,
+        TestDependencies,
     },
 };
 
@@ -529,6 +530,32 @@ async fn then_dependency_endpoint_responds_with_200(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[then("Kafka exposes host and Docker network benchmark endpoints")]
+fn then_kafka_exposes_host_and_docker_network_benchmark_endpoints(world: &mut ScenarioWorld) {
+    let endpoints = world.dependencies.endpoints();
+    let host = endpoints
+        .get(KAFKA_ADDR)
+        .expect("Kafka should expose its host endpoint");
+    let docker = endpoints
+        .get(KAFKA_DOCKER_ADDR)
+        .expect("Kafka should expose its Docker endpoint");
+    let network = endpoints
+        .get(KAFKA_DOCKER_NETWORK)
+        .expect("Kafka should expose its Docker network");
+    assert!(
+        host.starts_with("127.0.0.1:"),
+        "unexpected host endpoint: {host}"
+    );
+    assert!(
+        docker.ends_with(":9093") && !docker.starts_with("localhost:"),
+        "unexpected Docker endpoint: {docker}"
+    );
+    assert!(
+        !network.is_empty(),
+        "Kafka Docker network must not be empty"
+    );
 }
 
 #[then("an ephemeral dependency is removed when its test suite unwinds")]
