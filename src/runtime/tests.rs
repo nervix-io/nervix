@@ -9323,11 +9323,11 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     );
     assert_eq!(
         plan.headers,
-        vec![vec![
+        Some(vec![vec![
             ("tenant".to_string(), "acme".to_string()),
             ("route".to_string(), "fast-lane".to_string()),
             ("route".to_string(), "second".to_string()),
-        ]]
+        ]])
     );
 }
 

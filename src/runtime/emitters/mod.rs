@@ -115,21 +115,22 @@ struct EmitterBatchContext<'a> {
 #[derive(Clone)]
 struct EmitterPublishBatch {
     batch: RelayRecordBatch,
-    headers: Vec<EmitterHeaders>,
+    headers: Option<Vec<EmitterHeaders>>,
 }
 
 impl EmitterPublishBatch {
     fn from_batch(batch: RelayRecordBatch) -> Self {
-        let header_count = batch.batch.batch().num_rows();
         Self {
             batch,
-            headers: vec![Vec::new(); header_count],
+            headers: None,
         }
     }
 
-    fn new(batch: RelayRecordBatch, headers: Vec<EmitterHeaders>) -> Result<Self, String> {
+    fn new(batch: RelayRecordBatch, headers: Option<Vec<EmitterHeaders>>) -> Result<Self, String> {
         let row_count = batch.batch.batch().num_rows();
-        if row_count != headers.len() {
+        if let Some(headers) = &headers
+            && row_count != headers.len()
+        {
             return Err(format!(
                 "emitter header count {} does not match row count {}",
                 headers.len(),
@@ -144,6 +145,7 @@ impl EmitterPublishBatch {
             self.headers
                 .iter()
                 .flatten()
+                .flatten()
                 .map(|(name, value)| {
                     u64::try_from(name.len())
                         .unwrap_or(u64::MAX)
@@ -151,6 +153,16 @@ impl EmitterPublishBatch {
                 })
                 .fold(0_u64, u64::saturating_add),
         )
+    }
+
+    fn headers_for_row(&self, row: usize) -> Option<&EmitterHeaders> {
+        static EMPTY: EmitterHeaders = Vec::new();
+
+        match &self.headers {
+            Some(headers) => headers.get(row),
+            None if row < self.batch.keys.len() => Some(&EMPTY),
+            None => None,
+        }
     }
 
     fn message_count(&self) -> u64 {
@@ -306,6 +318,7 @@ impl PublishReport {
 struct EmitterBatchBuffer {
     flush_policy: Option<RuntimeFlushPolicy>,
     pending: Vec<EmitterPublishBatch>,
+    pending_messages: u64,
     pending_bytes: u64,
     flush_at: Option<Instant>,
     buffered_messages: Arc<EmitterBufferedMessages>,
@@ -325,6 +338,7 @@ impl EmitterBatchBuffer {
                 max_batch_size,
             ),
             pending: Vec::new(),
+            pending_messages: 0,
             pending_bytes: 0,
             flush_at: None,
             buffered_messages,
@@ -332,13 +346,8 @@ impl EmitterBatchBuffer {
     }
 
     fn update_buffered_messages(&self) {
-        let messages = self
-            .pending
-            .iter()
-            .map(EmitterPublishBatch::message_count)
-            .fold(0_u64, u64::saturating_add);
         self.buffered_messages
-            .set_generic(usize::try_from(messages).unwrap_or(usize::MAX));
+            .set_generic(usize::try_from(self.pending_messages).unwrap_or(usize::MAX));
     }
 
     fn reconfigure(
@@ -367,6 +376,7 @@ impl EmitterBatchBuffer {
         let Some(flush_policy) = self.flush_policy else {
             return Err(Report::new(EmitterRuntimeError::FlushPolicyNotInitialized));
         };
+        self.pending_messages = self.pending_messages.saturating_add(batch.message_count());
         self.pending_bytes = self.pending_bytes.saturating_add(batch.estimated_bytes());
         self.pending.push(batch);
         self.update_buffered_messages();
@@ -413,6 +423,7 @@ impl EmitterBatchBuffer {
 
     fn drain_pending(&mut self) -> Vec<EmitterPublishBatch> {
         let pending = std::mem::take(&mut self.pending);
+        self.pending_messages = 0;
         self.pending_bytes = 0;
         self.flush_at = None;
         self.update_buffered_messages();
@@ -421,6 +432,7 @@ impl EmitterBatchBuffer {
 
     fn clear(&mut self) {
         self.pending.clear();
+        self.pending_messages = 0;
         self.pending_bytes = 0;
         self.flush_at = None;
         self.update_buffered_messages();
@@ -430,11 +442,6 @@ impl EmitterBatchBuffer {
         if self.pending.is_empty() {
             return None;
         }
-        let messages = self
-            .pending
-            .iter()
-            .map(EmitterPublishBatch::message_count)
-            .fold(0_u64, u64::saturating_add);
         let bytes = self.pending_bytes;
         let domain_timestamp = self
             .pending
@@ -442,7 +449,11 @@ impl EmitterBatchBuffer {
             .filter_map(EmitterPublishBatch::domain_timestamp)
             .max()
             .unwrap_or_else(current_timestamp);
-        Some(PublishReport::flushed(messages, bytes, domain_timestamp))
+        Some(PublishReport::flushed(
+            self.pending_messages,
+            bytes,
+            domain_timestamp,
+        ))
     }
 }
 
@@ -975,6 +986,107 @@ enum SinkEmitter {
     MongoDb(MongoDbEmitter),
     Iceberg(IcebergEmitter),
     Missing { reason: String },
+}
+
+enum EncodedChunkPublisher<'a> {
+    Kafka {
+        topic: &'a Identifier,
+        emitter: &'a KafkaEmitter,
+    },
+    Sink {
+        emitter: &'a mut SinkEmitter,
+        sink: &'a EmitSink,
+    },
+}
+
+impl EncodedChunkPublisher<'_> {
+    async fn publish_chunk(
+        &mut self,
+        context: &EmitterSinkContext,
+        batch: &EmitterPublishBatch,
+        start: usize,
+        payloads: Vec<Vec<u8>>,
+    ) -> EmitterRuntimeResult<()> {
+        let message_count = payloads.len();
+        let end = start.saturating_add(message_count);
+        let keys = batch.batch.keys.get(start..end).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch)
+                .attach_printable("encoded payload range is outside emitter branch keys")
+        })?;
+        let empty_headers;
+        let headers = match &batch.headers {
+            Some(headers) => headers.get(start..end).ok_or_else(|| {
+                Report::new(EmitterRuntimeError::EncodeBatch)
+                    .attach_printable("encoded payload range is outside emitter headers")
+            })?,
+            None if end <= batch.batch.keys.len() => {
+                empty_headers = vec![EmitterHeaders::new(); message_count];
+                empty_headers.as_slice()
+            }
+            None => {
+                return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                    .attach_printable("encoded payload range is outside emitter rows"));
+            }
+        };
+
+        match self {
+            Self::Kafka { topic, emitter } => {
+                emitter
+                    .publish_chunk(topic, keys, payloads, headers)
+                    .await?;
+            }
+            Self::Sink { emitter, sink } => match (&mut **emitter, *sink) {
+                (SinkEmitter::Pulsar(emitter), EmitSink::Pulsar { .. }) => {
+                    emitter
+                        .publish_chunk(keys, payloads, headers, PUBLISH_IN_FLIGHT)
+                        .await?;
+                }
+                (SinkEmitter::RabbitMq(emitter), EmitSink::RabbitMq { queue, .. }) => {
+                    emitter
+                        .publish_chunk(queue, payloads, headers, PUBLISH_IN_FLIGHT)
+                        .await?;
+                }
+                (SinkEmitter::Redis(emitter), EmitSink::Redis { channel, .. }) => {
+                    emitter.publish_chunk(channel, payloads).await?;
+                }
+                (SinkEmitter::Mqtt(emitter), EmitSink::Mqtt { .. }) => {
+                    emitter.publish_chunk(payloads).await?;
+                }
+                (SinkEmitter::Nats(emitter), EmitSink::Nats { .. }) => {
+                    emitter.publish_chunk(payloads, headers).await?;
+                }
+                (SinkEmitter::ZeroMq(emitter), EmitSink::ZeroMq { .. }) => {
+                    for payload in payloads {
+                        tokio::task::consume_budget().await;
+                        emitter.publish(payload).await?;
+                    }
+                }
+                (SinkEmitter::Sqs(emitter), EmitSink::Sqs { .. }) => {
+                    for (offset, payload) in payloads.into_iter().enumerate() {
+                        tokio::task::consume_budget().await;
+                        emitter.publish(payload, &headers[offset]).await?;
+                    }
+                }
+                (SinkEmitter::Sentry(emitter), EmitSink::Sentry { .. }) => {
+                    for payload in payloads {
+                        tokio::task::consume_budget().await;
+                        emitter.publish(payload).await?;
+                    }
+                }
+                _ => {
+                    return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
+                        .attach_printable("emitter has no initialized sink client"));
+                }
+            },
+        }
+        trace!(
+            domain = context.domain.as_str(),
+            emitter = context.emitter.as_str(),
+            rows = message_count,
+            "emitter published encoded chunk"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -1566,23 +1678,38 @@ impl SinkEmitter {
             return Err(Report::new(EmitterRuntimeError::EncodeBatch)
                 .attach_printable("encoded emitter has no compiled codec"));
         };
+        let mut publisher = match (&mut *self, sink) {
+            (Self::Kafka(emitter), EmitSink::Kafka { topic, .. }) => {
+                EncodedChunkPublisher::Kafka { topic, emitter }
+            }
+            (emitter, sink) => EncodedChunkPublisher::Sink { emitter, sink },
+        };
+        let mut publish_result = Ok(());
         for batch in batches {
             tokio::task::consume_budget().await;
-            self.publish_encoded_batch(sink, context, codec.clone(), batch)
-                .await?;
+            if let Err(error) =
+                Self::publish_encoded_batch(&mut publisher, context, codec.clone(), batch).await
+            {
+                publish_result = Err(error);
+                break;
+            }
         }
-        Ok(())
+        publish_result
     }
 
     async fn publish_encoded_batch(
-        &mut self,
-        sink: &EmitSink,
+        publisher: &mut EncodedChunkPublisher<'_>,
         context: &EmitterSinkContext,
         codec: Arc<CompiledCodec>,
         batch: &EmitterPublishBatch,
     ) -> EmitterRuntimeResult<()> {
         let row_count = batch.batch.batch.batch().num_rows();
-        if batch.batch.keys.len() != row_count || batch.headers.len() != row_count {
+        if batch.batch.keys.len() != row_count
+            || batch
+                .headers
+                .as_ref()
+                .is_some_and(|headers| headers.len() != row_count)
+        {
             return Err(
                 Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
                     "emitter '{}' encoded batch row, branch key, and header counts differ",
@@ -1591,9 +1718,41 @@ impl SinkEmitter {
             );
         }
         if codec.requires_blocking_encode() {
-            return self
-                .publish_blocking_encoded_batch(sink, context, codec, batch, row_count)
-                .await;
+            return Self::publish_blocking_encoded_batch(
+                publisher, context, codec, batch, row_count,
+            )
+            .await;
+        }
+
+        if let EncodedChunkPublisher::Kafka { topic, emitter } = publisher {
+            let encoder = codec
+                .batch_encoder(&batch.batch.batch)
+                .map_err(|error| Self::encode_batch_error(context, error))?;
+            let mut payload = Vec::new();
+            for row_index in 0..row_count {
+                tokio::task::consume_budget().await;
+                encoder
+                    .encode_row_into(row_index, &mut payload)
+                    .map_err(|error| Self::encode_batch_error(context, error))?;
+                emitter
+                    .publish_message(
+                        topic,
+                        batch.batch.keys[row_index].as_ref(),
+                        &payload,
+                        batch.headers_for_row(row_index).ok_or_else(|| {
+                            Report::new(EmitterRuntimeError::EncodeBatch)
+                                .attach_printable("encoded row is outside emitter headers")
+                        })?,
+                    )
+                    .await?;
+            }
+            trace!(
+                domain = context.domain.as_str(),
+                emitter = context.emitter.as_str(),
+                rows = row_count,
+                "emitter serialized an Arrow batch directly into Kafka"
+            );
+            return Ok(());
         }
 
         for start in (0..row_count).step_by(ENCODE_CHUNK_ROWS) {
@@ -1602,15 +1761,15 @@ impl SinkEmitter {
             let payloads = codec
                 .encode_batch(&batch.batch.batch, start..end)
                 .map_err(|error| Self::encode_batch_error(context, error))?;
-            self.publish_encoded_chunk(sink, context, batch, start, payloads)
+            publisher
+                .publish_chunk(context, batch, start, payloads)
                 .await?;
         }
         Ok(())
     }
 
     async fn publish_blocking_encoded_batch(
-        &mut self,
-        sink: &EmitSink,
+        publisher: &mut EncodedChunkPublisher<'_>,
         context: &EmitterSinkContext,
         codec: Arc<CompiledCodec>,
         batch: &EmitterPublishBatch,
@@ -1640,8 +1799,8 @@ impl SinkEmitter {
                     return Err(Self::encode_batch_error(context, error));
                 }
             };
-            if let Err(error) = self
-                .publish_encoded_chunk(sink, context, batch, start, payloads)
+            if let Err(error) = publisher
+                .publish_chunk(context, batch, start, payloads)
                 .await
             {
                 drop(encoded_rx);
@@ -1667,82 +1826,6 @@ impl SinkEmitter {
             "emitter '{}' failed to encode columnar batch: {error}",
             context.emitter.as_str()
         ))
-    }
-
-    async fn publish_encoded_chunk(
-        &mut self,
-        sink: &EmitSink,
-        context: &EmitterSinkContext,
-        batch: &EmitterPublishBatch,
-        start: usize,
-        payloads: Vec<Vec<u8>>,
-    ) -> EmitterRuntimeResult<()> {
-        let message_count = payloads.len();
-        let end = start.saturating_add(message_count);
-        let keys = batch.batch.keys.get(start..end).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch)
-                .attach_printable("encoded payload range is outside emitter branch keys")
-        })?;
-        let headers = batch.headers.get(start..end).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch)
-                .attach_printable("encoded payload range is outside emitter headers")
-        })?;
-
-        match (&mut *self, sink) {
-            (Self::Kafka(emitter), EmitSink::Kafka { topic, .. }) => {
-                emitter
-                    .publish_chunk(topic, keys, payloads, headers, PUBLISH_IN_FLIGHT)
-                    .await?;
-            }
-            (Self::Pulsar(emitter), EmitSink::Pulsar { .. }) => {
-                emitter
-                    .publish_chunk(keys, payloads, headers, PUBLISH_IN_FLIGHT)
-                    .await?;
-            }
-            (Self::RabbitMq(emitter), EmitSink::RabbitMq { queue, .. }) => {
-                emitter
-                    .publish_chunk(queue, payloads, headers, PUBLISH_IN_FLIGHT)
-                    .await?;
-            }
-            (Self::Redis(emitter), EmitSink::Redis { channel, .. }) => {
-                emitter.publish_chunk(channel, payloads).await?;
-            }
-            (Self::Mqtt(emitter), EmitSink::Mqtt { .. }) => {
-                emitter.publish_chunk(payloads).await?;
-            }
-            (Self::Nats(emitter), EmitSink::Nats { .. }) => {
-                emitter.publish_chunk(payloads, headers).await?;
-            }
-            (Self::ZeroMq(emitter), EmitSink::ZeroMq { .. }) => {
-                for payload in payloads {
-                    tokio::task::consume_budget().await;
-                    emitter.publish(payload).await?;
-                }
-            }
-            (Self::Sqs(emitter), EmitSink::Sqs { .. }) => {
-                for (offset, payload) in payloads.into_iter().enumerate() {
-                    tokio::task::consume_budget().await;
-                    emitter.publish(payload, &headers[offset]).await?;
-                }
-            }
-            (Self::Sentry(emitter), EmitSink::Sentry { .. }) => {
-                for payload in payloads {
-                    tokio::task::consume_budget().await;
-                    emitter.publish(payload).await?;
-                }
-            }
-            _ => {
-                return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                    .attach_printable("emitter has no initialized sink client"));
-            }
-        }
-        trace!(
-            domain = context.domain.as_str(),
-            emitter = context.emitter.as_str(),
-            rows = message_count,
-            "emitter published encoded chunk"
-        );
-        Ok(())
     }
 
     async fn wait_for_fault_injector(
@@ -2483,6 +2566,8 @@ impl EmitterTask {
                         relay: input_relay,
                         batch,
                     } => {
+                        let delivery_observation = batch.delivery_observation(current_timestamp());
+                        let physical_node_id = runtime.local_node_id.read().clone();
                         runtime
                             .metrics
                             .observe_global_node_received(NodeBatchObservation {
@@ -2490,19 +2575,17 @@ impl EmitterTask {
                                 kind: ModelKind::Emitter,
                                 node: &task_emitter,
                                 relay: &input_relay,
-                                physical_node_id: runtime.local_node_id.read().as_deref(),
+                                physical_node_id: physical_node_id.as_deref(),
                                 messages: batch.message_count(),
                                 bytes: batch.estimated_bytes(),
-                                domain_timestamp: batch.domain_timestamp(),
+                                domain_timestamp: delivery_observation.domain_timestamp,
                             });
                         runtime.mark_branch_aggregated_metrics_updated(
                             &task_domain,
                             ModelKind::Emitter,
                             &task_emitter,
                         );
-                        let delivery_latencies =
-                            batch.delivery_latency_seconds(current_timestamp());
-                        for seconds in delivery_latencies {
+                        for seconds in delivery_observation.latency_seconds {
                             runtime
                                 .metrics
                                 .observe_global_delivery_latency_at_domain_time(
@@ -2511,16 +2594,11 @@ impl EmitterTask {
                                         kind: ModelKind::Emitter,
                                         node: &task_emitter,
                                         relay: &input_relay,
-                                        physical_node_id: runtime.local_node_id.read().as_deref(),
+                                        physical_node_id: physical_node_id.as_deref(),
                                         seconds,
-                                        domain_timestamp: batch.domain_timestamp(),
+                                        domain_timestamp: delivery_observation.domain_timestamp,
                                     },
                                 );
-                            runtime.mark_branch_aggregated_metrics_updated(
-                                &task_domain,
-                                ModelKind::Emitter,
-                                &task_emitter,
-                            );
                         }
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let publish_batch = match batch_context
@@ -3166,7 +3244,7 @@ mod tests {
     fn publish_batch_requires_one_header_row_per_record() {
         let batch = input_batch();
         let from_batch = EmitterPublishBatch::from_batch(batch.clone());
-        assert_eq!(from_batch.headers, vec![EmitterHeaders::new()]);
+        assert!(from_batch.headers.is_none());
         assert_eq!(from_batch.message_count(), 1);
         assert_eq!(
             from_batch.domain_timestamp(),
@@ -3174,15 +3252,15 @@ mod tests {
         );
 
         let headers = vec![vec![("route".to_string(), "fast".to_string())]];
-        let with_headers = EmitterPublishBatch::new(batch.clone(), headers.clone())
+        let with_headers = EmitterPublishBatch::new(batch.clone(), Some(headers.clone()))
             .expect("row-aligned headers must build");
-        assert_eq!(with_headers.headers, headers);
+        assert_eq!(with_headers.headers.as_ref(), Some(&headers));
         assert_eq!(
             with_headers.estimated_bytes(),
             batch.estimated_bytes() + u64::try_from("routefast".len()).unwrap()
         );
 
-        let error = match EmitterPublishBatch::new(batch, Vec::new()) {
+        let error = match EmitterPublishBatch::new(batch, Some(Vec::new())) {
             Err(error) => error,
             Ok(_) => panic!("missing row headers must be rejected"),
         };
@@ -3226,9 +3304,36 @@ mod tests {
         });
         buffer.buffered_messages = buffered_messages.clone();
         let first = EmitterPublishBatch::from_batch(input_batch_with(1, 10, AckSet::empty()));
+        let second_batch = RelayRecordBatch::from_messages(
+            input_schema(),
+            vec![
+                RelayMessage {
+                    key: None,
+                    record: RuntimeRecord::from_fields([(
+                        "value".to_string(),
+                        RuntimeValue::I64(2),
+                    )])
+                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(20)),
+                    acks: AckSet::empty(),
+                },
+                RelayMessage {
+                    key: None,
+                    record: RuntimeRecord::from_fields([(
+                        "value".to_string(),
+                        RuntimeValue::I64(3),
+                    )])
+                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(20)),
+                    acks: AckSet::empty(),
+                },
+            ],
+        )
+        .expect("valid multi-row emitter input batch");
         let second = EmitterPublishBatch::new(
-            input_batch_with(2, 20, AckSet::empty()),
-            vec![vec![("name".to_string(), "value".to_string())]],
+            second_batch,
+            Some(vec![
+                vec![("name".to_string(), "value".to_string())],
+                Vec::new(),
+            ]),
         )
         .expect("headers must align");
         let expected_bytes = first
@@ -3236,15 +3341,17 @@ mod tests {
             .saturating_add(second.estimated_bytes());
 
         assert!(!buffer.push(first).expect("first batch must buffer"));
+        assert_eq!(buffer.pending_messages, 1);
         let first_deadline = buffer.deadline().expect("first push must set a deadline");
         assert!(!buffer.push(second).expect("second batch must buffer"));
 
         assert_eq!(buffer.deadline(), Some(first_deadline));
-        assert_eq!(reported_messages.load(Ordering::Acquire), 2);
+        assert_eq!(reported_messages.load(Ordering::Acquire), 3);
+        assert_eq!(buffer.pending_messages, 3);
         let report = buffer
             .report()
             .expect("pending batches must produce a report");
-        assert_eq!(report.messages, 2);
+        assert_eq!(report.messages, 3);
         assert_eq!(report.bytes, expected_bytes);
         assert_eq!(report.domain_timestamp, Timestamp::from_unix_nanos(20));
         assert_eq!(buffer.pending_bytes, expected_bytes);
@@ -3375,6 +3482,7 @@ mod tests {
         buffer
             .push(EmitterPublishBatch::from_batch(input_batch()))
             .expect("configured buffer must accept input");
+        assert_eq!(buffer.pending_messages, 1);
         buffer.reconfigure(&context, "IMMEDIATE", None);
         assert_eq!(buffer.flush_policy, Some(RuntimeFlushPolicy::Immediate));
         assert!(buffer.deadline().is_some());
@@ -3383,14 +3491,17 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert!(buffer.is_empty());
         assert_eq!(buffer.pending_bytes, 0);
+        assert_eq!(buffer.pending_messages, 0);
         assert!(buffer.deadline().is_none());
         assert_eq!(reported_messages.load(Ordering::Acquire), 0);
 
         buffer
             .push(EmitterPublishBatch::from_batch(input_batch()))
             .expect("reconfigured buffer must accept input");
+        assert_eq!(buffer.pending_messages, 1);
         buffer.clear();
         assert!(buffer.report().is_none());
+        assert_eq!(buffer.pending_messages, 0);
         assert_eq!(reported_messages.load(Ordering::Acquire), 0);
 
         buffered_messages.set_generic(7);

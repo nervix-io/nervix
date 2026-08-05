@@ -6112,6 +6112,8 @@ impl BranchRuntime {
             }
             return;
         };
+        let delivery_observation = batch.delivery_observation(current_timestamp());
+        let physical_node_id = self.runtime.local_node_id.read().clone();
         self.runtime
             .metrics
             .observe_global_node_received(NodeBatchObservation {
@@ -6119,10 +6121,10 @@ impl BranchRuntime {
                 kind: processor.kind,
                 node: &processor.processor,
                 relay: incoming_relay,
-                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                physical_node_id: physical_node_id.as_deref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
+                domain_timestamp: delivery_observation.domain_timestamp,
             });
         self.runtime.metrics.observe_branch_node_received(
             branch_key_display(&self.key),
@@ -6131,10 +6133,10 @@ impl BranchRuntime {
                 kind: processor.kind,
                 node: &processor.processor,
                 relay: incoming_relay,
-                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                physical_node_id: physical_node_id.as_deref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
+                domain_timestamp: delivery_observation.domain_timestamp,
             },
         );
         self.runtime.mark_branch_aggregated_metrics_updated(
@@ -6142,8 +6144,7 @@ impl BranchRuntime {
             processor.kind,
             &processor.processor,
         );
-        let delivery_latencies = batch.delivery_latency_seconds(current_timestamp());
-        for seconds in delivery_latencies {
+        for seconds in delivery_observation.latency_seconds {
             self.runtime
                 .metrics
                 .observe_global_delivery_latency_at_domain_time(NodeLatencyObservation {
@@ -6151,9 +6152,9 @@ impl BranchRuntime {
                     kind: processor.kind,
                     node: &processor.processor,
                     relay: incoming_relay,
-                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    physical_node_id: physical_node_id.as_deref(),
                     seconds,
-                    domain_timestamp: batch.domain_timestamp(),
+                    domain_timestamp: delivery_observation.domain_timestamp,
                 });
             self.runtime.metrics.observe_branch_delivery_latency(
                 branch_key_display(&self.key),
@@ -6162,15 +6163,10 @@ impl BranchRuntime {
                     kind: processor.kind,
                     node: &processor.processor,
                     relay: incoming_relay,
-                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    physical_node_id: physical_node_id.as_deref(),
                     seconds,
-                    domain_timestamp: batch.domain_timestamp(),
+                    domain_timestamp: delivery_observation.domain_timestamp,
                 },
-            );
-            self.runtime.mark_branch_aggregated_metrics_updated(
-                &self.domain,
-                processor.kind,
-                &processor.processor,
             );
         }
         processor
@@ -12413,7 +12409,7 @@ async fn plan_filter_map_messages(
 
 struct EmitterFilterMapPlan {
     batch: Option<RelayRecordBatch>,
-    headers: Vec<EmitterHeaders>,
+    headers: Option<Vec<EmitterHeaders>>,
     message_errors: Vec<PlannedMessageError>,
 }
 
@@ -12455,7 +12451,7 @@ async fn plan_emitter_filter_map_batch(
 
     let mut successful_output_rows = Vec::new();
     let mut successful_input_rows = Vec::new();
-    let mut headers = Vec::new();
+    let mut headers = (!body_result.invocations.is_empty()).then(Vec::new);
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in body_result.selected_rows.iter().enumerate() {
         let source_record = |context: &str| {
@@ -12589,7 +12585,9 @@ async fn plan_emitter_filter_map_batch(
         }
         successful_output_rows.push(output_row);
         successful_input_rows.push(input_row);
-        headers.push(message_headers);
+        if let Some(headers) = &mut headers {
+            headers.push(message_headers);
+        }
     }
 
     let batch = if successful_output_rows.is_empty() {

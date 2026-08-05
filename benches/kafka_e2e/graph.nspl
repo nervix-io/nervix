@@ -1,0 +1,20 @@
+BEGIN;
+CREATE SCHEMA benchmark_record (
+  value STRING
+);
+CREATE WIRE JSON SCHEMA benchmark_wire MODE STRICT (
+  value string
+);
+CREATE CODEC benchmark_codec
+  FROM WIRE JSON SCHEMA benchmark_wire
+  TO SCHEMA benchmark_record;
+CREATE CLIENT kafka_local
+  TYPE KAFKA
+  CONFIG {
+    'bootstrap.servers' = '__KAFKA_BOOTSTRAP_SERVERS__',
+    'auto.offset.reset' = 'earliest'
+  };
+__RELAY_DEFINITIONS__
+__INGESTOR_DEFINITIONS__
+__EMITTER_DEFINITIONS__
+COMMIT;

@@ -85,6 +85,19 @@ bench *args:
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
+# Build and exercise a real release server through Kafka for a fixed load interval, then wait for
+# exact output parity and retain a performance report under target/benchmarks/kafka-e2e/.
+bench-kafka-e2e duration_seconds="auto" partitions="16" value_bytes="128" max_backlog_messages="4194304" ingestor_flush_each="10ms" ingestor_max_batch_size="8MiB" emitter_flush_each="10ms" emitter_max_batch_size="8MiB":
+    bash benches/kafka_e2e/run.sh \
+        --duration-seconds {{ quote(duration_seconds) }} \
+        --partitions {{ quote(partitions) }} \
+        --value-bytes {{ quote(value_bytes) }} \
+        --max-backlog-messages {{ quote(max_backlog_messages) }} \
+        --ingestor-flush-each {{ quote(ingestor_flush_each) }} \
+        --ingestor-max-batch-size {{ quote(ingestor_max_batch_size) }} \
+        --emitter-flush-each {{ quote(emitter_flush_each) }} \
+        --emitter-max-batch-size {{ quote(emitter_max_batch_size) }}
+
 cargo-fmt:
     cargo +nightly fmt
 

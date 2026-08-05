@@ -10863,6 +10863,8 @@ impl Runtime {
                         batch,
                     } => {
                         debug_assert_eq!(input_relay, task_from_relay);
+                        let delivery_observation = batch.delivery_observation(current_timestamp());
+                        let physical_node_id = runtime.local_node_id.read().clone();
                         runtime
                             .metrics
                             .observe_global_node_received(NodeBatchObservation {
@@ -10870,19 +10872,17 @@ impl Runtime {
                                 kind: ModelKind::Reingestor,
                                 node: &task_reingestor,
                                 relay: &task_from_relay,
-                                physical_node_id: runtime.local_node_id.read().as_deref(),
+                                physical_node_id: physical_node_id.as_deref(),
                                 messages: batch.message_count(),
                                 bytes: batch.estimated_bytes(),
-                                domain_timestamp: batch.domain_timestamp(),
+                                domain_timestamp: delivery_observation.domain_timestamp,
                             });
                         runtime.mark_branch_aggregated_metrics_updated(
                             &task_domain,
                             ModelKind::Reingestor,
                             &task_reingestor,
                         );
-                        let delivery_latencies =
-                            batch.delivery_latency_seconds(current_timestamp());
-                        for seconds in delivery_latencies {
+                        for seconds in delivery_observation.latency_seconds {
                             runtime
                                 .metrics
                                 .observe_global_delivery_latency_at_domain_time(
@@ -10891,16 +10891,11 @@ impl Runtime {
                                         kind: ModelKind::Reingestor,
                                         node: &task_reingestor,
                                         relay: &task_from_relay,
-                                        physical_node_id: runtime.local_node_id.read().as_deref(),
+                                        physical_node_id: physical_node_id.as_deref(),
                                         seconds,
-                                        domain_timestamp: batch.domain_timestamp(),
+                                        domain_timestamp: delivery_observation.domain_timestamp,
                                     },
                                 );
-                            runtime.mark_branch_aggregated_metrics_updated(
-                                &task_domain,
-                                ModelKind::Reingestor,
-                                &task_reingestor,
-                            );
                         }
                         let dependency_error_acks = batch.acks.clone();
                         let wait_for_required_state = !interaction.is_terminal_drain();

@@ -62,6 +62,63 @@ Feature: Kafka ingestion
       | 3            | 1         | 1             |
       | 3            | 2         | 1             |
 
+  Scenario Outline: Kafka emitter forwards a multi-chunk unbranched batch with exact count parity
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "forwarding_input_{{test_id}}" exists with 1 partitions
+    And Kafka topic "forwarding_output_{{test_id}}" exists with 1 partitions
+    And Kafka topic "forwarding_output_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA forwarding_event (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA forwarding_event_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC forwarding_event_codec
+        FROM WIRE JSON SCHEMA forwarding_event_wire
+        TO SCHEMA forwarding_event;
+      CREATE RELAY forwarding_events SCHEMA forwarding_event UNBRANCHED;
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE INGESTOR kafka_forwarding_source
+        FROM KAFKA kafka_main TOPIC forwarding_input_{{test_id}}
+        OFFSET BY CONSUMER GROUP nervix_cucumber_forwarding_{{test_id}}
+        MODE NO_ACK PARALLEL
+        DECODE USING forwarding_event_codec
+        TO forwarding_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE ATTACHED EMITTER kafka_forward
+        FROM forwarding_events
+        TO KAFKA kafka_main TOPIC forwarding_output_{{test_id}}
+        ENCODE USING forwarding_event_codec
+        INHERIT ALL
+        FLUSH EACH 500ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And 4096 JSON messages with user id 42 are rapidly published to "KAFKA" input "forwarding_input_{{test_id}}"
+    Then within "30s" the observed broker receives exactly 4096 messages
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Kafka ingestor reports transient source failures and recovers
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

@@ -12,6 +12,12 @@ bench = false
 name = "nervix-server"
 path = "src/main.rs"
 
+[[bin]]
+bench = false
+name = "nervix-kafka-e2e-driver"
+path = "benches/kafka_e2e/driver.rs"
+required-features = ["benchmarks"]
+
 [features]
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
@@ -455,8 +461,6 @@ cranelift-codegen = { git = "https://github.com/glebpom/wasmtime.git", branch = 
 cranelift-jit = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
 
 [profile.release]
-codegen-units = 1
-lto = true
 panic = "unwind"
 
 [profile.dev.package."wasmtime"]

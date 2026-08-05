@@ -145,6 +145,8 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- Treat Kafka emitter success as local librdkafka producer-queue admission. Even in `ATTACHED`
+  mode, Nervix does not wait for a broker delivery receipt before completing its ACK share.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts

@@ -67,6 +67,11 @@ pub struct CompiledCodec {
     wire_schema: CompiledWireSchema,
 }
 
+pub(crate) struct CompiledCodecBatchEncoder<'a> {
+    codec: &'a CompiledCodec,
+    batch: &'a RuntimeRecordBatch,
+}
+
 #[derive(Debug, Clone)]
 enum CompiledWireSchema {
     Json(CompiledJsonWireSchema),
@@ -549,110 +554,132 @@ impl CompiledCodec {
         }
     }
 
-    pub(crate) fn encode_batch(
-        &self,
-        batch: &RuntimeRecordBatch,
-        rows: std::ops::Range<usize>,
-    ) -> Result<Vec<Vec<u8>>, CodecError> {
+    pub(crate) fn batch_encoder<'a>(
+        &'a self,
+        batch: &'a RuntimeRecordBatch,
+    ) -> Result<CompiledCodecBatchEncoder<'a>, CodecError> {
         self.schema
             .validate_arrow_batch(batch)
             .map_err(|reason| CodecError::InvalidCodec {
                 codec: self.name.as_str().to_string(),
                 reason,
             })?;
-        if rows.start > rows.end || rows.end > batch.batch.num_rows() {
+        Ok(CompiledCodecBatchEncoder { codec: self, batch })
+    }
+
+    pub(crate) fn encode_batch(
+        &self,
+        batch: &RuntimeRecordBatch,
+        rows: std::ops::Range<usize>,
+    ) -> Result<Vec<Vec<u8>>, CodecError> {
+        let encoder = self.batch_encoder(batch)?;
+        encoder.validate_rows(&rows)?;
+        let mut payloads = Vec::with_capacity(rows.len());
+        for row_index in rows {
+            let mut payload = Vec::new();
+            encoder.encode_row_into(row_index, &mut payload)?;
+            payloads.push(payload);
+        }
+        Ok(payloads)
+    }
+}
+
+impl CompiledCodecBatchEncoder<'_> {
+    fn validate_rows(&self, rows: &std::ops::Range<usize>) -> Result<(), CodecError> {
+        if rows.start > rows.end || rows.end > self.batch.batch.num_rows() {
             return Err(CodecError::InvalidCodec {
-                codec: self.name.as_str().to_string(),
+                codec: self.codec.name.as_str().to_string(),
                 reason: format!(
                     "columnar encode row range {}..{} is outside batch with {} rows",
                     rows.start,
                     rows.end,
-                    batch.batch.num_rows()
+                    self.batch.batch.num_rows()
                 ),
             });
         }
+        Ok(())
+    }
 
-        let mut payloads = Vec::with_capacity(rows.len());
-        match &self.wire_schema {
+    pub(crate) fn encode_row_into(
+        &self,
+        row_index: usize,
+        payload: &mut Vec<u8>,
+    ) -> Result<(), CodecError> {
+        if row_index >= self.batch.batch.num_rows() {
+            return Err(CodecError::InvalidCodec {
+                codec: self.codec.name.as_str().to_string(),
+                reason: format!(
+                    "columnar encode row {row_index} is outside batch with {} rows",
+                    self.batch.batch.num_rows()
+                ),
+            });
+        }
+        payload.clear();
+        let row = ArrowCodecRow::new(self.codec, self.batch, row_index);
+        match &self.codec.wire_schema {
             CompiledWireSchema::Json(_) => {
-                for row_index in rows {
-                    let row = ArrowCodecRow::new(self, batch, row_index);
-                    payloads.push(simd_json::to_vec(&row).map_err(|source| {
-                        CodecError::SimdJsonEncode {
-                            codec: self.name.as_str().to_string(),
-                            source,
-                        }
-                    })?);
-                }
+                simd_json::to_writer(&mut *payload, &row).map_err(|source| {
+                    CodecError::SimdJsonEncode {
+                        codec: self.codec.name.as_str().to_string(),
+                        source,
+                    }
+                })?;
             }
             CompiledWireSchema::Cbor(_) => {
-                for row_index in rows {
-                    let row = ArrowCodecRow::new(self, batch, row_index);
-                    let mut encoded = Vec::new();
-                    ciborium::into_writer(&row, &mut encoded).map_err(|source| {
-                        CodecError::CborEncode {
-                            codec: self.name.as_str().to_string(),
-                            reason: source.to_string(),
-                        }
-                    })?;
-                    payloads.push(encoded);
-                }
+                ciborium::into_writer(&row, &mut *payload).map_err(|source| {
+                    CodecError::CborEncode {
+                        codec: self.codec.name.as_str().to_string(),
+                        reason: source.to_string(),
+                    }
+                })?;
             }
             CompiledWireSchema::Avro(wire_schema) => {
-                for row_index in rows {
-                    let row = ArrowCodecRow::new(self, batch, row_index);
-                    let value = row.to_avro_record(wire_schema)?;
-                    payloads.push(to_avro_datum(&wire_schema.schema, value).map_err(|source| {
-                        CodecError::AvroEncode {
-                            codec: self.name.as_str().to_string(),
-                            source,
-                        }
-                    })?);
-                }
+                let value = row.to_avro_record(wire_schema)?;
+                *payload = to_avro_datum(&wire_schema.schema, value).map_err(|source| {
+                    CodecError::AvroEncode {
+                        codec: self.codec.name.as_str().to_string(),
+                        source,
+                    }
+                })?;
             }
             CompiledWireSchema::JaqNative(native) => {
                 let Some(program) = native.transformations.on_emitting.as_deref() else {
                     return Err(CodecError::InvalidCodec {
-                        codec: self.name.as_str().to_string(),
+                        codec: self.codec.name.as_str().to_string(),
                         reason: "JAQ-native codec used for encoding must declare ON EMITTING \
                                  transformation"
                             .to_string(),
                     });
                 };
-                for row_index in rows {
-                    let row = ArrowCodecRow::new(self, batch, row_index);
-                    let value = run_jaq_transformation(self, program, row.to_json_value()?)?;
-                    payloads.push(native.format.write_value(value).map_err(|error| {
-                        CodecError::JaqNativeEncode {
-                            codec: self.name.as_str().to_string(),
-                            format: native.format.name(),
-                            reason: error.to_string(),
-                        }
-                    })?);
-                }
+                let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
+                *payload = native.format.write_value(value).map_err(|error| {
+                    CodecError::JaqNativeEncode {
+                        codec: self.codec.name.as_str().to_string(),
+                        format: native.format.name(),
+                        reason: error.to_string(),
+                    }
+                })?;
             }
             CompiledWireSchema::Protobuf(protobuf) => {
                 let Some(program) = protobuf.transformations.on_emitting.as_deref() else {
                     return Err(CodecError::InvalidCodec {
-                        codec: self.name.as_str().to_string(),
+                        codec: self.codec.name.as_str().to_string(),
                         reason: "protobuf codec used for encoding must declare ON EMITTING \
                                  transformation"
                             .to_string(),
                     });
                 };
-                for row_index in rows {
-                    let row = ArrowCodecRow::new(self, batch, row_index);
-                    let value = run_jaq_transformation(self, program, row.to_json_value()?)?;
-                    payloads.push(encode_protobuf_payload(&protobuf.message, &value).map_err(
-                        |reason| CodecError::ProtobufEncode {
-                            codec: self.name.as_str().to_string(),
+                let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
+                *payload =
+                    encode_protobuf_payload(&protobuf.message, &value).map_err(|reason| {
+                        CodecError::ProtobufEncode {
+                            codec: self.codec.name.as_str().to_string(),
                             reason,
-                        },
-                    )?);
-                }
+                        }
+                    })?;
             }
         }
-        Ok(payloads)
+        Ok(())
     }
 }
 
@@ -4046,6 +4073,103 @@ mod tests {
             .encode_batch(&batch, 2..3)
             .expect_err("an out-of-bounds row range must fail");
         assert!(matches!(error, CodecError::InvalidCodec { .. }));
+    }
+
+    #[test]
+    fn codec_batch_encoder_reuses_payload_storage_for_arrow_rows() {
+        let compiled_schema = Arc::new(compile_schema(&schema()));
+        let compiled_codec = compile_codec(
+            &codec("json_codec"),
+            compiled_schema.clone(),
+            Some(&json_wire_schema()),
+        )
+        .expect("codec should compile");
+        let mut first = record();
+        first.fields.insert(
+            "tenant".to_string(),
+            RuntimeValue::String("a".repeat(4_096)),
+        );
+        let mut second = record();
+        second
+            .fields
+            .insert("tenant".to_string(), RuntimeValue::String("b".to_string()));
+        let batch = compiled_schema
+            .arrow_batch_from_records(&[first, second])
+            .expect("records should convert to arrow");
+        let encoder = compiled_codec
+            .batch_encoder(&batch)
+            .expect("arrow batch should be accepted");
+        let mut payload = Vec::new();
+
+        encoder
+            .encode_row_into(0, &mut payload)
+            .expect("first arrow row should encode");
+        let allocation = payload.as_ptr();
+        let capacity = payload.capacity();
+        encoder
+            .encode_row_into(1, &mut payload)
+            .expect("second arrow row should encode into the same buffer");
+
+        assert_eq!(payload.as_ptr(), allocation);
+        assert_eq!(payload.capacity(), capacity);
+        let decoded = decode_with_codec(&compiled_codec, &payload)
+            .expect("reused payload should contain only the second row");
+        assert_eq!(
+            decoded.value("tenant"),
+            Some(&RuntimeValue::String("b".to_string()))
+        );
+    }
+
+    #[test]
+    fn codec_batch_encoder_does_not_eagerly_encode_arrow_rows() {
+        let schema_model = CreateSchema {
+            name: identifier("counter"),
+            fields: vec![SchemaField {
+                name: identifier("value"),
+                ty: ParseAsType::U64,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let compiled_schema = Arc::new(compile_schema(&schema_model));
+        let codec_model = CreateCodec {
+            name: identifier("counter_avro"),
+            wire_format: CodecWireFormat::Avro,
+            wire_schema: Some(identifier("counter_wire")),
+            schema: schema_model.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let wire_schema = WireSchemaDefinition::Avro(CreateWireSchema {
+            name: identifier("counter_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: identifier("value"),
+                ty: AvroType::Long,
+                optional: false,
+            }],
+        });
+        let compiled_codec =
+            compile_codec(&codec_model, compiled_schema.clone(), Some(&wire_schema))
+                .expect("codec should compile");
+        let batch = compiled_schema
+            .arrow_batch_from_records(&[
+                RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::U64(1))]),
+                RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::U64(u64::MAX))]),
+            ])
+            .expect("records should convert to arrow");
+
+        let encoder = compiled_codec
+            .batch_encoder(&batch)
+            .expect("building an encoder must not serialize later rows");
+        let mut payload = Vec::new();
+        encoder
+            .encode_row_into(0, &mut payload)
+            .expect("the first row should encode independently");
+        let error = encoder
+            .encode_row_into(1, &mut payload)
+            .expect_err("the overflowing second row should fail only when requested");
+
+        assert!(matches!(error, CodecError::EncodeField { .. }));
     }
 
     #[test]

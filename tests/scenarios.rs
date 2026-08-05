@@ -11141,6 +11141,59 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
     }
 }
 
+#[then(expr = "within {string} the observed broker receives exactly {int} messages")]
+async fn then_within_duration_the_observed_broker_receives_exactly_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let deadline = Instant::now() + duration;
+    let mut payload_counts = BTreeMap::new();
+
+    for received in 0..count {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out after receiving {received} of {count} broker messages within {duration:?}; \
+             observed payload counts: {payload_counts:?}"
+        );
+        let message = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
+            .try_next_message(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for an exact broker message count")
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out after receiving {received} of {count} broker messages within \
+                     {duration:?}; observed payload counts: {payload_counts:?}"
+                )
+            });
+        *payload_counts
+            .entry(message.payload.clone())
+            .or_insert(0usize) += 1;
+        world.last_broker_payload = Some(message.payload);
+        world.last_broker_headers = message.headers;
+    }
+
+    let duplicate = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion")
+        .try_next_message(Duration::from_millis(500))
+        .await
+        .expect("failed while checking for a duplicate broker message");
+    assert!(
+        duplicate.is_none(),
+        "observed an extra broker message after receiving exactly {count}: {duplicate:?}; \
+         observed payload counts: {payload_counts:?}"
+    );
+}
+
 #[then(
     expr = "within {string} the observed broker receives {int} messages in sequence by field \
             {string} with headers"

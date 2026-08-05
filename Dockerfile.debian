@@ -96,10 +96,12 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml ./
 COPY src ./src
-COPY benches ./benches
 COPY crates ./crates
 COPY proto ./proto
 COPY tests/scenarios.rs ./tests/scenarios.rs
+
+ENV CARGO_PROFILE_RELEASE_LTO=fat
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
