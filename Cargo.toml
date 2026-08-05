@@ -338,7 +338,8 @@ opendal = { version = "0.56.0", features = [
   "services-gcs",
   "services-azdls",
 ] }
-openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
+# OpenRaft prereleases change snapshot APIs without semver compatibility.
+openraft = { version = "=0.10.0-alpha.33", features = ["serde"] }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", default-features = false }
 opentelemetry_sdk = "0.31"

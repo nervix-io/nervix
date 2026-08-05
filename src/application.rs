@@ -52,10 +52,11 @@ use nervix_client_core::{
 };
 use nervix_consensus::{
     AppendEntriesRequest as RaftAppendEntriesRequest, ConsensusHandle, ConsensusRuntimeState,
-    ConsensusSettings, InstallSnapshotRequest as RaftInstallSnapshotRequest,
-    RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR, RAFT_INSTALL_SNAPSHOT_PATH,
-    RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH, TransferLeaderRequest as RaftTransferLeaderRequest,
-    TypeConfig, UserCredentials, VoteRequest as RaftVoteRequest,
+    ConsensusSettings, RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR,
+    RAFT_INSTALL_SNAPSHOT_PATH, RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH,
+    SnapshotRelayHeader as RaftSnapshotRelayHeader,
+    TransferLeaderRequest as RaftTransferLeaderRequest, TypeConfig, UserCredentials,
+    VoteRequest as RaftVoteRequest,
 };
 use nervix_dataflow_graph::{DataflowGraph, DataflowNodeStatus};
 use nervix_interconnect::{
@@ -1673,24 +1674,13 @@ async fn handle_cluster_api_request(
             }
         }
         (&Method::POST, RAFT_INSTALL_SNAPSHOT_PATH) => {
-            let mut snapshot = match consensus.begin_receiving_snapshot().await {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    return Ok(text_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("begin_receiving_snapshot failed: {error}"),
-                    ));
-                }
-            };
+            let mut snapshot = Vec::new();
             let mut buffer = Vec::new();
-            let mut vote = None;
-            let mut meta = None;
-            let mut expected_offset = 0u64;
-            let mut saw_done = false;
+            let mut header = None;
             let mut body = request.into_body();
 
             let mut error_response = None;
-            'stream: while let Some(frame_result) = body.frame().await {
+            while let Some(frame_result) = body.frame().await {
                 let frame = match frame_result {
                     Ok(frame) => frame,
                     Err(error) => {
@@ -1704,98 +1694,46 @@ async fn handle_cluster_api_request(
                 let Ok(data) = frame.into_data() else {
                     continue;
                 };
+                if header.is_some() {
+                    snapshot.extend_from_slice(&data);
+                    continue;
+                }
+
                 buffer.extend_from_slice(&data);
-                while let Some(payload) = try_take_length_delimited_frame(&mut buffer) {
-                    let chunk: RaftInstallSnapshotRequest<TypeConfig> = match decode_cbor(&payload)
-                    {
-                        Ok(chunk) => chunk,
+                if let Some(payload) = try_take_length_delimited_frame(&mut buffer) {
+                    match decode_cbor::<RaftSnapshotRelayHeader>(&payload) {
+                        Ok(decoded) => {
+                            header = Some(decoded);
+                            snapshot.append(&mut buffer);
+                        }
                         Err(error) => {
                             error_response = Some(text_response(
                                 StatusCode::BAD_REQUEST,
-                                format!("invalid snapshot chunk: {error}"),
+                                format!("invalid snapshot relay header: {error}"),
                             ));
-                            break 'stream;
+                            break;
                         }
-                    };
-
-                    if saw_done {
-                        error_response = Some(text_response(
-                            StatusCode::BAD_REQUEST,
-                            "snapshot relay received extra data after done=true",
-                        ));
-                        break 'stream;
                     }
-
-                    if chunk.offset != expected_offset {
-                        error_response = Some(text_response(
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "unexpected snapshot chunk offset {}, expected {}",
-                                chunk.offset, expected_offset
-                            ),
-                        ));
-                        break 'stream;
-                    }
-
-                    if let Some(existing_vote) = &vote
-                        && existing_vote != &chunk.vote
-                    {
-                        error_response = Some(text_response(
-                            StatusCode::BAD_REQUEST,
-                            "snapshot relay vote changed mid-stream",
-                        ));
-                        break 'stream;
-                    }
-                    if let Some(existing_meta) = &meta
-                        && existing_meta != &chunk.meta
-                    {
-                        error_response = Some(text_response(
-                            StatusCode::BAD_REQUEST,
-                            "snapshot relay metadata changed mid-stream",
-                        ));
-                        break 'stream;
-                    }
-
-                    vote = Some(chunk.vote.clone());
-                    meta = Some(chunk.meta.clone());
-                    if let Err(error) = std::io::Write::write_all(&mut snapshot, &chunk.data) {
-                        error_response = Some(text_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("failed to write snapshot chunk: {error}"),
-                        ));
-                        break 'stream;
-                    }
-                    expected_offset = expected_offset.saturating_add(chunk.data.len() as u64);
-                    saw_done = chunk.done;
                 }
             }
 
             if let Some(response) = error_response {
                 response
-            } else if !buffer.is_empty() {
-                text_response(
-                    StatusCode::BAD_REQUEST,
-                    "snapshot relay ended with a partial frame",
-                )
-            } else if !saw_done {
-                text_response(
-                    StatusCode::BAD_REQUEST,
-                    "snapshot relay ended before done=true",
-                )
             } else {
-                let Some(vote) = vote else {
+                let Some(header) = header else {
                     return Ok(text_response(
                         StatusCode::BAD_REQUEST,
-                        "snapshot relay was empty",
+                        if buffer.is_empty() {
+                            "snapshot relay was empty"
+                        } else {
+                            "snapshot relay ended with a partial header"
+                        },
                     ));
                 };
-                let Some(meta) = meta else {
-                    return Ok(text_response(
-                        StatusCode::BAD_REQUEST,
-                        "snapshot relay was empty",
-                    ));
-                };
-                match consensus.install_full_snapshot(vote, meta, snapshot).await {
+                match consensus
+                    .install_full_snapshot(header.vote, header.meta, snapshot)
+                    .await
+                {
                     Ok(response) => match encode_cbor(&response) {
                         Ok(body) => {
                             response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
