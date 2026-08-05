@@ -246,6 +246,11 @@ jobs:
           files: ./lcov.info
           use_oidc: true
 
+      # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
+      # without treating noisy shared-runner timings as a performance regression signal.
+      - name: Benchmark smoke tests
+        run: just bench --test
+
       # Runs after the main tests rather than inside them: the walk saturates every core, and its
       # failures are about completion reachability rather than any one test.
       - name: NSPL completion walk

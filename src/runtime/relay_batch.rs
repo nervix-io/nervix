@@ -201,8 +201,18 @@ impl RelayRecordBatch {
     }
 
     pub(super) fn concat(batches: Vec<Self>) -> Result<Self, String> {
+        Self::concat_preserving(batches).map_err(|error| {
+            let (reason, _batches) = *error;
+            reason
+        })
+    }
+
+    pub(super) fn concat_preserving(batches: Vec<Self>) -> Result<Self, Box<(String, Vec<Self>)>> {
         let Some(first) = batches.first() else {
-            return Err("cannot concat zero relay batches".to_string());
+            return Err(Box::new((
+                "cannot concat zero relay batches".to_string(),
+                batches,
+            )));
         };
 
         let key = first.key.clone();
@@ -212,7 +222,10 @@ impl RelayRecordBatch {
 
         let concatenated = {
             let runtime_batches = batches.iter().map(|batch| &batch.batch).collect::<Vec<_>>();
-            RuntimeRecordBatch::concat(&runtime_batches)?
+            match RuntimeRecordBatch::concat(&runtime_batches) {
+                Ok(batch) => batch,
+                Err(error) => return Err(Box::new((error, batches))),
+            }
         };
 
         let total_metadata = batches
