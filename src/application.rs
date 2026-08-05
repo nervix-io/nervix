@@ -52,10 +52,11 @@ use nervix_client_core::{
 };
 use nervix_consensus::{
     AppendEntriesRequest as RaftAppendEntriesRequest, ConsensusHandle, ConsensusRuntimeState,
-    ConsensusSettings, InstallSnapshotRequest as RaftInstallSnapshotRequest,
-    RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR, RAFT_INSTALL_SNAPSHOT_PATH,
-    RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH, TransferLeaderRequest as RaftTransferLeaderRequest,
-    TypeConfig, UserCredentials, VoteRequest as RaftVoteRequest,
+    ConsensusSettings, RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR,
+    RAFT_INSTALL_SNAPSHOT_PATH, RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH,
+    SnapshotRelayHeader as RaftSnapshotRelayHeader,
+    TransferLeaderRequest as RaftTransferLeaderRequest, TypeConfig, UserCredentials,
+    VoteRequest as RaftVoteRequest,
 };
 use nervix_dataflow_graph::{DataflowGraph, DataflowNodeStatus};
 use nervix_interconnect::{
@@ -80,7 +81,7 @@ use nervix_interconnect::{
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
     EntityReference as RemoteEntityReference, Envelope, IngestorDescribeEnvelope, LocalIdentity,
     LookupDescribeEnvelope, LookupRequest as RemoteLookupRequest,
-    LookupResponse as RemoteLookupResponse, PeerVerifier,
+    LookupResponse as RemoteLookupResponse, PeerVerifier, RelayPayload,
     RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncResponse as RemoteStateSyncResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
@@ -165,6 +166,7 @@ const SUBSCRIPTION_INTEREST_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(5
 const SUBSCRIPTION_INTEREST_CHECK_TIMEOUT: Duration = Duration::from_millis(250);
 const RUNTIME_REVISION_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const RUNTIME_REVISION_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const OBSERVABILITY_LIVEZ_PATH: &str = "/livez";
 const OBSERVABILITY_READYZ_PATH: &str = "/readyz";
@@ -262,7 +264,39 @@ enum DomainAlterError {
 
 struct ClusterEntityGate {
     operation_id: u64,
+    domain: Domain,
     nodes: Vec<String>,
+    release_owner: Option<SessionServiceImpl>,
+}
+
+struct PendingClusterEntityGateRelease {
+    operation_id: u64,
+    domain: Domain,
+    nodes: Vec<String>,
+}
+
+struct InterconnectRelayPayloadLane {
+    sender: mpsc::UnboundedSender<RelayPayload>,
+}
+
+impl InterconnectRelayPayloadLane {
+    fn new() -> (Self, mpsc::UnboundedReceiver<RelayPayload>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (Self { sender }, receiver)
+    }
+
+    /// Moves relay payload work off the ordered control lane without awaiting it. The dedicated
+    /// receiver still processes payloads in arrival order, while gate release and status controls
+    /// remain runnable when one payload is waiting for a relay gate.
+    fn route(&self, envelope: Envelope) -> Option<Envelope> {
+        let Envelope::RelayPayload(payload) = envelope else {
+            return Some(envelope);
+        };
+        if self.sender.send(payload).is_err() {
+            warn!("interconnect relay payload lane is unavailable");
+        }
+        None
+    }
 }
 
 /// One entity-gate engagement the leader asks a node to perform: the operation it belongs to, the
@@ -1640,24 +1674,13 @@ async fn handle_cluster_api_request(
             }
         }
         (&Method::POST, RAFT_INSTALL_SNAPSHOT_PATH) => {
-            let mut snapshot = match consensus.begin_receiving_snapshot().await {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    return Ok(text_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("begin_receiving_snapshot failed: {error}"),
-                    ));
-                }
-            };
+            let mut snapshot = Vec::new();
             let mut buffer = Vec::new();
-            let mut vote = None;
-            let mut meta = None;
-            let mut expected_offset = 0u64;
-            let mut saw_done = false;
+            let mut header = None;
             let mut body = request.into_body();
 
             let mut error_response = None;
-            'stream: while let Some(frame_result) = body.frame().await {
+            while let Some(frame_result) = body.frame().await {
                 let frame = match frame_result {
                     Ok(frame) => frame,
                     Err(error) => {
@@ -1671,98 +1694,46 @@ async fn handle_cluster_api_request(
                 let Ok(data) = frame.into_data() else {
                     continue;
                 };
+                if header.is_some() {
+                    snapshot.extend_from_slice(&data);
+                    continue;
+                }
+
                 buffer.extend_from_slice(&data);
-                while let Some(payload) = try_take_length_delimited_frame(&mut buffer) {
-                    let chunk: RaftInstallSnapshotRequest<TypeConfig> = match decode_cbor(&payload)
-                    {
-                        Ok(chunk) => chunk,
+                if let Some(payload) = try_take_length_delimited_frame(&mut buffer) {
+                    match decode_cbor::<RaftSnapshotRelayHeader>(&payload) {
+                        Ok(decoded) => {
+                            header = Some(decoded);
+                            snapshot.append(&mut buffer);
+                        }
                         Err(error) => {
                             error_response = Some(text_response(
                                 StatusCode::BAD_REQUEST,
-                                format!("invalid snapshot chunk: {error}"),
+                                format!("invalid snapshot relay header: {error}"),
                             ));
-                            break 'stream;
+                            break;
                         }
-                    };
-
-                    if saw_done {
-                        error_response = Some(text_response(
-                            StatusCode::BAD_REQUEST,
-                            "snapshot relay received extra data after done=true",
-                        ));
-                        break 'stream;
                     }
-
-                    if chunk.offset != expected_offset {
-                        error_response = Some(text_response(
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "unexpected snapshot chunk offset {}, expected {}",
-                                chunk.offset, expected_offset
-                            ),
-                        ));
-                        break 'stream;
-                    }
-
-                    if let Some(existing_vote) = &vote
-                        && existing_vote != &chunk.vote
-                    {
-                        error_response = Some(text_response(
-                            StatusCode::BAD_REQUEST,
-                            "snapshot relay vote changed mid-stream",
-                        ));
-                        break 'stream;
-                    }
-                    if let Some(existing_meta) = &meta
-                        && existing_meta != &chunk.meta
-                    {
-                        error_response = Some(text_response(
-                            StatusCode::BAD_REQUEST,
-                            "snapshot relay metadata changed mid-stream",
-                        ));
-                        break 'stream;
-                    }
-
-                    vote = Some(chunk.vote.clone());
-                    meta = Some(chunk.meta.clone());
-                    if let Err(error) = std::io::Write::write_all(&mut snapshot, &chunk.data) {
-                        error_response = Some(text_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("failed to write snapshot chunk: {error}"),
-                        ));
-                        break 'stream;
-                    }
-                    expected_offset = expected_offset.saturating_add(chunk.data.len() as u64);
-                    saw_done = chunk.done;
                 }
             }
 
             if let Some(response) = error_response {
                 response
-            } else if !buffer.is_empty() {
-                text_response(
-                    StatusCode::BAD_REQUEST,
-                    "snapshot relay ended with a partial frame",
-                )
-            } else if !saw_done {
-                text_response(
-                    StatusCode::BAD_REQUEST,
-                    "snapshot relay ended before done=true",
-                )
             } else {
-                let Some(vote) = vote else {
+                let Some(header) = header else {
                     return Ok(text_response(
                         StatusCode::BAD_REQUEST,
-                        "snapshot relay was empty",
+                        if buffer.is_empty() {
+                            "snapshot relay was empty"
+                        } else {
+                            "snapshot relay ended with a partial header"
+                        },
                     ));
                 };
-                let Some(meta) = meta else {
-                    return Ok(text_response(
-                        StatusCode::BAD_REQUEST,
-                        "snapshot relay was empty",
-                    ));
-                };
-                match consensus.install_full_snapshot(vote, meta, snapshot).await {
+                match consensus
+                    .install_full_snapshot(header.vote, header.meta, snapshot)
+                    .await
+                {
                     Ok(response) => match encode_cbor(&response) {
                         Ok(body) => {
                             response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
@@ -2968,6 +2939,50 @@ struct SessionServiceImpl {
     configured_basic_auth: Option<BasicAuthCredentials>,
     auth_rate_limiter: Arc<AuthRateLimiter>,
     failed_auth_rate_limit_keys: Arc<DashMap<String, (), RandomState>>,
+}
+
+impl ClusterEntityGate {
+    fn new(service: &SessionServiceImpl, operation_id: u64, domain: &Domain) -> Self {
+        Self {
+            operation_id,
+            domain: domain.clone(),
+            nodes: Vec::new(),
+            release_owner: Some(service.clone()),
+        }
+    }
+
+    /// Records a node before sending its engagement request. A response timeout is ambiguous: the
+    /// remote node may already own the durable lease, so cleanup must include every attempted node
+    /// and rely on idempotent release.
+    fn record_attempt(&mut self, node: String) {
+        if !self.nodes.iter().any(|candidate| candidate == &node) {
+            self.nodes.push(node);
+        }
+    }
+
+    fn mark_released(&mut self, node: &str) {
+        self.nodes.retain(|candidate| candidate != node);
+    }
+
+    fn schedule_remaining_releases(&mut self) {
+        let Some(owner) = self.release_owner.take() else {
+            return;
+        };
+        if self.nodes.is_empty() {
+            return;
+        }
+        owner.schedule_cluster_entity_gate_release(PendingClusterEntityGateRelease {
+            operation_id: self.operation_id,
+            domain: self.domain.clone(),
+            nodes: std::mem::take(&mut self.nodes),
+        });
+    }
+}
+
+impl Drop for ClusterEntityGate {
+    fn drop(&mut self) {
+        self.schedule_remaining_releases();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5368,7 +5383,7 @@ impl SessionServiceImpl {
         domain: &Domain,
     ) -> Result<DomainDrainStatusEnvelope, String> {
         if node_id == self.consensus.local_node_id() {
-            self.runtime.force_flush_domain(domain);
+            self.runtime.force_flush_domain_if_idle(domain);
             return Ok(self.local_domain_drain_status(domain));
         }
         let correlation_id = self.next_cluster_command_correlation_id();
@@ -5504,8 +5519,11 @@ impl SessionServiceImpl {
         deadline: tokio::time::Instant,
     ) -> Result<EntityDrainStatusEnvelope, String> {
         if node_id == self.consensus.local_node_id() {
-            self.runtime.force_flush_domain(domain);
-            return Ok(self.local_entity_drain_status(domain, relays, affected_entities));
+            let status = self.local_entity_drain_status(domain, relays, affected_entities);
+            if status.buffered_relay_batches != 0 || status.node_work_items != 0 {
+                self.runtime.force_flush_domain_if_idle(domain);
+            }
+            return Ok(status);
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
@@ -5616,6 +5634,53 @@ impl SessionServiceImpl {
         }
     }
 
+    fn schedule_cluster_entity_gate_release(&self, release: PendingClusterEntityGateRelease) {
+        let service = self.clone();
+        self.service_tasks.spawn(async move {
+            service.retry_cluster_entity_gate_release(release).await;
+        });
+    }
+
+    async fn retry_cluster_entity_gate_release(
+        &self,
+        mut release: PendingClusterEntityGateRelease,
+    ) {
+        while !release.nodes.is_empty() {
+            tokio::task::consume_budget().await;
+            let nodes = release.nodes.clone();
+            for node in nodes {
+                tokio::task::consume_budget().await;
+                let result = tokio::select! {
+                    _ = self.shutdown.cancelled() => return,
+                    result = self.release_entity_gate_on_node(
+                        &node,
+                        release.operation_id,
+                        &release.domain,
+                    ) => result,
+                };
+                match result {
+                    Ok(()) => release.nodes.retain(|candidate| candidate != &node),
+                    Err(error) => {
+                        debug!(
+                            domain = release.domain.as_str(),
+                            operation_id = release.operation_id,
+                            node,
+                            error,
+                            "entity gate release retry remains pending"
+                        );
+                    }
+                }
+            }
+            if release.nodes.is_empty() {
+                return;
+            }
+            tokio::select! {
+                _ = self.shutdown.cancelled() => return,
+                _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
+            }
+        }
+    }
+
     async fn engage_cluster_entity_gates(
         &self,
         domain: &Domain,
@@ -5633,9 +5698,10 @@ impl SessionServiceImpl {
         nodes.sort();
         nodes.dedup();
         let operation_id = self.next_cluster_command_correlation_id();
-        let mut engaged = Vec::new();
+        let mut gate = ClusterEntityGate::new(self, operation_id, domain);
         for node in &nodes {
             tokio::task::consume_budget().await;
+            gate.record_attempt(node.clone());
             if let Err(error) = self
                 .engage_entity_gate_on_node(
                     node,
@@ -5650,22 +5716,14 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                let gate = ClusterEntityGate {
-                    operation_id,
-                    nodes: engaged,
-                };
-                self.release_cluster_entity_gates(domain, gate).await;
+                self.release_cluster_entity_gates(gate).await;
                 return Err(Report::new(DomainAlterError::PauseDomain {
                     domain: domain.clone(),
                     reason: format!("failed to engage entity gates on node '{node}': {error}"),
                 }));
             }
-            engaged.push(node.clone());
         }
-        Ok(ClusterEntityGate {
-            operation_id,
-            nodes,
-        })
+        Ok(gate)
     }
 
     async fn wait_for_cluster_entity_drain(
@@ -5724,26 +5782,29 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn release_cluster_entity_gates(&self, domain: &Domain, gate: ClusterEntityGate) {
-        for node in gate.nodes {
+    async fn release_cluster_entity_gates(&self, mut gate: ClusterEntityGate) {
+        let domain = gate.domain.clone();
+        for node in gate.nodes.clone() {
             tokio::task::consume_budget().await;
-            if let Err(error) = self
-                .release_entity_gate_on_node(&node, gate.operation_id, domain)
+            match self
+                .release_entity_gate_on_node(&node, gate.operation_id, &domain)
                 .await
             {
-                warn!(
-                    domain = domain.as_str(),
-                    node,
-                    error,
-                    "failed to release entity gates; deadline expiry remains the backstop"
-                );
-                self.broadcast_error(format!(
-                    "failed to release entity gates on node '{node}' in domain '{}': {error}; \
-                     affected relays stay gated until the gate deadline expires",
-                    domain.as_str()
-                ));
+                Ok(()) => gate.mark_released(&node),
+                Err(error) => {
+                    warn!(
+                        domain = domain.as_str(),
+                        node, error, "failed to release entity gates; scheduling retry"
+                    );
+                    self.broadcast_error(format!(
+                        "failed to release entity gates on node '{node}' in domain '{}': {error}; \
+                         release will retry in the background",
+                        domain.as_str()
+                    ));
+                }
             }
         }
+        gate.schedule_remaining_releases();
     }
 
     async fn pause_and_drain_domain_for_alter(
@@ -7508,7 +7569,7 @@ impl SessionServiceImpl {
                     )
                     .await
                 {
-                    self.release_cluster_entity_gates(&domain, gate).await;
+                    self.release_cluster_entity_gates(gate).await;
                     return command_error(error.to_string());
                 }
                 cluster_entity_gate = Some(gate);
@@ -7520,7 +7581,7 @@ impl SessionServiceImpl {
                     Ok(changes) => changes,
                     Err(err) => {
                         if let Some(gate) = cluster_entity_gate.take() {
-                            self.release_cluster_entity_gates(&domain, gate).await;
+                            self.release_cluster_entity_gates(gate).await;
                         }
                         if let RegistryError::ConcurrentMutation { .. } = err.current_context() {
                             error!(
@@ -7558,7 +7619,7 @@ impl SessionServiceImpl {
                     .await
                 {
                     if let Some(gate) = cluster_entity_gate.take() {
-                        self.release_cluster_entity_gates(&domain, gate).await;
+                        self.release_cluster_entity_gates(gate).await;
                     }
                     if let Some(rollback_plan) = rollback_plan.take()
                         && let Err(rollback_error) = self
@@ -7621,7 +7682,7 @@ impl SessionServiceImpl {
                 }
             }
             if let Some(gate) = cluster_entity_gate {
-                self.release_cluster_entity_gates(&domain, gate).await;
+                self.release_cluster_entity_gates(gate).await;
             }
 
             if refresh_http_tls && let Err(error) = self.refresh_http_tls_server_config().await {
@@ -14270,6 +14331,32 @@ impl Application {
             }
         }));
 
+        let (interconnect_relay_payload_lane, mut interconnect_relay_payload_rx) =
+            InterconnectRelayPayloadLane::new();
+        let relay_payload_shutdown = shutdown.clone();
+        let runtime_for_relay_payloads = runtime.clone();
+        background_tasks.push(tokio::spawn(async move {
+            loop {
+                tokio::task::consume_budget().await;
+                let payload = tokio::select! {
+                    _ = relay_payload_shutdown.cancelled() => break,
+                    payload = interconnect_relay_payload_rx.recv() => {
+                        let Some(payload) = payload else {
+                            break;
+                        };
+                        payload
+                    }
+                };
+                let result = tokio::select! {
+                    _ = relay_payload_shutdown.cancelled() => break,
+                    result = runtime_for_relay_payloads.handle_remote_stream(payload) => result,
+                };
+                if let Err(error) = result {
+                    warn!(error = %error, "failed to process remote relay payload");
+                }
+            }
+        }));
+
         let interconnect_shutdown = shutdown.clone();
         let runtime_for_interconnect = runtime.clone();
         let service_for_interconnect = service.clone();
@@ -14287,14 +14374,14 @@ impl Application {
                             peer_node_id = %message.peer_node_id,
                             "received interconnect envelope"
                         );
-                        match message.envelope {
-                            Envelope::RelayPayload(payload) => {
-                                if let Err(error) = runtime_for_interconnect
-                                    .handle_remote_stream(payload)
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to process remote relay payload");
-                                }
+                        let Some(envelope) = interconnect_relay_payload_lane
+                            .route(message.envelope)
+                        else {
+                            continue;
+                        };
+                        match envelope {
+                            Envelope::RelayPayload(_) => {
+                                unreachable!("relay payloads are routed to their dedicated lane")
                             }
                             Envelope::Ack(ack) => {
                                 runtime_for_interconnect.handle_remote_ack_resolution(ack);
@@ -14453,7 +14540,7 @@ impl Application {
                                     .map(|()| {
                                         service_for_interconnect
                                             .runtime
-                                            .force_flush_domain(&request.domain);
+                                            .force_flush_domain_if_idle(&request.domain);
                                         service_for_interconnect
                                             .local_domain_drain_status(&request.domain)
                                     });
@@ -14515,9 +14602,6 @@ impl Application {
                                 service_for_interconnect.handle_entity_gate_response(response);
                             }
                             Envelope::Control(ControlEnvelope::EntityDrainStatusRequest(request)) => {
-                                service_for_interconnect
-                                    .runtime
-                                    .force_flush_domain(&request.domain);
                                 let affected_entities = request
                                     .affected_entities
                                     .iter()
@@ -14526,12 +14610,19 @@ impl Application {
                                         identifier: entity.identifier.clone(),
                                     })
                                     .collect::<Vec<_>>();
-                                let result: Result<EntityDrainStatusEnvelope, String> =
-                                    Ok(service_for_interconnect.local_entity_drain_status(
+                                let status = service_for_interconnect.local_entity_drain_status(
                                         &request.domain,
                                         &request.relays,
                                         &affected_entities,
-                                    ));
+                                    );
+                                if status.buffered_relay_batches != 0
+                                    || status.node_work_items != 0
+                                {
+                                    service_for_interconnect
+                                        .runtime
+                                        .force_flush_domain_if_idle(&request.domain);
+                                }
+                                let result: Result<EntityDrainStatusEnvelope, String> = Ok(status);
                                 if let Err(error) = service_for_interconnect
                                     .dispatch_interconnect_control(
                                         &message.peer_node_id,
@@ -14994,6 +15085,27 @@ mod tests {
         Identifier::try_from(raw).expect("valid identifier")
     }
 
+    #[test]
+    fn snapshot_relay_header_framing_leaves_raw_snapshot_payload() {
+        let header = RaftSnapshotRelayHeader {
+            vote: nervix_consensus::VoteOf::new(7, "node-1".to_string()),
+            meta: Default::default(),
+        };
+        let encoded = encode_cbor(&header).expect("snapshot relay header should encode");
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+        wire.extend_from_slice(&encoded);
+        wire.extend_from_slice(b"snapshot-data");
+
+        let payload = try_take_length_delimited_frame(&mut wire)
+            .expect("length-delimited snapshot relay header should be complete");
+        let decoded: RaftSnapshotRelayHeader =
+            decode_cbor(&payload).expect("snapshot relay header should decode");
+
+        assert_eq!(decoded, header);
+        assert_eq!(wire, b"snapshot-data");
+    }
+
     fn string_branch_key(field: &str, value: &str) -> Option<crate::runtime::BranchKey> {
         crate::runtime::BranchKey::from_fields([(
             identifier(field),
@@ -15001,6 +15113,27 @@ mod tests {
         )])
         .expect("test branch key must be non-empty")
         .into()
+    }
+
+    #[test]
+    fn interconnect_control_lane_never_waits_for_relay_payload_processing() {
+        let (lane, mut payloads) = InterconnectRelayPayloadLane::new();
+        let routed = RelayPayload {
+            kind: nervix_interconnect::RelayPayloadKind::Routed,
+            domain: Domain::parse("default").expect("valid domain"),
+            relay: identifier("incoming"),
+            key: None,
+            batch_ipc: Vec::new(),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+        };
+
+        assert!(lane.route(Envelope::RelayPayload(routed)).is_none());
+        assert!(payloads.try_recv().is_ok());
+        assert!(matches!(
+            lane.route(Envelope::Control(ControlEnvelope::Terminate)),
+            Some(Envelope::Control(ControlEnvelope::Terminate))
+        ));
     }
 
     #[tokio::test]
@@ -15345,6 +15478,51 @@ mod tests {
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
         };
         (service, registry, path)
+    }
+
+    #[tokio::test]
+    async fn dropping_cluster_gate_owner_releases_local_durable_hold() {
+        let (service, _registry, path) = build_test_service(false).await;
+        let domain = Domain::parse("default").expect("valid domain");
+        let operation_id = 41;
+        service
+            .runtime
+            .engage_entity_gate_operation(
+                operation_id,
+                &domain,
+                &[],
+                &[],
+                tokio::time::Instant::now() + Duration::from_secs(30),
+                "canceled coordinator test",
+            )
+            .await
+            .expect("local gate hold should engage");
+        assert!(
+            service
+                .runtime
+                .entity_gate_operation_is_held(operation_id, &domain)
+        );
+
+        let mut gate = ClusterEntityGate::new(&service, operation_id, &domain);
+        gate.record_attempt(service.consensus.local_node_id().to_string());
+        drop(gate);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while service
+                .runtime
+                .entity_gate_operation_is_held(operation_id, &domain)
+            {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped coordinator guard should release its local durable hold");
+
+        service.shutdown.cancel();
+        service.service_tasks.close();
+        service.service_tasks.wait().await;
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]

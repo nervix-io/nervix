@@ -59,6 +59,7 @@ pub(in crate::runtime) struct IcebergEmitter {
     staged_rows: u64,
     staged_bytes: u64,
     commit_at: Option<Instant>,
+    buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
 struct IcebergEmitterClient {
@@ -167,6 +168,7 @@ pub(in crate::runtime::emitters) struct IcebergEmitterInit<'a> {
     pub(in crate::runtime::emitters) commit_each: &'a str,
     pub(in crate::runtime::emitters) max_commit_size: &'a str,
     pub(in crate::runtime::emitters) input_schema: Arc<CompiledSchema>,
+    pub(in crate::runtime::emitters) buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
 trait IcebergStorageBackendExt {
@@ -231,6 +233,7 @@ impl IcebergEmitter {
             commit_each,
             max_commit_size,
             input_schema,
+            buffered_messages,
         } = init;
         let flush_policy = Runtime::parse_runtime_node_flush_policy(
             &context.domain,
@@ -288,6 +291,7 @@ impl IcebergEmitter {
             staged_rows: 0,
             staged_bytes: 0,
             commit_at: None,
+            buffered_messages,
         })
     }
 
@@ -514,6 +518,7 @@ impl IcebergEmitter {
         });
         self.pending_rows = self.pending_rows.saturating_add(rows);
         self.pending_bytes = self.pending_bytes.saturating_add(bytes);
+        self.update_buffered_messages();
         if self.flush_at.is_none() {
             self.flush_at = Some(Instant::now() + self.flush_policy.interval());
         }
@@ -611,6 +616,7 @@ impl IcebergEmitter {
         self.staged_bytes = self.staged_bytes.saturating_add(staged_bytes);
         self.pending_rows = 0;
         self.pending_bytes = 0;
+        self.update_buffered_messages();
         self.flush_at = None;
         if self.commit_at.is_none() {
             self.commit_at = Some(Instant::now() + self.commit_policy.interval);
@@ -674,6 +680,7 @@ impl IcebergEmitter {
         self.staged_rows = 0;
         self.staged_bytes = 0;
         self.commit_at = None;
+        self.update_buffered_messages();
         for ack in acks {
             ack.ack_success();
         }
@@ -682,6 +689,51 @@ impl IcebergEmitter {
             bytes,
             domain_timestamp,
         )))
+    }
+
+    fn update_buffered_messages(&self) {
+        self.buffered_messages
+            .set_iceberg(Self::buffered_message_count(
+                self.pending_rows,
+                self.staged_rows,
+            ));
+    }
+
+    fn buffered_message_count(pending_rows: u64, staged_rows: u64) -> usize {
+        usize::try_from(pending_rows.saturating_add(staged_rows)).unwrap_or(usize::MAX)
+    }
+
+    fn no_ack_retained_batches(
+        pending_batches: &[IcebergPendingBatch],
+        staged_batches: &[IcebergStagedBatch],
+    ) {
+        for acks in pending_batches
+            .iter()
+            .flat_map(|batch| batch.acks.iter())
+            .chain(staged_batches.iter().flat_map(|batch| batch.acks.iter()))
+        {
+            acks.no_ack("Iceberg emitter dropped buffered batch");
+        }
+    }
+
+    fn retained_acks(
+        pending_batches: &[IcebergPendingBatch],
+        staged_batches: &[IcebergStagedBatch],
+    ) -> AckSet {
+        AckSet::merged(
+            pending_batches
+                .iter()
+                .flat_map(|batch| batch.acks.iter().cloned())
+                .chain(
+                    staged_batches
+                        .iter()
+                        .flat_map(|batch| batch.acks.iter().cloned()),
+                ),
+        )
+    }
+
+    pub(in crate::runtime::emitters) fn pending_acks(&self) -> AckSet {
+        Self::retained_acks(&self.pending_batches, &self.staged_batches)
     }
 
     async fn mapped_arrow_batch_from_runtime_batch(
@@ -907,6 +959,13 @@ impl IcebergEmitter {
     }
 }
 
+impl Drop for IcebergEmitter {
+    fn drop(&mut self) {
+        Self::no_ack_retained_batches(&self.pending_batches, &self.staged_batches);
+        self.buffered_messages.set_iceberg(0);
+    }
+}
+
 impl IcebergEmitterClient {
     async fn write_batch(&mut self, batch: RecordBatch) -> IcebergEmitterResult<()> {
         let location_generator = DefaultLocationGenerator::new(self.table.metadata())
@@ -1125,5 +1184,90 @@ mod tests {
         assert_eq!(converted.value(0), 1_234);
         assert!(converted.is_null(1));
         assert_eq!(converted.value(2), -1);
+    }
+
+    #[test]
+    fn iceberg_buffered_message_count_includes_pending_and_staged_rows() {
+        assert_eq!(IcebergEmitter::buffered_message_count(2, 3), 5);
+        assert_eq!(
+            IcebergEmitter::buffered_message_count(u64::MAX, 1),
+            usize::MAX
+        );
+    }
+
+    #[tokio::test]
+    async fn iceberg_retained_batch_drop_helper_no_acks_pending_and_staged_rows() {
+        let schema = StdArc::new(arrow_schema::Schema::empty());
+        let batch = RecordBatch::try_new_with_options(
+            schema.clone(),
+            Vec::new(),
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .expect("one-row empty batch must build");
+        let batch = RuntimeRecordBatch::from_record_batch(schema, batch)
+            .expect("runtime batch schema must match");
+        let (pending_acks, pending_completion) = AckSet::root();
+        let (staged_acks, staged_completion) = AckSet::root();
+        let pending = IcebergPendingBatch {
+            batch,
+            metadata: vec![RuntimeRecordMetadata::test()],
+            keys: vec![None],
+            acks: vec![pending_acks],
+            domain_timestamp: Timestamp::from_unix_nanos(0),
+        };
+        let staged = IcebergStagedBatch {
+            path: PathBuf::from("unwritten-test-batch.arrow"),
+            rows: 1,
+            bytes: 0,
+            acks: vec![staged_acks],
+            domain_timestamp: Timestamp::from_unix_nanos(0),
+        };
+
+        IcebergEmitter::no_ack_retained_batches(&[pending], &[staged]);
+
+        let expected = AckOutcome::NoAck("Iceberg emitter dropped buffered batch".to_string());
+        assert_eq!(pending_completion.wait().await, expected);
+        assert_eq!(staged_completion.wait().await, expected);
+    }
+
+    #[tokio::test]
+    async fn iceberg_retained_ack_view_heartbeats_pending_and_staged_rows() {
+        let schema = StdArc::new(arrow_schema::Schema::empty());
+        let batch = RecordBatch::try_new_with_options(
+            schema.clone(),
+            Vec::new(),
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .expect("one-row empty batch must build");
+        let batch = RuntimeRecordBatch::from_record_batch(schema, batch)
+            .expect("runtime batch schema must match");
+        let (pending_acks, mut pending_completion) = AckSet::root();
+        let (staged_acks, mut staged_completion) = AckSet::root();
+        let pending = IcebergPendingBatch {
+            batch,
+            metadata: vec![RuntimeRecordMetadata::test()],
+            keys: vec![None],
+            acks: vec![pending_acks],
+            domain_timestamp: Timestamp::from_unix_nanos(0),
+        };
+        let staged = IcebergStagedBatch {
+            path: PathBuf::from("unwritten-test-batch.arrow"),
+            rows: 1,
+            bytes: 0,
+            acks: vec![staged_acks],
+            domain_timestamp: Timestamp::from_unix_nanos(0),
+        };
+
+        let retained = IcebergEmitter::retained_acks(&[pending], &[staged]);
+        retained.ack_alive();
+
+        assert_eq!(
+            pending_completion.wait_for_progress().await,
+            AckProgress::Alive
+        );
+        assert_eq!(
+            staged_completion.wait_for_progress().await,
+            AckProgress::Alive
+        );
     }
 }

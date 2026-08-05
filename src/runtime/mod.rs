@@ -29,7 +29,7 @@ use arrow_select::{
 use chrono::{TimeDelta, TimeZone, Utc};
 use dashmap::DashMap;
 use fjall::Database;
-use futures_util::stream::FuturesUnordered;
+use futures_util::stream::{FuturesOrdered, FuturesUnordered};
 use nervix_interconnect::{
     Envelope, RelayPayload, RelayPayloadKind, Transport, TransportMode as InterconnectTransportMode,
 };
@@ -114,7 +114,7 @@ use crate::{
         CodecError, CompiledCodec, CompiledSchema, DecodedRecord, ProtobufDescriptorPool,
         RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
         compile_codec_with_protobuf, compile_schema, decode_with_codec, decode_with_codec_owned,
-        encode_with_codec, parse_as_type_from_arrow, runtime_value_from_arrow_array,
+        parse_as_type_from_arrow, runtime_value_from_arrow_array,
     },
 };
 
@@ -124,6 +124,7 @@ mod branch_lru_state;
 mod client_config;
 mod deduplicator;
 mod emitters;
+mod force_flush;
 mod http_client;
 mod inferencer;
 mod ingestors;
@@ -134,6 +135,10 @@ mod planning;
 mod processors;
 mod relay_batch;
 mod relay_channel;
+mod relay_interaction;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub mod relay_interaction_benchmark;
 mod runtime_impl;
 mod schedule_delta;
 mod service_url;
@@ -155,6 +160,7 @@ use client_config::{client_tls_paths, read_tls_file, render_client_config_templa
 use deduplicator::{
     CompiledDeduplicatorKeyProgram, ReplicatedDeduplicatorState, compile_deduplicator_key_program,
 };
+use force_flush::{DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant};
 use http_client::HttpClientConfig;
 pub(crate) use ingestors::kafka::KafkaIngestor;
 use kafka_offset_state::ReplicatedKafkaOffsetState;
@@ -192,8 +198,12 @@ pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
 use relay_batch::build_stream_record_batch_preserving_acks;
 pub(crate) use relay_channel::{
-    RelayBroadcast, RelayDispatchGate, RelayDispatchGateToken,
+    RelayBroadcast, RelayDispatchGate, RelayDispatchGateLease,
     RelayReceiver as RelaySubscriptionReceiver,
+};
+use relay_interaction::{
+    RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
+    RuntimeInputCollectPolicy,
 };
 pub(crate) type RelaySubscriptionRecvError = async_broadcast::RecvError;
 use service_url::ServiceUrl;
@@ -520,7 +530,7 @@ impl EntityDrainStatus {
 }
 
 pub struct EntityGateHold {
-    gates: Vec<(Arc<RelayDispatchGate>, RelayDispatchGateToken)>,
+    gates: Vec<RelayDispatchGateLease>,
 }
 
 struct EntityAlterHold {
@@ -533,6 +543,7 @@ struct NodeQuiesceCounters {
     mailbox_and_in_flight: AtomicUsize,
     collected_inputs: AtomicUsize,
     output_buffers: AtomicUsize,
+    force_flushes: AtomicUsize,
 }
 
 impl NodeQuiesceCounters {
@@ -541,6 +552,7 @@ impl NodeQuiesceCounters {
             .load(Ordering::Acquire)
             .saturating_add(self.collected_inputs.load(Ordering::Acquire))
             .saturating_add(self.output_buffers.load(Ordering::Acquire))
+            .saturating_add(self.force_flushes.load(Ordering::Acquire))
     }
 }
 
@@ -590,7 +602,7 @@ impl BranchQuiesceGauges {
                         .input_collectors
                         .values()
                         .map(|collector| collector.pending.len())
-                        .sum(),
+                        .fold(processor.pending_materialized.len(), usize::saturating_add),
                     processor
                         .operation
                         .output_routes()
@@ -635,14 +647,22 @@ impl Drop for BranchQuiesceGauges {
 }
 
 impl EntityGateHold {
+    async fn wait_quiescent(&mut self) -> bool {
+        for gate in &mut self.gates {
+            tokio::task::consume_budget().await;
+            if !gate.wait_quiescent().await {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn release(mut self) {
         self.release_all();
     }
 
     fn release_all(&mut self) {
-        for (gate, token) in self.gates.drain(..) {
-            gate.release(token);
-        }
+        self.gates.clear();
     }
 }
 
@@ -1508,7 +1528,7 @@ impl RelayConsumerFanout {
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
     ) -> Result<(), RelayRecordBatch> {
-        self.dispatch_gate.wait_open().await;
+        let _dispatch_permit = self.dispatch_gate.acquire_dispatch().await;
         let attached_receiver_count = self
             .runtime_consumer_broadcast_for_mode(AckMode::Attached)
             .receiver_count();
@@ -1744,6 +1764,7 @@ impl RelayRuntimeFanIn {
         Self { receiver }
     }
 
+    #[cfg(test)]
     async fn recv(&mut self) -> Option<RelayRecordBatch> {
         tokio::task::consume_budget().await;
         match self.receiver.recv().await {
@@ -1753,6 +1774,54 @@ impl RelayRuntimeFanIn {
             }
             Err(async_broadcast::RecvError::Closed) => None,
         }
+    }
+
+    fn try_recv(&mut self) -> Result<RelayRecordBatch, async_broadcast::TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    fn poll_recv(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<RelayRecordBatch>> {
+        match self.receiver.poll_recv(cx) {
+            std::task::Poll::Ready(Some(Ok(batch))) => std::task::Poll::Ready(Some(batch)),
+            std::task::Poll::Ready(Some(Err(async_broadcast::RecvError::Overflowed(_)))) => {
+                unreachable!("relay broadcasts are backpressured and must not overflow")
+            }
+            std::task::Poll::Ready(Some(Err(async_broadcast::RecvError::Closed)) | None) => {
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    fn pending_len(&self) -> usize {
+        self.receiver.len()
+    }
+
+    /// Polls one relay batch while keeping quiesce accounting continuous across dequeue.
+    fn poll_recv_with_quiesce(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        counters: Option<&Arc<NodeQuiesceCounters>>,
+    ) -> std::task::Poll<Option<(RelayRecordBatch, Option<NodeQuiesceWorkGuard>)>> {
+        let work = counters.map(|counters| NodeQuiesceWorkGuard::begin(counters.clone()));
+        match self.poll_recv(cx) {
+            std::task::Poll::Ready(Some(batch)) => std::task::Poll::Ready(Some((batch, work))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    /// Tries one relay batch while keeping quiesce accounting continuous across dequeue.
+    fn try_recv_with_quiesce(
+        &mut self,
+        counters: Option<&Arc<NodeQuiesceCounters>>,
+    ) -> Result<(RelayRecordBatch, Option<NodeQuiesceWorkGuard>), async_broadcast::TryRecvError>
+    {
+        let work = counters.map(|counters| NodeQuiesceWorkGuard::begin(counters.clone()));
+        self.try_recv().map(|batch| (batch, work))
     }
 }
 
@@ -1921,12 +1990,17 @@ impl RuntimeReconnectBackoff {
         self.next
     }
 
+    pub(in crate::runtime) fn take_next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(self.max);
+        delay
+    }
+
     pub(in crate::runtime) async fn wait(
         &mut self,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> bool {
-        let delay = self.next;
-        self.next = self.next.saturating_mul(2).min(self.max);
+        let delay = self.take_next_delay();
         tokio::select! {
             changed = shutdown_rx.changed() => {
                 !(changed.is_err() || *shutdown_rx.borrow())
@@ -1934,39 +2008,6 @@ impl RuntimeReconnectBackoff {
             _ = sleep(delay) => true,
         }
     }
-
-    pub(in crate::runtime) async fn wait_with_ack_alive(
-        &mut self,
-        shutdown_rx: &mut watch::Receiver<bool>,
-        acks: &AckSet,
-    ) -> bool {
-        let delay = self.next;
-        self.next = self.next.saturating_mul(2).min(self.max);
-        let deadline = Instant::now() + delay;
-        loop {
-            tokio::task::consume_budget().await;
-            acks.ack_alive();
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                return true;
-            }
-            tokio::select! {
-                changed = shutdown_rx.changed() => {
-                    return !(changed.is_err() || *shutdown_rx.borrow());
-                }
-                _ = sleep(remaining.min(Duration::from_millis(100))) => {}
-            }
-        }
-    }
-}
-
-enum BatchedInput {
-    Batch(RelayRecordBatch),
-    Wake,
-    Closed,
-    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1976,19 +2017,6 @@ enum RuntimeFlushPolicy {
         max_batch_size: u64,
     },
     Immediate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RuntimeInputCollectPolicy {
-    interval: Duration,
-    max_batch_size: Option<u64>,
-}
-
-impl RuntimeInputCollectPolicy {
-    fn size_boundary_reached(self, pending_bytes: u64) -> bool {
-        self.max_batch_size
-            .is_some_and(|max_batch_size| pending_bytes >= max_batch_size)
-    }
 }
 
 impl RuntimeFlushPolicy {
@@ -2007,135 +2035,6 @@ impl RuntimeFlushPolicy {
             Self::Immediate => false,
         }
     }
-}
-
-#[cfg(test)]
-fn relay_batches_estimated_bytes(batches: &[RelayRecordBatch]) -> u64 {
-    batches
-        .iter()
-        .map(RelayRecordBatch::estimated_bytes)
-        .sum::<u64>()
-}
-
-#[derive(Debug)]
-struct RuntimeTaskInputCollection {
-    policy: Option<RuntimeInputCollectPolicy>,
-    pending: HashMap<Option<BranchKey>, RuntimeTaskInputBranchCollection>,
-    quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
-    pending_batches: usize,
-}
-
-#[derive(Debug, Default)]
-struct RuntimeTaskInputBranchCollection {
-    batches: Vec<RelayRecordBatch>,
-    bytes: u64,
-    deadline: Option<Instant>,
-}
-
-impl RuntimeTaskInputCollection {
-    #[cfg(test)]
-    fn new(policy: Option<RuntimeInputCollectPolicy>) -> Self {
-        Self {
-            policy,
-            pending: HashMap::default(),
-            quiesce_counters: None,
-            pending_batches: 0,
-        }
-    }
-
-    fn with_quiesce_counters(
-        policy: Option<RuntimeInputCollectPolicy>,
-        quiesce_counters: Arc<NodeQuiesceCounters>,
-    ) -> Self {
-        Self {
-            policy,
-            pending: HashMap::default(),
-            quiesce_counters: Some(quiesce_counters),
-            pending_batches: 0,
-        }
-    }
-
-    fn push(&mut self, batch: RelayRecordBatch) -> Result<Option<RelayRecordBatch>, String> {
-        let Some(policy) = self.policy else {
-            return Ok(Some(batch));
-        };
-        let key = batch.key.clone();
-        let collection = self.pending.entry(key.clone()).or_default();
-        collection.bytes = collection.bytes.saturating_add(batch.estimated_bytes());
-        collection.batches.push(batch);
-        self.pending_batches = self.pending_batches.saturating_add(1);
-        if let Some(counters) = &self.quiesce_counters {
-            counters.collected_inputs.fetch_add(1, Ordering::AcqRel);
-        }
-        collection
-            .deadline
-            .get_or_insert_with(|| Instant::now() + policy.interval);
-        if policy.size_boundary_reached(collection.bytes) {
-            return self.take(&key).map(Some);
-        }
-        Ok(None)
-    }
-
-    fn next_deadline(&self) -> Option<Instant> {
-        self.pending
-            .values()
-            .filter_map(|collection| collection.deadline)
-            .min()
-    }
-
-    fn take_due(&mut self) -> Result<Option<RelayRecordBatch>, String> {
-        let now = Instant::now();
-        let Some(key) = self.pending.iter().find_map(|(key, collection)| {
-            collection
-                .deadline
-                .is_some_and(|deadline| deadline <= now)
-                .then_some(key.clone())
-        }) else {
-            return Ok(None);
-        };
-        self.take(&key).map(Some)
-    }
-
-    fn take(&mut self, key: &Option<BranchKey>) -> Result<RelayRecordBatch, String> {
-        let collection = self
-            .pending
-            .remove(key)
-            .expect("selected input collection must exist");
-        self.pending_batches = self
-            .pending_batches
-            .saturating_sub(collection.batches.len());
-        if let Some(counters) = &self.quiesce_counters {
-            counters
-                .collected_inputs
-                .fetch_sub(collection.batches.len(), Ordering::AcqRel);
-        }
-        RelayRecordBatch::concat(collection.batches)
-    }
-
-    fn take_any(&mut self) -> Result<Option<RelayRecordBatch>, String> {
-        let Some(key) = self.pending.keys().next().cloned() else {
-            return Ok(None);
-        };
-        self.take(&key).map(Some)
-    }
-}
-
-impl Drop for RuntimeTaskInputCollection {
-    fn drop(&mut self) {
-        if let Some(counters) = &self.quiesce_counters {
-            counters
-                .collected_inputs
-                .fetch_sub(self.pending_batches, Ordering::AcqRel);
-        }
-    }
-}
-
-#[cfg(test)]
-fn relay_batches_into_batched_input(batches: Vec<RelayRecordBatch>) -> BatchedInput {
-    BatchedInput::Batch(
-        RelayRecordBatch::concat(batches)
-            .expect("relay receive boundary batches must concatenate into one arrow batch"),
-    )
 }
 
 fn branched_entrypoint_inputs_acks(inputs: &[BranchedEntrypointInput]) -> Vec<AckSet> {
@@ -2539,7 +2438,7 @@ pub struct Runtime {
     in_flight_by_domain: Arc<DashMap<Domain, Arc<AckRootTracker>, RandomState>>,
     generator_activity_by_domain: Arc<DashMap<Domain, Arc<AtomicUsize>, RandomState>>,
     emitter_buffers: Arc<DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>>,
-    force_flush_by_domain: Arc<DashMap<Domain, watch::Sender<u64>, RandomState>>,
+    force_flush_by_domain: Arc<DashMap<Domain, Arc<DomainForceFlush>, RandomState>>,
     node_quiesce_counters: Arc<DashMap<RuntimeKey, Arc<NodeQuiesceCounters>, RandomState>>,
     entity_gate_holds: Arc<DashMap<(Domain, u64), EntityAlterHold, RandomState>>,
     active_domain_alters: Arc<DashMap<Domain, ActiveDomainAlter, RandomState>>,
@@ -6213,6 +6112,8 @@ impl BranchRuntime {
             }
             return;
         };
+        let delivery_observation = batch.delivery_observation(current_timestamp());
+        let physical_node_id = self.runtime.local_node_id.read().clone();
         self.runtime
             .metrics
             .observe_global_node_received(NodeBatchObservation {
@@ -6220,10 +6121,10 @@ impl BranchRuntime {
                 kind: processor.kind,
                 node: &processor.processor,
                 relay: incoming_relay,
-                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                physical_node_id: physical_node_id.as_deref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
+                domain_timestamp: delivery_observation.domain_timestamp,
             });
         self.runtime.metrics.observe_branch_node_received(
             branch_key_display(&self.key),
@@ -6232,10 +6133,10 @@ impl BranchRuntime {
                 kind: processor.kind,
                 node: &processor.processor,
                 relay: incoming_relay,
-                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                physical_node_id: physical_node_id.as_deref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
+                domain_timestamp: delivery_observation.domain_timestamp,
             },
         );
         self.runtime.mark_branch_aggregated_metrics_updated(
@@ -6243,8 +6144,7 @@ impl BranchRuntime {
             processor.kind,
             &processor.processor,
         );
-        let delivery_latencies = batch.delivery_latency_seconds(current_timestamp());
-        for seconds in delivery_latencies {
+        for seconds in delivery_observation.latency_seconds {
             self.runtime
                 .metrics
                 .observe_global_delivery_latency_at_domain_time(NodeLatencyObservation {
@@ -6252,9 +6152,9 @@ impl BranchRuntime {
                     kind: processor.kind,
                     node: &processor.processor,
                     relay: incoming_relay,
-                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    physical_node_id: physical_node_id.as_deref(),
                     seconds,
-                    domain_timestamp: batch.domain_timestamp(),
+                    domain_timestamp: delivery_observation.domain_timestamp,
                 });
             self.runtime.metrics.observe_branch_delivery_latency(
                 branch_key_display(&self.key),
@@ -6263,15 +6163,10 @@ impl BranchRuntime {
                     kind: processor.kind,
                     node: &processor.processor,
                     relay: incoming_relay,
-                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    physical_node_id: physical_node_id.as_deref(),
                     seconds,
-                    domain_timestamp: batch.domain_timestamp(),
+                    domain_timestamp: delivery_observation.domain_timestamp,
                 },
-            );
-            self.runtime.mark_branch_aggregated_metrics_updated(
-                &self.domain,
-                processor.kind,
-                &processor.processor,
             );
         }
         processor
@@ -7341,9 +7236,15 @@ enum ProcessorBranchStopMode {
 }
 
 struct ProcessorBranchTask {
-    input: mpsc::Sender<(Identifier, RelayRecordBatch)>,
+    input: mpsc::Sender<ProcessorBranchInput>,
     stop: mpsc::Sender<ProcessorBranchStopMode>,
     task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+}
+
+struct ProcessorBranchInput {
+    relay: Identifier,
+    batch: RelayRecordBatch,
+    work: NodeQuiesceWorkGuard,
 }
 
 #[derive(Debug)]
@@ -7359,56 +7260,113 @@ enum ProcessorNodeCommand {
     },
 }
 
+impl RelayInteractionCommand for ProcessorNodeCommand {
+    fn drain_inputs_before_handling(&self) -> bool {
+        true
+    }
+
+    fn cancels_external_waits_while_draining(&self) -> bool {
+        true
+    }
+}
+
 enum EmitterTaskCommand {
     Reconfigure {
         config: Box<CreateEmitter>,
         response: oneshot::Sender<()>,
     },
     Stop {
-        response: oneshot::Sender<()>,
+        response: oneshot::Sender<Result<(), String>>,
     },
+}
+
+impl RelayInteractionCommand for EmitterTaskCommand {
+    fn drain_inputs_before_handling(&self) -> bool {
+        matches!(self, Self::Stop { .. })
+    }
+
+    fn cancels_external_waits_while_draining(&self) -> bool {
+        matches!(self, Self::Stop { .. })
+    }
 }
 
 struct ScheduledEmitterTask {
     commands: mpsc::Sender<EmitterTaskCommand>,
+    work_cancel: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 
 impl ScheduledEmitterTask {
+    async fn abort_and_join(&mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+
     async fn reconfigure_via(
         commands: &mpsc::Sender<EmitterTaskCommand>,
         config: Box<CreateEmitter>,
     ) -> Result<(), String> {
         let (response, receiver) = oneshot::channel();
-        commands
-            .send(EmitterTaskCommand::Reconfigure { config, response })
-            .await
-            .map_err(|_| "scheduled emitter task is unavailable for reconfiguration".to_string())?;
+        tokio::time::timeout(
+            PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE,
+            commands.send(EmitterTaskCommand::Reconfigure { config, response }),
+        )
+        .await
+        .map_err(|_| "scheduled emitter task timed out accepting reconfiguration".to_string())?
+        .map_err(|_| "scheduled emitter task is unavailable for reconfiguration".to_string())?;
         tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, receiver)
             .await
             .map_err(|_| "scheduled emitter task timed out reconfiguring".to_string())?
             .map_err(|_| "scheduled emitter task dropped its reconfiguration response".to_string())
     }
 
-    async fn stop(mut self) -> Result<(), String> {
+    async fn stop(self) -> Result<(), String> {
+        self.stop_with_grace(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+            .await
+    }
+
+    async fn stop_with_grace(mut self, grace: Duration) -> Result<(), String> {
+        self.work_cancel.send_replace(true);
+        // Let data-bearing connector futures finish within the grace period: racing them locally
+        // can lose track of whether ownership already moved into a sink (especially Iceberg).
+        // Ownership-neutral waits observe `work_cancel`; every failure below hard-aborts and joins
+        // the task so the grace bound never leaves detached emitter work behind.
         let (response, receiver) = oneshot::channel();
-        self.commands
-            .send(EmitterTaskCommand::Stop { response })
-            .await
-            .map_err(|_| "scheduled emitter task is unavailable for stopping".to_string())?;
-        tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, receiver)
-            .await
-            .map_err(|_| "scheduled emitter task timed out stopping".to_string())?
-            .map_err(|_| "scheduled emitter task dropped its stop response".to_string())?;
-        match tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut self.task).await {
+        let send_result = tokio::time::timeout(
+            grace,
+            self.commands.send(EmitterTaskCommand::Stop { response }),
+        )
+        .await;
+        let send_error = match send_result {
+            Ok(Ok(())) => None,
+            Ok(Err(_)) => Some("scheduled emitter task is unavailable for stopping".to_string()),
+            Err(_) => Some("scheduled emitter task timed out accepting stop".to_string()),
+        };
+        if let Some(error) = send_error {
+            self.abort_and_join().await;
+            return Err(error);
+        }
+        let stop_result = match tokio::time::timeout(grace, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.abort_and_join().await;
+                return Err("scheduled emitter task dropped its stop response".to_string());
+            }
+            Err(_) => {
+                self.abort_and_join().await;
+                return Err("scheduled emitter task timed out stopping".to_string());
+            }
+        };
+        let task_result = match tokio::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(format!("scheduled emitter task join failed: {error}")),
             Err(_) => {
-                self.task.abort();
-                let _ = self.task.await;
+                self.abort_and_join().await;
                 Err("scheduled emitter task timed out terminating".to_string())
             }
-        }
+        };
+        stop_result?;
+        task_result
     }
 }
 
@@ -7418,17 +7376,50 @@ struct ScheduledNodeTask {
 }
 
 impl ScheduledNodeTask {
-    async fn handoff(mut self) -> Result<Vec<ProcessorBranchHandoff>, String> {
+    async fn abort_and_join(&mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+
+    async fn handoff(self) -> Result<Vec<ProcessorBranchHandoff>, String> {
+        self.handoff_within(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+            .await
+    }
+
+    async fn handoff_within(
+        mut self,
+        grace_period: Duration,
+    ) -> Result<Vec<ProcessorBranchHandoff>, String> {
         let (response, receiver) = oneshot::channel();
-        self.commands
-            .send(ProcessorNodeCommand::Handoff { response })
-            .await
-            .map_err(|_| "scheduled node task is unavailable for handoff".to_string())?;
-        let handoffs = tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, receiver)
-            .await
-            .map_err(|_| "scheduled node task timed out producing handoff residue".to_string())?
-            .map_err(|_| "scheduled node task dropped its handoff response".to_string())?;
-        match tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut self.task).await {
+        match tokio::time::timeout(
+            grace_period,
+            self.commands
+                .send(ProcessorNodeCommand::Handoff { response }),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                self.abort_and_join().await;
+                return Err("scheduled node task is unavailable for handoff".to_string());
+            }
+            Err(_) => {
+                self.abort_and_join().await;
+                return Err("scheduled node task timed out accepting handoff".to_string());
+            }
+        }
+        let handoffs = match tokio::time::timeout(grace_period, receiver).await {
+            Ok(Ok(handoffs)) => handoffs,
+            Ok(Err(_)) => {
+                self.abort_and_join().await;
+                return Err("scheduled node task dropped its handoff response".to_string());
+            }
+            Err(_) => {
+                self.abort_and_join().await;
+                return Err("scheduled node task timed out producing handoff residue".to_string());
+            }
+        };
+        match tokio::time::timeout(grace_period, &mut self.task).await {
             Ok(Ok(())) => Ok(handoffs),
             Ok(Err(error)) => Err(format!("scheduled node task join failed: {error}")),
             Err(_) => {
@@ -7507,8 +7498,8 @@ async fn run_processor_node_runtime(
     context: ProcessorRuntimeContext,
     template: BranchInstanceTemplate,
     inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
-    mut shutdown_rx: watch::Receiver<bool>,
-    mut command_rx: mpsc::Receiver<ProcessorNodeCommand>,
+    shutdown_rx: watch::Receiver<bool>,
+    command_rx: mpsc::Receiver<ProcessorNodeCommand>,
     restored_handoffs: Vec<ProcessorBranchHandoff>,
     expiration_scan_interval: Duration,
 ) {
@@ -7580,21 +7571,23 @@ async fn run_processor_node_runtime(
         )
         .await;
     }
-    let mut merged = futures_util::stream::select_all(inputs.into_iter().map(
-        |(relay, fan_in)| -> std::pin::Pin<
-            Box<dyn futures_util::Stream<Item = (Identifier, RelayRecordBatch)> + Send>,
-        > {
-            Box::pin(futures_util::stream::unfold(
-                (relay, fan_in),
-                |(relay, mut fan_in)| async move {
-                    fan_in
-                        .recv()
-                        .await
-                        .map(|batch| ((relay.clone(), batch), (relay, fan_in)))
-                },
-            ))
-        },
-    ));
+    let quiesce_counters = runtime_handle.node_quiesce_counters(&domain, &processor);
+    let interaction_inputs = inputs
+        .into_iter()
+        // Processor collection is branch-local and paced by the domain clock. The outer relay
+        // interaction therefore delivers each dequeued batch unchanged.
+        .map(|(relay, receiver)| RelayInteractionInput::new(relay, receiver, None))
+        .collect();
+    let mut interaction = RelayInteraction::with_commands(
+        interaction_inputs,
+        shutdown_rx,
+        // Branch tasks own processor state and output buffers, so they remain the force-flush
+        // participants. The supervisor only drains and dispatches relay input.
+        None,
+        Some(quiesce_counters),
+        command_rx,
+    )
+    .expect("validated processor inputs must build a relay interaction");
     let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
     let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
 
@@ -7645,31 +7638,30 @@ async fn run_processor_node_runtime(
             continue;
         }
 
-        let sleep_duration = next_expiration_scan
-            .checked_duration_since(Instant::now())
-            .unwrap_or(Duration::ZERO)
-            .min(
-                next_lru_snapshot
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or(Duration::ZERO),
-            );
-        tokio::select! {
-            biased;
-            command = command_rx.recv() => {
-                if let Some(ProcessorNodeCommand::Handoff { response }) = command {
-                    handoff_response = Some(response);
-                }
-                break;
+        let work = match interaction
+            .next(Some(next_expiration_scan.min(next_lru_snapshot)))
+            .await
+        {
+            Ok(work) => work,
+            Err(error) => {
+                runtime_handle.handle_internal_processor_error_for_acks(
+                    &domain,
+                    template.source_kind.as_str(),
+                    &processor,
+                    &template.error_policies,
+                    error.acks(),
+                    format!(
+                        "processor '{}' relay interaction failed: {error}",
+                        processor.as_str()
+                    ),
+                );
+                continue;
             }
-            changed = shutdown_rx.changed() => {
-                if changed.is_err() || *shutdown_rx.borrow() {
-                    break;
-                }
-            }
-            received = futures_util::StreamExt::next(&mut merged) => {
-                let Some((relay, batch)) = received else {
-                    break;
-                };
+        };
+        let (event, work) = work.into_parts();
+        match event {
+            RelayInteractionEvent::Batch { relay, batch } => {
+                let work = work.expect("processor relay input must track quiesce work");
                 dispatch_processor_node_input(
                     ProcessorNodeDispatchContext {
                         runtime_handle: &runtime_handle,
@@ -7681,10 +7673,29 @@ async fn run_processor_node_runtime(
                     &mut instances,
                     relay,
                     batch,
+                    work,
                 )
                 .await;
             }
-            _ = sleep(sleep_duration) => {}
+            RelayInteractionEvent::Wake => {}
+            RelayInteractionEvent::Command(ProcessorNodeCommand::Handoff { response }) => {
+                handoff_response = Some(response);
+                break;
+            }
+            RelayInteractionEvent::ForceFlush(completion) => {
+                // The supervisor never registers as a participant; keep the exhaustive arm from
+                // stranding an obligation if that ownership changes in the future.
+                completion.complete();
+            }
+            RelayInteractionEvent::Stopped(reason) => {
+                debug!(
+                    domain = domain.as_str(),
+                    processor = processor.as_str(),
+                    ?reason,
+                    "processor relay interaction stopped"
+                );
+                break;
+            }
         }
     }
 
@@ -7737,6 +7748,7 @@ async fn dispatch_processor_node_input(
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
     relay: Identifier,
     batch: RelayRecordBatch,
+    dequeued_work: NodeQuiesceWorkGuard,
 ) {
     let ProcessorNodeDispatchContext {
         runtime_handle,
@@ -7792,21 +7804,18 @@ async fn dispatch_processor_node_input(
             .await;
         }
     }
-    let quiesce_counters = runtime_handle.node_quiesce_counters(domain, &template.source);
-    quiesce_counters
-        .mailbox_and_in_flight
-        .fetch_add(1, Ordering::AcqRel);
-    if let Err(mpsc::error::SendError((_, batch))) = instance.state.input.send((relay, batch)).await
-    {
-        quiesce_counters
-            .mailbox_and_in_flight
-            .fetch_sub(1, Ordering::AcqRel);
+    let input = ProcessorBranchInput {
+        relay,
+        batch,
+        work: dequeued_work,
+    };
+    if let Err(mpsc::error::SendError(input)) = instance.state.input.send(input).await {
         runtime_handle.handle_internal_processor_error_for_acks(
             domain,
             template.source_kind.as_str(),
             &template.source,
             &template.error_policies,
-            batch.acks.iter(),
+            input.batch.acks.iter(),
             format!(
                 "processor branch task '{}' is unavailable",
                 branch_key_display(&key)
@@ -7828,6 +7837,7 @@ async fn dispatch_processor_node_input(
             )
             .await;
         }
+        drop(input.work);
     }
 }
 
@@ -7872,7 +7882,7 @@ async fn run_processor_branch_task(
     context: ProcessorRuntimeContext,
     processor: Identifier,
     mut branch: BranchRuntime,
-    mut input: mpsc::Receiver<(Identifier, RelayRecordBatch)>,
+    mut input: mpsc::Receiver<ProcessorBranchInput>,
     mut stop_rx: mpsc::Receiver<ProcessorBranchStopMode>,
     quiesce_counters: Arc<NodeQuiesceCounters>,
 ) {
@@ -7881,7 +7891,7 @@ async fn run_processor_branch_task(
         domain,
         graph,
     } = context;
-    let mut force_flush_rx = runtime_handle.force_flush_receiver(&domain);
+    let mut force_flush = runtime_handle.force_flush_participant(&domain, quiesce_counters.clone());
     let mut quiesce_gauges = BranchQuiesceGauges::new(quiesce_counters.clone());
     quiesce_gauges.observe(&branch, &processor);
     let stop_mode;
@@ -7915,14 +7925,12 @@ async fn run_processor_branch_task(
             }
             received = input.recv() => {
                 match received {
-                    Some((relay, batch)) => {
+                    Some(ProcessorBranchInput { relay, batch, work }) => {
                         branch
                             .execute_processor_input(&graph, &processor, &relay, batch)
                             .await;
-                        quiesce_counters
-                            .mailbox_and_in_flight
-                            .fetch_sub(1, Ordering::AcqRel);
                         quiesce_gauges.observe(&branch, &processor);
+                        drop(work);
                     }
                     None => {
                         stop_mode = Some(ProcessorBranchStopMode::Detach);
@@ -7936,25 +7944,24 @@ async fn run_processor_branch_task(
                     .await;
                 quiesce_gauges.observe(&branch, &processor);
             }
-            changed = force_flush_rx.changed() => {
-                if changed.is_err() {
+            completion = force_flush.changed() => {
+                let Ok(completion) = completion else {
                     stop_mode = Some(ProcessorBranchStopMode::Detach);
                     break;
-                }
+                };
                 branch.force_flush(&graph, now).await;
                 quiesce_gauges.observe(&branch, &processor);
+                completion.complete();
             }
             _ = sleep(sleep_duration) => {}
         }
     }
-    while let Ok((relay, batch)) = input.try_recv() {
+    while let Ok(ProcessorBranchInput { relay, batch, work }) = input.try_recv() {
         branch
             .execute_processor_input(&graph, &processor, &relay, batch)
             .await;
-        quiesce_counters
-            .mailbox_and_in_flight
-            .fetch_sub(1, Ordering::AcqRel);
         quiesce_gauges.observe(&branch, &processor);
+        drop(work);
     }
     match stop_mode {
         Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
@@ -12401,43 +12408,26 @@ async fn plan_filter_map_messages(
 }
 
 struct EmitterFilterMapPlan {
-    messages: Vec<RelayMessage>,
-    headers: Vec<EmitterHeaders>,
+    batch: Option<RelayRecordBatch>,
+    headers: Option<Vec<EmitterHeaders>>,
     message_errors: Vec<PlannedMessageError>,
 }
 
-async fn plan_emitter_filter_map_messages(
+async fn plan_emitter_filter_map_batch(
     emitter: &Identifier,
     program: &CompiledEmitterFilterMapProgram,
-    batch: RelayRecordBatch,
+    mut input: RelayRecordBatch,
     execution_now: Timestamp,
     side_inputs: &HashMap<String, RuntimeValue>,
 ) -> Result<EmitterFilterMapPlan, PlannedGeneralError> {
-    let source_records = batch
-        .runtime_records()
-        .map_err(|error| PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: format!(
-                "emitter '{}' failed to materialize its node-local input rows: {}",
-                emitter.as_str(),
-                error
-            ),
-        })?;
-    let RelayRecordBatch {
-        key: _,
-        keys,
-        batch: carrier,
-        metadata: _,
-        acks,
-        ..
-    } = batch;
+    let acks = std::mem::take(&mut input.acks);
     let body_result = execute_filter_map_program_on_batch(
         "emitter",
         emitter,
         &program.body,
         FilterMapBatchInputs {
-            carrier: &carrier,
-            keys: &keys,
+            carrier: &input.batch,
+            keys: &input.keys,
             side_inputs,
         },
         execution_now,
@@ -12459,18 +12449,31 @@ async fn plan_emitter_filter_map_messages(
         }
     }
 
-    let mut messages = Vec::new();
-    let mut headers = Vec::new();
+    let mut successful_output_rows = Vec::new();
+    let mut successful_input_rows = Vec::new();
+    let mut headers = (!body_result.invocations.is_empty()).then(Vec::new);
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in body_result.selected_rows.iter().enumerate() {
+        let source_record = |context: &str| {
+            input
+                .runtime_record(input_row)
+                .map_err(|error| PlannedGeneralError {
+                    acks: acks.clone(),
+                    reason: format!(
+                        "emitter '{}' failed to materialize {context} input row: {error}",
+                        emitter.as_str()
+                    ),
+                })
+        };
         if let Some(side_error) = body_result.batch.errors()[output_row].first() {
+            let source_record = source_record("FILTER-MAP error")?;
             let partial_output = program
                 .codec_route
                 .then(|| {
                     vm_partial_output_row_to_runtime_record(
                         &body_result.batch,
                         output_row,
-                        source_records[input_row].metadata().clone(),
+                        source_record.metadata().clone(),
                     )
                     .ok()
                 })
@@ -12484,8 +12487,8 @@ async fn plan_emitter_filter_map_messages(
             );
             message_errors.push(planned_structured_message_error(
                 RelayMessage {
-                    key: keys[input_row].clone(),
-                    record: source_records[input_row].clone(),
+                    key: input.keys[input_row].clone(),
+                    record: source_record,
                     acks: std::mem::take(&mut acks[input_row]),
                 },
                 program.body.structured_side_error(
@@ -12506,21 +12509,22 @@ async fn plan_emitter_filter_map_messages(
             match emitter_headers_from_invocations(&body_result.invocations, output_row) {
                 Ok(headers) => headers,
                 Err(error) => {
+                    let source_record = source_record("FILTER-MAP header error")?;
                     let partial_output = program
                         .codec_route
                         .then(|| {
                             vm_partial_output_row_to_runtime_record(
                                 &body_result.batch,
                                 output_row,
-                                source_records[input_row].metadata().clone(),
+                                source_record.metadata().clone(),
                             )
                             .ok()
                         })
                         .flatten();
                     message_errors.push(planned_structured_message_error(
                         RelayMessage {
-                            key: keys[input_row].clone(),
-                            record: source_records[input_row].clone(),
+                            key: input.keys[input_row].clone(),
+                            record: source_record,
                             acks: std::mem::take(&mut acks[input_row]),
                         },
                         structured_message_error(
@@ -12540,57 +12544,94 @@ async fn plan_emitter_filter_map_messages(
                     continue;
                 }
             };
-        let record = match vm_output_row_to_decoded_record(&body_result.batch, output_row) {
-            Ok(record) => record.into_runtime_record(source_records[input_row].metadata().clone()),
-            Err(error) => {
-                let partial_output = program
-                    .codec_route
-                    .then(|| {
-                        vm_partial_output_row_to_runtime_record(
-                            &body_result.batch,
-                            output_row,
-                            source_records[input_row].metadata().clone(),
-                        )
-                        .ok()
-                    })
-                    .flatten();
-                message_errors.push(planned_structured_message_error(
-                    RelayMessage {
-                        key: keys[input_row].clone(),
-                        record: source_records[input_row].clone(),
-                        acks: std::mem::take(&mut acks[input_row]),
-                    },
-                    structured_message_error(
-                        MessageErrorCode::Validation,
-                        format!(
-                            "emitter '{}' failed to materialize FILTER-MAP output row: {}",
-                            emitter.as_str(),
-                            error
-                        ),
-                        if program.codec_route {
-                            MessageErrorOperation::Finalize
-                        } else {
-                            MessageErrorOperation::Values
-                        },
-                        None,
-                        invalid_output_fields(&body_result.batch, output_row),
+        let invalid_fields = invalid_output_fields(&body_result.batch, output_row);
+        if !invalid_fields.is_empty() {
+            let source_record = source_record("FILTER-MAP validation error")?;
+            let partial_output = program
+                .codec_route
+                .then(|| {
+                    vm_partial_output_row_to_runtime_record(
+                        &body_result.batch,
+                        output_row,
+                        source_record.metadata().clone(),
+                    )
+                    .ok()
+                })
+                .flatten();
+            message_errors.push(planned_structured_message_error(
+                RelayMessage {
+                    key: input.keys[input_row].clone(),
+                    record: source_record,
+                    acks: std::mem::take(&mut acks[input_row]),
+                },
+                structured_message_error(
+                    MessageErrorCode::Validation,
+                    format!(
+                        "emitter '{}' FILTER-MAP output row has uninitialized required fields",
+                        emitter.as_str()
                     ),
-                    partial_output,
-                    state_snapshot.clone(),
-                ));
-                continue;
-            }
-        };
-        messages.push(RelayMessage {
-            key: keys[input_row].clone(),
-            record,
-            acks: std::mem::take(&mut acks[input_row]),
-        });
-        headers.push(message_headers);
+                    if program.codec_route {
+                        MessageErrorOperation::Finalize
+                    } else {
+                        MessageErrorOperation::Values
+                    },
+                    None,
+                    invalid_fields,
+                ),
+                partial_output,
+                state_snapshot.clone(),
+            ));
+            continue;
+        }
+        successful_output_rows.push(output_row);
+        successful_input_rows.push(input_row);
+        if let Some(headers) = &mut headers {
+            headers.push(message_headers);
+        }
     }
 
+    let batch = if successful_output_rows.is_empty() {
+        None
+    } else {
+        let output_batch = vm_typed_batch_selected_rows_to_runtime_batch(
+            &body_result.batch,
+            &successful_output_rows,
+        )
+        .map_err(|error| PlannedGeneralError {
+            acks: acks.clone(),
+            reason: format!(
+                "emitter '{}' failed to finalize FILTER-MAP output batch: {error}",
+                emitter.as_str()
+            ),
+        })?;
+        let metadata = successful_input_rows
+            .iter()
+            .map(|input_row| input.metadata[*input_row].clone())
+            .collect::<Vec<_>>();
+        let output_acks = successful_input_rows
+            .iter()
+            .map(|input_row| std::mem::take(&mut acks[*input_row]))
+            .collect::<Vec<_>>();
+        let error_acks = output_acks.clone();
+        Some(
+            RelayRecordBatch::from_filtered_parts(
+                input.key.clone(),
+                output_batch,
+                metadata,
+                output_acks,
+            )
+            .map_err(|error| PlannedGeneralError {
+                acks: error_acks,
+                reason: format!(
+                    "emitter '{}' failed to build FILTER-MAP output batch: {error}",
+                    emitter.as_str()
+                ),
+            })?,
+        )
+    };
+
     Ok(EmitterFilterMapPlan {
-        messages,
+        batch,
         headers,
         message_errors,
     })
@@ -18537,23 +18578,6 @@ async fn decode_ingested_payload_owned(
         .map_err(|error| CodecError::InvalidCodec {
             codec: codec_name,
             reason: format!("blocking decode task failed: {error}"),
-        })?
-}
-
-async fn encode_emitted_payload(
-    codec: Arc<CompiledCodec>,
-    record: RuntimeRecord,
-) -> Result<Vec<u8>, CodecError> {
-    if !codec.requires_blocking_encode() {
-        return encode_with_codec(&codec, &record);
-    }
-
-    let codec_name = codec.name.as_str().to_string();
-    tokio::task::spawn_blocking(move || encode_with_codec(&codec, &record))
-        .await
-        .map_err(|error| CodecError::InvalidCodec {
-            codec: codec_name,
-            reason: format!("blocking encode task failed: {error}"),
         })?
 }
 

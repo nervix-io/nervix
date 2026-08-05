@@ -12,6 +12,10 @@ Feature: Cluster observability
   Scenario: Ephemeral dependencies are removed when a test suite unwinds
     Then an ephemeral dependency is removed when its test suite unwinds
 
+  Scenario: Kafka exposes host and Docker network benchmark endpoints
+    Given Kafka is running
+    Then Kafka exposes host and Docker network benchmark endpoints
+
   Scenario Outline: On-demand dependency is shared for the test suite attempt <attempt>
     Given Quickwit is running
     Then dependency endpoint "quickwit_addr" remains stable for the test suite

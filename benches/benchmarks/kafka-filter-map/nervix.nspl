@@ -1,0 +1,50 @@
+BEGIN;
+CREATE SCHEMA benchmark_record (
+  value STRING
+);
+CREATE WIRE JSON SCHEMA benchmark_wire MODE STRICT (
+  value string
+);
+CREATE CODEC benchmark_codec
+  FROM WIRE JSON SCHEMA benchmark_wire
+  TO SCHEMA benchmark_record;
+CREATE CLIENT kafka_local
+  TYPE KAFKA
+  CONFIG {
+    'bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
+    'auto.offset.reset' = 'earliest'
+  };
+{% for lane in lanes %}
+CREATE RELAY benchmark_ingested_{{ lane }} SCHEMA benchmark_record UNBRANCHED;
+CREATE RELAY benchmark_records_{{ lane }} SCHEMA benchmark_record UNBRANCHED;
+CREATE INGESTOR kafka_in_{{ lane }}
+  FROM KAFKA kafka_local
+  TOPIC {{ input_topic }}
+  OFFSET BY CONSUMER GROUP {{ consumer_group }}
+  INSTANCES 1
+  MODE NO_ACK PARALLEL
+  DECODE USING benchmark_codec
+  TO benchmark_ingested_{{ lane }}
+    INHERIT ALL
+    UNBRANCHED
+    FLUSH EACH {{ parameters.ingestor_flush_each }} MAX BATCH SIZE {{ parameters.ingestor_max_batch_size }}
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+CREATE JUNCTION benchmark_transform_{{ lane }}
+  FROM benchmark_ingested_{{ lane }}
+  FILTER WHERE contains(input.value, "x")
+  UNBRANCHED
+  TO benchmark_records_{{ lane }}
+    SET value = upper(input.value)
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+CREATE EMITTER kafka_out_{{ lane }}
+  FROM benchmark_records_{{ lane }}
+  TO KAFKA kafka_local TOPIC {{ output_topic }} ENCODE USING benchmark_codec
+  INHERIT ALL
+  FLUSH EACH {{ parameters.emitter_flush_each }} MAX BATCH SIZE {{ parameters.emitter_max_batch_size }}
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+{% endfor %}
+COMMIT;
+

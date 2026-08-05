@@ -5,7 +5,7 @@ on:
     branches: [main]
   workflow_dispatch:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,15 +20,18 @@ permissions:
 jobs:
   meta:
     name: metadata
+    if: github.event.action != 'labeled' || github.event.label.name == 'benchmark'
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 40
     outputs:
+      build_id: ${{ steps.meta.outputs.build_id }}
       timestamp: ${{ steps.meta.outputs.timestamp }}
     steps:
       - name: Compute image metadata
         id: meta
         run: |
           ts="$(date -u +'%Y%m%d%H%M%S')"
+          echo "build_id=${ts}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
           echo "timestamp=${ts}" >> "${GITHUB_OUTPUT}"
 
   build-arch:
@@ -83,7 +86,7 @@ jobs:
       - name: Build and push arch image
         run: |
           image_repo="ghcr.io/nervix-io/nervix"
-          tag="${image_repo}:${{ needs.meta.outputs.timestamp }}-${{ matrix.image }}-${{ matrix.arch }}"
+          tag="${image_repo}:${{ needs.meta.outputs.build_id }}-${{ matrix.image }}-${{ matrix.arch }}"
           push_image="true"
           if [[ "${{ github.event_name }}" == "pull_request" \
             && "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
@@ -105,10 +108,220 @@ jobs:
               "${push_image}"
           fi
 
+  benchmark:
+    name: benchmarks
+    needs: [meta, build-arch]
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'benchmark') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CARGO_TERM_COLOR: never
+      NO_COLOR: "1"
+      RUST_LOG_STYLE: never
+      NERVIX_BENCHMARK_IMAGE: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull benchmark image
+        run: docker pull "${NERVIX_BENCHMARK_IMAGE}"
+
+      - name: Logout from GHCR
+        run: docker logout ghcr.io
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-22"
+          linker = "clang-22"
+          rustflags = ["-Clink-arg=--ld-path=wild"]
+          EOF
+
+      - name: Install benchmark build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Blacksmith cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run benchmarks
+        run: >-
+          just benchmark-ci
+          "${NERVIX_BENCHMARK_IMAGE}"
+          "${RUNNER_TEMP}/nervix-benchmarks"
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          root="${RUNNER_TEMP}/nervix-benchmarks"
+          comparison="${root}/benchmark-comparison.md"
+          if [[ -f "${comparison}" ]]; then
+            cat "${comparison}" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          mapfile -d '' reports < <(find "${root}" -type f -name load-report.txt -print0 2>/dev/null | sort -z)
+          if (( ${#reports[@]} == 0 )); then
+            exit 0
+          fi
+          {
+            echo "## Benchmark results"
+            for report in "${reports[@]}"; do
+              relative="${report#"${root}/"}"
+              echo
+              echo "### ${relative%/load-report.txt}"
+              echo '```text'
+              cat "${report}"
+              echo '```'
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-pr-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nervix-benchmarks
+          if-no-files-found: warn
+          retention-days: 14
+
+  benchmark-comment:
+    name: benchmark-comment
+    needs: [build-arch, benchmark]
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'benchmark') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Download benchmark artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results-pr-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nervix-benchmarks
+
+      - name: Update benchmark comparison on PR
+        uses: actions/github-script@v7
+        env:
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+          BUILD_RESULT: ${{ needs.build-arch.result }}
+          COMPARISON_PATH: ${{ runner.temp }}/nervix-benchmarks/benchmark-comparison.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- nervix-benchmark-comparison -->';
+            const runLink = `[Workflow run and artifacts](${process.env.RUN_URL})`;
+            const comparisonPath = process.env.COMPARISON_PATH;
+            let body;
+            let missingSuccessfulComparison = false;
+
+            if (
+              process.env.BENCHMARK_RESULT === 'success' &&
+              fs.existsSync(comparisonPath)
+            ) {
+              const comparison = fs.readFileSync(comparisonPath, 'utf8').trim();
+              body = `${marker}\n${comparison}\n\n${runLink} · commit \`${context.sha}\``;
+            } else {
+              let reason;
+              if (process.env.BUILD_RESULT !== 'success') {
+                reason = `The Docker image build finished with status \`${process.env.BUILD_RESULT}\`, so benchmarks did not run.`;
+              } else if (process.env.BENCHMARK_RESULT !== 'success') {
+                reason = `The benchmark job finished with status \`${process.env.BENCHMARK_RESULT}\` and did not produce a valid comparison.`;
+              } else {
+                reason = 'The benchmark job succeeded but did not publish benchmark-comparison.md.';
+                missingSuccessfulComparison = true;
+              }
+              body = `${marker}\n## Benchmark comparison\n\n❌ ${reason}\n\n${runLink} · commit \`${context.sha}\``;
+            }
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 }
+            );
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.type === 'Bot' &&
+                comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }
+
+            if (missingSuccessfulComparison) {
+              core.setFailed('successful benchmark job did not publish a comparison');
+            }
+
   publish-manifest:
     name: manifest-${{ matrix.image }}
     needs: [meta, build-arch]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event.action != 'labeled' &&
+      (github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 40
     strategy:
@@ -131,12 +344,13 @@ jobs:
       - name: Publish multi-arch manifest
         run: |
           base="ghcr.io/nervix-io/nervix"
+          build_id="${{ needs.meta.outputs.build_id }}"
           ts="${{ needs.meta.outputs.timestamp }}"
           docker buildx imagetools create \
             -t "${base}:${ts}-${{ matrix.image }}" \
             -t "${base}:${{ matrix.image }}-latest" \
-            "${base}:${ts}-${{ matrix.image }}-amd64" \
-            "${base}:${ts}-${{ matrix.image }}-arm64"
+            "${base}:${build_id}-${{ matrix.image }}-amd64" \
+            "${base}:${build_id}-${{ matrix.image }}-arm64"
 
   build-book:
     name: build-book
@@ -146,7 +360,10 @@ jobs:
     # reference from the current binary, so this job compiles the workspace and
     # drives a real browser rather than only rendering Markdown.
     timeout-minutes: 60
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event.action != 'labeled' &&
+      (github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - name: Checkout
         uses: actions/checkout@v4

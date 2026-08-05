@@ -159,12 +159,15 @@ impl HttpIngestor {
                                                     timestamp_source: task_timestamp_source.as_ref(),
                                                     output_routes: &output_routes,
                                                     filter_where: filter_where.as_ref(),
-                            records: vec![record],
-                            metadata: vec![IngestFilterMapMetadata::from_headers(
+                                                    records: vec![record],
+                                                    metadata: vec![
+                                                        IngestFilterMapMetadata::from_headers(
                                                             headers.clone(),
-                                                        )],
+                                                        ),
+                                                    ],
                                                     ingested_at: current_timestamp(),
-                            acks: vec![AckSet::empty()],})
+                                                    acks: vec![AckSet::empty()],
+                                                })
                                                 .await;
                                             let flush_result = task_runtime
                                                 .flush_ingest_collector(

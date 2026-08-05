@@ -251,6 +251,12 @@ ON GENERAL ERROR LOG
 FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
 ```
 
+Kafka emission is fire-and-forget after local admission: Nervix submits every encoded record to
+the librdkafka producer queue and does not wait for a broker delivery receipt. A full local queue
+is retried for a bounded interval, and failure to enqueue remains a publish error. Once enqueueing
+succeeds, an `ATTACHED` emitter completes its ACK share even though a later broker delivery error,
+producer timeout, or process exit can still lose the record.
+
 ### Pulsar
 
 ```nspl,ignore
@@ -630,25 +636,26 @@ Nervix composes per-hop ACKs. The effective delivery semantics of a source-to-si
 observable duplicate and loss behavior produced by the source delivery mode, emitter mode, and
 sink behavior. They are not the ACK mechanics of any one hop.
 
-Emitter modes set one boundary:
+Emitter modes set one boundary relative to each sink's completion point:
 
-- `ATTACHED`: downstream emitter success or failure stays part of the upstream ACK chain.
+- `ATTACHED`: emitter success or failure at the sink's completion point stays part of the upstream
+  ACK chain.
 - `DETACHED`: relay fan-out removes this emitter from the upstream ACK chain. The emitter still
   attempts delivery, but its result cannot delay, retry, or fail the source ACK.
 
 When one source record reaches multiple emitters or multiple attached routes, the upstream ACK
-completes only after every attached downstream delivery completes. A failure on any attached path
-reopens source retry for the record on all paths. A sink that already published successfully may
-therefore receive the record again because a sibling sink failed. This applies to every sink
-without idempotent writes. Iceberg is the canonical case: rows can be appended to the table again
-after a sibling emitter fails.
+completes only after every attached emitter reaches its sink completion point. A failure on any
+attached path reopens source retry for the record on all paths. A sink that already published
+successfully may therefore receive the record again because a sibling sink failed. This applies to
+every sink without idempotent writes. Iceberg is the canonical case: rows can be appended to the
+table again after a sibling emitter fails.
 
 The table assumes a source mode that retries when an attached ACK fails or is lost. A no-ACK source
 cannot create that retry duplicate, but it can lose the record instead.
 
-| Sink | Duplicate conditions (`ATTACHED`) | Loss conditions (`DETACHED` and crash windows) | Idempotency available in Nervix |
+| Sink | Duplicate conditions (`ATTACHED`) | Loss conditions, including crash windows | Idempotency available in Nervix |
 | --- | --- | --- | --- |
-| Kafka | Retry after an ambiguous producer result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; broker durability still follows the configured Kafka producer and topic | None |
+| Kafka | Retry after partial local producer admission, lost ACK, or attached sibling failure | Any failure after local producer-queue admission, including delivery timeout or process exit; broker durability still follows the configured Kafka producer and topic | None |
 | Pulsar | Retry after an ambiguous broker receipt, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; retention and durability remain broker policy | None |
 | NATS | Retry after publish acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; Core NATS publish is not a durable consumer acknowledgement | None |
 | RabbitMQ | Retry after publish acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; Nervix does not enable publisher confirms, and queue durability and message persistence remain broker policy | None |

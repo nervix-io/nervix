@@ -13,7 +13,8 @@ const SENTRY_CLIENT_AGENT: &str = concat!("nervix/", env!("CARGO_PKG_VERSION"));
 
 pub(in crate::runtime) struct SentryEmitter {
     client: Option<HttpClient>,
-    dsn: Dsn,
+    envelope_url: url::Url,
+    auth: HeaderValue,
 }
 
 impl SentryEmitter {
@@ -32,26 +33,28 @@ impl SentryEmitter {
         let client = HttpClientConfig::new(config, "Sentry")
             .build()
             .map_err(emitter_config_error)?;
-        Ok(Self {
-            client: Some(client),
-            dsn,
-        })
-    }
-
-    pub(in crate::runtime) async fn publish(&mut self, payload: &[u8]) -> EmitterRuntimeResult<()> {
-        let Some(client) = self.client.as_mut() else {
-            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("no initialized Sentry sink client"));
-        };
-        let body = Self::encode_envelope(payload)?;
-        let auth = HeaderValue::from_str(&self.dsn.to_auth(Some(SENTRY_CLIENT_AGENT)).to_string())
+        let envelope_url = dsn.envelope_api_url();
+        let auth = HeaderValue::from_str(&dsn.to_auth(Some(SENTRY_CLIENT_AGENT)).to_string())
             .map_err(|error| {
                 emitter_config_error(format!("invalid Sentry authentication header: {error}"))
             })?;
+        Ok(Self {
+            client: Some(client),
+            envelope_url,
+            auth,
+        })
+    }
+
+    pub(in crate::runtime) async fn publish(&self, payload: Vec<u8>) -> EmitterRuntimeResult<()> {
+        let Some(client) = self.client.as_ref() else {
+            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
+                .attach_printable("no initialized Sentry sink client"));
+        };
+        let body = Self::encode_envelope(&payload)?;
 
         client
-            .post(self.dsn.envelope_api_url())
-            .header(SENTRY_AUTH_HEADER, auth)
+            .post(self.envelope_url.clone())
+            .header(SENTRY_AUTH_HEADER, self.auth.clone())
             .header(CONTENT_TYPE, SENTRY_ENVELOPE_CONTENT_TYPE)
             .body(body)
             .send()
