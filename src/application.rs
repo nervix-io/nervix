@@ -15085,6 +15085,27 @@ mod tests {
         Identifier::try_from(raw).expect("valid identifier")
     }
 
+    #[test]
+    fn snapshot_relay_header_framing_leaves_raw_snapshot_payload() {
+        let header = RaftSnapshotRelayHeader {
+            vote: nervix_consensus::VoteOf::new(7, "node-1".to_string()),
+            meta: Default::default(),
+        };
+        let encoded = encode_cbor(&header).expect("snapshot relay header should encode");
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+        wire.extend_from_slice(&encoded);
+        wire.extend_from_slice(b"snapshot-data");
+
+        let payload = try_take_length_delimited_frame(&mut wire)
+            .expect("length-delimited snapshot relay header should be complete");
+        let decoded: RaftSnapshotRelayHeader =
+            decode_cbor(&payload).expect("snapshot relay header should decode");
+
+        assert_eq!(decoded, header);
+        assert_eq!(wire, b"snapshot-data");
+    }
+
     fn string_branch_key(field: &str, value: &str) -> Option<crate::runtime::BranchKey> {
         crate::runtime::BranchKey::from_fields([(
             identifier(field),

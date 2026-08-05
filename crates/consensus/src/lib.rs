@@ -1792,18 +1792,25 @@ fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Re
 
 #[cfg(test)]
 mod tests {
+    use std::{io::Cursor, sync::Arc as StdArc};
+
     use fjall::Database;
     use nervix_models::{
         Domain, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
         DomainStatus, Identifier, ResourceId, ResourceNodeState, ResourceNodeStatus,
         ResourceReplicaKey, ResourceVersion, ResourceVersionStatus,
     };
+    use openraft::{
+        SnapshotMeta,
+        storage::{RaftSnapshotBuilder, RaftStateMachine},
+    };
     use tempfile::tempdir;
 
     use super::{
         ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallStore, GossipNode, GossipState,
-        KEY_CLUSTER_SCHEDULE, StateMachineData, UserCredentials, apply_consensus_command, decode,
-        encode, io_error, load_value, read_key, write_key,
+        KEY_CLUSTER_SCHEDULE, KEY_SNAPSHOT, SnapshotRelayHeader, StateMachineData,
+        StoredMembershipOf, TypeConfig, UserCredentials, apply_consensus_command, decode, encode,
+        encode_stream_frame, io_error, load_value, read_key, write_key,
     };
     use crate::{ConsensusError, VoteOf};
 
@@ -1918,6 +1925,29 @@ mod tests {
 
         let err = decode::<ConsensusCommand>(b"not-cbor").expect_err("invalid bytes must fail");
         assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn snapshot_relay_header_roundtrips_in_length_delimited_cbor_frame() {
+        let header = SnapshotRelayHeader {
+            vote: VoteOf::new(7, "node-1".to_string()),
+            meta: SnapshotMeta {
+                last_log_id: None,
+                last_membership: StoredMembershipOf::default(),
+            },
+        };
+
+        let payload = encode(&header).expect("snapshot relay header should encode");
+        let frame = encode_stream_frame(&payload);
+        let length = u32::from_be_bytes(
+            frame[..4]
+                .try_into()
+                .expect("snapshot relay frame has a length prefix"),
+        ) as usize;
+        assert_eq!(length, payload.len());
+        let decoded: SnapshotRelayHeader =
+            decode(&frame[4..]).expect("snapshot relay header should decode");
+        assert_eq!(decoded, header);
     }
 
     #[test]
@@ -2160,6 +2190,58 @@ mod tests {
             .await
             .expect("vote should persist");
         assert!(store.has_raft_state().await);
+    }
+
+    #[tokio::test]
+    async fn snapshot_build_and_install_roundtrip_preserves_state() {
+        let tenant = domain("tenant");
+        let state = StateMachineData {
+            schedule: ClusterSchedule {
+                domains: vec![domain_schedule("tenant")],
+            },
+            domains: [(tenant, running_domain_state("tenant"))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut source = StdArc::new(
+            FjallStore::from_database(temp_database()).expect("source store should open"),
+        );
+        *source.inner.state_machine.write().await = state.clone();
+
+        let built = RaftSnapshotBuilder::<TypeConfig>::build_snapshot(&mut source)
+            .await
+            .expect("snapshot should build");
+        let meta = built.meta.clone();
+        let bytes = built.snapshot.into_inner();
+        let mut target = StdArc::new(
+            FjallStore::from_database(temp_database()).expect("target store should open"),
+        );
+
+        RaftStateMachine::<TypeConfig>::install_snapshot(
+            &mut target,
+            &meta,
+            Cursor::new(bytes.clone()),
+        )
+        .await
+        .expect("snapshot should install");
+
+        assert_eq!(*target.inner.state_machine.read().await, state);
+        let persisted: StateMachineData = read_key(&target.inner.sm, super::KEY_STATE_MACHINE)
+            .expect("persisted state should read")
+            .expect("persisted state should exist");
+        assert_eq!(persisted, state);
+        let current = RaftStateMachine::<TypeConfig>::get_current_snapshot(&mut target)
+            .await
+            .expect("current snapshot should read")
+            .expect("current snapshot should exist");
+        assert_eq!(current.meta, meta);
+        assert_eq!(current.snapshot.into_inner(), bytes);
+        assert!(
+            read_key::<super::StoredSnapshotData>(&target.inner.snapshot, KEY_SNAPSHOT)
+                .expect("stored snapshot should read")
+                .is_some()
+        );
     }
 
     #[test]

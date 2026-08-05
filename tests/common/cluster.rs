@@ -339,15 +339,19 @@ impl Cluster {
     pub(crate) async fn start_with_config(
         node_count: usize,
         runtime_test_hooks: RuntimeTestHooks,
-        mut config: TestClusterConfig,
+        config: TestClusterConfig,
     ) -> io::Result<Self> {
         assert!(node_count >= 1, "cluster must contain at least one node");
         #[cfg(feature = "testing")]
-        config.scheduler_mode.get_or_insert(if node_count == 3 {
-            SchedulerMode::Random
-        } else {
-            SchedulerMode::Sticky
-        });
+        let config = {
+            let mut config = config;
+            config.scheduler_mode.get_or_insert(if node_count == 3 {
+                SchedulerMode::Random
+            } else {
+                SchedulerMode::Sticky
+            });
+            config
+        };
         truncate_test_log_once()?;
         init_tracing_to_file(std::path::Path::new(TEST_LOG_FILE))?;
         let root_dir = tempdir()?;
