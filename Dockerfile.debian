@@ -96,6 +96,7 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml ./
 COPY src ./src
+COPY benches ./benches
 COPY crates ./crates
 COPY proto ./proto
 COPY tests/scenarios.rs ./tests/scenarios.rs
