@@ -132,13 +132,37 @@ Feature: MySQL emission
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
-    Then within "10s" repeatedly publishing MQTT message to topic "mysql_conflict_notifications_in_{{test_id}}" yields a relay subscription payload
+    And these NSPL commands are executed
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "emitter" "to_mysql" is saved as placeholder "mysql_emitter_owner"
+    When MQTT message is published to topic "mysql_conflict_notifications_in_{{test_id}}"
       """
       {"user_id":42,"action":"OPEN"}
       """
-    And within "10s" repeatedly publishing MQTT message to topic "mysql_conflict_notifications_in_{{test_id}}" yields a relay subscription payload
+    Then within "5s" the relay subscription receives a payload
+      """
+      "action":"OPEN"
+      """
+    And the MySQL table eventually contains a row
+      """
+      {"mysql_user_id":42,"mysql_action":"open"}
+      """
+    When MQTT message is published to topic "mysql_conflict_notifications_in_{{test_id}}"
       """
       {"user_id":42,"action":"CLOSE"}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      "action":"CLOSE"
+      """
+    And within "5s" node "{{mysql_emitter_owner}}" observability metric "nervix_messages_total" with labels eventually equals 2
+      """
+      target_kind="EMITTER"
+      target="to_mysql"
+      direction="sent"
+      relay="notifications"
       """
     And the MySQL table eventually contains a row
       """

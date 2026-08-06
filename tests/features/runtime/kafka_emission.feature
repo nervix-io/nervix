@@ -243,7 +243,7 @@ Feature: Kafka emission
       START;
       """
     Then Kafka consumer group "mode_boundary_group_{{test_id}}" eventually has 1 consumers
-    And Kafka message is published to topic "mode_boundary_in_{{test_id}}"
+    When Kafka message is published to topic "mode_boundary_in_{{test_id}}"
       """
       {"user_id":42}
       """
@@ -303,7 +303,7 @@ Feature: Kafka emission
       START;
       """
     Then Kafka consumer group "detached_confirming_group_{{test_id}}" eventually has 1 consumers
-    And emitter "kafka_detached_confirming" enters stall mode
+    When emitter "kafka_detached_confirming" enters stall mode
     And Kafka message is published to topic "detached_confirming_in_{{test_id}}"
       """
       {"user_id":42}

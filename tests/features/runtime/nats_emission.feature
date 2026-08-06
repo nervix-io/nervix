@@ -328,7 +328,7 @@ Feature: NATS emission
       START;
       """
     Then Kafka consumer group "jetstream_boundary_group_{{test_id}}" eventually has 1 consumers
-    And Kafka message is published to topic "jetstream_in_{{test_id}}"
+    When Kafka message is published to topic "jetstream_in_{{test_id}}"
       """
       {"user_id":42}
       """
