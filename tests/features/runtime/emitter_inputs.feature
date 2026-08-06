@@ -1,6 +1,6 @@
 Feature: Emitter relay inputs
 
-  Scenario Outline: One emitter consumes same-schema relays from different branches
+  Scenario Outline: One emitter drains every already-ready same-schema relay batch
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -68,28 +68,29 @@ Feature: Emitter relay inputs
         ON GENERAL ERROR LOG;
       START;
       """
-    When http payload is posted to host "emitter-inputs-{{test_id}}.example.com" path "/a"
+    When emitter "combined_sink" enters stall mode
+    And http payload is posted to host "emitter-inputs-{{test_id}}.example.com" path "/a"
       """
       {"seq":1,"tenant":"acme","source":"a"}
       """
+    Then within "5s" DESCRIBE EMITTER "combined_sink" on the leader node contains
+      """
+      transient error: fault injector stalled emitter publish
+      """
+    When http payload is posted to host "emitter-inputs-{{test_id}}.example.com" path "/a"
+      """
+      {"seq":2,"tenant":"beta","source":"a"}
+      """
     And http payload is posted to host "emitter-inputs-{{test_id}}.example.com" path "/b"
       """
-      {"seq":2,"tenant":"acme","source":"b"}
+      {"seq":3,"tenant":"beta","source":"b"}
       """
-    And http payload is posted to host "emitter-inputs-{{test_id}}.example.com" path "/a"
-      """
-      {"seq":3,"tenant":"beta","source":"a"}
-      """
-    And http payload is posted to host "emitter-inputs-{{test_id}}.example.com" path "/b"
-      """
-      {"seq":4,"tenant":"beta","source":"b"}
-      """
+    And emitter "combined_sink" leaves fault mode
     Then within "5s" the observed broker receives payloads
       """
       "seq":1
       "seq":2
       "seq":3
-      "seq":4
       """
     When http payload is posted to host "emitter-inputs-{{test_id}}.example.com" path "/a"
       """

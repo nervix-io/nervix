@@ -72,7 +72,8 @@ Feature: Kafka emission
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}'
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
         };
 
       CREATE EMITTER kafka_notifications
@@ -153,7 +154,8 @@ Feature: Kafka emission
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}'
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
         };
         CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL

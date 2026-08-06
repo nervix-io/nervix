@@ -105,13 +105,8 @@ impl RabbitMqEmitter {
         }
     }
 
-    async fn publish_message(
-        channel: &lapin::Channel,
-        queue: &str,
-        payload: &[u8],
-        headers: &EmitterHeaders,
-    ) -> EmitterRuntimeResult<PublisherConfirm> {
-        let properties = if headers.is_empty() {
+    fn properties(headers: &EmitterHeaders) -> lapin::BasicProperties {
+        if headers.is_empty() {
             lapin::BasicProperties::default()
         } else {
             let mut table = FieldTable::default();
@@ -122,7 +117,15 @@ impl RabbitMqEmitter {
                 );
             }
             lapin::BasicProperties::default().with_headers(table)
-        };
+        }
+    }
+
+    async fn publish_message(
+        channel: &lapin::Channel,
+        queue: &str,
+        payload: &[u8],
+        headers: &EmitterHeaders,
+    ) -> EmitterRuntimeResult<PublisherConfirm> {
         channel
             .basic_publish(
                 "".into(),
@@ -132,54 +135,10 @@ impl RabbitMqEmitter {
                     ..Default::default()
                 },
                 payload,
-                properties,
+                Self::properties(headers),
             )
             .await
             .map_err(emitter_publish_error)
-    }
-
-    pub(in crate::runtime) async fn publish(
-        &self,
-        queue: &Identifier,
-        payload: &[u8],
-        headers: &EmitterHeaders,
-    ) -> EmitterRuntimeResult<()> {
-        let Some(channel) = self.channel.as_ref() else {
-            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("no initialized rabbitmq sink client"));
-        };
-        let confirmation = Self::publish_message(channel, queue.as_str(), payload, headers).await?;
-        match self.mode {
-            BrokerPublishingMode::NoAck => match confirmation.await {
-                Ok(Confirmation::NotRequested | Confirmation::Ack(None)) => Ok(()),
-                Ok(Confirmation::Ack(Some(returned))) => {
-                    Err(Self::returned_message_error(&returned))
-                }
-                Ok(Confirmation::Nack(_)) => Err(emitter_publish_error(
-                    "rabbitmq channel acceptance returned nack",
-                )),
-                Err(source) => Err(emitter_publish_error(source)),
-            },
-            BrokerPublishingMode::Ack { timeout, .. } => {
-                match tokio::time::timeout(timeout, confirmation).await {
-                    Ok(Ok(Confirmation::Ack(None))) => Ok(()),
-                    Ok(Ok(Confirmation::Ack(Some(returned)))) => {
-                        Err(Self::returned_message_error(&returned))
-                    }
-                    Ok(Ok(Confirmation::Nack(_))) => Err(emitter_publish_error(
-                        "rabbitmq publisher confirm returned nack",
-                    )),
-                    Ok(Ok(Confirmation::NotRequested)) => Err(emitter_publish_error(
-                        "rabbitmq publisher confirms were not enabled",
-                    )),
-                    Ok(Err(source)) => Err(emitter_publish_error(source)),
-                    Err(_) => Err(emitter_publish_error(format!(
-                        "rabbitmq publisher confirm exceeded ACK TIMEOUT {}",
-                        humantime::format_duration(timeout)
-                    ))),
-                }
-            }
-        }
     }
 
     pub(super) async fn publish_records(

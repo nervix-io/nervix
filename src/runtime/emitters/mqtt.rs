@@ -4,7 +4,7 @@ use futures_util::FutureExt;
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, Event, MqttOptions,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNoticeError,
-    PublishOptions, SessionMode, TlsConfiguration, Transport as MqttTransport,
+    PublishOptions, SessionMode, TlsConfiguration, Transport as MqttTransport, ValidatedTopic,
 };
 use url::{Host, Url};
 
@@ -12,6 +12,7 @@ use super::*;
 
 pub(in crate::runtime) struct MqttEmitter {
     client: Option<AsyncClient>,
+    topic: ValidatedTopic,
     mode: MqttPublishingMode,
     eventloop_shutdown: watch::Sender<bool>,
 }
@@ -29,6 +30,7 @@ impl MqttEmitter {
     pub(in crate::runtime) fn new(
         client: &CreateClientMqtt,
         resolved: Option<&ResolvedClientConfig>,
+        topic: &Identifier,
         context: &EmitterSinkContext,
         mode: MqttPublishingMode,
         retry_policy: ParsedRetryPolicy,
@@ -64,7 +66,7 @@ impl MqttEmitter {
                         runtime.clear_emitter_transient_error(&domain, &emitter);
                     }
                     Err(error) => {
-                        let wait = backoff.take_delay();
+                        let wait = backoff.take_next_delay();
                         runtime.record_emitter_transient_error_with_backoff(
                             &domain,
                             &emitter,
@@ -98,8 +100,10 @@ impl MqttEmitter {
                 }
             }
         });
+        let topic = ValidatedTopic::new(topic.as_str()).map_err(emitter_config_error)?;
         Ok(Self {
             client: Some(client),
+            topic,
             mode,
             eventloop_shutdown,
         })
@@ -209,6 +213,35 @@ impl MqttEmitter {
                 self.mode.publish_options(),
             )
             .map_err(emitter_publish_error)?;
+        Ok(())
+    }
+
+    pub(in crate::runtime) async fn publish_chunk(
+        &self,
+        payloads: Vec<Vec<u8>>,
+    ) -> EmitterRuntimeResult<()> {
+        let Some(client) = self.client.as_ref() else {
+            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
+                .attach_printable("no initialized mqtt sink client"));
+        };
+        for payload in payloads {
+            tokio::task::consume_budget().await;
+            let payload = bytes::Bytes::from(payload);
+            match client.try_publish(
+                self.topic.clone(),
+                payload.clone(),
+                PublishOptions::at_most_once(),
+            ) {
+                Ok(()) => {}
+                Err(MqttClientError::RequestChannelFull(_)) => {
+                    client
+                        .publish(self.topic.clone(), payload, PublishOptions::at_most_once())
+                        .await
+                        .map_err(emitter_publish_error)?;
+                }
+                Err(error) => return Err(emitter_publish_error(error)),
+            }
+        }
         Ok(())
     }
 

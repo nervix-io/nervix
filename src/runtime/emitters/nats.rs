@@ -2,14 +2,15 @@ use std::{future::Future, pin::Pin};
 
 use async_nats::{
     Client as NatsClient, PublishError as NatsPublishError,
-    PublishErrorKind as NatsPublishErrorKind,
+    PublishErrorKind as NatsPublishErrorKind, Subject,
     jetstream::{
         Context as NatsJetStream,
         context::{PublishError as JetStreamPublishError, PublishErrorKind},
         publish::PublishAck,
     },
+    message::OutboundMessage,
 };
-use futures_util::FutureExt;
+use futures_util::{FutureExt, SinkExt};
 
 use super::*;
 
@@ -17,6 +18,7 @@ pub(in crate::runtime) struct NatsEmitter {
     client: Option<NatsClient>,
     jetstream: Option<NatsJetStream>,
     mode: NatsPublishingMode,
+    subject: Subject,
 }
 
 type NatsConfirmation =
@@ -33,6 +35,7 @@ impl NatsEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientNats,
         resolved: Option<&ResolvedClientConfig>,
+        subject: &Identifier,
         mode: NatsPublishingMode,
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<Self> {
@@ -61,6 +64,7 @@ impl NatsEmitter {
             client: Some(client),
             jetstream,
             mode,
+            subject: Subject::from(subject.as_str().to_string()),
         })
     }
 
@@ -128,74 +132,17 @@ impl NatsEmitter {
         delay
     }
 
-    pub(in crate::runtime) async fn publish(
-        &mut self,
-        subject: &Identifier,
-        payload: &[u8],
-        headers: &EmitterHeaders,
-    ) -> EmitterRuntimeResult<()> {
-        let Some(client) = self.client.as_mut() else {
-            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("no initialized nats sink client"));
-        };
-        if let NatsPublishingMode::JetStream { .. } = self.mode {
-            let Some(jetstream) = self.jetstream.as_ref() else {
-                return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                    .attach_printable("no initialized NATS JetStream context"));
-            };
-            let confirmation = if headers.is_empty() {
-                jetstream
-                    .publish(subject.as_str().to_string(), payload.to_vec().into())
-                    .await
-            } else {
-                jetstream
-                    .publish_with_headers(
-                        subject.as_str().to_string(),
-                        Self::header_map(headers),
-                        payload.to_vec().into(),
-                    )
-                    .await
-            }
-            .map_err(emitter_publish_error)?;
-            confirmation
-                .await
-                .map(|_| ())
-                .map_err(emitter_publish_error)
-        } else if headers.is_empty() {
-            client
-                .publish(subject.as_str().to_string(), payload.to_vec().into())
-                .await
-                .map_err(emitter_publish_error)?;
-            client.flush().await.map_err(emitter_publish_error)
-        } else {
-            client
-                .publish_with_headers(
-                    subject.as_str().to_string(),
-                    Self::header_map(headers),
-                    payload.to_vec().into(),
-                )
-                .await
-                .map_err(emitter_publish_error)?;
-            client.flush().await.map_err(emitter_publish_error)
-        }
-    }
-
     pub(super) async fn publish_records(
         &self,
-        subject: &Identifier,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         match self.mode {
-            NatsPublishingMode::Core => self.publish_core(subject, records).await,
-            NatsPublishingMode::JetStream { .. } => self.publish_jetstream(subject, records).await,
+            NatsPublishingMode::Core => self.publish_core(records).await,
+            NatsPublishingMode::JetStream { .. } => self.publish_jetstream(records).await,
         }
     }
 
-    async fn publish_core(
-        &self,
-        subject: &Identifier,
-        records: Vec<EncodedBrokerRecord>,
-    ) -> PerRecordPublishOutcome {
+    async fn publish_core(&self, records: Vec<EncodedBrokerRecord>) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
         let Some(client) = self.client.as_ref() else {
             outcome.fail(
@@ -204,6 +151,7 @@ impl NatsEmitter {
             );
             return outcome;
         };
+        let mut sink = client.clone();
         let mut queued: Vec<(BrokerRecordPosition, AckSet)> = Vec::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
@@ -214,22 +162,21 @@ impl NatsEmitter {
                     .chain(std::iter::once(record.acks.clone())),
             );
             let position = (record.batch_index, record.row_index);
-            let publish = async {
-                if record.headers.is_empty() {
-                    client
-                        .publish(subject.as_str().to_string(), record.payload.into())
-                        .await
-                } else {
-                    client
-                        .publish_with_headers(
-                            subject.as_str().to_string(),
-                            Self::header_map(&record.headers),
-                            record.payload.into(),
-                        )
-                        .await
-                }
+            let headers = if record.headers.is_empty() {
+                None
+            } else {
+                Some(Self::header_map(&record.headers))
             };
-            let result = await_emitter_confirmation(&publish_acks, publish).await;
+            let result = await_emitter_confirmation(
+                &publish_acks,
+                sink.feed(OutboundMessage {
+                    subject: self.subject.clone(),
+                    reply: None,
+                    payload: record.payload.into(),
+                    headers,
+                }),
+            )
+            .await;
             match result {
                 Ok(()) => queued.push((position, record.acks)),
                 Err(error) if Self::is_core_record_rejection(&error) => {
@@ -242,7 +189,7 @@ impl NatsEmitter {
             }
         }
         let queued_acks = AckSet::merged(queued.iter().map(|(_, acks)| acks.clone()));
-        match await_emitter_confirmation(&queued_acks, client.flush()).await {
+        match await_emitter_confirmation(&queued_acks, SinkExt::flush(&mut sink)).await {
             Ok(()) => outcome
                 .delivered
                 .extend(queued.into_iter().map(|(position, _)| position)),
@@ -253,7 +200,6 @@ impl NatsEmitter {
 
     async fn publish_jetstream(
         &self,
-        subject: &Identifier,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -285,12 +231,12 @@ impl NatsEmitter {
             let publish = async {
                 if record.headers.is_empty() {
                     jetstream
-                        .publish(subject.as_str().to_string(), record.payload.into())
+                        .publish(self.subject.clone(), record.payload.into())
                         .await
                 } else {
                     jetstream
                         .publish_with_headers(
-                            subject.as_str().to_string(),
+                            self.subject.clone(),
                             Self::header_map(&record.headers),
                             record.payload.into(),
                         )

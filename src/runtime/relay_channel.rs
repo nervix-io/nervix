@@ -1,10 +1,14 @@
 use std::{
+    collections::BTreeMap,
     num::NonZeroUsize,
+    pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
+    task::{Context, Poll},
 };
 
 use async_broadcast::{
     InactiveReceiver, Receiver as AsyncBroadcastReceiver, RecvError, SendError, Sender,
+    TryRecvError,
 };
 use parking_lot::Mutex;
 use tokio::{
@@ -24,18 +28,41 @@ pub(crate) struct RelayDispatchGate {
 #[derive(Debug, Default)]
 struct RelayDispatchGateState {
     generation: u64,
-    engagement: Option<RelayDispatchGateEngagement>,
+    engagements: BTreeMap<u64, RelayDispatchGateEngagement>,
+    in_flight_dispatches: usize,
 }
 
 #[derive(Debug)]
 struct RelayDispatchGateEngagement {
-    deadline: Instant,
+    phase: RelayDispatchGateEngagementPhase,
     reason: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RelayDispatchGateToken {
+#[derive(Debug, Clone, Copy)]
+enum RelayDispatchGateEngagementPhase {
+    Fencing { deadline: Instant },
+    Leased,
+}
+
+/// Owns one dispatch-gate engagement from fence acquisition through the protected mutation.
+///
+/// The deadline only bounds acquisition of the fence. Once [`Self::wait_quiescent`] succeeds, the
+/// gate remains closed until this lease is explicitly released or dropped, even when the original
+/// fence deadline passes.
+#[derive(Debug)]
+pub(crate) struct RelayDispatchGateLease {
+    gate: Arc<RelayDispatchGate>,
     generation: u64,
+}
+
+/// Proof that one relay dispatch entered before the current gate engagements.
+///
+/// Acquiring a permit and engaging the gate are serialized by the gate state lock. Once an
+/// engagement wins that ordering, no later dispatch can acquire a permit until the engagement is
+/// released. Dropping every permit that won before it completes the engagement fence.
+#[derive(Debug)]
+pub(crate) struct RelayDispatchPermit<'gate> {
+    gate: &'gate RelayDispatchGate,
 }
 
 impl RelayDispatchGate {
@@ -47,34 +74,101 @@ impl RelayDispatchGate {
         }
     }
 
-    pub(crate) fn engage(
-        &self,
-        deadline: Instant,
-        reason: impl Into<String>,
-    ) -> RelayDispatchGateToken {
+    pub(super) fn engage(&self, deadline: Instant, reason: impl Into<String>) -> u64 {
         let mut state = self.state.lock();
-        state.generation = state.generation.wrapping_add(1);
-        let token = RelayDispatchGateToken {
-            generation: state.generation,
-        };
-        state.engagement = Some(RelayDispatchGateEngagement {
-            deadline,
-            reason: reason.into(),
-        });
-        self.closed.store(true, Ordering::Release);
-        self.changed.notify_waiters();
-        token
-    }
-
-    pub(crate) fn release(&self, token: RelayDispatchGateToken) {
-        let mut state = self.state.lock();
-        if state.generation != token.generation || state.engagement.is_none() {
-            return;
+        loop {
+            state.generation = state.generation.wrapping_add(1);
+            if !state.engagements.contains_key(&state.generation) {
+                break;
+            }
         }
-        state.engagement = None;
-        self.closed.store(false, Ordering::Release);
+        let generation = state.generation;
+        state.engagements.insert(
+            generation,
+            RelayDispatchGateEngagement {
+                phase: RelayDispatchGateEngagementPhase::Fencing { deadline },
+                reason: reason.into(),
+            },
+        );
+        self.closed.store(true, Ordering::Release);
         drop(state);
         self.changed.notify_waiters();
+        generation
+    }
+
+    pub(super) fn release(&self, generation: u64) {
+        let mut state = self.state.lock();
+        if state.engagements.remove(&generation).is_none() {
+            return;
+        }
+        self.closed
+            .store(!state.engagements.is_empty(), Ordering::Release);
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) async fn acquire_dispatch(&self) -> RelayDispatchPermit<'_> {
+        loop {
+            tokio::task::consume_budget().await;
+            self.clear_if_expired();
+            let changed = self.changed.notified();
+            let deadline = {
+                let mut state = self.state.lock();
+                if state.engagements.is_empty() {
+                    state.in_flight_dispatches = state.in_flight_dispatches.saturating_add(1);
+                    return RelayDispatchPermit { gate: self };
+                }
+                state
+                    .engagements
+                    .values()
+                    .filter_map(RelayDispatchGateEngagement::fence_deadline)
+                    .min()
+            };
+            if let Some(deadline) = deadline {
+                if timeout_at(deadline, changed).await.is_err() {
+                    self.clear_if_expired();
+                }
+            } else {
+                changed.await;
+            }
+        }
+    }
+
+    /// Waits for all dispatch permits acquired before `generation` was engaged to be dropped.
+    ///
+    /// `false` means this engagement was released or reached its deadline before the fence
+    /// completed. Callers must not tear down relay consumers when the fence did not complete.
+    async fn wait_quiescent(&self, generation: u64) -> bool {
+        loop {
+            tokio::task::consume_budget().await;
+            self.clear_if_expired();
+            let changed = self.changed.notified();
+            let deadline = {
+                let mut state = self.state.lock();
+                let in_flight_dispatches = state.in_flight_dispatches;
+                let Some(engagement) = state.engagements.get_mut(&generation) else {
+                    return false;
+                };
+                match engagement.phase {
+                    RelayDispatchGateEngagementPhase::Leased => return true,
+                    RelayDispatchGateEngagementPhase::Fencing { deadline } => {
+                        if Instant::now() >= deadline {
+                            drop(state);
+                            self.clear_if_expired();
+                            return false;
+                        }
+                        if in_flight_dispatches == 0 {
+                            engagement.phase = RelayDispatchGateEngagementPhase::Leased;
+                            return true;
+                        }
+                        deadline
+                    }
+                }
+            };
+            if timeout_at(deadline, changed).await.is_err() {
+                self.clear_if_expired();
+            }
+        }
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -89,22 +183,26 @@ impl RelayDispatchGate {
         loop {
             tokio::task::consume_budget().await;
             let changed = self.changed.notified();
-            let Some((generation, deadline)) = ({
+            let (is_open, deadline) = {
                 let state = self.state.lock();
-                state
-                    .engagement
-                    .as_ref()
-                    .map(|engagement| (state.generation, engagement.deadline))
-            }) else {
-                self.closed.store(false, Ordering::Release);
-                return;
+                (
+                    state.engagements.is_empty(),
+                    state
+                        .engagements
+                        .values()
+                        .filter_map(RelayDispatchGateEngagement::fence_deadline)
+                        .min(),
+                )
             };
-            if Instant::now() >= deadline {
-                self.clear_generation_if_expired(generation);
+            if is_open {
                 return;
             }
-            if timeout_at(deadline, changed).await.is_err() {
-                self.clear_generation_if_expired(generation);
+            if let Some(deadline) = deadline {
+                if timeout_at(deadline, changed).await.is_err() {
+                    self.clear_if_expired();
+                }
+            } else {
+                changed.await;
             }
             if !self.closed.load(Ordering::Acquire) {
                 return;
@@ -131,51 +229,98 @@ impl RelayDispatchGate {
         self.clear_if_expired();
         self.state
             .lock()
-            .engagement
-            .as_ref()
+            .engagements
+            .last_key_value()
+            .map(|(_, engagement)| engagement)
             .map(|engagement| engagement.reason.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_flight_dispatches(&self) -> usize {
+        self.state.lock().in_flight_dispatches
     }
 
     fn clear_if_expired(&self) {
         if !self.closed.load(Ordering::Acquire) {
             return;
         }
-        let generation = {
-            let state = self.state.lock();
-            state.engagement.as_ref().and_then(|engagement| {
-                (Instant::now() >= engagement.deadline).then_some(state.generation)
-            })
-        };
-        if let Some(generation) = generation {
-            self.clear_generation_if_expired(generation);
-        }
-    }
-
-    fn clear_generation_if_expired(&self, generation: u64) {
+        let now = Instant::now();
         let mut state = self.state.lock();
-        let should_clear = state.generation == generation
-            && state
-                .engagement
-                .as_ref()
-                .is_some_and(|engagement| Instant::now() >= engagement.deadline);
-        if !should_clear {
+        let expired = state
+            .engagements
+            .iter()
+            .filter_map(|(generation, engagement)| {
+                engagement
+                    .fence_deadline()
+                    .is_some_and(|deadline| now >= deadline)
+                    .then_some((*generation, engagement.reason.clone()))
+            })
+            .collect::<Vec<_>>();
+        if expired.is_empty() {
             return;
         }
-        let reason = state
-            .engagement
-            .take()
-            .map(|engagement| engagement.reason)
-            .unwrap_or_default();
-        self.closed.store(false, Ordering::Release);
+        for (generation, _) in &expired {
+            state.engagements.remove(generation);
+        }
+        self.closed
+            .store(!state.engagements.is_empty(), Ordering::Release);
         drop(state);
-        debug!(reason, "relay dispatch gate deadline expired; reopening");
+        for (_, reason) in expired {
+            debug!(reason, "relay dispatch gate fence deadline expired");
+        }
         self.changed.notify_waiters();
+    }
+}
+
+impl RelayDispatchGateEngagement {
+    fn fence_deadline(&self) -> Option<Instant> {
+        match self.phase {
+            RelayDispatchGateEngagementPhase::Fencing { deadline } => Some(deadline),
+            RelayDispatchGateEngagementPhase::Leased => None,
+        }
+    }
+}
+
+impl RelayDispatchGateLease {
+    pub(crate) fn engage(
+        gate: Arc<RelayDispatchGate>,
+        deadline: Instant,
+        reason: impl Into<String>,
+    ) -> Self {
+        let generation = gate.engage(deadline, reason);
+        Self { gate, generation }
+    }
+
+    pub(crate) async fn wait_quiescent(&mut self) -> bool {
+        self.gate.wait_quiescent(self.generation).await
+    }
+}
+
+impl Drop for RelayDispatchGateLease {
+    fn drop(&mut self) {
+        self.gate.release(self.generation);
     }
 }
 
 impl Default for RelayDispatchGate {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for RelayDispatchPermit<'_> {
+    fn drop(&mut self) {
+        let mut state = self.gate.state.lock();
+        debug_assert!(
+            state.in_flight_dispatches > 0,
+            "relay dispatch permit count underflow"
+        );
+        state.in_flight_dispatches = state.in_flight_dispatches.saturating_sub(1);
+        let quiescent = state.in_flight_dispatches == 0;
+        drop(state);
+        if quiescent {
+            self.gate.changed.notify_waiters();
+        }
     }
 }
 
@@ -190,25 +335,35 @@ mod gate_tests {
     use std::time::Duration;
 
     use tokio::time::Instant;
+    use triomphe::Arc;
 
-    use super::RelayDispatchGate;
+    use super::{RelayDispatchGate, RelayDispatchGateLease};
+
+    fn engage(
+        gate: &Arc<RelayDispatchGate>,
+        deadline: Instant,
+        reason: &str,
+    ) -> RelayDispatchGateLease {
+        RelayDispatchGateLease::engage(gate.clone(), deadline, reason)
+    }
 
     #[tokio::test]
     async fn relay_dispatch_gate_releases_waiters_explicitly() {
-        let gate = RelayDispatchGate::new();
-        let token = gate.engage(Instant::now() + Duration::from_secs(1), "node swap");
+        let gate = Arc::new(RelayDispatchGate::new());
+        let lease = engage(&gate, Instant::now() + Duration::from_secs(1), "node swap");
         assert!(gate.is_closed());
         assert_eq!(gate.reason().as_deref(), Some("node swap"));
 
-        gate.release(token);
+        drop(lease);
         gate.wait_open().await;
         assert!(!gate.is_closed());
     }
 
     #[tokio::test]
     async fn relay_dispatch_gate_self_clears_at_its_deadline() {
-        let gate = RelayDispatchGate::new();
-        gate.engage(
+        let gate = Arc::new(RelayDispatchGate::new());
+        let _lease = engage(
+            &gate,
             Instant::now() + Duration::from_millis(10),
             "leader may fail",
         );
@@ -219,14 +374,161 @@ mod gate_tests {
 
     #[tokio::test]
     async fn stale_gate_hold_cannot_release_a_new_engagement() {
-        let gate = RelayDispatchGate::new();
-        let stale = gate.engage(Instant::now() + Duration::from_secs(1), "first");
-        let current = gate.engage(Instant::now() + Duration::from_secs(1), "second");
+        let gate = Arc::new(RelayDispatchGate::new());
+        let stale = engage(&gate, Instant::now() + Duration::from_secs(1), "first");
+        let current = engage(&gate, Instant::now() + Duration::from_secs(1), "second");
 
-        gate.release(stale);
+        drop(stale);
         assert!(gate.is_closed());
         assert_eq!(gate.reason().as_deref(), Some("second"));
-        gate.release(current);
+        drop(current);
+        assert!(!gate.is_closed());
+    }
+
+    #[tokio::test]
+    async fn gate_engagement_waits_for_pre_engagement_dispatch_to_finish() {
+        let gate = Arc::new(RelayDispatchGate::new());
+        let permit = gate.acquire_dispatch().await;
+        let mut lease = engage(
+            &gate,
+            Instant::now() + Duration::from_secs(1),
+            "graceful entity stop",
+        );
+
+        let quiescent = tokio::spawn(async move { lease.wait_quiescent().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !quiescent.is_finished(),
+            "engagement must fence a dispatch that already acquired its permit"
+        );
+
+        drop(permit);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), quiescent)
+                .await
+                .expect("dispatch completion should wake the gate fence")
+                .expect("gate fence task should join")
+        );
+    }
+
+    #[tokio::test]
+    async fn engaged_gate_prevents_new_dispatch_until_release() {
+        let gate = Arc::new(RelayDispatchGate::new());
+        let mut lease = engage(
+            &gate,
+            Instant::now() + Duration::from_secs(1),
+            "graceful entity stop",
+        );
+        assert!(lease.wait_quiescent().await);
+
+        let dispatch = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                let _permit = gate.acquire_dispatch().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !dispatch.is_finished(),
+            "dispatches that arrive after engagement must remain outside the fence"
+        );
+
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("gate release should admit the waiting dispatch")
+            .expect("dispatch task should join");
+    }
+
+    #[tokio::test]
+    async fn canceled_dispatch_releases_gate_fence_permit() {
+        let gate = Arc::new(RelayDispatchGate::new());
+        let dispatch = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                let _permit = gate.acquire_dispatch().await;
+                std::future::pending::<()>().await;
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gate.in_flight_dispatches() == 0 {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatch should acquire its permit");
+
+        let mut lease = engage(
+            &gate,
+            Instant::now() + Duration::from_secs(1),
+            "graceful entity stop",
+        );
+        dispatch.abort();
+        let _ = dispatch.await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), lease.wait_quiescent())
+                .await
+                .expect("canceling dispatch should drop its permit")
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_engagement_does_not_report_a_completed_fence() {
+        let gate = Arc::new(RelayDispatchGate::new());
+        let _permit = gate.acquire_dispatch().await;
+        let mut lease = engage(
+            &gate,
+            Instant::now() + Duration::from_millis(10),
+            "graceful entity stop",
+        );
+
+        assert!(!lease.wait_quiescent().await);
+        assert!(!gate.is_closed());
+    }
+
+    #[tokio::test]
+    async fn acquired_gate_lease_outlives_its_fence_deadline() {
+        let gate = Arc::new(RelayDispatchGate::new());
+        let deadline = Instant::now() + Duration::from_millis(10);
+        let mut lease = engage(&gate, deadline, "slow node swap");
+        assert!(lease.wait_quiescent().await);
+
+        tokio::time::sleep_until(deadline + Duration::from_millis(10)).await;
+        assert!(gate.is_closed());
+
+        let dispatch = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                let _permit = gate.acquire_dispatch().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !dispatch.is_finished(),
+            "the acquisition deadline must not reopen an owned gate lease"
+        );
+
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("dropping the gate lease should admit dispatch")
+            .expect("dispatch task should join");
+    }
+
+    #[tokio::test]
+    async fn overlapping_gate_leases_must_all_release_before_dispatch_resumes() {
+        let gate = Arc::new(RelayDispatchGate::new());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut first = engage(&gate, deadline, "first node swap");
+        let mut second = engage(&gate, deadline, "second node swap");
+        assert!(first.wait_quiescent().await);
+        assert!(second.wait_quiescent().await);
+
+        drop(second);
+        assert!(gate.is_closed());
+        drop(first);
         assert!(!gate.is_closed());
     }
 }
@@ -357,6 +659,7 @@ impl<T: Clone> RelayBroadcast<T> {
 
     async fn publish_permit(&self) -> RelayPublishPermit<T> {
         loop {
+            tokio::task::consume_budget().await;
             let changed = self.inner.changed.notified();
             {
                 let mut control = self.inner.control.lock();
@@ -435,6 +738,26 @@ impl<T: Clone> RelayReceiver<T> {
             self.inner.maintain_dirty_capacity();
         }
         result
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        let result = self.receiver.try_recv();
+        if result.is_ok() {
+            self.inner.maintain_dirty_capacity();
+        }
+        result
+    }
+
+    pub(crate) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<T, RecvError>>> {
+        let result = Pin::new(&mut self.receiver).poll_recv(cx);
+        if let Poll::Ready(Some(Ok(_))) = &result {
+            self.inner.maintain_dirty_capacity();
+        }
+        result
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.receiver.len()
     }
 }
 
@@ -560,6 +883,7 @@ mod tests {
 
     async fn wait_for_waiting_publishers(channel: &RelayBroadcast<i32>, expected: usize) {
         for _ in 0..100 {
+            tokio::task::consume_budget().await;
             if channel.inner.control.lock().waiting_publishers == expected {
                 return;
             }

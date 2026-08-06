@@ -315,10 +315,13 @@ TO KAFKA <client> TOPIC <topic>
 
 `ACK` waits for every record's delivery report. Kafka's `acks`, idempotence, batching, linger, and
 compression remain pass-through client configuration; Nervix's `ACK TIMEOUT` independently bounds
-the report wait. `NO_ACK` acknowledges on local producer-queue acceptance and can lose accepted
-records on a crash or broker failure. A full local queue is infrastructure backpressure. Graceful
-shutdown drains queued records within the node drain bound in both modes. A definitive
-record-specific rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
+the report wait. `NO_ACK` is fire-and-forget after local admission: Nervix acknowledges the
+emitter's `ATTACHED` ACK share when librdkafka accepts the record into its producer queue and does
+not wait for a delivery report. A later broker error, producer timeout, crash, or process exit can
+therefore lose an accepted record. A full local queue is an infrastructure condition paced by the
+declared retry policy with backpressure. Graceful shutdown drains queued records within the node
+drain bound in both modes. A definitive record-specific rejection, such as an oversized message,
+follows `ON MESSAGE ERROR`.
 
 ### Pulsar
 
@@ -797,13 +800,14 @@ observable duplicate and loss behavior produced by the source delivery mode, the
 publishing `MODE`, its attachment, and the external service. They are not the ACK mechanics of any
 one hop.
 
-Publishing mode determines when the emitter itself considers a record delivered. Attachment
-determines whether that outcome participates in the upstream ACK chain:
+Publishing `MODE` selects the sink completion point at which the emitter considers a record
+delivered. Attachment determines whether that outcome participates in the upstream ACK chain:
 
-- `ATTACHED`: downstream emitter success or failure stays part of the upstream ACK chain.
+- `ATTACHED`: emitter success or failure at the selected sink completion point stays part of the
+  upstream ACK chain.
 - `DETACHED`: relay fan-out acknowledges upstream immediately. The emitter still waits for its
   declared confirmations, applies its retry policy, error-routes record failures, and exerts local
-  backpressure, but that outcome cannot delay or fail the source ACK.
+  backpressure, but that outcome cannot delay, retry, or fail the source ACK.
 
 Confirming broker modes and request/response `ACK` modes are at least once. A confirmation timeout
 or lost response is not proof that the service rejected a record, so retry can duplicate it. The
@@ -814,18 +818,41 @@ after a crash or downstream failure. External broker durability and idempotence 
 the user's client and service configuration.
 
 When one source record reaches multiple emitters or multiple attached routes, the upstream ACK
-completes only after every attached downstream delivery completes. A failure on any attached path
-reopens source retry for the record on all paths. A sink that already published successfully may
-therefore receive the record again because a sibling sink failed. This applies to every sink
-without idempotent writes. Iceberg is the canonical case: rows can be appended to the table again
-after a sibling emitter fails.
+completes only after every attached emitter reaches its sink completion point. A failure on any
+attached path reopens source retry for the record on all paths. A sink that already published
+successfully may therefore receive the record again because a sibling sink failed. This applies to
+every sink without idempotent writes. Iceberg is the canonical case: rows can be appended to the
+table again after a sibling emitter fails.
 
 This sibling-retry case assumes a source mode that retries when an attached ACK fails or is lost. A
 no-ACK source cannot create that retry duplicate, but it can lose the record instead.
 
+Every `DETACHED` path has a common loss window: a process can fail after relay fan-out acknowledges
+upstream but before the emitter reaches its declared sink completion point. The table below calls
+out the additional mode- and transport-specific duplicate and loss conditions.
+
+| Sink | Duplicate conditions (`ATTACHED`) | Additional loss conditions | Idempotency available in Nervix |
+| --- | --- | --- | --- |
+| Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO_ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
+| Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO_ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
+| NATS | JetStream retry after an ambiguous `PubAck`; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO_ACK` connection flush is not durable stream acknowledgement | None |
+| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; either mode after a lost upstream ACK or attached sibling failure | `NO_ACK` can lose a record after channel acceptance; queue durability and message persistence remain broker policy | None |
+| SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
+| MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
+| Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
+| ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
+| Sentry | Retry after an ambiguous HTTP result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
+| ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |
+| Postgres | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
+| MySQL | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
+| MongoDB | Retry after an ambiguous write result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed write can survive a crash before Nervix observes success | `ON CONFLICT` |
+| Iceberg | Retry after a commit with a lost ACK or attached sibling failure; appends repeat rows | Crash before catalog commit loses staged work unless the attached source redelivers; detached mode accepts that loss | None; appends are not idempotent |
+
 The [publishing-mode table](#publishing-modes) names each transport's exact completion point.
-`ATTACHED` cannot make an earlier `NO_ACK` boundary durable, and `DETACHED` cannot turn a
-confirming mode into fire-and-forget inside the emitter.
+`ATTACHED` waits only for that declared point and cannot make an earlier `NO_ACK` boundary durable.
+MQTT QoS 0, Core NATS, RabbitMQ `NO_ACK`, Redis Pub/Sub, and ZeroMQ can still lose a message after
+Nervix observes client-side acceptance. `DETACHED` cannot turn a confirming mode into
+fire-and-forget inside the emitter; it changes only whether the result participates upstream.
 
 Emit a stable idempotency key at ingestion, for example with `uuid_v7()`, and carry it through the
 graph. Downstream consumers and queries can use that key to suppress retries within that admitted

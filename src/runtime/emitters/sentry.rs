@@ -14,7 +14,8 @@ const SENTRY_RATE_LIMITS_HEADER: &str = "x-sentry-rate-limits";
 
 pub(in crate::runtime) struct SentryEmitter {
     client: Option<HttpClient>,
-    dsn: Dsn,
+    envelope_url: url::Url,
+    auth: HeaderValue,
 }
 
 impl SentryEmitter {
@@ -33,34 +34,30 @@ impl SentryEmitter {
         let client = HttpClientConfig::new(config, "Sentry")
             .build()
             .map_err(emitter_config_error)?;
+        let envelope_url = dsn.envelope_api_url();
+        let auth = HeaderValue::from_str(&dsn.to_auth(Some(SENTRY_CLIENT_AGENT)).to_string())
+            .map_err(|error| {
+                emitter_config_error(format!("invalid Sentry authentication header: {error}"))
+            })?;
         Ok(Self {
             client: Some(client),
-            dsn,
+            envelope_url,
+            auth,
         })
     }
 
     pub(super) async fn publish(
-        &mut self,
+        &self,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
-        let Some(client) = self.client.as_mut() else {
+        let Some(client) = self.client.as_ref() else {
             outcome.fail(
                 Report::new(EmitterRuntimeError::SinkNotInitialized)
                     .attach_printable("no initialized Sentry sink client"),
             );
             return outcome;
         };
-        let auth =
-            match HeaderValue::from_str(&self.dsn.to_auth(Some(SENTRY_CLIENT_AGENT)).to_string()) {
-                Ok(auth) => auth,
-                Err(error) => {
-                    outcome.fail(emitter_config_error(format!(
-                        "invalid Sentry authentication header: {error}"
-                    )));
-                    return outcome;
-                }
-            };
 
         for record in records {
             tokio::task::consume_budget().await;
@@ -73,8 +70,8 @@ impl SentryEmitter {
                 }
             };
             let request = client
-                .post(self.dsn.envelope_api_url())
-                .header(SENTRY_AUTH_HEADER, auth.clone())
+                .post(self.envelope_url.clone())
+                .header(SENTRY_AUTH_HEADER, self.auth.clone())
                 .header(CONTENT_TYPE, SENTRY_ENVELOPE_CONTENT_TYPE)
                 .body(body)
                 .send();

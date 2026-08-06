@@ -74,17 +74,22 @@ impl RedisEmitter {
         }
     }
 
-    pub(in crate::runtime) async fn publish(
-        &mut self,
+    pub(in crate::runtime) async fn publish_chunk(
+        &self,
         channel: &Identifier,
-        payload: &[u8],
+        payloads: Vec<Vec<u8>>,
     ) -> EmitterRuntimeResult<()> {
-        let Some(connection) = self.connection.as_mut() else {
+        let Some(connection) = self.connection.as_ref() else {
             return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
                 .attach_printable("no initialized redis sink client"));
         };
-        let _: i64 = connection
-            .publish(channel.as_str(), payload)
+        let mut connection = connection.clone();
+        let mut pipeline = ::redis::Pipeline::with_capacity(payloads.len());
+        for payload in payloads {
+            pipeline.cmd("PUBLISH").arg(channel.as_str()).arg(payload);
+        }
+        let _: Vec<i64> = pipeline
+            .query_async(&mut connection)
             .await
             .map_err(emitter_publish_error)?;
         Ok(())

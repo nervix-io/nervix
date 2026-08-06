@@ -1,0 +1,16 @@
+[package]
+edition.workspace = true
+name = "nervix-test-environment"
+publish = false
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+testcontainers = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }

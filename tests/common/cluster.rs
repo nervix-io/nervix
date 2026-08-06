@@ -28,10 +28,7 @@ use nervix_server::SchedulerMode;
 use nervix_server::{
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
-    runtime::{
-        DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks,
-        SchedulePublicationFaultInjector,
-    },
+    runtime::{DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks},
 };
 use parking_lot::Mutex;
 use proto::{
@@ -72,7 +69,7 @@ use tokio::{
 use tokio_rustls::TlsConnector;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_tungstenite::{
-    client_async, connect_async,
+    WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
 use tokio_util::sync::CancellationToken;
@@ -466,15 +463,19 @@ impl Cluster {
     pub(crate) async fn start_with_config(
         node_count: usize,
         runtime_test_hooks: RuntimeTestHooks,
-        mut config: TestClusterConfig,
+        config: TestClusterConfig,
     ) -> io::Result<Self> {
         assert!(node_count >= 1, "cluster must contain at least one node");
         #[cfg(feature = "testing")]
-        config.scheduler_mode.get_or_insert(if node_count == 3 {
-            SchedulerMode::Random
-        } else {
-            SchedulerMode::Sticky
-        });
+        let config = {
+            let mut config = config;
+            config.scheduler_mode.get_or_insert(if node_count == 3 {
+                SchedulerMode::Random
+            } else {
+                SchedulerMode::Sticky
+            });
+            config
+        };
         truncate_test_log_once()?;
         init_tracing_to_file(std::path::Path::new(TEST_LOG_FILE))?;
         let root_dir = tempdir()?;
@@ -1096,6 +1097,14 @@ impl Cluster {
         wait_for_nats_stream_payload(&self.dependencies, stream, subject, expected).await
     }
 
+    pub(crate) async fn publish_nats_payloads(
+        &self,
+        subject: &str,
+        payloads: &[String],
+    ) -> io::Result<()> {
+        publish_nats_payloads(&self.dependencies, subject, payloads).await
+    }
+
     pub(crate) async fn publish_nats_with_headers(
         &self,
         subject: &str,
@@ -1127,7 +1136,7 @@ impl Cluster {
         publish_websocket(&handle.spec, host, path, payload).await
     }
 
-    pub(crate) async fn exchange_websocket_text(
+    pub(crate) async fn exchange_websocket(
         &self,
         node_id: &str,
         host: &str,
@@ -1138,7 +1147,7 @@ impl Cluster {
             .nodes
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        exchange_websocket_text(&handle.spec, host, path, actions).await
+        exchange_websocket(&handle.spec, host, path, actions).await
     }
 
     pub(crate) async fn publish_secure_websocket(
@@ -1266,12 +1275,6 @@ impl Cluster {
     pub(crate) fn clear_emitter_fault_on_all_nodes(&self, emitter: &str) {
         for handle in self.nodes.values() {
             handle.clear_emitter_fault(emitter);
-        }
-    }
-
-    pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
-        for handle in self.nodes.values() {
-            handle.fail_next_schedule_publication(domain);
         }
     }
 
@@ -1435,6 +1438,7 @@ impl Cluster {
         metric_name: &str,
         label_fragments: &[String],
         expected_value: i64,
+        wait: Option<Duration>,
     ) -> io::Result<()> {
         let handle = self
             .nodes
@@ -1442,41 +1446,45 @@ impl Cluster {
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         let url = format!("http://{}/metrics", handle.spec.observability_addr());
         let client = reqwest::Client::new();
-        let start = Instant::now();
         let mut last_response = None;
         let mut last_error = None;
         let mut last_matching_lines = Vec::new();
+        let deadline = Instant::now() + wait.unwrap_or(STATUS_TIMEOUT);
 
-        while start.elapsed() < STATUS_TIMEOUT {
+        while Instant::now() < deadline {
             tokio::task::consume_budget().await;
-            match client.get(&url).send().await {
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    match response.text().await {
-                        Ok(body) => {
-                            if status == 200
-                                && observability_metric_has_value(
-                                    &body,
-                                    metric_name,
-                                    label_fragments,
-                                    expected_value,
-                                    &mut last_matching_lines,
-                                )
-                            {
-                                return Ok(());
-                            }
-                            last_response = Some((status, body));
-                        }
-                        Err(error) => {
-                            last_error = Some(io::Error::other(error));
-                        }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let response = timeout(remaining, async {
+                let response = client.get(&url).send().await?;
+                let status = response.status().as_u16();
+                response.text().await.map(|body| (status, body))
+            })
+            .await;
+            match response {
+                Ok(Ok((status, body))) => {
+                    if status == 200
+                        && observability_metric_has_value(
+                            &body,
+                            metric_name,
+                            label_fragments,
+                            expected_value,
+                            &mut last_matching_lines,
+                        )
+                    {
+                        return Ok(());
                     }
+                    last_response = Some((status, body));
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     last_error = Some(io::Error::other(error));
                 }
+                Err(_) => break,
             }
-            sleep(POLL_INTERVAL).await;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            sleep(POLL_INTERVAL.min(remaining)).await;
         }
 
         let mut message = format!(
@@ -1678,7 +1686,6 @@ struct NodeHandle {
     config: TestClusterConfig,
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
-    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     failure: Arc<Mutex<Option<String>>>,
     task: Option<JoinHandle<()>>,
     shutdown: Option<CancellationToken>,
@@ -1692,14 +1699,12 @@ impl NodeHandle {
     ) -> Self {
         let emitter_faults = runtime_test_hooks.emitter_faults.clone();
         let ingestor_faults = runtime_test_hooks.ingestor_faults.clone();
-        let schedule_publication_faults = runtime_test_hooks.schedule_publication_faults.clone();
         Self {
             spec,
             runtime_test_hooks,
             config,
             emitter_faults,
             ingestor_faults,
-            schedule_publication_faults,
             failure: Arc::new(Mutex::new(None)),
             task: None,
             shutdown: None,
@@ -1905,11 +1910,6 @@ impl NodeHandle {
 
     fn clear_ingestor_fault(&self, ingestor: &str) {
         self.ingestor_faults.clear_ingestor(ingestor);
-    }
-
-    fn fail_next_schedule_publication(&self, domain: &str) {
-        self.schedule_publication_faults
-            .fail_next_publication(domain);
     }
 }
 
@@ -2145,9 +2145,13 @@ async fn publish_websocket(
 pub(crate) enum WebsocketExchangeAction {
     ExpectText(String),
     SendText(String),
+    ExpectBinary(Vec<u8>),
+    SendBinary(Vec<u8>),
+    ExpectClose,
+    ExpectSilence(Duration),
 }
 
-async fn exchange_websocket_text(
+async fn exchange_websocket(
     spec: &NodeSpec,
     host: &str,
     path: &str,
@@ -2165,14 +2169,10 @@ async fn exchange_websocket_text(
     for action in actions {
         match action {
             WebsocketExchangeAction::ExpectText(expected) => {
-                let message = timeout(
-                    Duration::from_secs(5),
-                    futures_util::StreamExt::next(&mut relay),
-                )
-                .await
-                .map_err(|_| io::Error::other("timed out waiting for websocket text frame"))?
-                .ok_or_else(|| io::Error::other("websocket closed before expected text frame"))?
-                .map_err(io::Error::other)?;
+                let message = next_exchange_message(&mut relay)
+                    .await?
+                    .ok_or_else(|| io::Error::other("websocket closed before expected text frame"))?
+                    .map_err(io::Error::other)?;
                 let WsMessage::Text(actual) = message else {
                     return Err(io::Error::other(format!(
                         "expected websocket text frame {expected:?}, got {message:?}"
@@ -2190,10 +2190,78 @@ async fn exchange_websocket_text(
                     .await
                     .map_err(io::Error::other)?;
             }
+            WebsocketExchangeAction::ExpectBinary(expected) => {
+                let message = next_exchange_message(&mut relay)
+                    .await?
+                    .ok_or_else(|| {
+                        io::Error::other("websocket closed before expected binary frame")
+                    })?
+                    .map_err(io::Error::other)?;
+                let WsMessage::Binary(actual) = message else {
+                    return Err(io::Error::other(format!(
+                        "expected websocket binary frame {expected:02x?}, got {message:?}"
+                    )));
+                };
+                if actual != *expected {
+                    return Err(io::Error::other(format!(
+                        "expected websocket binary frame {expected:02x?}, got {actual:02x?}"
+                    )));
+                }
+            }
+            WebsocketExchangeAction::SendBinary(payload) => {
+                relay
+                    .send(WsMessage::Binary(payload.clone()))
+                    .await
+                    .map_err(io::Error::other)?;
+            }
+            WebsocketExchangeAction::ExpectSilence(window) => {
+                // Proves a frame is withheld rather than merely delivered later: the peer must
+                // stay quiet for the whole window.
+                match timeout(*window, futures_util::StreamExt::next(&mut relay)).await {
+                    Err(_) => {}
+                    Ok(None) => {
+                        return Err(io::Error::other(
+                            "websocket closed while silence was expected",
+                        ));
+                    }
+                    Ok(Some(Ok(message))) => {
+                        return Err(io::Error::other(format!(
+                            "expected no websocket frame for {window:?}, got {message:?}"
+                        )));
+                    }
+                    Ok(Some(Err(error))) => return Err(io::Error::other(error)),
+                }
+            }
+            WebsocketExchangeAction::ExpectClose => {
+                // The server aborts a rejected session without a close handshake, so a
+                // transport error is as valid an outcome as a close frame or clean EOF.
+                match next_exchange_message(&mut relay).await? {
+                    None | Some(Ok(WsMessage::Close(_))) | Some(Err(_)) => {}
+                    Some(Ok(message)) => {
+                        return Err(io::Error::other(format!(
+                            "expected the websocket to close, got {message:?}"
+                        )));
+                    }
+                }
+                return Ok(());
+            }
         }
     }
     let _ = relay.close(None).await;
     Ok(())
+}
+
+type ExchangeMessage = Result<WsMessage, tokio_tungstenite::tungstenite::Error>;
+
+async fn next_exchange_message<S>(
+    relay: &mut WebSocketStream<S>,
+) -> io::Result<Option<ExchangeMessage>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    timeout(Duration::from_secs(5), futures_util::StreamExt::next(relay))
+        .await
+        .map_err(|_| io::Error::other("timed out waiting for a websocket frame"))
 }
 
 async fn publish_http(spec: &NodeSpec, host: &str, path: &str, payload: &str) -> io::Result<()> {
@@ -2409,8 +2477,17 @@ impl BrokerObserver {
         &mut self,
         duration: Duration,
     ) -> io::Result<Option<String>> {
+        self.try_next_message(duration)
+            .await
+            .map(|message| message.map(|message| message.payload))
+    }
+
+    pub(crate) async fn try_next_message(
+        &mut self,
+        duration: Duration,
+    ) -> io::Result<Option<BrokerMessage>> {
         match timeout(duration, self.payload_rx.recv()).await {
-            Ok(Some(message)) => Ok(Some(message.payload)),
+            Ok(Some(message)) => Ok(Some(message)),
             Ok(None) => Err(io::Error::other(
                 "broker observer closed before delivering payload",
             )),
@@ -3622,6 +3699,23 @@ async fn publish_nats(
     Ok(())
 }
 
+async fn publish_nats_payloads(
+    dependencies: &DependencyEndpoints,
+    subject: &str,
+    payloads: &[String],
+) -> io::Result<()> {
+    let client = nats_client(dependencies).await?;
+    let subject = async_nats::Subject::from(subject.to_string());
+    for payload in payloads {
+        tokio::task::consume_budget().await;
+        client
+            .publish(subject.clone(), payload.as_bytes().to_vec().into())
+            .await
+            .map_err(io::Error::other)?;
+    }
+    client.flush().await.map_err(io::Error::other)
+}
+
 async fn publish_nats_with_headers(
     dependencies: &DependencyEndpoints,
     subject: &str,
@@ -4030,10 +4124,30 @@ async fn observe_nats(
     let (payload_tx, payload_rx) = mpsc::channel(1);
 
     let task = tokio::spawn(async move {
-        if let Some(message) = subscriber.next().await {
+        while let Some(message) = subscriber.next().await {
             tokio::task::consume_budget().await;
             let payload = String::from_utf8_lossy(message.payload.as_ref()).to_string();
-            let _ = payload_tx.send(BrokerMessage::payload(payload)).await;
+            let headers = message
+                .headers
+                .as_ref()
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .flat_map(|(name, values)| {
+                            values
+                                .iter()
+                                .map(|value| (name.to_string(), value.as_str().to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if payload_tx
+                .send(BrokerMessage { payload, headers })
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     });
 

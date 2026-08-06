@@ -296,6 +296,10 @@ intervals and larger batches generally improve throughput at the cost of latency
 both values for the route's traffic, downstream behavior, and branch cardinality. Values in
 examples are illustrative, not recommended defaults.
 
+`MAX BATCH SIZE` measures the logical Arrow data in the current batch slice: value buffers plus
+the offsets and validity data needed to represent those values. It does not count unused buffer
+capacity or Rust and Arrow object overhead.
+
 `SET` assignments execute left to right and repeated targets are valid. A later assignment may read
 an earlier value through the bare field or `output.<field>`. `INHERIT ALL`, `INHERIT ALL EXCEPT
 ...`, and explicit `INHERIT field, ...` copy compatible same-named input fields. `UNSET` is not part
@@ -479,9 +483,16 @@ WebSocket clients and endpoints may also reference a signaling protocol:
 
 ```nspl,ignore
 CREATE [IF NOT EXISTS] SIGNALING PROTOCOL <name>
+  FORMAT JSON | YAML | TOML | XML | CBOR | RAW
+       | PROTOBUF USING RESOURCE <resource> [VERSION <version>]
+         CONFIG { '<key>' = '<value>' }
+         SEND MESSAGE '<message_type>' WAIT MESSAGE '<message_type>'
   ON CONNECT
-  SEND BODY '<text_body>'[, '<text_body>'...]
-  WAIT BODY '<text_body>'[, '<text_body>'...] TIMEOUT <duration>;
+  ( SEND JAQ '<program>'[, '<program>'...]
+  | WAIT JAQ '<matcher>'[, '<matcher>'...]
+  | WAIT JAQ '<matcher>' [CAPTURE '<program>'] [ACCEPT DATA] )+
+  [FAIL JAQ '<matcher>'[, '<matcher>'...]]
+  TIMEOUT <duration>;
 
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE WEBSOCKETS WITH SIGNALING PROTOCOL <name>
@@ -489,6 +500,21 @@ CREATE [IF NOT EXISTS] CLIENT <name>
     'endpoint' = 'wss://example.com/ws'
   };
 ```
+
+Each `SEND JAQ` program must produce exactly one value, which is serialized in the declared format.
+Each `WAIT JAQ` matcher is satisfied by any output that is neither `null` nor `false`, so it can
+assert the fields that matter and ignore the connection ids and timestamps real services add.
+`FAIL JAQ` matchers abort the handshake immediately with the matched value as the reason.
+
+Steps run strictly in written order: a step completes before the next starts, so a request can
+depend on an earlier reply. A `WAIT` step completes when every matcher it lists is satisfied, in any
+arrival order. `CAPTURE` records values from the matched frame, which every later program reads
+through `$state`.
+
+`ACCEPT DATA` says where payload starts flowing to the relay — on `ON CONNECT` for the first frame,
+or on the `WAIT` step whose completion proves the peer is streaming. Frames arriving before that are
+dropped rather than buffered. A `FAIL JAQ` guard on a step aborts during that step; the optional one
+before `ON CONNECT` applies throughout.
 
 Current built-in client transport kinds include:
 

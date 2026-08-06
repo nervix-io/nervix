@@ -911,7 +911,7 @@ Feature: Web console NSPL REPL
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG; CREATE INGESTOR auth_server_activity
-        FROM KAFKA kafka_auth TOPIC datalake_auth_activity OFFSET BY CONSUMER GROUP datalake_demo_auth INSTANCES 4 MODE NO_ACK PARALLEL MAX 1024
+        FROM KAFKA kafka_auth TOPIC datalake_auth_activity OFFSET BY CONSUMER GROUP datalake_demo_auth INSTANCES 4 MODE NO_ACK PARALLEL
         DECODE USING activity_codec
         TO auth_activity_landing
         INHERIT ALL

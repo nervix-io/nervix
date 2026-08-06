@@ -8,6 +8,7 @@ compile_error!(
 
 pub mod application;
 pub mod cluster;
+pub mod jaq_program;
 pub mod memory_pressure;
 pub mod metrics;
 pub(crate) mod registry;

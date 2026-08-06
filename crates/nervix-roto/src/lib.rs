@@ -1046,12 +1046,12 @@ impl CompiledUdf {
             output
         };
         if !self.model.returns.optional {
-            for row in 0..row_count {
+            for (row, propagated) in propagation.iter().copied().enumerate() {
                 let error_row = state
                     .side_errors
                     .iter()
                     .any(|(error_row, _)| *error_row == row);
-                if output.is_null(row) && !propagation[row] && !error_row {
+                if output.is_null(row) && !propagated && !error_row {
                     return Err(RuntimeError::InjectedFunctionFailed {
                         function: self.model.name.to_string(),
                         message: format!(

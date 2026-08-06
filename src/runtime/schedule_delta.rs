@@ -292,7 +292,7 @@ mod tests {
         let mut dynamic_config = junction;
         dynamic_config.filter_where = Some(Expression::Literal(Literal::Bool(true)));
         let mut desired = existing.clone();
-        desired.nodes[0].config = Box::new(Model::Junction(dynamic_config));
+        *desired.nodes[0].config = Model::Junction(dynamic_config);
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Processor {
@@ -380,12 +380,12 @@ mod tests {
         dynamic_emitter.flush_each = "IMMEDIATE".to_string();
         dynamic_emitter.max_batch_size = None;
         let mut dynamic = existing.clone();
-        dynamic.nodes[0].config = Box::new(Model::Emitter(dynamic_emitter.clone()));
+        *dynamic.nodes[0].config = Model::Emitter(dynamic_emitter.clone());
         assert_eq!(
             ScheduleDelta::classify(&existing, &dynamic),
             ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Emitter {
                 emitter: identifier("event_sink"),
-                config: dynamic_emitter,
+                config: Box::new(dynamic_emitter),
             }])
         );
 
@@ -394,7 +394,7 @@ mod tests {
             client: identifier("sink_b"),
         };
         let mut swapped = existing.clone();
-        swapped.nodes[0].config = Box::new(Model::Emitter(swapped_emitter));
+        *swapped.nodes[0].config = Model::Emitter(swapped_emitter);
         swapped.nodes[0].schema_fingerprint = [2; 32];
         assert_eq!(
             ScheduleDelta::classify(&existing, &swapped),

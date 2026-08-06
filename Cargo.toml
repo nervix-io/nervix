@@ -7,8 +7,15 @@ version.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+bench = false
+name = "nervix-server"
+path = "src/main.rs"
+
 [features]
 default = []
+# Exposes opaque benchmark drivers without making runtime internals part of the normal API.
+benchmarks = []
 # Test-only feature used by the standard test recipes for random multinode scheduling and to lower
 # intentionally expensive password hashing parameters.
 testing = []
@@ -168,21 +175,28 @@ webpki-roots = { workspace = true }
 zeromq = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 loom = { workspace = true }
 nervix-client-core = { workspace = true }
+nervix-test-environment = { workspace = true }
 playwright-rs = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
-testcontainers = { workspace = true }
 
 [[test]]
 harness = false
 name = "scenarios"
 
+[[bench]]
+harness = false
+name = "relay_interaction"
+required-features = ["benchmarks"]
+
 [workspace]
 members = [
   ".",
+  "crates/benchmark",
   "crates/client-core",
   "crates/consensus",
   "crates/dataflow-graph",
@@ -196,6 +210,7 @@ members = [
   "crates/nspl",
   "crates/models",
   "crates/proto",
+  "crates/test-environment",
   "crates/nervix-cli",
 ]
 
@@ -314,6 +329,7 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
 ] }
 nervix-proto = { package = "nervix-proto", path = "crates/proto" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
+nervix-test-environment = { package = "nervix-test-environment", path = "crates/test-environment" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
 nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }
@@ -323,7 +339,8 @@ opendal = { version = "0.56.0", features = [
   "services-gcs",
   "services-azdls",
 ] }
-openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
+# OpenRaft prereleases change snapshot APIs without semver compatibility.
+openraft = { version = "=0.10.0-alpha.33", features = ["serde"] }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", default-features = false }
 opentelemetry_sdk = "0.31"
@@ -407,6 +424,7 @@ tokio-rustls = "0.26"
 tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
 tonic-build = "0.13"
@@ -443,8 +461,6 @@ cranelift-codegen = { git = "https://github.com/glebpom/wasmtime.git", branch = 
 cranelift-jit = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
 
 [profile.release]
-codegen-units = 1
-lto = true
 panic = "unwind"
 
 [profile.dev.package."wasmtime"]

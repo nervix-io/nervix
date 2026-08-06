@@ -5,8 +5,8 @@ use chumsky::{
     prelude::*,
 };
 use nervix_models::{
-    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchSelection, Domain,
-    EmitterAckWindow, Expression, GeneralErrorPolicy, Identifier as ModelIdentifier,
+    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchSelection, ClientConfigEntry,
+    Domain, EmitterAckWindow, Expression, GeneralErrorPolicy, Identifier as ModelIdentifier,
     InputCollectPolicy, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy,
     OutputBranch, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
     ProcessorOutputs, RetryPolicy, RouteConstruction,
@@ -578,6 +578,29 @@ pub fn signaling_protocol_clause<'src>()
     )
     .ignore_then(signaling_protocol_ref())
     .boxed()
+}
+
+pub fn config_entries_block<'src>()
+-> impl Parser<'src, &'src [Token], Vec<ClientConfigEntry>, extra::Err<ParseError<'src>>> + Clone {
+    let value = choice((
+        string_lit(),
+        select! { Token::NumberLiteral(v) => v },
+        word_raw(),
+    ));
+    let entry = string_lit()
+        .labelled("config_key")
+        .then_ignore(tok(Token::Eq))
+        .then(value.labelled("config_value"))
+        .map(|(key, value)| ClientConfigEntry { key, value });
+    kw(Identifier::Config)
+        .ignore_then(
+            entry
+                .separated_by(tok(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
+        )
+        .boxed()
 }
 
 pub fn generator_name<'src>()

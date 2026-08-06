@@ -16,6 +16,7 @@ use arrow_array::{
 };
 use arrow_ipc::reader::StreamReader;
 use arrow_schema::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cucumber::{
     World as _, WriterExt,
     gherkin::Step,
@@ -74,9 +75,10 @@ use crate::common::{
         TestSession, WebsocketExchangeAction, client_connect_options,
     },
     dependencies::{
-        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, MONGODB_ADDR,
-        MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR,
-        PULSAR_ADDR, RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
+        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
+        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
+        REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
 };
 
@@ -226,6 +228,34 @@ impl ScenarioWorld {
         self.cluster
             .as_ref()
             .expect("cluster must be created before using it")
+    }
+
+    async fn wait_for_observability_metric_value(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        expected_value: i64,
+        wait: Option<Duration>,
+        step: &Step,
+    ) {
+        let node_id = expand_placeholders(self, node_id);
+        let metric_name = expand_placeholders(self, metric_name);
+        let label_fragments = docstring(step)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| expand_placeholders(self, line))
+            .collect::<Vec<_>>();
+        self.cluster()
+            .wait_for_observability_metric_value(
+                &node_id,
+                &metric_name,
+                &label_fragments,
+                expected_value,
+                wait,
+            )
+            .await
+            .expect("observability endpoint did not report the expected metric value");
     }
 }
 
@@ -579,6 +609,32 @@ async fn then_dependency_endpoint_responds_with_200(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[then("Kafka exposes host and Docker network benchmark endpoints")]
+fn then_kafka_exposes_host_and_docker_network_benchmark_endpoints(world: &mut ScenarioWorld) {
+    let endpoints = world.dependencies.endpoints();
+    let host = endpoints
+        .get(KAFKA_ADDR)
+        .expect("Kafka should expose its host endpoint");
+    let docker = endpoints
+        .get(KAFKA_DOCKER_ADDR)
+        .expect("Kafka should expose its Docker endpoint");
+    let network = endpoints
+        .get(KAFKA_DOCKER_NETWORK)
+        .expect("Kafka should expose its Docker network");
+    assert!(
+        host.starts_with("127.0.0.1:"),
+        "unexpected host endpoint: {host}"
+    );
+    assert!(
+        docker.ends_with(":9093") && !docker.starts_with("localhost:"),
+        "unexpected Docker endpoint: {docker}"
+    );
+    assert!(
+        !network.is_empty(),
+        "Kafka Docker network must not be empty"
+    );
 }
 
 #[then("an ephemeral dependency is removed when its test suite unwinds")]
@@ -2692,14 +2748,6 @@ async fn then_last_authentication_attempts_take_at_least(
         min_duration,
         elapsed
     );
-}
-
-#[when(expr = "the next schedule publication for domain {string} fails")]
-async fn when_next_schedule_publication_fails(world: &mut ScenarioWorld, domain: String) {
-    let domain = expand_placeholders(world, &domain);
-    world
-        .cluster()
-        .fail_next_schedule_publication_on_all_nodes(&domain);
 }
 
 #[when(expr = "emitter {string} enters fault mode")]
@@ -7892,24 +7940,34 @@ async fn then_node_observability_metric_with_labels_eventually_equals(
     expected_value: i64,
     #[step] step: &Step,
 ) {
-    let node_id = expand_placeholders(world, &node_id);
-    let metric_name = expand_placeholders(world, &metric_name);
-    let label_fragments = docstring(step)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| expand_placeholders(world, line))
-        .collect::<Vec<_>>();
     world
-        .cluster()
+        .wait_for_observability_metric_value(&node_id, &metric_name, expected_value, None, step)
+        .await;
+}
+
+#[then(
+    expr = "within {string} node {string} observability metric {string} with labels eventually \
+            equals {int}"
+)]
+async fn then_within_duration_node_observability_metric_with_labels_eventually_equals(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    metric_name: String,
+    expected_value: i64,
+    #[step] step: &Step,
+) {
+    let wait =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    world
         .wait_for_observability_metric_value(
             &node_id,
             &metric_name,
-            &label_fragments,
             expected_value,
+            Some(wait),
+            step,
         )
-        .await
-        .expect("observability endpoint did not report the expected metric value");
+        .await;
 }
 
 #[then(expr = "within {string} node {string} eventually reports describe relay as {string}")]
@@ -8938,6 +8996,29 @@ async fn then_nats_jetstream_stream_eventually_contains_payload(
         .expect("NATS JetStream stream did not receive expected payload");
 }
 
+#[when(expr = "{int} sequential NATS messages are published to subject {string}")]
+async fn when_sequential_nats_messages_are_published(
+    world: &mut ScenarioWorld,
+    count: usize,
+    subject: String,
+    #[step] step: &Step,
+) {
+    let subject = expand_placeholders(world, &subject);
+    let template = expand_placeholders(world, docstring(step));
+    assert!(
+        template.contains("{{sequence}}"),
+        "sequential NATS payload template must contain {{{{sequence}}}}"
+    );
+    let payloads = (1..=count)
+        .map(|sequence| template.replace("{{sequence}}", &sequence.to_string()))
+        .collect::<Vec<_>>();
+    world
+        .cluster()
+        .publish_nats_payloads(&subject, &payloads)
+        .await
+        .expect("failed to publish sequential nats messages");
+}
+
 #[when("ZeroMQ message is published")]
 async fn when_zeromq_message_is_published(world: &mut ScenarioWorld, #[step] step: &Step) {
     let payload = expand_placeholders(world, docstring(step));
@@ -8965,8 +9046,8 @@ async fn when_websocket_message_is_published(
         .expect("failed to publish websocket message");
 }
 
-#[when(expr = "websocket text frames are exchanged with host {string} path {string}")]
-async fn when_websocket_text_frames_are_exchanged(
+#[when(expr = "websocket frames are exchanged with host {string} path {string}")]
+async fn when_websocket_frames_are_exchanged(
     world: &mut ScenarioWorld,
     host: String,
     path: String,
@@ -8979,20 +9060,41 @@ async fn when_websocket_text_frames_are_exchanged(
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(|line| {
-            if let Some(payload) = line.strip_prefix("EXPECT ") {
+            if line == "EXPECT CLOSE" {
+                WebsocketExchangeAction::ExpectClose
+            } else if let Some(window) = line.strip_prefix("EXPECT SILENCE ") {
+                WebsocketExchangeAction::ExpectSilence(
+                    humantime::parse_duration(window.trim()).unwrap_or_else(|error| {
+                        panic!("invalid silence window '{window}': {error}")
+                    }),
+                )
+            } else if let Some(payload) = line.strip_prefix("EXPECT BASE64 ") {
+                WebsocketExchangeAction::ExpectBinary(decode_base64_frame(payload))
+            } else if let Some(payload) = line.strip_prefix("SEND BASE64 ") {
+                WebsocketExchangeAction::SendBinary(decode_base64_frame(payload))
+            } else if let Some(payload) = line.strip_prefix("EXPECT ") {
                 WebsocketExchangeAction::ExpectText(expand_placeholders(world, payload))
             } else if let Some(payload) = line.strip_prefix("SEND ") {
                 WebsocketExchangeAction::SendText(expand_placeholders(world, payload))
             } else {
-                panic!("websocket exchange lines must start with EXPECT or SEND: {line}");
+                panic!(
+                    "websocket exchange lines must start with EXPECT, SEND, EXPECT BASE64, SEND \
+                     BASE64, or be EXPECT CLOSE: {line}"
+                );
             }
         })
         .collect::<Vec<_>>();
     world
         .cluster()
-        .exchange_websocket_text("node-1", &host, &path, &actions)
+        .exchange_websocket("node-1", &host, &path, &actions)
         .await
-        .expect("failed to exchange websocket text frames");
+        .expect("failed to exchange websocket frames");
+}
+
+fn decode_base64_frame(payload: &str) -> Vec<u8> {
+    BASE64_STANDARD
+        .decode(payload.trim())
+        .unwrap_or_else(|error| panic!("invalid base64 websocket frame '{payload}': {error}"))
 }
 
 #[when(expr = "websocket message is published to host {string} path {string} and fails")]
@@ -11790,6 +11892,151 @@ async fn then_observed_broker_receives_json_payloads_preserving_group_order(
     );
 }
 
+#[then(expr = "within {string} the observed broker receives exactly {int} messages")]
+async fn then_within_duration_the_observed_broker_receives_exactly_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let deadline = Instant::now() + duration;
+    let mut payload_counts = BTreeMap::new();
+
+    for received in 0..count {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out after receiving {received} of {count} broker messages within {duration:?}; \
+             observed payload counts: {payload_counts:?}"
+        );
+        let message = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
+            .try_next_message(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for an exact broker message count")
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out after receiving {received} of {count} broker messages within \
+                     {duration:?}; observed payload counts: {payload_counts:?}"
+                )
+            });
+        *payload_counts
+            .entry(message.payload.clone())
+            .or_insert(0usize) += 1;
+        world.last_broker_payload = Some(message.payload);
+        world.last_broker_headers = message.headers;
+    }
+
+    let duplicate = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion")
+        .try_next_message(Duration::from_millis(500))
+        .await
+        .expect("failed while checking for a duplicate broker message");
+    assert!(
+        duplicate.is_none(),
+        "observed an extra broker message after receiving exactly {count}: {duplicate:?}; \
+         observed payload counts: {payload_counts:?}"
+    );
+}
+
+#[then(
+    expr = "within {string} the observed broker receives {int} messages in sequence by field \
+            {string} with headers"
+)]
+async fn then_observed_broker_receives_sequential_messages_with_headers(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+    field: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let expected_headers = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split_once('=').unwrap_or_else(|| {
+                panic!("expected broker header assertion '{line}' to use name=value")
+            })
+        })
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect::<Vec<_>>();
+    assert!(
+        !expected_headers.is_empty(),
+        "sequential broker assertion must include at least one header"
+    );
+
+    let deadline = Instant::now() + duration;
+    for expected_sequence in 1..=count {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out after receiving {} of {count} sequential broker messages",
+            expected_sequence - 1
+        );
+        let message = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
+            .try_next_message(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for sequential broker message")
+            .unwrap_or_else(|| {
+                panic!("timed out waiting for broker message {expected_sequence} of {count}")
+            });
+        let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
+            .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}"));
+        let actual_sequence = payload
+            .get(&field)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| {
+                panic!(
+                    "broker payload field '{field}' is not an unsigned integer: {}",
+                    message.payload
+                )
+            });
+        let expected_u64 =
+            u64::try_from(expected_sequence).expect("expected sequence must fit u64");
+        assert_eq!(
+            actual_sequence,
+            expected_u64,
+            "broker messages were duplicated, lost, or reordered: expected sequence \
+             {expected_u64} but observed {actual_sequence} ({} messages behind, {} of {} consumed \
+             so far)",
+            actual_sequence.abs_diff(expected_u64),
+            expected_sequence,
+            count
+        );
+        assert_eq!(
+            message.headers, expected_headers,
+            "broker message {expected_sequence} headers changed"
+        );
+        world.last_broker_payload = Some(message.payload);
+        world.last_broker_headers = message.headers;
+    }
+
+    let duplicate = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion")
+        .try_next_message(Duration::from_millis(500))
+        .await
+        .expect("failed while checking for a duplicate broker message");
+    assert!(
+        duplicate.is_none(),
+        "observed a duplicate broker message after the expected sequence: {duplicate:?}"
+    );
+}
+
 #[then(expr = "the observed broker does not receive a payload within {string}")]
 async fn then_the_observed_broker_does_not_receive_a_payload_within(
     world: &mut ScenarioWorld,
@@ -12031,8 +12278,11 @@ async fn run_scenarios() -> Option<String> {
                 }
             })
         })
-        .fail_on_skipped()
         .with_writer(writer)
+        // Must wrap the configured writer, not precede it: `with_writer` replaces the writer it is
+        // given, so calling this first silently discards the guard and lets an unmatched step skip
+        // its scenario while the suite still reports green.
+        .fail_on_skipped()
         .run(SCENARIOS_PATH)
         .await;
 

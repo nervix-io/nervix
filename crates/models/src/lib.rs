@@ -84,8 +84,9 @@ pub use statement::{
     PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
     RedisPubSubIngestMode, RelayBranching, RetryPolicy, S3ConfigEntry, ScheduledNode,
     SentryConfigEntry, ShowClusterStatus, ShowCreate, ShowRelayMaterializedState, ShowUdfs,
-    SignalingProtocolOnConnect, SqsConfigEntry, SqsFifoGroup, SqsIngestMode, StartDomain,
-    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode, StartDomain, Statement,
+    StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
     UncordonNode, UploadResource, VhostTlsResource, WasmProcessorLimits, WebsocketsConfigEntry,
     WebsocketsIngestMode, WindowBound, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
 };
