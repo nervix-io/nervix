@@ -299,7 +299,8 @@ Feature: NATS emission
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}'
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
       };
       CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_ingress TOPIC jetstream_in_{{test_id}}
@@ -326,6 +327,7 @@ Feature: NATS emission
         ON GENERAL ERROR LOG;
       START;
       """
+    Then Kafka consumer group "jetstream_boundary_group_{{test_id}}" eventually has 1 consumers
     And Kafka message is published to topic "jetstream_in_{{test_id}}"
       """
       {"user_id":42}

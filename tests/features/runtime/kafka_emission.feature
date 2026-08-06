@@ -211,7 +211,8 @@ Feature: Kafka emission
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}'
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
       };
       CREATE CLIENT unavailable_kafka_sink TYPE KAFKA CONFIG {
         'bootstrap.servers' = '127.0.0.1:1',
@@ -241,6 +242,7 @@ Feature: Kafka emission
         ON GENERAL ERROR LOG;
       START;
       """
+    Then Kafka consumer group "mode_boundary_group_{{test_id}}" eventually has 1 consumers
     And Kafka message is published to topic "mode_boundary_in_{{test_id}}"
       """
       {"user_id":42}
@@ -275,7 +277,8 @@ Feature: Kafka emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}'
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
       };
       CREATE INGESTOR kafka_notifications
       FROM KAFKA kafka_main TOPIC detached_confirming_in_{{test_id}}
@@ -299,12 +302,13 @@ Feature: Kafka emission
       ON GENERAL ERROR LOG;
       START;
       """
+    Then Kafka consumer group "detached_confirming_group_{{test_id}}" eventually has 1 consumers
     And emitter "kafka_detached_confirming" enters stall mode
     And Kafka message is published to topic "detached_confirming_in_{{test_id}}"
       """
       {"user_id":42}
       """
-    Then within "3s" Kafka consumer group "detached_confirming_group_{{test_id}}" next offset for topic "detached_confirming_in_{{test_id}}" partition 0 is "at least 1"
+    Then within "10s" Kafka consumer group "detached_confirming_group_{{test_id}}" next offset for topic "detached_confirming_in_{{test_id}}" partition 0 is "at least 1"
     And the observed broker does not receive a payload within "500ms"
     And within "5s" DESCRIBE EMITTER "kafka_detached_confirming" on the leader node contains
       """

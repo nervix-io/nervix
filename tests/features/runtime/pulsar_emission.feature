@@ -93,7 +93,8 @@ Feature: Pulsar emission
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}'
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
       };
       CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_ingress TOPIC pulsar_boundary_in_{{test_id}}
@@ -121,6 +122,7 @@ Feature: Pulsar emission
         ON GENERAL ERROR LOG;
       START;
       """
+    Then Kafka consumer group "pulsar_boundary_group_{{test_id}}" eventually has 1 consumers
     When the stallable endpoint "pulsar" is paused
     And Kafka message is published to topic "pulsar_boundary_in_{{test_id}}"
       """

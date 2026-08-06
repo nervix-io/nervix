@@ -105,7 +105,8 @@ Feature: MQTT emission
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE RELAY emitter_errors SCHEMA emitter_error BRANCHED BY by_kafka_notifications;
       CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}'
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
       };
       CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_ingress TOPIC mqtt_boundary_in_{{test_id}}
@@ -138,6 +139,7 @@ Feature: MQTT emission
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
       START;
       """
+    Then Kafka consumer group "mqtt_boundary_group_{{test_id}}" eventually has 1 consumers
     When the stallable endpoint "mqtt" is paused
     And Kafka message is published to topic "mqtt_boundary_in_{{test_id}}"
       """
