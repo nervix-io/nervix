@@ -5187,19 +5187,19 @@ impl Runtime {
                     (old_emitter, old_task)
                 };
                 let had_old_task = old_task.is_some();
-                if let Some(old_task) = old_task {
-                    if let Err(error) = old_task.stop(self.domain_drain_timeout()).await {
-                        let reason = error.reason().to_string();
-                        if let Some(old_task) = error.into_task()
-                            && let Some(mut execution) = self.executions.get_mut(domain)
-                        {
-                            execution.emitter_tasks.insert(entity.clone(), old_task);
-                        }
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason,
-                        });
+                if let Some(old_task) = old_task
+                    && let Err(error) = old_task.stop(self.domain_drain_timeout()).await
+                {
+                    let reason = error.reason().to_string();
+                    if let Some(old_task) = error.into_task()
+                        && let Some(mut execution) = self.executions.get_mut(domain)
+                    {
+                        execution.emitter_tasks.insert(entity.clone(), old_task);
                     }
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason,
+                    });
                 }
 
                 let executes_locally = local_node_id

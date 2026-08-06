@@ -1,5 +1,4 @@
-use std::collections::{HashMap as StdHashMap, HashSet as StdHashSet};
-
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
@@ -28,7 +27,7 @@ pub(in crate::runtime) struct SqsEmitter {
 struct PreparedSqsRecord {
     position: BrokerRecordPosition,
     body: String,
-    attributes: StdHashMap<String, MessageAttributeValue>,
+    attributes: HashMap<String, MessageAttributeValue>,
     group_id: Option<String>,
     encoded_bytes: usize,
     acks: AckSet,
@@ -53,7 +52,7 @@ impl PreparedSqsRecord {
                 headers.len()
             ));
         }
-        let mut attributes = StdHashMap::with_capacity(headers.len());
+        let mut attributes = HashMap::with_capacity(headers.len());
         for (name, value) in headers {
             SqsEmitter::validate_attribute(&name, &value)?;
             let attribute = MessageAttributeValue::builder()
@@ -234,7 +233,8 @@ impl SqsEmitter {
                 .queue_url(&self.queue_url)
                 .message_body(&record.body)
                 .set_message_attributes(
-                    (!record.attributes.is_empty()).then(|| record.attributes.clone()),
+                    (!record.attributes.is_empty())
+                        .then(|| record.attributes.clone().into_iter().collect()),
                 );
             if let Some(group_id) = record.group_id.as_deref() {
                 request = request.message_group_id(group_id);
@@ -271,7 +271,8 @@ impl SqsEmitter {
                     .id(Self::batch_entry_id(index))
                     .message_body(&record.body)
                     .set_message_attributes(
-                        (!record.attributes.is_empty()).then(|| record.attributes.clone()),
+                        (!record.attributes.is_empty())
+                            .then(|| record.attributes.clone().into_iter().collect()),
                     );
                 if let Some(group_id) = record.group_id.as_deref() {
                     entry = entry.message_group_id(group_id);
@@ -308,7 +309,7 @@ impl SqsEmitter {
         let mut chunks = Vec::new();
         let mut current = Vec::new();
         let mut current_bytes = 0_usize;
-        let mut current_fifo_groups = StdHashSet::new();
+        let mut current_fifo_groups = HashSet::new();
         for record in records {
             let would_exceed_count = current.len() == SQS_MAX_BATCH_ENTRIES;
             let would_exceed_bytes = !current.is_empty()

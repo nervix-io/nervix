@@ -566,40 +566,9 @@ impl CompiledCodec {
             })?;
         Ok(CompiledCodecBatchEncoder { codec: self, batch })
     }
-
-    pub(crate) fn encode_batch(
-        &self,
-        batch: &RuntimeRecordBatch,
-        rows: std::ops::Range<usize>,
-    ) -> Result<Vec<Vec<u8>>, CodecError> {
-        let encoder = self.batch_encoder(batch)?;
-        encoder.validate_rows(&rows)?;
-        let mut payloads = Vec::with_capacity(rows.len());
-        for row_index in rows {
-            let mut payload = Vec::new();
-            encoder.encode_row_into(row_index, &mut payload)?;
-            payloads.push(payload);
-        }
-        Ok(payloads)
-    }
 }
 
 impl CompiledCodecBatchEncoder<'_> {
-    fn validate_rows(&self, rows: &std::ops::Range<usize>) -> Result<(), CodecError> {
-        if rows.start > rows.end || rows.end > self.batch.batch.num_rows() {
-            return Err(CodecError::InvalidCodec {
-                codec: self.codec.name.as_str().to_string(),
-                reason: format!(
-                    "columnar encode row range {}..{} is outside batch with {} rows",
-                    rows.start,
-                    rows.end,
-                    self.batch.batch.num_rows()
-                ),
-            });
-        }
-        Ok(())
-    }
-
     pub(crate) fn encode_row_into(
         &self,
         row_index: usize,
@@ -3889,13 +3858,10 @@ mod tests {
                 codec: codec.name.as_str().to_string(),
                 reason,
             })?;
-        codec
-            .encode_batch(&batch, 0..1)?
-            .pop()
-            .ok_or_else(|| CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: "single-row columnar encode returned no payload".to_string(),
-            })
+        let encoder = codec.batch_encoder(&batch)?;
+        let mut payload = Vec::new();
+        encoder.encode_row_into(0, &mut payload)?;
+        Ok(payload)
     }
 
     #[test]
@@ -4051,9 +4017,17 @@ mod tests {
             .arrow_batch_from_records(&records)
             .expect("records should convert to arrow");
 
-        let payloads = compiled_codec
-            .encode_batch(&batch, 0..records.len())
-            .expect("arrow rows should encode directly");
+        let encoder = compiled_codec
+            .batch_encoder(&batch)
+            .expect("arrow batch should be accepted");
+        let mut payloads = Vec::with_capacity(records.len());
+        for row_index in 0..records.len() {
+            let mut payload = Vec::new();
+            encoder
+                .encode_row_into(row_index, &mut payload)
+                .expect("arrow row should encode directly");
+            payloads.push(payload);
+        }
 
         assert_eq!(payloads.len(), records.len());
         for (payload, expected_user_id) in payloads.iter().zip([42, 7]) {
@@ -4065,13 +4039,14 @@ mod tests {
             );
         }
 
-        let second_payload = compiled_codec
-            .encode_batch(&batch, 1..2)
-            .expect("a bounded row range should encode");
-        assert_eq!(second_payload, vec![payloads[1].clone()]);
-        let error = compiled_codec
-            .encode_batch(&batch, 2..3)
-            .expect_err("an out-of-bounds row range must fail");
+        let mut second_payload = Vec::new();
+        encoder
+            .encode_row_into(1, &mut second_payload)
+            .expect("a selected row should encode");
+        assert_eq!(second_payload, payloads[1]);
+        let error = encoder
+            .encode_row_into(2, &mut second_payload)
+            .expect_err("an out-of-bounds row must fail");
         assert!(matches!(error, CodecError::InvalidCodec { .. }));
     }
 

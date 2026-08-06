@@ -131,7 +131,7 @@ enum PrePublishingModeStoredModelVersioned {
 }
 
 pub(super) enum PrePublishingModeStoredDecode {
-    Model(StoredModelVersioned),
+    Model(Box<StoredModelVersioned>),
     EmitterWithoutMode,
 }
 
@@ -261,7 +261,7 @@ pub(super) fn decode_pre_publishing_mode_model(
         }
         PrePublishingModeStoredModelVersioned::Udf(value) => StoredModelVersioned::Udf(value),
     };
-    Some(PrePublishingModeStoredDecode::Model(decoded))
+    Some(PrePublishingModeStoredDecode::Model(Box::new(decoded)))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1458,11 +1458,7 @@ pub enum StoredSqsFifoGroup {
 
 impl StoredEmitSink {
     fn is_removed_integration(&self) -> bool {
-        if let Self::RemovedIntegration { .. } = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::RemovedIntegration { .. })
     }
 }
 

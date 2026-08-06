@@ -4915,7 +4915,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<StoredModelVersioned, Report<Regist
     match rkyv::from_bytes::<StoredModelVersioned, rkyv::rancor::Error>(bytes) {
         Ok(stored) => Ok(stored),
         Err(current_error) => match stored::decode_pre_publishing_mode_model(bytes) {
-            Some(stored::PrePublishingModeStoredDecode::Model(stored)) => Ok(stored),
+            Some(stored::PrePublishingModeStoredDecode::Model(stored)) => Ok(*stored),
             Some(stored::PrePublishingModeStoredDecode::EmitterWithoutMode) => {
                 Err(Report::new(RegistryError::EmitterPublishingModeMissing))
             }

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap as StdHashMap, VecDeque},
+    collections::VecDeque,
     fs::File,
     path::{Path, PathBuf},
     sync::Arc as StdArc,
@@ -98,11 +98,12 @@ impl IcebergPreparedCommit {
         self.data_files.as_slice()
     }
 
-    fn snapshot_properties(&self) -> StdHashMap<String, String> {
-        StdHashMap::from([(
+    fn snapshot_properties(&self) -> impl Iterator<Item = (String, String)> {
+        [(
             ICEBERG_APPEND_ID_PROPERTY.to_string(),
             self.append_id.to_string(),
-        )])
+        )]
+        .into_iter()
     }
 
     fn matches_snapshot(&self, snapshot: &Snapshot) -> bool {
@@ -961,22 +962,6 @@ impl IcebergEmitter {
         }
     }
 
-    fn retained_acks(
-        pending_batches: &[IcebergPendingBatch],
-        staged_batches: &[IcebergStagedBatch],
-    ) -> AckSet {
-        AckSet::merged(
-            pending_batches
-                .iter()
-                .flat_map(|batch| batch.acks.iter().cloned())
-                .chain(
-                    staged_batches
-                        .iter()
-                        .flat_map(|batch| batch.acks.iter().cloned()),
-                ),
-        )
-    }
-
     async fn mapped_arrow_batch_from_runtime_batch(
         &self,
         batch: &RuntimeRecordBatch,
@@ -1261,10 +1246,14 @@ impl IcebergEmitterClient {
             .metadata()
             .clone()
             .into_builder(None)
-            .set_properties(StdHashMap::from([(
-                TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_string(),
-                "0".to_string(),
-            )]))
+            .set_properties(
+                [(
+                    TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_string(),
+                    "0".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            )
             .change_context(IcebergEmitterError::Commit)?
             .build()
             .change_context(IcebergEmitterError::Commit)?
@@ -1345,7 +1334,7 @@ impl IcebergEmitterClient {
         let action = tx
             .fast_append()
             .set_commit_uuid(prepared.append_id())
-            .set_snapshot_properties(prepared.snapshot_properties())
+            .set_snapshot_properties(prepared.snapshot_properties().collect())
             .add_data_files(prepared.data_files().iter().cloned());
         let tx = action
             .apply(tx)
@@ -1515,10 +1504,12 @@ mod tests {
             SortOrder::unsorted_order(),
             "memory://warehouse/table".to_string(),
             FormatVersion::V2,
-            StdHashMap::from([(
+            [(
                 TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_string(),
                 "7".to_string(),
-            )]),
+            )]
+            .into_iter()
+            .collect(),
         )
         .expect("valid table metadata builder")
         .build()
@@ -1601,10 +1592,12 @@ mod tests {
             .with_manifest_list("s3://bucket/table/metadata/manifest-list.avro")
             .with_summary(Summary {
                 operation: Operation::Append,
-                additional_properties: std::collections::HashMap::from([(
+                additional_properties: [(
                     ICEBERG_APPEND_ID_PROPERTY.to_string(),
                     append_id.to_string(),
-                )]),
+                )]
+                .into_iter()
+                .collect(),
             })
             .build();
 
@@ -1832,46 +1825,5 @@ mod tests {
         let expected = AckOutcome::NoAck("Iceberg emitter dropped buffered batch".to_string());
         assert_eq!(pending_completion.wait().await, expected);
         assert_eq!(staged_completion.wait().await, expected);
-    }
-
-    #[tokio::test]
-    async fn iceberg_retained_ack_view_heartbeats_pending_and_staged_rows() {
-        let schema = StdArc::new(arrow_schema::Schema::empty());
-        let batch = RecordBatch::try_new_with_options(
-            schema.clone(),
-            Vec::new(),
-            &RecordBatchOptions::new().with_row_count(Some(1)),
-        )
-        .expect("one-row empty batch must build");
-        let batch = RuntimeRecordBatch::from_record_batch(schema, batch)
-            .expect("runtime batch schema must match");
-        let (pending_acks, mut pending_completion) = AckSet::root();
-        let (staged_acks, mut staged_completion) = AckSet::root();
-        let pending = IcebergPendingBatch {
-            batch,
-            metadata: vec![RuntimeRecordMetadata::test()],
-            keys: vec![None],
-            acks: vec![pending_acks],
-            domain_timestamp: Timestamp::from_unix_nanos(0),
-        };
-        let staged = IcebergStagedBatch {
-            path: PathBuf::from("unwritten-test-batch.arrow"),
-            rows: 1,
-            bytes: 0,
-            acks: vec![staged_acks],
-            domain_timestamp: Timestamp::from_unix_nanos(0),
-        };
-
-        let retained = IcebergEmitter::retained_acks(&[pending], &[staged]);
-        retained.ack_alive();
-
-        assert_eq!(
-            pending_completion.wait_for_progress().await,
-            AckProgress::Alive
-        );
-        assert_eq!(
-            staged_completion.wait_for_progress().await,
-            AckProgress::Alive
-        );
     }
 }
