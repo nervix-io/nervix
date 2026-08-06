@@ -26,7 +26,6 @@ type NatsConfirmation =
 
 struct PendingNatsConfirmation {
     position: BrokerRecordPosition,
-    acks: AckSet,
     deadline: Instant,
     confirmation: NatsConfirmation,
 }
@@ -152,33 +151,25 @@ impl NatsEmitter {
             return outcome;
         };
         let mut sink = client.clone();
-        let mut queued: Vec<(BrokerRecordPosition, AckSet)> = Vec::with_capacity(records.len());
+        let mut queued = Vec::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
-            let publish_acks = AckSet::merged(
-                queued
-                    .iter()
-                    .map(|(_, acks)| acks.clone())
-                    .chain(std::iter::once(record.acks.clone())),
-            );
             let position = (record.batch_index, record.row_index);
             let headers = if record.headers.is_empty() {
                 None
             } else {
                 Some(Self::header_map(&record.headers))
             };
-            let result = await_emitter_confirmation(
-                &publish_acks,
-                sink.feed(OutboundMessage {
+            let result = sink
+                .feed(OutboundMessage {
                     subject: self.subject.clone(),
                     reply: None,
                     payload: record.payload.into(),
                     headers,
-                }),
-            )
-            .await;
+                })
+                .await;
             match result {
-                Ok(()) => queued.push((position, record.acks)),
+                Ok(()) => queued.push(position),
                 Err(error) if Self::is_core_record_rejection(&error) => {
                     outcome.reject(position, format!("nats rejected record: {error}"));
                 }
@@ -188,11 +179,8 @@ impl NatsEmitter {
                 }
             }
         }
-        let queued_acks = AckSet::merged(queued.iter().map(|(_, acks)| acks.clone()));
-        match await_emitter_confirmation(&queued_acks, SinkExt::flush(&mut sink)).await {
-            Ok(()) => outcome
-                .delivered
-                .extend(queued.into_iter().map(|(position, _)| position)),
+        match client.flush().await {
+            Ok(()) => outcome.delivered.extend(queued),
             Err(error) => outcome.fail(emitter_publish_error(error)),
         }
         outcome
@@ -221,12 +209,6 @@ impl NatsEmitter {
         let mut pending: VecDeque<PendingNatsConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
-            let publish_acks = AckSet::merged(
-                pending
-                    .iter()
-                    .map(|confirmation| confirmation.acks.clone())
-                    .chain(std::iter::once(record.acks.clone())),
-            );
             let position = (record.batch_index, record.row_index);
             let publish = async {
                 if record.headers.is_empty() {
@@ -243,7 +225,7 @@ impl NatsEmitter {
                         .await
                 }
             };
-            let confirmation = await_emitter_confirmation(&publish_acks, publish).await;
+            let confirmation = publish.await;
             let confirmation = match confirmation {
                 Ok(confirmation) => confirmation,
                 Err(error) if Self::is_jetstream_record_rejection(&error) => {
@@ -257,7 +239,6 @@ impl NatsEmitter {
             };
             pending.push_back(PendingNatsConfirmation {
                 position,
-                acks: record.acks,
                 deadline: Instant::now() + timeout,
                 confirmation: Box::pin(confirmation.into_future()),
             });
@@ -285,9 +266,6 @@ impl NatsEmitter {
     ) -> EmitterRuntimeResult<()> {
         loop {
             tokio::task::consume_budget().await;
-            for confirmation in pending.iter() {
-                confirmation.acks.ack_alive();
-            }
             let Some(oldest) = pending.front_mut() else {
                 return Err(emitter_publish_error(
                     "NATS JetStream acknowledgment window unexpectedly became empty",

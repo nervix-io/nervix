@@ -2217,8 +2217,7 @@ impl SinkEmitter {
         if let EmitSink::Iceberg { .. } = sink
             && let Self::Iceberg(_) = self
         {
-            self.wait_for_fault_injector(context, control, &batch.merged_acks())
-                .await
+            self.check_fault_injector(context, control)
                 .map_err(EmitterPublishFailure::caller)?;
             let Self::Iceberg(emitter) = self else {
                 unreachable!("checked Iceberg emitter must remain Iceberg")
@@ -2275,8 +2274,7 @@ impl SinkEmitter {
         if !buffer.should_flush(force) {
             return Ok(None);
         }
-        self.wait_for_fault_injector(context, control, &buffer.pending_acks())
-            .await?;
+        self.check_fault_injector(context, control)?;
         let Self::Iceberg(emitter) = self else {
             return Ok(None);
         };
@@ -2313,8 +2311,7 @@ impl SinkEmitter {
         if buffer.is_empty() {
             return Ok(None);
         }
-        self.wait_for_fault_injector(context, control, &buffer.pending_acks())
-            .await?;
+        self.check_fault_injector(context, control)?;
         let report = buffer.report();
         let pending_acks = buffer.pending_acks();
         {
@@ -2553,76 +2550,32 @@ impl SinkEmitter {
         Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
             .attach_printable("emitter has no initialized sink client for its configured sink"))
     }
-    async fn wait_for_fault_injector(
+    fn check_fault_injector(
         &self,
         context: &EmitterSinkContext,
-        control: &mut EmitterPublishControl<'_>,
-        acks: &AckSet,
+        control: &EmitterPublishControl<'_>,
     ) -> EmitterRuntimeResult<()> {
-        loop {
-            tokio::task::consume_budget().await;
-            match control.fault_injector.fault_mode(&context.emitter) {
-                Some(EmitterFaultMode::Fail) => {
-                    let reason = format!(
-                        "fault injector failed emitter '{}'",
-                        context.emitter.as_str()
-                    );
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
-                        "{} in domain '{}'",
-                        reason,
-                        context.domain.as_str()
-                    )));
-                    warn!(
-                        domain = context.domain.as_str(),
-                        emitter = context.emitter.as_str(),
-                        "fault injector failed emitter publish"
-                    );
-                    return Err(
-                        Report::new(EmitterRuntimeError::FaultInjected).attach_printable(reason)
-                    );
-                }
-                Some(EmitterFaultMode::Stall) => {
-                    let wait = control.backoff.next_delay();
-                    control.runtime.record_emitter_transient_error_with_backoff(
-                        &context.domain,
-                        &context.emitter,
-                        "fault injector stalled emitter publish",
-                        wait,
-                    );
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
-                        "fault injector stalled emitter '{}' in domain '{}' before reconnect \
-                         retry in {}",
-                        context.emitter.as_str(),
-                        context.domain.as_str(),
-                        humantime::format_duration(wait),
-                    )));
-                    warn!(
-                        domain = context.domain.as_str(),
-                        emitter = context.emitter.as_str(),
-                        reconnect_backoff = %humantime::format_duration(wait),
-                        "fault injector stalled emitter publish"
-                    );
-                    let Some(waited) = await_or_emitter_stop_request(
-                        control.stop_rx,
-                        control
-                            .backoff
-                            .wait_with_ack_alive(control.shutdown_rx, acks),
-                    )
-                    .await
-                    else {
-                        // A stop drains this batch through the normal publish path under the
-                        // caller's deadline; fault injection must not prevent that drain.
-                        return Ok(());
-                    };
-                    if !waited {
-                        return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled));
-                    }
-                }
-                None => {
-                    control.backoff.reset();
-                    return Ok(());
-                }
+        match control.fault_injector.fault_mode(&context.emitter) {
+            Some(EmitterFaultMode::Fail) => {
+                let reason = format!(
+                    "fault injector failed emitter '{}'",
+                    context.emitter.as_str()
+                );
+                let _ = context.events.send(RuntimeEvent::Error(format!(
+                    "{} in domain '{}'",
+                    reason,
+                    context.domain.as_str()
+                )));
+                warn!(
+                    domain = context.domain.as_str(),
+                    emitter = context.emitter.as_str(),
+                    "fault injector failed emitter publish"
+                );
+                Err(Report::new(EmitterRuntimeError::FaultInjected).attach_printable(reason))
             }
+            Some(EmitterFaultMode::Stall) => Err(Report::new(EmitterRuntimeError::PublishStalled)
+                .attach_printable("fault injector stalled emitter publish")),
+            None => Ok(()),
         }
     }
 
