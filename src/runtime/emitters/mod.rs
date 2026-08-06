@@ -94,7 +94,6 @@ pub(in crate::runtime) struct EmitterSinkContext {
 }
 
 struct EmitterPublishControl<'a> {
-    runtime: &'a Runtime,
     fault_injector: &'a EmitterFaultInjector,
     shutdown_rx: &'a mut watch::Receiver<bool>,
     stop_rx: &'a mut watch::Receiver<Option<Instant>>,
@@ -119,27 +118,6 @@ async fn await_until_emitter_stop_deadline<T>(
             changed = stop_rx.changed() => {
                 if changed.is_err() {
                     return Ok(future.await);
-                }
-            }
-        }
-    }
-}
-
-async fn await_or_emitter_stop_request<T>(
-    stop_rx: &mut watch::Receiver<Option<Instant>>,
-    future: impl std::future::Future<Output = T>,
-) -> Option<T> {
-    tokio::pin!(future);
-    loop {
-        tokio::task::consume_budget().await;
-        if stop_rx.borrow().is_some() {
-            return None;
-        }
-        tokio::select! {
-            output = &mut future => return Some(output),
-            changed = stop_rx.changed() => {
-                if changed.is_err() {
-                    return Some(future.await);
                 }
             }
         }
@@ -3300,7 +3278,6 @@ impl EmitterTask {
                             continue;
                         }
                         let mut control = EmitterPublishControl {
-                            runtime: &runtime,
                             fault_injector: &fault_injector,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
@@ -3389,7 +3366,6 @@ impl EmitterTask {
                             continue;
                         }
                         let mut control = EmitterPublishControl {
-                            runtime: &runtime,
                             fault_injector: &fault_injector,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
@@ -3480,7 +3456,6 @@ impl EmitterTask {
                             break;
                         }
                         let mut control = EmitterPublishControl {
-                            runtime: &runtime,
                             fault_injector: &fault_injector,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
@@ -3560,7 +3535,6 @@ impl EmitterTask {
                             runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
                         }
                         let mut control = EmitterPublishControl {
-                            runtime: &runtime,
                             fault_injector: &fault_injector,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
@@ -3734,7 +3708,6 @@ impl EmitterTask {
 
                         let mut pending_batch = Some(publish_batch);
                         let mut control = EmitterPublishControl {
-                            runtime: &runtime,
                             fault_injector: &fault_injector,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
@@ -4875,13 +4848,11 @@ mod tests {
 
     #[tokio::test]
     async fn retry_wake_attempts_a_buffer_before_its_ordinary_deadline() {
-        let runtime = Runtime::default();
         let fault_injector = EmitterFaultInjector::default();
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
         let mut control = EmitterPublishControl {
-            runtime: &runtime,
             fault_injector: &fault_injector,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
@@ -5119,13 +5090,11 @@ mod tests {
 
     #[tokio::test]
     async fn flush_all_returns_the_failure_and_retains_unpublished_batches() {
-        let runtime = Runtime::default();
         let fault_injector = EmitterFaultInjector::default();
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
         let mut control = EmitterPublishControl {
-            runtime: &runtime,
             fault_injector: &fault_injector,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
@@ -5356,14 +5325,12 @@ mod tests {
 
     #[tokio::test]
     async fn buffering_does_not_wait_for_sink_fault_until_a_flush_is_required() {
-        let runtime = Runtime::default();
         let fault_injector = EmitterFaultInjector::default();
         fault_injector.fail_emitter("output");
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
         let mut control = EmitterPublishControl {
-            runtime: &runtime,
             fault_injector: &fault_injector,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
