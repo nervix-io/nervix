@@ -104,6 +104,7 @@ Feature: Kafka ingestion
       CREATE ATTACHED EMITTER kafka_forward
         FROM forwarding_events
         TO KAFKA kafka_main TOPIC forwarding_output_{{test_id}}
+        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING forwarding_event_codec
         INHERIT ALL
         FLUSH EACH 500ms MAX BATCH SIZE 1MiB

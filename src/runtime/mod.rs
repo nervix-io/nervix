@@ -213,7 +213,9 @@ pub(crate) use state_store::{
     RuntimeStateStore,
 };
 use test_hooks::EmitterFaultMode;
-pub use test_hooks::{EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks};
+pub use test_hooks::{
+    EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks, SchedulePublicationFaultInjector,
+};
 use tls::RustlsClientConfigSource;
 use wasm_state::ReplicatedWasmProcessorState;
 pub use websocket_signaling::CompiledSignalingProtocol;
@@ -2533,6 +2535,7 @@ pub struct Runtime {
     events: broadcast::Sender<RuntimeEvent>,
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
+    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,

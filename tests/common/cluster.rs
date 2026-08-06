@@ -28,7 +28,10 @@ use nervix_server::SchedulerMode;
 use nervix_server::{
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
-    runtime::{DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks},
+    runtime::{
+        DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks,
+        SchedulePublicationFaultInjector,
+    },
 };
 use parking_lot::Mutex;
 use proto::{
@@ -1278,6 +1281,12 @@ impl Cluster {
         }
     }
 
+    pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
+        for handle in self.nodes.values() {
+            handle.fail_next_schedule_publication(domain);
+        }
+    }
+
     pub(crate) fn fail_ingestor_on_all_nodes(&self, ingestor: &str) {
         for handle in self.nodes.values() {
             handle.fail_ingestor(ingestor);
@@ -1686,6 +1695,7 @@ struct NodeHandle {
     config: TestClusterConfig,
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
+    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     failure: Arc<Mutex<Option<String>>>,
     task: Option<JoinHandle<()>>,
     shutdown: Option<CancellationToken>,
@@ -1699,12 +1709,14 @@ impl NodeHandle {
     ) -> Self {
         let emitter_faults = runtime_test_hooks.emitter_faults.clone();
         let ingestor_faults = runtime_test_hooks.ingestor_faults.clone();
+        let schedule_publication_faults = runtime_test_hooks.schedule_publication_faults.clone();
         Self {
             spec,
             runtime_test_hooks,
             config,
             emitter_faults,
             ingestor_faults,
+            schedule_publication_faults,
             failure: Arc::new(Mutex::new(None)),
             task: None,
             shutdown: None,
@@ -1910,6 +1922,11 @@ impl NodeHandle {
 
     fn clear_ingestor_fault(&self, ingestor: &str) {
         self.ingestor_faults.clear_ingestor(ingestor);
+    }
+
+    fn fail_next_schedule_publication(&self, domain: &str) {
+        self.schedule_publication_faults
+            .fail_next_publication(domain);
     }
 }
 
