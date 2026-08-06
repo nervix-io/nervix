@@ -25,6 +25,11 @@ pub(crate) struct RelayRecordBatch {
     pub(super) acks: Vec<AckSet>,
 }
 
+pub(super) struct RelayDeliveryObservation {
+    pub(super) domain_timestamp: Option<Timestamp>,
+    pub(super) latency_seconds: Vec<f64>,
+}
+
 type UnkeyedRelayBatchParts = (
     RuntimeRecordBatch,
     Vec<RuntimeRecordMetadata>,
@@ -201,8 +206,18 @@ impl RelayRecordBatch {
     }
 
     pub(super) fn concat(batches: Vec<Self>) -> Result<Self, String> {
+        Self::concat_preserving(batches).map_err(|error| {
+            let (reason, _batches) = *error;
+            reason
+        })
+    }
+
+    pub(super) fn concat_preserving(batches: Vec<Self>) -> Result<Self, Box<(String, Vec<Self>)>> {
         let Some(first) = batches.first() else {
-            return Err("cannot concat zero relay batches".to_string());
+            return Err(Box::new((
+                "cannot concat zero relay batches".to_string(),
+                batches,
+            )));
         };
 
         let key = first.key.clone();
@@ -212,7 +227,10 @@ impl RelayRecordBatch {
 
         let concatenated = {
             let runtime_batches = batches.iter().map(|batch| &batch.batch).collect::<Vec<_>>();
-            RuntimeRecordBatch::concat(&runtime_batches)?
+            match RuntimeRecordBatch::concat(&runtime_batches) {
+                Ok(batch) => batch,
+                Err(error) => return Err(Box::new((error, batches))),
+            }
         };
 
         let total_metadata = batches
@@ -300,8 +318,15 @@ impl RelayRecordBatch {
             .batch()
             .columns()
             .iter()
-            .map(|column| u64::try_from(column.get_array_memory_size()).unwrap_or(u64::MAX))
-            .sum()
+            .map(|column| {
+                column
+                    .to_data()
+                    .get_slice_memory_size()
+                    .ok()
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .unwrap_or(u64::MAX)
+            })
+            .fold(0_u64, u64::saturating_add)
     }
 
     pub(super) fn ack_success(&self) {
@@ -314,17 +339,13 @@ impl RelayRecordBatch {
         AckSet::merged(self.acks.iter().cloned())
     }
 
-    pub(super) fn delivery_latency_seconds(&self, now: Timestamp) -> Vec<f64> {
-        self.metadata
-            .iter()
-            .filter_map(|metadata| {
-                now.into_datetime()
-                    .signed_duration_since(metadata.ingested_at_high_watermark().into_datetime())
-                    .to_std()
-                    .ok()
-                    .map(|duration| duration.as_secs_f64())
-            })
-            .collect()
+    pub(super) fn delivery_observation(&self, now: Timestamp) -> RelayDeliveryObservation {
+        delivery_observation_from_timestamps(
+            now,
+            self.metadata
+                .iter()
+                .map(RuntimeRecordMetadata::ingested_at_high_watermark),
+        )
     }
 
     pub(super) fn domain_timestamp(&self) -> Option<Timestamp> {
@@ -332,6 +353,29 @@ impl RelayRecordBatch {
             .iter()
             .map(|metadata| metadata.ingested_at_high_watermark())
             .max()
+    }
+}
+
+fn delivery_observation_from_timestamps(
+    now: Timestamp,
+    timestamps: impl Iterator<Item = Timestamp>,
+) -> RelayDeliveryObservation {
+    let mut domain_timestamp: Option<Timestamp> = None;
+    let mut latency_seconds = Vec::with_capacity(timestamps.size_hint().0);
+    for timestamp in timestamps {
+        domain_timestamp =
+            Some(domain_timestamp.map_or(timestamp, |current| current.max(timestamp)));
+        if let Ok(duration) = now
+            .into_datetime()
+            .signed_duration_since(timestamp.into_datetime())
+            .to_std()
+        {
+            latency_seconds.push(duration.as_secs_f64());
+        }
+    }
+    RelayDeliveryObservation {
+        domain_timestamp,
+        latency_seconds,
     }
 }
 
@@ -381,4 +425,38 @@ pub(super) fn build_stream_record_batch_preserving_acks(
         metadata,
         acks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use nervix_models::Timestamp;
+
+    use super::delivery_observation_from_timestamps;
+
+    #[test]
+    fn delivery_observation_visits_each_timestamp_once() {
+        let visited = Cell::new(0);
+        let timestamps = [
+            Timestamp::from_unix_nanos(2_000_000_000),
+            Timestamp::from_unix_nanos(4_000_000_000),
+            Timestamp::from_unix_nanos(1_000_000_000),
+            Timestamp::from_unix_nanos(3_000_000_000),
+        ];
+
+        let observation = delivery_observation_from_timestamps(
+            Timestamp::from_unix_nanos(5_000_000_000),
+            timestamps
+                .into_iter()
+                .inspect(|_| visited.set(visited.get() + 1)),
+        );
+
+        assert_eq!(visited.get(), timestamps.len());
+        assert_eq!(
+            observation.domain_timestamp,
+            Some(Timestamp::from_unix_nanos(4_000_000_000))
+        );
+        assert_eq!(observation.latency_seconds, [3.0, 1.0, 4.0, 2.0]);
+    }
 }

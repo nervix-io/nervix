@@ -2207,6 +2207,198 @@ fn scheduled_model(
     }
 }
 
+fn insert_failing_ingestor_restart_schedule(
+    runtime: &super::Runtime,
+    domain: &Domain,
+    ingestor: &Identifier,
+    client: &Identifier,
+    relay: &Identifier,
+) {
+    let mut client_node = scheduled_model(
+        ModelKind::Client,
+        client.clone(),
+        nervix_models::Model::ClientHttp(CreateClientHttp {
+            name: client.clone(),
+            mount: None,
+            config: Vec::new(),
+        }),
+    );
+    client_node.primary_node = None;
+    client_node.assigned_nodes.clear();
+    let mut ingestor_node = scheduled_model(
+        ModelKind::Ingestor,
+        ingestor.clone(),
+        nervix_models::Model::Ingestor(CreateIngestor {
+            name: ingestor.clone(),
+            output_routes: with_inherit_all(ProcessorOutputs::single(relay.clone()))
+                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                .with_branch(OutputBranch::Unbranched),
+            decode_using_codec: identifier("missing_codec"),
+            timestamp_source: None,
+            source: IngestSource::Http {
+                client: client.clone(),
+                every: "1s".to_string(),
+            },
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        }),
+    );
+    ingestor_node.primary_node = None;
+    ingestor_node.assigned_nodes.clear();
+    let (shutdown, _) = watch::channel(false);
+    runtime.executions.insert(
+        domain.clone(),
+        super::DomainExecution {
+            schedule: DomainSchedule {
+                domain: domain.clone(),
+                nodes: vec![client_node, ingestor_node],
+            },
+            passive_only: false,
+            start_version: 0,
+            shutdown,
+            graph: StdArc::new(ArcSwapOption::empty()),
+            relay_registries: HashMap::default(),
+            relay_schemas: HashMap::default(),
+            relay_services: HashMap::default(),
+            relay_branchings: HashMap::default(),
+            relay_branching_schemas: HashMap::default(),
+            materialized_stream_specs: HashMap::default(),
+            materialized_stream_owner_nodes: HashMap::default(),
+            branched_ingestors: HashMap::default(),
+            branched_entrypoints: HashMap::default(),
+            codecs: HashMap::default(),
+            signaling_protocols: HashMap::default(),
+            lookups: HashMap::default(),
+            udfs: nervix_roto::UdfExecutor::default(),
+            endpoint_routes: HashMap::default(),
+            node_tasks: HashMap::default(),
+            emitter_tasks: HashMap::default(),
+            generator_tasks: HashMap::default(),
+            reingestor_tasks: HashMap::default(),
+            clients: HashMap::default(),
+            tasks: Vec::new(),
+        },
+    );
+}
+
+#[tokio::test]
+async fn canceled_ingestor_stop_keeps_retryable_entity_gate_recovery() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let relay = identifier("events");
+    let ingestor = identifier("events_source");
+    let client = identifier("http_source");
+    let operation_id = 41;
+    insert_failing_ingestor_restart_schedule(&runtime, &domain, &ingestor, &client, &relay);
+
+    let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+    let gate = fanout.dispatch_gate();
+    runtime
+        .relay_boundary_fanouts
+        .insert((domain.clone(), relay.clone()), fanout);
+
+    let key = super::RuntimeKey::new(domain.clone(), ingestor.clone());
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let (stop_entered_tx, mut stop_entered_rx) = mpsc::channel(1);
+    let (allow_stop_tx, mut allow_stop_rx) = mpsc::channel(1);
+    let (task_finished_tx, mut task_finished_rx) = mpsc::channel(1);
+    let task = tokio::spawn(async move {
+        shutdown_rx
+            .wait_for(|shutdown| *shutdown)
+            .await
+            .expect("fake ingestor shutdown sender should remain open");
+        stop_entered_tx
+            .send(())
+            .await
+            .expect("test should wait for pending stop");
+        let _ = allow_stop_rx.recv().await;
+        let _ = task_finished_tx.send(()).await;
+    });
+    runtime.ingestors.insert(
+        key.clone(),
+        super::IngestorRuntime::Background {
+            shutdown: shutdown_tx,
+            branched: Vec::new(),
+            tasks: vec![task],
+        },
+    );
+
+    let affected = crate::registry::RegistryEntity {
+        kind: ModelKind::Ingestor,
+        identifier: ingestor.clone(),
+    };
+    let engagement = tokio::spawn({
+        let runtime = runtime.clone();
+        let domain = domain.clone();
+        let relay = relay.clone();
+        async move {
+            runtime
+                .engage_entity_gate_operation(
+                    operation_id,
+                    &domain,
+                    std::slice::from_ref(&relay),
+                    std::slice::from_ref(&affected),
+                    Instant::now() + Duration::from_secs(5),
+                    "cancellation regression",
+                )
+                .await
+        }
+    });
+
+    timeout(Duration::from_secs(1), stop_entered_rx.recv())
+        .await
+        .expect("stop should reach its cancellable task join")
+        .expect("fake ingestor should report pending stop");
+    assert!(runtime.ingestors.get(&key).is_none());
+    assert!(gate.is_closed());
+    assert!(runtime.entity_gate_operation_is_held(operation_id, &domain));
+
+    engagement.abort();
+    assert!(
+        engagement
+            .await
+            .expect_err("engagement should cancel")
+            .is_cancelled()
+    );
+    allow_stop_tx
+        .send(())
+        .await
+        .expect("fake task should finish");
+    timeout(Duration::from_secs(1), task_finished_rx.recv())
+        .await
+        .expect("detached fake ingestor task should finish")
+        .expect("fake ingestor completion should be reported");
+
+    let error = runtime
+        .release_entity_gate_operation(operation_id, &domain)
+        .await
+        .expect_err("missing codec should fail the ingestor restart");
+    assert!(
+        error.contains("missing_codec"),
+        "unexpected restart error: {error}"
+    );
+    assert!(runtime.entity_gate_operation_is_held(operation_id, &domain));
+    assert!(gate.is_closed(), "failed restart must not open dispatch");
+
+    // Simulate the retry condition becoming healthy: a running ingestor makes restart discovery
+    // idempotently skip it.
+    let (resumed_shutdown, _resumed_rx) = watch::channel(false);
+    runtime.ingestors.insert(
+        key,
+        super::IngestorRuntime::Background {
+            shutdown: resumed_shutdown,
+            branched: Vec::new(),
+            tasks: Vec::new(),
+        },
+    );
+    runtime
+        .release_entity_gate_operation(operation_id, &domain)
+        .await
+        .expect("retry should release after ingestor recovery");
+    assert!(!runtime.entity_gate_operation_is_held(operation_id, &domain));
+    assert!(!gate.is_closed());
+}
+
 #[tokio::test]
 async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph() {
     let runtime = super::Runtime::default();
@@ -3160,6 +3352,11 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         super::BranchInstanceRegistry::<Option<super::BranchKey>, super::ProcessorBranchTask>::new(
         );
     let now = super::current_timestamp();
+    let dequeued_work = || {
+        super::NodeQuiesceWorkGuard::begin(
+            runtime.node_quiesce_counters(&domain, &identifier("dedup_users")),
+        )
+    };
     let branch_batch = |user_id: i64, tenant: &str| {
         super::RelayRecordBatch::from_messages(
             schema.clone(),
@@ -3186,6 +3383,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         &mut instances,
         identifier("orders"),
         branch_batch(42, "acme"),
+        dequeued_work(),
     )
     .await;
     let mut states = instances.states();
@@ -3203,6 +3401,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         &mut instances,
         identifier("orders"),
         branch_batch(43, "acme"),
+        dequeued_work(),
     )
     .await;
     let states = instances.states();
@@ -3223,6 +3422,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         &mut instances,
         identifier("orders"),
         branch_batch(7, "beta"),
+        dequeued_work(),
     )
     .await;
     assert_eq!(instances.states().len(), 2);
@@ -3236,6 +3436,303 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
     )
     .await;
     assert!(instances.states().is_empty());
+}
+
+fn junction_branch_template(processor: &str, input_relay: &str) -> super::BranchInstanceTemplate {
+    let processor = identifier(processor);
+    let input_relay = identifier(input_relay);
+    super::BranchInstanceTemplate {
+        source_kind: ModelKind::Junction,
+        source: processor.clone(),
+        root_relay: input_relay.clone(),
+        branch: None,
+        branch_ttl: None,
+        branch_max_instances: None,
+        error_policies: ErrorPolicies::handled_by_log(),
+        relays: HashMap::default(),
+        materialized_streams: HashSet::default(),
+        processors: [(
+            processor.clone(),
+            super::RelayProcessorTemplate {
+                kind: ModelKind::Junction,
+                processor,
+                input_relays: vec![input_relay],
+                input_collect_policies: HashMap::default(),
+                error_policies: ErrorPolicies::handled_by_log(),
+                from_where: HashMap::default(),
+                filter_where: None,
+                materialized_state: Vec::new(),
+                operation: super::RelayProcessorOperationTemplate::Junction {
+                    output_routes: super::RelayProcessorOutputsTemplate { routes: Vec::new() },
+                },
+            },
+        )]
+        .into_iter()
+        .collect(),
+    }
+}
+
+fn quiesce_test_batch() -> super::RelayRecordBatch {
+    super::RelayRecordBatch::single(
+        test_schema(&[("value", ParseAsType::I64)]),
+        None,
+        RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I64(1))]),
+        AckSet::empty(),
+    )
+    .expect("quiesce test batch should build")
+}
+
+#[test]
+fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let processor = identifier("wait_for_customer");
+    let input_relay = identifier("orders");
+    let template = junction_branch_template(processor.as_str(), input_relay.as_str());
+    let mut branch = template
+        .instantiate(&runtime, &domain, None)
+        .expect("junction branch should instantiate")
+        .into_inner();
+    branch
+        .processors
+        .get_mut(&processor)
+        .expect("junction processor should exist")
+        .pending_materialized
+        .push_back((input_relay, quiesce_test_batch()));
+    let counters = runtime.node_quiesce_counters(&domain, &processor);
+    let mut gauges = super::BranchQuiesceGauges::new(counters.clone());
+
+    gauges.observe(&branch, &processor);
+
+    assert_eq!(counters.collected_inputs.load(Ordering::Acquire), 1);
+    let status = runtime.entity_drain_status(
+        &domain,
+        &[],
+        &[crate::registry::RegistryEntity {
+            kind: ModelKind::Junction,
+            identifier: processor.clone(),
+        }],
+    );
+    assert_eq!(status.node_work_items, 1);
+    assert!(!status.is_drained());
+
+    drop(gauges);
+    assert_eq!(counters.outstanding_work(), 0);
+}
+
+#[tokio::test]
+async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let processor = identifier("route_orders");
+    let input_relay = identifier("orders");
+    let template = junction_branch_template(processor.as_str(), input_relay.as_str());
+    let counters = runtime.node_quiesce_counters(&domain, &processor);
+    let (input_tx, mut input_rx) = mpsc::channel(1);
+    let (stop_tx, _stop_rx) = mpsc::channel(1);
+    let task = tokio::spawn(std::future::pending::<()>());
+    let mut instances =
+        super::BranchInstanceRegistry::<Option<super::BranchKey>, super::ProcessorBranchTask>::new(
+        );
+    instances.insert_restored(
+        None,
+        super::current_timestamp(),
+        super::ProcessorBranchTask {
+            input: input_tx,
+            stop: stop_tx,
+            task: parking_lot::Mutex::new(Some(task)),
+        },
+    );
+
+    super::dispatch_processor_node_input(
+        super::ProcessorNodeDispatchContext {
+            runtime_handle: &runtime,
+            domain: &domain,
+            graph: &StdArc::new(ArcSwapOption::from(None)),
+            template: &template,
+            now: super::current_timestamp(),
+        },
+        &mut instances,
+        input_relay.clone(),
+        quiesce_test_batch(),
+        super::NodeQuiesceWorkGuard::begin(counters.clone()),
+    )
+    .await;
+
+    assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 1);
+    let queued = input_rx
+        .recv()
+        .await
+        .expect("processor input should remain in the branch mailbox");
+    assert_eq!(queued.relay, input_relay);
+    assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 1);
+    drop(queued);
+    assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 0);
+
+    let entry = instances
+        .remove(&None)
+        .expect("test branch task should remain registered");
+    let task = entry
+        .task
+        .lock()
+        .take()
+        .expect("test branch task should still be running");
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn processor_handoff_drains_ready_batches_from_every_input() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let processor = identifier("route_orders");
+    let orders = identifier("orders");
+    let returns = identifier("returns");
+    let mut template = junction_branch_template(processor.as_str(), orders.as_str());
+    template
+        .processors
+        .get_mut(&processor)
+        .expect("junction processor should exist")
+        .input_relays
+        .push(returns.clone());
+    let schema = test_schema(&[("value", ParseAsType::I64)]);
+    let orders_broadcast = super::RelayBroadcast::with_capacity(nonzero_capacity(2));
+    let returns_broadcast = super::RelayBroadcast::with_capacity(nonzero_capacity(2));
+    let orders_input = super::RelayRuntimeFanIn::new(orders_broadcast.new_receiver());
+    let returns_input = super::RelayRuntimeFanIn::new(returns_broadcast.new_receiver());
+    let acme = string_branch_key("tenant", "acme");
+    let beta = string_branch_key("tenant", "beta");
+    let batch = |key, value| {
+        super::RelayRecordBatch::single(
+            schema.clone(),
+            key,
+            RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I64(value))]),
+            AckSet::empty(),
+        )
+        .expect("processor input batch should build")
+    };
+    orders_broadcast
+        .broadcast(batch(acme.clone(), 1))
+        .await
+        .expect("orders batch should queue");
+    returns_broadcast
+        .broadcast(batch(beta.clone(), 2))
+        .await
+        .expect("returns batch should queue");
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (commands, command_rx) = mpsc::channel(1);
+    let (response, handoffs) = tokio::sync::oneshot::channel();
+    commands
+        .send(super::ProcessorNodeCommand::Handoff { response })
+        .await
+        .expect("handoff command should queue before the processor starts");
+    let task = tokio::spawn(super::run_processor_node_runtime(
+        super::ProcessorRuntimeContext::new(
+            runtime.clone(),
+            domain.clone(),
+            StdArc::new(ArcSwapOption::from(None)),
+        ),
+        template,
+        vec![(orders, orders_input), (returns, returns_input)],
+        shutdown_rx,
+        command_rx,
+        Vec::new(),
+        Duration::from_secs(60),
+    ));
+
+    let handoffs = timeout(Duration::from_secs(2), handoffs)
+        .await
+        .expect("processor handoff should finish")
+        .expect("processor should return handoff state");
+    timeout(Duration::from_secs(2), task)
+        .await
+        .expect("processor supervisor should stop")
+        .expect("processor supervisor should join");
+    assert_eq!(handoffs.len(), 2);
+    assert!(handoffs.iter().any(|handoff| handoff.key == acme));
+    assert!(handoffs.iter().any(|handoff| handoff.key == beta));
+    assert_eq!(
+        runtime
+            .node_quiesce_counters(&domain, &processor)
+            .outstanding_work(),
+        0
+    );
+    drop(shutdown_tx);
+}
+
+#[tokio::test]
+async fn scheduled_processor_handoff_bounds_command_backpressure_and_aborts_the_task() {
+    struct Dropped(Arc<AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let (commands, _command_rx) = mpsc::channel(1);
+    let (first_response, _first_receiver) = tokio::sync::oneshot::channel();
+    commands
+        .send(super::ProcessorNodeCommand::Handoff {
+            response: first_response,
+        })
+        .await
+        .expect("first command should fill the processor mailbox");
+    let dropped = Arc::new(AtomicBool::new(false));
+    let task_dropped = dropped.clone();
+    let task = tokio::spawn(async move {
+        let _dropped = Dropped(task_dropped);
+        std::future::pending::<()>().await;
+    });
+    let scheduled = super::ScheduledNodeTask { commands, task };
+
+    let error = scheduled
+        .handoff_within(Duration::from_millis(10))
+        .await
+        .expect_err("a full command mailbox must bound handoff");
+
+    assert_eq!(
+        error,
+        "scheduled node task timed out accepting handoff".to_string()
+    );
+    assert!(dropped.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn scheduled_processor_handoff_aborts_a_task_that_drops_its_response() {
+    struct Dropped(Arc<AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let (commands, mut command_rx) = mpsc::channel(1);
+    let dropped = Arc::new(AtomicBool::new(false));
+    let task_dropped = dropped.clone();
+    let task = tokio::spawn(async move {
+        let _dropped = Dropped(task_dropped);
+        let Some(super::ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await
+        else {
+            panic!("scheduled processor must receive its handoff command")
+        };
+        drop(response);
+        std::future::pending::<()>().await;
+    });
+    let scheduled = super::ScheduledNodeTask { commands, task };
+
+    let error = scheduled
+        .handoff()
+        .await
+        .expect_err("a dropped handoff response must fail");
+
+    assert_eq!(
+        error,
+        "scheduled node task dropped its handoff response".to_string()
+    );
+    assert!(dropped.load(Ordering::Acquire));
 }
 
 #[test]
@@ -4256,55 +4753,6 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
     assert!(!services.fanout.uses_branch_collapse());
 }
 
-#[tokio::test]
-async fn recv_stream_message_batch_collects_until_flush_deadline() {
-    let (sender, mut receiver) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
-    let schema = test_schema(&[]);
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
-    sender
-        .send(
-            super::RelayRecordBatch::single(
-                schema.clone(),
-                string_branch_key("tenant", "acme"),
-                RuntimeRecord::from_fields([]),
-                AckSet::empty(),
-            )
-            .expect("batch should build"),
-        )
-        .await
-        .expect("first message should send");
-    sender
-        .send(
-            super::RelayRecordBatch::single(
-                schema,
-                string_branch_key("tenant", "acme"),
-                RuntimeRecord::from_fields([]),
-                AckSet::empty(),
-            )
-            .expect("batch should build"),
-        )
-        .await
-        .expect("second message should send");
-    drop(sender);
-
-    let batch = super::Runtime::recv_stream_message_batch(
-        &mut receiver,
-        &mut shutdown_rx,
-        super::RuntimeFlushPolicy::Each {
-            interval: Duration::from_millis(20),
-            max_batch_size: u64::MAX,
-        },
-    )
-    .await;
-
-    let super::BatchedInput::Batch(batch) = batch else {
-        panic!("expected message batch");
-    };
-    assert_eq!(batch.message_count(), 2);
-    drop(shutdown_tx);
-}
-
 #[test]
 fn flush_immediate_schedules_100_microsecond_system_timeout() {
     let now = Timestamp::from_unix_nanos(1_000_000);
@@ -4339,284 +4787,6 @@ fn flush_immediate_schedules_100_microsecond_system_timeout() {
             Duration::from_micros(100)
         ))
     );
-}
-
-#[tokio::test]
-async fn recv_stream_message_batch_flushes_when_max_batch_size_is_reached() {
-    let (sender, mut receiver) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
-    let schema = test_schema(&[]);
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
-    sender
-        .send(
-            super::RelayRecordBatch::single(
-                schema.clone(),
-                string_branch_key("tenant", "acme"),
-                RuntimeRecord::from_fields([]),
-                AckSet::empty(),
-            )
-            .expect("first message should build"),
-        )
-        .await
-        .expect("first message should send");
-    sender
-        .send(
-            super::RelayRecordBatch::single(
-                schema,
-                string_branch_key("tenant", "acme"),
-                RuntimeRecord::from_fields([]),
-                AckSet::empty(),
-            )
-            .expect("second message should build"),
-        )
-        .await
-        .expect("second message should send");
-
-    let batch = super::Runtime::recv_stream_message_batch(
-        &mut receiver,
-        &mut shutdown_rx,
-        super::RuntimeFlushPolicy::Each {
-            interval: Duration::from_secs(60),
-            max_batch_size: 0,
-        },
-    )
-    .await;
-
-    let super::BatchedInput::Batch(batch) = batch else {
-        panic!("expected message batch");
-    };
-    assert_eq!(batch.message_count(), 1);
-    drop(sender);
-    drop(shutdown_tx);
-}
-
-#[tokio::test]
-async fn recv_stream_message_batch_flush_immediate_drains_cached_batches() {
-    let (sender, mut receiver) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
-    let schema = test_schema(&[]);
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
-    sender
-        .send(
-            super::RelayRecordBatch::single(
-                schema.clone(),
-                string_branch_key("tenant", "acme"),
-                RuntimeRecord::from_fields([]),
-                AckSet::empty(),
-            )
-            .expect("batch should build"),
-        )
-        .await
-        .expect("first message should send");
-    sender
-        .send(
-            super::RelayRecordBatch::single(
-                schema,
-                string_branch_key("tenant", "acme"),
-                RuntimeRecord::from_fields([]),
-                AckSet::empty(),
-            )
-            .expect("batch should build"),
-        )
-        .await
-        .expect("second message should send");
-
-    let batch = super::Runtime::recv_stream_message_batch(
-        &mut receiver,
-        &mut shutdown_rx,
-        super::RuntimeFlushPolicy::Immediate,
-    )
-    .await;
-
-    let super::BatchedInput::Batch(batch) = batch else {
-        panic!("expected message batch");
-    };
-    assert_eq!(batch.message_count(), 2);
-    drop(sender);
-    drop(shutdown_tx);
-}
-
-#[tokio::test]
-async fn recv_runtime_collected_input_without_policy_preserves_relay_batches() {
-    let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(
-        TWO_ITEM_TEST_CHANNEL_CAPACITY,
-    ));
-    let schema = test_schema(&[]);
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let mut receiver =
-        super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let broadcast = match &fanout {
-        super::RelayBoundaryFanout::Direct(fanout) => {
-            fanout.runtime_consumer_broadcast_for_mode(AckMode::Attached)
-        }
-        super::RelayBoundaryFanout::BranchCollapse(_) => {
-            panic!("test services should use direct fanout")
-        }
-    };
-
-    broadcast
-        .broadcast(
-            super::RelayRecordBatch::single(
-                schema.clone(),
-                string_branch_key("tenant", "acme"),
-                RuntimeRecord::from_fields([]),
-                AckSet::empty(),
-            )
-            .expect("first batch should build"),
-        )
-        .await
-        .expect("first batch should send");
-    broadcast
-        .broadcast(
-            super::RelayRecordBatch::single(
-                schema,
-                string_branch_key("tenant", "acme"),
-                RuntimeRecord::from_fields([]),
-                AckSet::empty(),
-            )
-            .expect("second batch should build"),
-        )
-        .await
-        .expect("second batch should send");
-
-    let mut collection = super::RuntimeTaskInputCollection::new(None);
-    let first = super::Runtime::recv_runtime_collected_input(
-        &mut receiver,
-        &mut shutdown_rx,
-        &mut collection,
-        None,
-    )
-    .await;
-
-    let super::BatchedInput::Batch(first) = first else {
-        panic!("expected runtime consumer batch");
-    };
-    assert_eq!(first.message_count(), 1);
-
-    let second = super::Runtime::recv_runtime_collected_input(
-        &mut receiver,
-        &mut shutdown_rx,
-        &mut collection,
-        None,
-    )
-    .await;
-    let super::BatchedInput::Batch(second) = second else {
-        panic!("expected second runtime consumer batch");
-    };
-    assert_eq!(second.message_count(), 1);
-    drop(shutdown_tx);
-}
-
-#[test]
-fn task_input_collection_is_branch_local_and_honors_size_boundary() {
-    let schema = test_schema(&[("value", ParseAsType::String)]);
-    let batch = |tenant: &str, value: &str| {
-        super::RelayRecordBatch::single(
-            schema.clone(),
-            string_branch_key("tenant", tenant),
-            RuntimeRecord::from_fields([(
-                "value".to_string(),
-                RuntimeValue::String(value.to_string()),
-            )]),
-            AckSet::empty(),
-        )
-        .expect("input collection batch should build")
-    };
-    let mut collection =
-        super::RuntimeTaskInputCollection::new(Some(super::RuntimeInputCollectPolicy {
-            interval: Duration::from_secs(60),
-            max_batch_size: None,
-        }));
-    let alpha = string_branch_key("tenant", "alpha");
-    let beta = string_branch_key("tenant", "beta");
-
-    assert!(
-        collection
-            .push(batch("alpha", "alpha-1"))
-            .expect("alpha input must collect")
-            .is_none()
-    );
-    assert!(
-        collection
-            .push(batch("beta", "beta-1"))
-            .expect("beta input must collect")
-            .is_none()
-    );
-    assert!(
-        collection
-            .push(batch("alpha", "alpha-2"))
-            .expect("second alpha input must collect")
-            .is_none()
-    );
-    assert!(
-        collection
-            .push(batch("beta", "beta-2"))
-            .expect("second beta input must collect")
-            .is_none()
-    );
-
-    let alpha_batch = collection
-        .take(&alpha)
-        .expect("alpha collection must concatenate");
-    let beta_batch = collection
-        .take(&beta)
-        .expect("beta collection must concatenate");
-    assert_eq!(alpha_batch.message_count(), 2);
-    assert_eq!(beta_batch.message_count(), 2);
-    assert_eq!(alpha_batch.key, alpha);
-    assert_eq!(beta_batch.key, beta);
-
-    let mut size_bounded =
-        super::RuntimeTaskInputCollection::new(Some(super::RuntimeInputCollectPolicy {
-            interval: Duration::from_secs(60),
-            max_batch_size: Some(1),
-        }));
-    let released = size_bounded
-        .push(batch("alpha", "size-trigger"))
-        .expect("size-bounded input must collect")
-        .expect("input size boundary must release the collection");
-    assert_eq!(released.message_count(), 1);
-    assert!(size_bounded.pending.is_empty());
-}
-
-#[tokio::test]
-async fn recv_stream_message_batch_flushes_collected_messages_on_shutdown() {
-    let (sender, mut receiver) = mpsc::channel(STUPID_CHANNEL_CAPACITY_REMOVE_ME);
-    let schema = test_schema(&[]);
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
-    sender
-        .send(
-            super::RelayRecordBatch::single(
-                schema,
-                string_branch_key("tenant", "acme"),
-                RuntimeRecord::from_fields([]),
-                AckSet::empty(),
-            )
-            .expect("message should build"),
-        )
-        .await
-        .expect("message should send");
-
-    let shutdown_task = tokio::spawn(async move {
-        tokio::task::yield_now().await;
-        shutdown_tx.send(true).expect("shutdown should send");
-    });
-    let batch = super::Runtime::recv_stream_message_batch(
-        &mut receiver,
-        &mut shutdown_rx,
-        super::RuntimeFlushPolicy::Each {
-            interval: Duration::from_secs(60),
-            max_batch_size: u64::MAX,
-        },
-    )
-    .await;
-    shutdown_task.await.expect("shutdown task should join");
-    let super::BatchedInput::Batch(batch) = batch else {
-        panic!("expected collected messages to flush on shutdown");
-    };
-    assert_eq!(batch.message_count(), 1);
-    drop(sender);
 }
 
 #[test]
@@ -4830,6 +5000,76 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
         .await;
 
     assert!(expiring_state.contains_key(&branch));
+}
+
+#[tokio::test]
+async fn materializer_shutdown_drains_every_ready_relay_batch() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let relay = identifier("materialized_orders");
+    let schema = test_schema(&[("value", ParseAsType::I64)]);
+    let state = runtime
+        .replicated_materialized_stream_state(
+            RuntimeStatePlacement {
+                domain: domain.clone(),
+                state: RuntimeStateKind::MaterializedRelay,
+                kind: ModelKind::Materializer,
+                identifier: relay.clone(),
+                schema_fingerprint: [0; 32],
+                branch_key: None,
+            },
+            None,
+            Vec::new(),
+            0,
+        )
+        .expect("materialized state should initialize");
+    let broadcast = super::RelayBroadcast::with_capacity(nonzero_capacity(2));
+    let receiver = super::RelayRuntimeFanIn::new(broadcast.new_receiver());
+    let (shutdown, _) = watch::channel(false);
+    let task = runtime.spawn_materializer_task(
+        &domain,
+        &shutdown,
+        super::MaterializerTaskSpec {
+            relay: relay.clone(),
+            state: state.clone(),
+            branch_ttl: None,
+            branch_capacity: None,
+            receiver,
+        },
+    );
+    let acme = string_branch_key("tenant", "acme");
+    let beta = string_branch_key("tenant", "beta");
+    for (key, value) in [(acme.clone(), 1), (beta.clone(), 2)] {
+        tokio::task::consume_budget().await;
+        broadcast
+            .broadcast(
+                super::RelayRecordBatch::single(
+                    schema.clone(),
+                    key,
+                    RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I64(value))])
+                        .with_ingested_at_watermarks(Timestamp::from_unix_nanos(value)),
+                    AckSet::empty(),
+                )
+                .expect("materialized batch should build"),
+            )
+            .await
+            .expect("materialized batch should queue");
+    }
+
+    shutdown.send(true).expect("materializer should stop");
+    timeout(Duration::from_secs(1), task)
+        .await
+        .expect("materializer should drain before the shutdown deadline")
+        .expect("materializer task should join");
+
+    assert!(state.entries.contains_key(&acme));
+    assert!(state.entries.contains_key(&beta));
+    assert_eq!(
+        runtime
+            .node_quiesce_counters(&domain, &relay)
+            .outstanding_work(),
+        0
+    );
 }
 
 #[test]
@@ -7566,6 +7806,8 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
         .expect("reingestor task should spawn");
     let (acme_acks, acme_completion) = AckSet::root();
     let (beta_acks, beta_completion) = AckSet::root();
+    let mut acme_completion = Box::pin(acme_completion.wait());
+    let mut beta_completion = Box::pin(beta_completion.wait());
 
     broadcast
         .broadcast(
@@ -7581,7 +7823,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
                             ),
                             ("user_id".to_string(), RuntimeValue::U32(42)),
                         ]),
-                        acks: acme_acks.clone(),
+                        acks: acme_acks.attached(),
                     },
                     RelayMessage {
                         key: string_branch_key("site", "north"),
@@ -7592,7 +7834,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
                             ),
                             ("user_id".to_string(), RuntimeValue::U32(7)),
                         ]),
-                        acks: beta_acks.clone(),
+                        acks: beta_acks.attached(),
                     },
                 ],
             )
@@ -7603,18 +7845,25 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     acme_acks.ack_success();
     beta_acks.ack_success();
 
-    assert_eq!(
-        timeout(Duration::from_secs(1), acme_completion.wait())
+    assert!(
+        timeout(Duration::from_millis(20), output_subscription.recv())
             .await
-            .expect("acme ack completion should resolve"),
-        AckOutcome::Ack
+            .is_err(),
+        "reingestor output must remain buffered until its flush deadline"
     );
-    assert_eq!(
-        timeout(Duration::from_secs(1), beta_completion.wait())
+    assert!(
+        timeout(Duration::from_millis(1), &mut acme_completion)
             .await
-            .expect("beta ack completion should resolve"),
-        AckOutcome::Ack
+            .is_err(),
+        "attached acme ACK must remain pending with the buffered output"
     );
+    assert!(
+        timeout(Duration::from_millis(1), &mut beta_completion)
+            .await
+            .is_err(),
+        "attached beta ACK must remain pending with the buffered output"
+    );
+
     let first_output_batch = timeout(Duration::from_secs(1), output_subscription.recv())
         .await
         .expect("first output subscription should receive")
@@ -7623,6 +7872,18 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
         .await
         .expect("second output subscription should receive")
         .expect("output subscription should stay open");
+    assert_eq!(
+        timeout(Duration::from_secs(1), &mut acme_completion)
+            .await
+            .expect("acme ack completion should resolve after output dispatch"),
+        AckOutcome::Ack
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(1), &mut beta_completion)
+            .await
+            .expect("beta ack completion should resolve after output dispatch"),
+        AckOutcome::Ack
+    );
     let tenants = [first_output_batch, second_output_batch]
         .into_iter()
         .flat_map(|batch| {
@@ -7645,6 +7906,198 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     let _ = shutdown_tx.send(true);
     let _ = task.await;
     branched_runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn reingestor_force_and_shutdown_flush_buffered_routes() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let input_relay = identifier("orders");
+    let output_relay = identifier("tenant_orders");
+    let reingestor = identifier("tenant_partition");
+    let schema = test_schema(&[
+        ("tenant", ParseAsType::String),
+        ("user_id", ParseAsType::U32),
+    ]);
+    let (execution_shutdown, _) = watch::channel(false);
+    runtime.executions.insert(
+        domain.clone(),
+        super::DomainExecution {
+            schedule: DomainSchedule {
+                domain: domain.clone(),
+                nodes: Vec::new(),
+            },
+            passive_only: false,
+            start_version: 0,
+            shutdown: execution_shutdown,
+            graph: StdArc::new(ArcSwapOption::empty()),
+            relay_registries: HashMap::default(),
+            relay_schemas: [
+                (input_relay.clone(), schema.clone()),
+                (output_relay.clone(), schema.clone()),
+            ]
+            .into_iter()
+            .collect(),
+            relay_services: HashMap::default(),
+            relay_branchings: HashMap::default(),
+            relay_branching_schemas: HashMap::default(),
+            materialized_stream_specs: HashMap::default(),
+            materialized_stream_owner_nodes: HashMap::default(),
+            branched_ingestors: HashMap::default(),
+            branched_entrypoints: HashMap::default(),
+            codecs: HashMap::default(),
+            signaling_protocols: HashMap::default(),
+            lookups: HashMap::default(),
+            udfs: nervix_roto::UdfExecutor::default(),
+            endpoint_routes: HashMap::default(),
+            node_tasks: HashMap::default(),
+            emitter_tasks: HashMap::default(),
+            generator_tasks: HashMap::default(),
+            reingestor_tasks: HashMap::default(),
+            clients: HashMap::default(),
+            tasks: Vec::new(),
+        },
+    );
+    let (shutdown_tx, _) = watch::channel(false);
+    let broadcast = super::RelayBroadcast::with_capacity(nonzero_capacity(4));
+    let fan_in = super::RelayRuntimeFanIn::new(broadcast.new_receiver());
+    let (output_tx, mut output_rx) = mpsc::channel(4);
+    let task = runtime
+        .spawn_reingestor_task(
+            &domain,
+            &shutdown_tx,
+            &[(output_relay.clone(), output_tx)].into_iter().collect(),
+            CreateReingestor {
+                name: reingestor.clone(),
+                from: ProcessorInputs::single(input_relay.clone()),
+                output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))
+                    .with_flush_policy("10s".to_string(), Some("1MiB".to_string())),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            },
+            input_relay,
+            fan_in,
+        )
+        .expect("reingestor task should spawn");
+    let input_batch = |user_id, acks| {
+        super::RelayRecordBatch::single(
+            schema.clone(),
+            None,
+            RuntimeRecord::from_fields([
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String("acme".to_string()),
+                ),
+                ("user_id".to_string(), RuntimeValue::U32(user_id)),
+            ]),
+            acks,
+        )
+        .expect("input batch should build")
+    };
+
+    let (first_acks, first_completion) = AckSet::root();
+    let mut first_completion = Box::pin(first_completion.wait());
+    broadcast
+        .broadcast(input_batch(1, first_acks.attached()))
+        .await
+        .expect("first input should broadcast");
+    first_acks.ack_success();
+    assert!(
+        timeout(Duration::from_millis(20), output_rx.recv())
+            .await
+            .is_err(),
+        "long-cadence reingestor output must remain buffered"
+    );
+    assert!(
+        timeout(Duration::from_millis(1), &mut first_completion)
+            .await
+            .is_err(),
+        "force-flush input ACK must remain pending with buffered output"
+    );
+
+    runtime.force_flush_domain(&domain);
+    let forced = timeout(Duration::from_secs(1), output_rx.recv())
+        .await
+        .expect("force flush should publish buffered output")
+        .expect("reingestor output should remain open");
+    assert_eq!(
+        forced
+            .runtime_record(0)
+            .expect("forced output should contain a record")
+            .value("user_id"),
+        Some(&RuntimeValue::U32(1))
+    );
+    forced.ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), &mut first_completion)
+            .await
+            .expect("force-flushed ACK should resolve"),
+        AckOutcome::Ack
+    );
+    timeout(Duration::from_secs(1), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let pending = runtime
+                .force_flush_by_domain
+                .get(&domain)
+                .map(|force_flush| force_flush.pending())
+                .unwrap_or_default();
+            if pending == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("force-flush generation should complete after output publication");
+
+    let (second_acks, second_completion) = AckSet::root();
+    let mut second_completion = Box::pin(second_completion.wait());
+    broadcast
+        .broadcast(input_batch(2, second_acks.attached()))
+        .await
+        .expect("second input should broadcast");
+    second_acks.ack_success();
+    assert!(
+        timeout(Duration::from_millis(20), &mut second_completion)
+            .await
+            .is_err(),
+        "shutdown input ACK must remain pending while its output is buffered"
+    );
+    shutdown_tx
+        .send(true)
+        .expect("reingestor shutdown receiver should remain open");
+    timeout(Duration::from_secs(1), task)
+        .await
+        .expect("reingestor should stop after draining input")
+        .expect("reingestor task should not panic");
+    let stopped = timeout(Duration::from_secs(1), output_rx.recv())
+        .await
+        .expect("shutdown should publish buffered output")
+        .expect("reingestor output should remain open");
+    assert_eq!(
+        stopped
+            .runtime_record(0)
+            .expect("shutdown output should contain a record")
+            .value("user_id"),
+        Some(&RuntimeValue::U32(2))
+    );
+    stopped.ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), &mut second_completion)
+            .await
+            .expect("shutdown-flushed ACK should resolve"),
+        AckOutcome::Ack
+    );
+    assert_eq!(
+        runtime
+            .node_quiesce_counters(&domain, &reingestor)
+            .output_buffers
+            .load(Ordering::Acquire),
+        0,
+        "reingestor output gauge must be cleared when the task exits"
+    );
 }
 
 #[test]
@@ -7856,125 +8309,184 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
 }
 
 #[tokio::test]
-async fn ingestor_route_applies_size_boundaries_independently_per_branch() {
-    let runtime = super::Runtime::default();
-    let domain = domain("default");
-    let root_relay = identifier("notifications");
-    let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
-    let mut fan_in =
-        super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let services = Arc::new(super::RelayBoundaryServices::new(
-        fanout,
-        1,
-        0,
-        Vec::new(),
-        None,
-    ));
+async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_branch() {
+    let cases = [
+        (
+            ModelKind::Ingestor,
+            super::BranchInstanceAckBoundary::Preserve,
+            "notifications_ingestor",
+        ),
+        (
+            ModelKind::Reingestor,
+            super::BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
+            "notifications_reingestor",
+        ),
+    ];
+    for (source_kind, ack_boundary, source) in cases {
+        tokio::task::consume_budget().await;
+        let runtime = super::Runtime::default();
+        let domain = domain("default");
+        let root_relay = identifier("notifications");
+        let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
+        let mut fan_in = super::RelayRuntimeFanIn::new(
+            fanout.runtime_consumer_receiver_for_mode(AckMode::Attached),
+        );
+        let services = Arc::new(super::RelayBoundaryServices::new(
+            fanout,
+            1,
+            0,
+            Vec::new(),
+            None,
+        ));
+        let schema = test_schema(&[
+            ("tenant", ParseAsType::String),
+            ("user_id", ParseAsType::U32),
+        ]);
+        let batch = |tenant: &str, user_id| {
+            super::RelayRecordBatch::single(
+                schema.clone(),
+                string_branch_key("tenant", tenant),
+                RuntimeRecord::from_fields([
+                    (
+                        "tenant".to_string(),
+                        RuntimeValue::String(tenant.to_string()),
+                    ),
+                    ("user_id".to_string(), RuntimeValue::U32(user_id)),
+                ]),
+                AckSet::empty(),
+            )
+            .expect("ingestor output batch should build")
+        };
+        let acme_one = batch("acme", 1);
+        let max_batch_size = acme_one.estimated_bytes() + 1;
+        let route_runtime = super::IngestorRouteRuntime::new(
+            runtime,
+            domain,
+            identifier(source),
+            StdArc::new(ArcSwapOption::from(None)),
+            super::IngestorRouteTemplate {
+                branch: super::BranchInstanceTemplate {
+                    source_kind,
+                    source: identifier(source),
+                    root_relay: root_relay.clone(),
+                    branch: None,
+                    branch_ttl: None,
+                    branch_max_instances: None,
+                    error_policies: ErrorPolicies::handled_by_log(),
+                    relays: [(
+                        root_relay,
+                        super::RelayProcessorRelayTemplate {
+                            registry: super::RelayRegistry::new(),
+                            services,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    materialized_streams: HashSet::default(),
+                    processors: HashMap::default(),
+                },
+                branch_assignments: Vec::new(),
+                ack_boundary,
+                flush_policy: super::RuntimeFlushPolicy::Each {
+                    interval: Duration::from_secs(10),
+                    max_batch_size,
+                },
+            },
+            Duration::from_secs(30),
+        );
+
+        route_runtime
+            .sender()
+            .send(acme_one)
+            .await
+            .expect("acme batch should enter the route");
+        route_runtime
+            .sender()
+            .send(batch("beta", 1))
+            .await
+            .expect("beta batch should enter the route");
+        assert!(
+            timeout(Duration::from_millis(50), fan_in.recv())
+                .await
+                .is_err(),
+            "different branches must not share a size boundary"
+        );
+
+        route_runtime
+            .sender()
+            .send(batch("acme", 2))
+            .await
+            .expect("second acme batch should enter the route");
+        let acme = timeout(Duration::from_secs(1), fan_in.recv())
+            .await
+            .expect("acme size boundary should flush")
+            .expect("runtime consumer should remain open");
+        assert_eq!(key_label(&acme.key), r#"{"tenant":"acme"}"#);
+        assert_eq!(acme.message_count(), 2);
+        assert!(
+            timeout(Duration::from_millis(50), fan_in.recv())
+                .await
+                .is_err(),
+            "beta must remain pending until its own size boundary"
+        );
+
+        route_runtime
+            .sender()
+            .send(batch("beta", 2))
+            .await
+            .expect("second beta batch should enter the route");
+        let beta = timeout(Duration::from_secs(1), fan_in.recv())
+            .await
+            .expect("beta size boundary should flush")
+            .expect("runtime consumer should remain open");
+        assert_eq!(key_label(&beta.key), r#"{"tenant":"beta"}"#);
+        assert_eq!(beta.message_count(), 2);
+
+        route_runtime.shutdown().await;
+    }
+}
+
+#[test]
+fn relay_batch_estimated_bytes_counts_arrow_payload_buffers() {
     let schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("user_id", ParseAsType::U32),
     ]);
-    let batch = |tenant: &str, user_id| {
-        super::RelayRecordBatch::single(
-            schema.clone(),
-            string_branch_key("tenant", tenant),
-            RuntimeRecord::from_fields([
-                (
-                    "tenant".to_string(),
-                    RuntimeValue::String(tenant.to_string()),
-                ),
-                ("user_id".to_string(), RuntimeValue::U32(user_id)),
-            ]),
-            AckSet::empty(),
-        )
-        .expect("ingestor output batch should build")
-    };
-    let acme_one = batch("acme", 1);
-    let max_batch_size = acme_one.estimated_bytes() + 1;
-    let route_runtime = super::IngestorRouteRuntime::new(
-        runtime,
-        domain,
-        identifier("notifications_ingestor"),
-        StdArc::new(ArcSwapOption::from(None)),
-        super::IngestorRouteTemplate {
-            branch: super::BranchInstanceTemplate {
-                source_kind: ModelKind::Ingestor,
-                source: identifier("notifications_ingestor"),
-                root_relay: root_relay.clone(),
-                branch: None,
-                branch_ttl: None,
-                branch_max_instances: None,
-                error_policies: ErrorPolicies::handled_by_log(),
-                relays: [(
-                    root_relay,
-                    super::RelayProcessorRelayTemplate {
-                        registry: super::RelayRegistry::new(),
-                        services,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                materialized_streams: HashSet::default(),
-                processors: HashMap::default(),
-            },
-            branch_assignments: Vec::new(),
-            ack_boundary: super::BranchInstanceAckBoundary::Preserve,
-            flush_policy: super::RuntimeFlushPolicy::Each {
-                interval: Duration::from_secs(10),
-                max_batch_size,
-            },
-        },
-        Duration::from_secs(30),
-    );
+    let batch = super::RelayRecordBatch::single(
+        schema,
+        None,
+        RuntimeRecord::from_fields([
+            (
+                "tenant".to_string(),
+                RuntimeValue::String("acme".to_string()),
+            ),
+            ("user_id".to_string(), RuntimeValue::U32(42)),
+        ]),
+        AckSet::empty(),
+    )
+    .expect("relay batch should build");
+    let payload_bytes = batch
+        .batch
+        .batch()
+        .columns()
+        .iter()
+        .map(|column| {
+            column
+                .to_data()
+                .get_slice_memory_size()
+                .expect("test Arrow type should report its logical payload size") as u64
+        })
+        .sum::<u64>();
+    let allocated_bytes = batch
+        .batch
+        .batch()
+        .columns()
+        .iter()
+        .map(|column| column.get_array_memory_size() as u64)
+        .sum::<u64>();
 
-    route_runtime
-        .sender()
-        .send(acme_one)
-        .await
-        .expect("acme batch should enter the route");
-    route_runtime
-        .sender()
-        .send(batch("beta", 1))
-        .await
-        .expect("beta batch should enter the route");
-    assert!(
-        timeout(Duration::from_millis(50), fan_in.recv())
-            .await
-            .is_err(),
-        "different branches must not share a size boundary"
-    );
-
-    route_runtime
-        .sender()
-        .send(batch("acme", 2))
-        .await
-        .expect("second acme batch should enter the route");
-    let acme = timeout(Duration::from_secs(1), fan_in.recv())
-        .await
-        .expect("acme size boundary should flush")
-        .expect("runtime consumer should remain open");
-    assert_eq!(key_label(&acme.key), r#"{"tenant":"acme"}"#);
-    assert_eq!(acme.message_count(), 2);
-    assert!(
-        timeout(Duration::from_millis(50), fan_in.recv())
-            .await
-            .is_err(),
-        "beta must remain pending until its own size boundary"
-    );
-
-    route_runtime
-        .sender()
-        .send(batch("beta", 2))
-        .await
-        .expect("second beta batch should enter the route");
-    let beta = timeout(Duration::from_secs(1), fan_in.recv())
-        .await
-        .expect("beta size boundary should flush")
-        .expect("runtime consumer should remain open");
-    assert_eq!(key_label(&beta.key), r#"{"tenant":"beta"}"#);
-    assert_eq!(beta.message_count(), 2);
-
-    route_runtime.shutdown().await;
+    assert!(allocated_bytes > payload_bytes);
+    assert_eq!(batch.estimated_bytes(), payload_bytes);
 }
 
 #[tokio::test]
@@ -8788,7 +9300,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     let batch =
         super::RelayRecordBatch::from_messages(input_schema, messages).expect("batch must build");
 
-    let plan = super::plan_emitter_filter_map_messages(
+    let plan = super::plan_emitter_filter_map_batch(
         &emitter.name,
         &program,
         batch,
@@ -8798,18 +9310,24 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     .await
     .expect("emitter filter-map must execute");
 
-    assert_eq!(plan.messages.len(), 1);
+    let output = plan
+        .batch
+        .expect("selected emitter output must remain a batch");
+    assert_eq!(output.batch.batch().num_rows(), 1);
+    let output_record = output
+        .runtime_record(0)
+        .expect("test may inspect the selected output row");
     assert_eq!(
-        plan.messages[0].record.value("normalized"),
+        output_record.value("normalized"),
         Some(&RuntimeValue::String("fast-lane".to_string()))
     );
     assert_eq!(
         plan.headers,
-        vec![vec![
+        Some(vec![vec![
             ("tenant".to_string(), "acme".to_string()),
             ("route".to_string(), "fast-lane".to_string()),
             ("route".to_string(), "second".to_string()),
-        ]]
+        ]])
     );
 }
 
@@ -9597,10 +10115,12 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
         &domain("default"),
         &generator,
         &output,
-        output_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
-        source_schema.arrow_schema(),
-        None,
+        super::GeneratorSetProgramSchemas {
+            output: output_schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+            source: source_schema.arrow_schema(),
+            branch: None,
+        },
         None,
     )
     .expect("generator set program must compile");
@@ -9734,4 +10254,41 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             .expect("missing dependencies should produce a policy outcome"),
         super::MaterializedDependencyResolution::Skip
     ));
+
+    let (acks, completion) = AckSet::root();
+    let retained = super::RelayRecordBatch::single(
+        state_schema,
+        None,
+        RuntimeRecord::from_fields([(
+            "status".to_string(),
+            RuntimeValue::String("pending".to_string()),
+        )]),
+        acks,
+    )
+    .expect("required-wait test batch must build");
+    let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    assert!(
+        runtime
+            .resolve_materialized_dependencies_for_batch(
+                &domain,
+                &identifier("input"),
+                &[nervix_models::MaterializedStateDependency {
+                    relay: identifier("profiles"),
+                    policy: nervix_models::MaterializedStatePolicy::RequiredWait,
+                }],
+                retained,
+                &mut shutdown_rx,
+                false,
+            )
+            .await
+            .expect("terminal drain must resolve retained materialized work")
+            .is_none()
+    );
+    assert_eq!(
+        completion.wait().await,
+        AckOutcome::NoAck(
+            "node stopped while waiting for required materialized state at relay 'input'"
+                .to_string()
+        )
+    );
 }

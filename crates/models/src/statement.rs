@@ -2375,14 +2375,103 @@ pub enum EndpointType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSignalingProtocol {
     pub name: Identifier,
+    pub format: SignalingWireFormat,
     pub on_connect: SignalingProtocolOnConnect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum SignalingWireFormat {
+    Json,
+    Yaml,
+    Toml,
+    Xml,
+    Cbor,
+    Raw,
+    Protobuf(SignalingProtobufConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalingProtobufConfig {
+    pub resource: Identifier,
+    pub resource_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config: Vec<ClientConfigEntry>,
+    pub send_message: String,
+    pub wait_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalingProtocolOnConnect {
-    pub send_bodies: Vec<String>,
-    pub wait_bodies: Vec<String>,
+    /// Whether payload streams to the relay from the moment the connection opens.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_data: bool,
+    /// Handshake steps, executed strictly in written order.
+    pub steps: Vec<SignalingStep>,
+    /// Matchers that abort the handshake during any step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fail_matchers: Vec<String>,
     pub timeout: String,
+}
+
+/// One step of a handshake: frames written, or an outcome waited for.
+///
+/// A step completes before the next begins, which is what makes a request able to depend on an
+/// earlier reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignalingStep {
+    Send(Vec<String>),
+    Wait(SignalingWaitStep),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalingWaitStep {
+    /// Matchers that must all be satisfied, in any arrival order, for the step to complete.
+    pub matchers: Vec<String>,
+    /// Program merged into the handshake state, valid only for a single-matcher step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<String>,
+    /// Matchers that abort the handshake while this step is waiting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fail_matchers: Vec<String>,
+    /// Whether completing this step starts streaming payload to the relay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_data: bool,
+}
+
+impl SignalingWaitStep {
+    pub fn new(matchers: Vec<String>) -> Self {
+        Self {
+            matchers,
+            capture: None,
+            fail_matchers: Vec::new(),
+            accept_data: false,
+        }
+    }
+}
+
+impl SignalingProtocolOnConnect {
+    pub fn wait_steps(&self) -> impl Iterator<Item = &SignalingWaitStep> {
+        self.steps.iter().filter_map(|step| match step {
+            SignalingStep::Wait(wait) => Some(wait),
+            SignalingStep::Send(_) => None,
+        })
+    }
+
+    pub fn sends(&self) -> impl Iterator<Item = &String> {
+        self.steps
+            .iter()
+            .filter_map(|step| match step {
+                SignalingStep::Send(programs) => Some(programs),
+                SignalingStep::Wait(_) => None,
+            })
+            .flatten()
+    }
+
+    /// Whether payload ever starts streaming before the handshake finishes.
+    pub fn accepts_data_during_handshake(&self) -> bool {
+        self.accept_data || self.wait_steps().any(|wait| wait.accept_data)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
@@ -2512,9 +2601,7 @@ pub enum KafkaIngestMode {
         timeout: String,
         retry_policy: RetryPolicy,
     },
-    NoAckParallel {
-        max: u64,
-    },
+    NoAckParallel,
 }
 
 pub type PulsarIngestMode = KafkaIngestMode;
@@ -2548,7 +2635,6 @@ pub enum MqttIngestMode {
         qos: MqttQos,
     },
     NoAckParallel {
-        max: u64,
         session: MqttSession,
         qos: MqttQos,
     },
@@ -2583,13 +2669,6 @@ impl MqttIngestMode {
         match self {
             Self::AckSequential { .. } | Self::AckParallel { .. } => true,
             Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => false,
-        }
-    }
-
-    pub const fn max_inflight(&self) -> usize {
-        match self {
-            Self::AckParallel { max, .. } | Self::NoAckParallel { max, .. } => *max as usize,
-            Self::AckSequential { .. } | Self::NoAckSequential { .. } => 1,
         }
     }
 }
@@ -2979,7 +3058,7 @@ pub struct AlterDeduplicator {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterDeduplicatorOperation {
-    Processor(AlterProcessorOperation),
+    Processor(Box<AlterProcessorOperation>),
     SetDeduplicateOn { expressions: Vec<crate::Expression> },
     SetMaxTime { max_time: String },
 }
@@ -3096,7 +3175,7 @@ pub struct AlterReorderer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterReordererOperation {
-    Processor(AlterProcessorOperation),
+    Processor(Box<AlterProcessorOperation>),
     SetOrderBy { expressions: Vec<crate::Expression> },
     SetMaxTime { max_time: String },
 }
@@ -4516,10 +4595,12 @@ mod tests {
             .apply_alter(&AlterDeduplicator {
                 deduplicator: identifier("dedup_events"),
                 operations: vec![
-                    AlterDeduplicatorOperation::Processor(AlterProcessorOperation::AddFrom {
-                        relay: identifier("secondary"),
-                        where_clause: Some(Expression::Literal(Literal::Bool(true))),
-                    }),
+                    AlterDeduplicatorOperation::Processor(Box::new(
+                        AlterProcessorOperation::AddFrom {
+                            relay: identifier("secondary"),
+                            where_clause: Some(Expression::Literal(Literal::Bool(true))),
+                        },
+                    )),
                     AlterDeduplicatorOperation::SetDeduplicateOn {
                         expressions: vec![Expression::Literal(Literal::I64(2))],
                     },
@@ -4532,9 +4613,11 @@ mod tests {
                     AlterDeduplicatorOperation::SetMaxTime {
                         max_time: "2m".to_string(),
                     },
-                    AlterDeduplicatorOperation::Processor(AlterProcessorOperation::SetMode {
-                        mode: AckMode::Detached,
-                    }),
+                    AlterDeduplicatorOperation::Processor(Box::new(
+                        AlterProcessorOperation::SetMode {
+                            mode: AckMode::Detached,
+                        },
+                    )),
                 ],
             })
             .expect("deduplicator ALTER should apply");
@@ -4570,9 +4653,11 @@ mod tests {
                     AlterReordererOperation::SetMaxTime {
                         max_time: "2m".to_string(),
                     },
-                    AlterReordererOperation::Processor(AlterProcessorOperation::SetFilterWhere {
-                        where_clause: Expression::Literal(Literal::Bool(true)),
-                    }),
+                    AlterReordererOperation::Processor(Box::new(
+                        AlterProcessorOperation::SetFilterWhere {
+                            where_clause: Expression::Literal(Literal::Bool(true)),
+                        },
+                    )),
                 ],
             })
             .expect("reorderer ALTER should apply");
@@ -4599,9 +4684,11 @@ mod tests {
                     AlterDeduplicatorOperation::SetMaxTime {
                         max_time: "1s".to_string(),
                     },
-                    AlterDeduplicatorOperation::Processor(AlterProcessorOperation::DropRoute {
-                        relay: identifier("missing"),
-                    },),
+                    AlterDeduplicatorOperation::Processor(Box::new(
+                        AlterProcessorOperation::DropRoute {
+                            relay: identifier("missing"),
+                        },
+                    )),
                 ],
             }),
             Err(AlterDeduplicatorError::Processor(

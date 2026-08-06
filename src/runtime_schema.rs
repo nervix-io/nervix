@@ -1,4 +1,4 @@
-use std::{io::Cursor, str::FromStr, sync::Arc as StdArc};
+use std::{io::Cursor, sync::Arc as StdArc};
 
 use ahash::{HashMap, HashMapExt, HashSet};
 use apache_avro::{
@@ -21,20 +21,9 @@ use arrow_schema::{
     Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
 };
 use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter_record_batch};
-use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
-use jaq_core::{
-    Compiler as JaqCompiler, Ctx as JaqCtx, Vars as JaqVars, data,
-    load::{Arena, File, Loader},
-    unwrap_valr,
-};
-use jaq_fmts::{
-    Format as JaqFormat, read as jaq_read,
-    write::{self as jaq_write, Writer as JaqWriter},
-};
-use jaq_json::{Num as JaqNum, Val as JaqVal};
 use nervix_models::{
-    AvroType, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
+    AvroType, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
     CreateWireSchema, Identifier, JsonType, ParseAsType, RemoteDecodedRecord,
     RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
     RemoteRuntimeRecordMetadata, RemoteRuntimeValue, Timestamp, WireSchemaDefinition,
@@ -47,10 +36,15 @@ use prost_reflect::{
     DescriptorPool, DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage,
     MessageDescriptor, SerializeOptions as ProtobufSerializeOptions,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    ser::{SerializeMap, SerializeSeq},
+};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use thiserror::Error;
 use triomphe::Arc;
+
+use crate::jaq_program::{CompiledJaqProgram, JaqNativeFormat};
 
 #[derive(Debug, Clone)]
 pub struct CompiledSchema {
@@ -71,6 +65,11 @@ pub struct CompiledCodec {
     pub name: Identifier,
     schema: Arc<CompiledSchema>,
     wire_schema: CompiledWireSchema,
+}
+
+pub(crate) struct CompiledCodecBatchEncoder<'a> {
+    codec: &'a CompiledCodec,
+    batch: &'a RuntimeRecordBatch,
 }
 
 #[derive(Debug, Clone)]
@@ -96,41 +95,65 @@ struct CompiledAvroWireSchema {
 
 #[derive(Debug, Clone)]
 struct CompiledJaqNativeCodec {
-    format: CodecJaqFormat,
-    transformations: CodecJaqTransformations,
+    format: JaqNativeFormat,
+    transformations: CompiledJaqTransformations,
 }
 
-#[derive(Debug, Clone)]
-pub struct ProtobufCodecDescriptor {
-    message: MessageDescriptor,
+#[derive(Debug, Clone, Default)]
+struct CompiledJaqTransformations {
+    on_ingestion: Option<Arc<CompiledJaqProgram>>,
+    on_emitting: Option<Arc<CompiledJaqProgram>>,
+}
+
+impl CompiledJaqTransformations {
+    fn compile(
+        codec: &CreateCodec,
+        transformations: &CodecJaqTransformations,
+    ) -> Result<Self, CodecError> {
+        let compile = |program: Option<&str>| {
+            program
+                .map(|program| {
+                    CompiledJaqProgram::compile(program)
+                        .map(Arc::new)
+                        .map_err(|error| CodecError::InvalidJaqTransformation {
+                            codec: codec.name.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                })
+                .transpose()
+        };
+        Ok(Self {
+            on_ingestion: compile(transformations.on_ingestion.as_deref())?,
+            on_emitting: compile(transformations.on_emitting.as_deref())?,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
 struct CompiledProtobufCodec {
     message: MessageDescriptor,
-    transformations: CodecJaqTransformations,
+    transformations: CompiledJaqTransformations,
 }
 
-impl ProtobufCodecDescriptor {
+/// A protobuf descriptor pool compiled from a resource version.
+#[derive(Debug, Clone)]
+pub struct ProtobufDescriptorPool {
+    pool: DescriptorPool,
+}
+
+impl ProtobufDescriptorPool {
     pub fn from_file_descriptor_set(
-        codec: &CreateCodec,
         file_descriptor_set: prost_types::FileDescriptorSet,
-        message_name: &str,
-    ) -> Result<Self, CodecError> {
-        let pool =
-            DescriptorPool::from_file_descriptor_set(file_descriptor_set).map_err(|source| {
-                CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
-                    reason: format!("invalid protobuf descriptor set: {source}"),
-                }
-            })?;
-        let message =
-            pool.get_message_by_name(message_name)
-                .ok_or_else(|| CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
-                    reason: format!("protobuf message '{message_name}' was not found"),
-                })?;
-        Ok(Self { message })
+    ) -> Result<Self, String> {
+        DescriptorPool::from_file_descriptor_set(file_descriptor_set)
+            .map(|pool| Self { pool })
+            .map_err(|source| format!("invalid protobuf descriptor set: {source}"))
+    }
+
+    pub fn message(&self, message_name: &str) -> Result<MessageDescriptor, String> {
+        self.pool
+            .get_message_by_name(message_name)
+            .ok_or_else(|| format!("protobuf message '{message_name}' was not found"))
     }
 }
 
@@ -222,8 +245,20 @@ pub enum CodecError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("failed to encode json payload for codec '{codec}': {source}")]
+    JsonEncode {
+        codec: String,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("failed to parse json payload for codec '{codec}': {source}")]
     SimdJsonDecode {
+        codec: String,
+        #[source]
+        source: simd_json::Error,
+    },
+    #[error("failed to encode json payload for codec '{codec}': {source}")]
+    SimdJsonEncode {
         codec: String,
         #[source]
         source: simd_json::Error,
@@ -234,6 +269,12 @@ pub enum CodecError {
     CborEncode { codec: String, reason: String },
     #[error("failed to parse avro payload for codec '{codec}': {source}")]
     AvroDecode {
+        codec: String,
+        #[source]
+        source: apache_avro::Error,
+    },
+    #[error("failed to encode avro payload for codec '{codec}': {source}")]
+    AvroEncode {
         codec: String,
         #[source]
         source: apache_avro::Error,
@@ -488,9 +529,7 @@ impl CompiledCodec {
     pub(crate) fn schema(&self) -> Arc<CompiledSchema> {
         self.schema.clone()
     }
-}
 
-impl CompiledCodec {
     pub fn requires_blocking_decode(&self) -> bool {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => native.transformations.on_ingestion.is_some(),
@@ -503,7 +542,7 @@ impl CompiledCodec {
         }
     }
 
-    pub fn requires_blocking_encode(&self) -> bool {
+    pub(crate) fn requires_blocking_encode(&self) -> bool {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => native.transformations.on_emitting.is_some(),
             CompiledWireSchema::Protobuf(protobuf) => {
@@ -513,6 +552,134 @@ impl CompiledCodec {
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_) => false,
         }
+    }
+
+    pub(crate) fn batch_encoder<'a>(
+        &'a self,
+        batch: &'a RuntimeRecordBatch,
+    ) -> Result<CompiledCodecBatchEncoder<'a>, CodecError> {
+        self.schema
+            .validate_arrow_batch(batch)
+            .map_err(|reason| CodecError::InvalidCodec {
+                codec: self.name.as_str().to_string(),
+                reason,
+            })?;
+        Ok(CompiledCodecBatchEncoder { codec: self, batch })
+    }
+
+    pub(crate) fn encode_batch(
+        &self,
+        batch: &RuntimeRecordBatch,
+        rows: std::ops::Range<usize>,
+    ) -> Result<Vec<Vec<u8>>, CodecError> {
+        let encoder = self.batch_encoder(batch)?;
+        encoder.validate_rows(&rows)?;
+        let mut payloads = Vec::with_capacity(rows.len());
+        for row_index in rows {
+            let mut payload = Vec::new();
+            encoder.encode_row_into(row_index, &mut payload)?;
+            payloads.push(payload);
+        }
+        Ok(payloads)
+    }
+}
+
+impl CompiledCodecBatchEncoder<'_> {
+    fn validate_rows(&self, rows: &std::ops::Range<usize>) -> Result<(), CodecError> {
+        if rows.start > rows.end || rows.end > self.batch.batch.num_rows() {
+            return Err(CodecError::InvalidCodec {
+                codec: self.codec.name.as_str().to_string(),
+                reason: format!(
+                    "columnar encode row range {}..{} is outside batch with {} rows",
+                    rows.start,
+                    rows.end,
+                    self.batch.batch.num_rows()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encode_row_into(
+        &self,
+        row_index: usize,
+        payload: &mut Vec<u8>,
+    ) -> Result<(), CodecError> {
+        if row_index >= self.batch.batch.num_rows() {
+            return Err(CodecError::InvalidCodec {
+                codec: self.codec.name.as_str().to_string(),
+                reason: format!(
+                    "columnar encode row {row_index} is outside batch with {} rows",
+                    self.batch.batch.num_rows()
+                ),
+            });
+        }
+        payload.clear();
+        let row = ArrowCodecRow::new(self.codec, self.batch, row_index);
+        match &self.codec.wire_schema {
+            CompiledWireSchema::Json(_) => {
+                simd_json::to_writer(&mut *payload, &row).map_err(|source| {
+                    CodecError::SimdJsonEncode {
+                        codec: self.codec.name.as_str().to_string(),
+                        source,
+                    }
+                })?;
+            }
+            CompiledWireSchema::Cbor(_) => {
+                ciborium::into_writer(&row, &mut *payload).map_err(|source| {
+                    CodecError::CborEncode {
+                        codec: self.codec.name.as_str().to_string(),
+                        reason: source.to_string(),
+                    }
+                })?;
+            }
+            CompiledWireSchema::Avro(wire_schema) => {
+                let value = row.to_avro_record(wire_schema)?;
+                *payload = to_avro_datum(&wire_schema.schema, value).map_err(|source| {
+                    CodecError::AvroEncode {
+                        codec: self.codec.name.as_str().to_string(),
+                        source,
+                    }
+                })?;
+            }
+            CompiledWireSchema::JaqNative(native) => {
+                let Some(program) = native.transformations.on_emitting.as_deref() else {
+                    return Err(CodecError::InvalidCodec {
+                        codec: self.codec.name.as_str().to_string(),
+                        reason: "JAQ-native codec used for encoding must declare ON EMITTING \
+                                 transformation"
+                            .to_string(),
+                    });
+                };
+                let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
+                *payload = native.format.write_value(value).map_err(|error| {
+                    CodecError::JaqNativeEncode {
+                        codec: self.codec.name.as_str().to_string(),
+                        format: native.format.name(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            }
+            CompiledWireSchema::Protobuf(protobuf) => {
+                let Some(program) = protobuf.transformations.on_emitting.as_deref() else {
+                    return Err(CodecError::InvalidCodec {
+                        codec: self.codec.name.as_str().to_string(),
+                        reason: "protobuf codec used for encoding must declare ON EMITTING \
+                                 transformation"
+                            .to_string(),
+                    });
+                };
+                let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
+                *payload =
+                    encode_protobuf_payload(&protobuf.message, &value).map_err(|reason| {
+                        CodecError::ProtobufEncode {
+                            codec: self.codec.name.as_str().to_string(),
+                            reason,
+                        }
+                    })?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -753,22 +920,20 @@ impl RuntimeRecordBatch {
             .fields()
             .iter()
             .enumerate()
-            .filter_map(|(column_index, field)| {
+            .map(|(column_index, field)| {
                 let field_name = field.name().clone();
                 let column = self.batch.column(column_index);
-                Some(
-                    parse_as_type_from_arrow(field.data_type())
-                        .and_then(|ty| {
-                            runtime_value_from_arrow_array(
-                                column.as_ref(),
-                                &ty,
-                                field.is_nullable(),
-                                row,
-                                &field_name,
-                            )
-                        })
-                        .map(|value| value.map(|value| (field_name, value))),
-                )
+                parse_as_type_from_arrow(field.data_type())
+                    .and_then(|ty| {
+                        runtime_value_from_arrow_array(
+                            column.as_ref(),
+                            &ty,
+                            field.is_nullable(),
+                            row,
+                            &field_name,
+                        )
+                    })
+                    .map(|value| value.map(|value| (field_name, value)))
             })
             .collect::<Result<Vec<_>, String>>()?
             .into_iter()
@@ -1327,7 +1492,7 @@ pub fn compile_codec_with_protobuf(
     codec: &CreateCodec,
     schema: Arc<CompiledSchema>,
     wire_schema: Option<&WireSchemaDefinition>,
-    protobuf_descriptor: Option<ProtobufCodecDescriptor>,
+    protobuf_descriptor: Option<MessageDescriptor>,
 ) -> Result<Arc<CompiledCodec>, CodecError> {
     let wire_schema = match (&codec.wire_format, wire_schema) {
         (CodecWireFormat::Json, Some(WireSchemaDefinition::Json(schema_def))) => {
@@ -1374,15 +1539,9 @@ pub fn compile_codec_with_protobuf(
                     reason: "JAQ-native codec must declare a JAQ transformation".to_string(),
                 });
             }
-            if let Some(program) = transformations.on_ingestion.as_deref() {
-                validate_jaq_program(codec, program)?;
-            }
-            if let Some(program) = transformations.on_emitting.as_deref() {
-                validate_jaq_program(codec, program)?;
-            }
             CompiledWireSchema::JaqNative(CompiledJaqNativeCodec {
-                format: *format,
-                transformations: transformations.clone(),
+                format: JaqNativeFormat::from(*format),
+                transformations: CompiledJaqTransformations::compile(codec, transformations)?,
             })
         }
         (CodecWireFormat::Protobuf(config), None) => {
@@ -1392,19 +1551,16 @@ pub fn compile_codec_with_protobuf(
                     reason: "protobuf codec must declare a JAQ transformation".to_string(),
                 });
             }
-            if let Some(program) = config.transformations.on_ingestion.as_deref() {
-                validate_jaq_program(codec, program)?;
-            }
-            if let Some(program) = config.transformations.on_emitting.as_deref() {
-                validate_jaq_program(codec, program)?;
-            }
-            let descriptor = protobuf_descriptor.ok_or_else(|| CodecError::InvalidCodec {
+            let message = protobuf_descriptor.ok_or_else(|| CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason: "protobuf codec is missing compiled descriptor".to_string(),
             })?;
             CompiledWireSchema::Protobuf(CompiledProtobufCodec {
-                message: descriptor.message,
-                transformations: config.transformations.clone(),
+                message,
+                transformations: CompiledJaqTransformations::compile(
+                    codec,
+                    &config.transformations,
+                )?,
             })
         }
         (CodecWireFormat::Json, Some(WireSchemaDefinition::Avro(_))) => {
@@ -1534,16 +1690,462 @@ pub(crate) fn decode_with_codec_owned(
     }
 }
 
-pub fn encode_with_codec(
-    codec: &CompiledCodec,
-    record: &RuntimeRecord,
-) -> Result<Vec<u8>, CodecError> {
-    match &codec.wire_schema {
-        CompiledWireSchema::Json(_) => encode_json(codec, record),
-        CompiledWireSchema::Cbor(_) => encode_cbor(codec, record),
-        CompiledWireSchema::Avro(wire_schema) => encode_avro(codec, wire_schema, record),
-        CompiledWireSchema::JaqNative(native) => encode_jaq_native(codec, native, record),
-        CompiledWireSchema::Protobuf(protobuf) => encode_protobuf(codec, protobuf, record),
+struct ArrowCodecRow<'a> {
+    codec: &'a CompiledCodec,
+    batch: &'a RuntimeRecordBatch,
+    row_index: usize,
+}
+
+impl<'a> ArrowCodecRow<'a> {
+    fn new(codec: &'a CompiledCodec, batch: &'a RuntimeRecordBatch, row_index: usize) -> Self {
+        Self {
+            codec,
+            batch,
+            row_index,
+        }
+    }
+
+    fn value(&self, field_index: usize) -> ArrowCodecValue<'a> {
+        let field = &self.codec.schema.fields[field_index];
+        ArrowCodecValue {
+            codec: self.codec,
+            array: self.batch.batch.column(field_index).as_ref(),
+            ty: &field.ty,
+            field: &field.name,
+            row_index: self.row_index,
+        }
+    }
+
+    fn to_json_value(&self) -> Result<JsonValue, CodecError> {
+        serde_json::to_value(self).map_err(|source| CodecError::JsonEncode {
+            codec: self.codec.name.as_str().to_string(),
+            source,
+        })
+    }
+
+    fn to_avro_record(
+        &self,
+        wire_schema: &CompiledAvroWireSchema,
+    ) -> Result<AvroValue, CodecError> {
+        let mut fields = Vec::with_capacity(self.codec.schema.fields.len());
+        for (field_index, field) in self.codec.schema.fields.iter().enumerate() {
+            let wire_field =
+                wire_schema
+                    .fields
+                    .get(&field.name)
+                    .ok_or_else(|| CodecError::InvalidCodec {
+                        codec: self.codec.name.as_str().to_string(),
+                        reason: format!("missing wire field '{}'", field.name),
+                    })?;
+            fields.push((
+                field.name.clone(),
+                self.value(field_index)
+                    .to_avro_wire_value(wire_field.ty, wire_field.optional)?,
+            ));
+        }
+        Ok(AvroValue::Record(fields))
+    }
+}
+
+impl Serialize for ArrowCodecRow<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        for (field_index, field) in self.codec.schema.fields.iter().enumerate() {
+            let value = self.value(field_index);
+            if value.is_null() && field.optional {
+                continue;
+            }
+            map.serialize_entry(&field.name, &value)?;
+        }
+        map.end()
+    }
+}
+
+struct ArrowCodecValue<'a> {
+    codec: &'a CompiledCodec,
+    array: &'a dyn Array,
+    ty: &'a ParseAsType,
+    field: &'a str,
+    row_index: usize,
+}
+
+impl<'a> ArrowCodecValue<'a> {
+    fn is_null(&self) -> bool {
+        self.array.is_null(self.row_index)
+    }
+
+    fn typed<T: 'static>(&self, arrow_type: &str) -> Result<&'a T, String> {
+        self.array.as_any().downcast_ref::<T>().ok_or_else(|| {
+            format!(
+                "field '{}' is not a {arrow_type} at row {}",
+                self.field, self.row_index
+            )
+        })
+    }
+
+    fn sequence(&self) -> Result<ArrowCodecSequence<'a>, String> {
+        match self.ty {
+            ParseAsType::Vec { element } => {
+                let array = self.typed::<ListArray>("ListArray")?;
+                let offsets = array.value_offsets();
+                let start = usize::try_from(offsets[self.row_index])
+                    .map_err(|_| format!("field '{}' has a negative list offset", self.field))?;
+                let end = usize::try_from(offsets[self.row_index + 1])
+                    .map_err(|_| format!("field '{}' has a negative list offset", self.field))?;
+                Ok(ArrowCodecSequence {
+                    codec: self.codec,
+                    array: array.values().as_ref(),
+                    element,
+                    field: self.field,
+                    rows: start..end,
+                })
+            }
+            ParseAsType::Array { element, len } => {
+                let array = self.typed::<FixedSizeListArray>("FixedSizeListArray")?;
+                if array.value_length() != i32::try_from(*len).unwrap_or(i32::MAX) {
+                    return Err(format!(
+                        "field '{}' fixed-size list length {} does not match schema length {}",
+                        self.field,
+                        array.value_length(),
+                        len
+                    ));
+                }
+                let start = usize::try_from(array.value_offset(self.row_index)).map_err(|_| {
+                    format!(
+                        "field '{}' has a negative fixed-size list offset",
+                        self.field
+                    )
+                })?;
+                let end = start.saturating_add(*len as usize);
+                Ok(ArrowCodecSequence {
+                    codec: self.codec,
+                    array: array.values().as_ref(),
+                    element,
+                    field: self.field,
+                    rows: start..end,
+                })
+            }
+            _ => Err(format!("field '{}' is not an array or vector", self.field)),
+        }
+    }
+
+    fn encode_field_error(&self, reason: impl Into<String>) -> CodecError {
+        CodecError::EncodeField {
+            codec: self.codec.name.as_str().to_string(),
+            field: self.field.to_string(),
+            reason: reason.into(),
+        }
+    }
+
+    fn to_avro_wire_value(
+        &self,
+        wire_ty: AvroType,
+        optional: bool,
+    ) -> Result<AvroValue, CodecError> {
+        if self.is_null() {
+            if optional {
+                return Ok(AvroValue::Union(0, Box::new(AvroValue::Null)));
+            }
+            return Err(self
+                .encode_field_error(format!("required field is null at row {}", self.row_index)));
+        }
+
+        let value = match wire_ty {
+            AvroType::Boolean => self.to_avro_boolean(),
+            AvroType::Int => self.to_avro_int(),
+            AvroType::Long => self.to_avro_long(),
+            AvroType::Float => self.to_avro_float(),
+            AvroType::Double => self.to_avro_double(),
+            AvroType::String => self.to_avro_string(),
+            AvroType::Array => self.to_avro_array(),
+            unsupported => {
+                Err(self.encode_field_error(format!("unsupported avro type {unsupported:?}")))
+            }
+        }?;
+        if optional {
+            Ok(AvroValue::Union(1, Box::new(value)))
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn to_avro_boolean(&self) -> Result<AvroValue, CodecError> {
+        if let ParseAsType::Bool = self.ty {
+            return self
+                .typed::<BooleanArray>("BooleanArray")
+                .map(|array| AvroValue::Boolean(array.value(self.row_index)))
+                .map_err(|reason| self.encode_field_error(reason));
+        }
+        Err(self.encode_field_error("expected bool"))
+    }
+
+    fn to_avro_int(&self) -> Result<AvroValue, CodecError> {
+        let value = match self.ty {
+            ParseAsType::I8 => i32::from(
+                self.typed::<Int8Array>("Int8Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::I16 => i32::from(
+                self.typed::<Int16Array>("Int16Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::I32 => self
+                .typed::<Int32Array>("Int32Array")
+                .map_err(|reason| self.encode_field_error(reason))?
+                .value(self.row_index),
+            ParseAsType::U8 => i32::from(
+                self.typed::<UInt8Array>("UInt8Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::U16 => i32::from(
+                self.typed::<UInt16Array>("UInt16Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::U32 => i32::try_from(
+                self.typed::<UInt32Array>("UInt32Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            )
+            .map_err(|_| self.encode_field_error("U32 value does not fit Avro INT"))?,
+            _ => return Err(self.encode_field_error("expected int-compatible value")),
+        };
+        Ok(AvroValue::Int(value))
+    }
+
+    fn to_avro_long(&self) -> Result<AvroValue, CodecError> {
+        let value = match self.ty {
+            ParseAsType::I8 => i64::from(
+                self.typed::<Int8Array>("Int8Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::I16 => i64::from(
+                self.typed::<Int16Array>("Int16Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::I32 => i64::from(
+                self.typed::<Int32Array>("Int32Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::I64 => self
+                .typed::<Int64Array>("Int64Array")
+                .map_err(|reason| self.encode_field_error(reason))?
+                .value(self.row_index),
+            ParseAsType::U8 => i64::from(
+                self.typed::<UInt8Array>("UInt8Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::U16 => i64::from(
+                self.typed::<UInt16Array>("UInt16Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::U32 => i64::from(
+                self.typed::<UInt32Array>("UInt32Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            ),
+            ParseAsType::U64 => i64::try_from(
+                self.typed::<UInt64Array>("UInt64Array")
+                    .map_err(|reason| self.encode_field_error(reason))?
+                    .value(self.row_index),
+            )
+            .map_err(|_| self.encode_field_error("U64 value does not fit Avro LONG"))?,
+            _ => return Err(self.encode_field_error("expected long-compatible value")),
+        };
+        Ok(AvroValue::Long(value))
+    }
+
+    fn to_avro_float(&self) -> Result<AvroValue, CodecError> {
+        if let ParseAsType::F32 = self.ty {
+            return self
+                .typed::<Float32Array>("Float32Array")
+                .map(|array| AvroValue::Float(array.value(self.row_index)))
+                .map_err(|reason| self.encode_field_error(reason));
+        }
+        Err(self.encode_field_error("expected f32"))
+    }
+
+    fn to_avro_double(&self) -> Result<AvroValue, CodecError> {
+        match self.ty {
+            ParseAsType::F32 => self
+                .typed::<Float32Array>("Float32Array")
+                .map(|array| AvroValue::Double(f64::from(array.value(self.row_index))))
+                .map_err(|reason| self.encode_field_error(reason)),
+            ParseAsType::F64 => self
+                .typed::<Float64Array>("Float64Array")
+                .map(|array| AvroValue::Double(array.value(self.row_index)))
+                .map_err(|reason| self.encode_field_error(reason)),
+            _ => Err(self.encode_field_error("expected float-compatible value")),
+        }
+    }
+
+    fn to_avro_string(&self) -> Result<AvroValue, CodecError> {
+        match self.ty {
+            ParseAsType::String => self
+                .typed::<StringArray>("StringArray")
+                .map(|array| AvroValue::String(array.value(self.row_index).to_string()))
+                .map_err(|reason| self.encode_field_error(reason)),
+            ParseAsType::Datetime => self
+                .typed::<TimestampNanosecondArray>("TimestampNanosecondArray")
+                .map(|array| {
+                    AvroValue::String(
+                        DateTime::from_timestamp_nanos(array.value(self.row_index))
+                            .fixed_offset()
+                            .to_rfc3339(),
+                    )
+                })
+                .map_err(|reason| self.encode_field_error(reason)),
+            _ => Err(self.encode_field_error("expected string-compatible value")),
+        }
+    }
+
+    fn to_avro_array(&self) -> Result<AvroValue, CodecError> {
+        self.sequence()
+            .map_err(|reason| self.encode_field_error(reason))?
+            .to_avro_values()
+            .map(AvroValue::Array)
+    }
+
+    fn to_avro_array_item(&self) -> Result<AvroValue, CodecError> {
+        if self.is_null() {
+            return Err(
+                self.encode_field_error(format!("list contains null at index {}", self.row_index))
+            );
+        }
+        match self.ty {
+            ParseAsType::Bool => self.to_avro_boolean(),
+            ParseAsType::U8
+            | ParseAsType::I8
+            | ParseAsType::U16
+            | ParseAsType::I16
+            | ParseAsType::U32
+            | ParseAsType::I32
+            | ParseAsType::U64
+            | ParseAsType::I64 => self.to_avro_long(),
+            ParseAsType::F32 => self.to_avro_float(),
+            ParseAsType::F64 => self.to_avro_double(),
+            ParseAsType::String | ParseAsType::Datetime => self.to_avro_string(),
+            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => self.to_avro_array(),
+        }
+    }
+}
+
+impl Serialize for ArrowCodecValue<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.is_null() {
+            return Err(serde::ser::Error::custom(format!(
+                "field '{}' contains null at row {}",
+                self.field, self.row_index
+            )));
+        }
+
+        macro_rules! serialize_primitive {
+            ($array:ty, $arrow_type:literal, $method:ident) => {{
+                let array = self
+                    .typed::<$array>($arrow_type)
+                    .map_err(serde::ser::Error::custom)?;
+                serializer.$method(array.value(self.row_index))
+            }};
+        }
+
+        match self.ty {
+            ParseAsType::U8 => serialize_primitive!(UInt8Array, "UInt8Array", serialize_u8),
+            ParseAsType::I8 => serialize_primitive!(Int8Array, "Int8Array", serialize_i8),
+            ParseAsType::U16 => serialize_primitive!(UInt16Array, "UInt16Array", serialize_u16),
+            ParseAsType::I16 => serialize_primitive!(Int16Array, "Int16Array", serialize_i16),
+            ParseAsType::U32 => serialize_primitive!(UInt32Array, "UInt32Array", serialize_u32),
+            ParseAsType::I32 => serialize_primitive!(Int32Array, "Int32Array", serialize_i32),
+            ParseAsType::U64 => serialize_primitive!(UInt64Array, "UInt64Array", serialize_u64),
+            ParseAsType::I64 => serialize_primitive!(Int64Array, "Int64Array", serialize_i64),
+            ParseAsType::Bool => {
+                serialize_primitive!(BooleanArray, "BooleanArray", serialize_bool)
+            }
+            ParseAsType::String => {
+                let array = self
+                    .typed::<StringArray>("StringArray")
+                    .map_err(serde::ser::Error::custom)?;
+                serializer.serialize_str(array.value(self.row_index))
+            }
+            ParseAsType::Datetime => {
+                let array = self
+                    .typed::<TimestampNanosecondArray>("TimestampNanosecondArray")
+                    .map_err(serde::ser::Error::custom)?;
+                serializer.serialize_str(
+                    &DateTime::from_timestamp_nanos(array.value(self.row_index))
+                        .fixed_offset()
+                        .to_rfc3339(),
+                )
+            }
+            ParseAsType::F32 => {
+                serialize_primitive!(Float32Array, "Float32Array", serialize_f32)
+            }
+            ParseAsType::F64 => {
+                serialize_primitive!(Float64Array, "Float64Array", serialize_f64)
+            }
+            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => self
+                .sequence()
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer),
+        }
+    }
+}
+
+struct ArrowCodecSequence<'a> {
+    codec: &'a CompiledCodec,
+    array: &'a dyn Array,
+    element: &'a ParseAsType,
+    field: &'a str,
+    rows: std::ops::Range<usize>,
+}
+
+impl ArrowCodecSequence<'_> {
+    fn to_avro_values(&self) -> Result<Vec<AvroValue>, CodecError> {
+        self.rows
+            .clone()
+            .map(|row_index| {
+                ArrowCodecValue {
+                    codec: self.codec,
+                    array: self.array,
+                    ty: self.element,
+                    field: self.field,
+                    row_index,
+                }
+                .to_avro_array_item()
+            })
+            .collect()
+    }
+}
+
+impl Serialize for ArrowCodecSequence<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.rows.len()))?;
+        for row_index in self.rows.clone() {
+            sequence.serialize_element(&ArrowCodecValue {
+                codec: self.codec,
+                array: self.array,
+                ty: self.element,
+                field: self.field,
+                row_index,
+            })?;
+        }
+        sequence.end()
     }
 }
 
@@ -1608,7 +2210,15 @@ fn decode_jaq_native(
                 .to_string(),
         });
     };
-    let value = parse_jaq_native_payload(codec, native.format, payload)?;
+    let value =
+        native
+            .format
+            .read_single_value(payload)
+            .map_err(|error| CodecError::JaqNativeDecode {
+                codec: codec.name.as_str().to_string(),
+                format: native.format.name(),
+                reason: error.to_string(),
+            })?;
     let value = run_jaq_transformation(codec, program, value)?;
     decode_json_value(codec, &value, None)
 }
@@ -1625,21 +2235,46 @@ fn decode_protobuf(
                 .to_string(),
         });
     };
-    let message = DynamicMessage::decode(protobuf.message.clone(), payload).map_err(|source| {
+    let value = decode_protobuf_payload(&protobuf.message, payload).map_err(|reason| {
         CodecError::ProtobufDecode {
             codec: codec.name.as_str().to_string(),
-            reason: source.to_string(),
+            reason,
         }
     })?;
-    let value = protobuf_message_to_json(codec, &message)?;
     let value = run_jaq_transformation(codec, program, value)?;
     decode_json_value(codec, &value, None)
 }
 
-fn protobuf_message_to_json(
-    codec: &CompiledCodec,
-    message: &DynamicMessage,
-) -> Result<JsonValue, CodecError> {
+/// Decode protobuf bytes as `message` into the JSON value jaq programs operate on.
+pub(crate) fn decode_protobuf_payload(
+    message: &MessageDescriptor,
+    payload: &[u8],
+) -> Result<JsonValue, String> {
+    let message =
+        DynamicMessage::decode(message.clone(), payload).map_err(|source| source.to_string())?;
+    protobuf_message_to_json(&message)
+}
+
+/// Encode a JSON value as protobuf bytes for `message`.
+pub(crate) fn encode_protobuf_payload(
+    message: &MessageDescriptor,
+    value: &JsonValue,
+) -> Result<Vec<u8>, String> {
+    let encoded_json = serde_json::to_vec(value).map_err(|source| source.to_string())?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&encoded_json);
+    let options = ProtobufDeserializeOptions::new().deny_unknown_fields(true);
+    let message =
+        DynamicMessage::deserialize_with_options(message.clone(), &mut deserializer, &options)
+            .map_err(|source| source.to_string())?;
+    deserializer.end().map_err(|source| source.to_string())?;
+    let mut encoded = Vec::new();
+    message
+        .encode(&mut encoded)
+        .map_err(|source| source.to_string())?;
+    Ok(encoded)
+}
+
+fn protobuf_message_to_json(message: &DynamicMessage) -> Result<JsonValue, String> {
     let mut encoded = Vec::new();
     let mut serializer = serde_json::Serializer::new(&mut encoded);
     let options = ProtobufSerializeOptions::new()
@@ -1647,106 +2282,8 @@ fn protobuf_message_to_json(
         .stringify_64_bit_integers(false);
     message
         .serialize_with_options(&mut serializer, &options)
-        .map_err(|source| CodecError::ProtobufDecode {
-            codec: codec.name.as_str().to_string(),
-            reason: source.to_string(),
-        })?;
-    serde_json::from_slice(&encoded).map_err(|source| CodecError::JsonDecode {
-        codec: codec.name.as_str().to_string(),
-        source,
-    })
-}
-
-fn parse_jaq_native_payload(
-    codec: &CompiledCodec,
-    format: CodecJaqFormat,
-    payload: &[u8],
-) -> Result<JsonValue, CodecError> {
-    let bytes = Bytes::copy_from_slice(payload);
-    let jaq_format = codec_jaq_format_to_jaq(format);
-    let format_name = codec_jaq_format_name(format);
-    let source =
-        jaq_read::bytes_str(jaq_format, &bytes).map_err(|error| CodecError::JaqNativeDecode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: error.to_string(),
-        })?;
-    let mut values = jaq_read::parse(jaq_format, &bytes, source, false);
-    let value = values
-        .next()
-        .ok_or_else(|| CodecError::JaqNativeDecode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: "payload produced no input values".to_string(),
-        })?
-        .map_err(|error| CodecError::JaqNativeDecode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: error.to_string(),
-        })?;
-    if values.next().is_some() {
-        return Err(CodecError::JaqNativeDecode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: "payload produced multiple input values".to_string(),
-        });
-    }
-    jaq_value_to_json(value).map_err(|reason| CodecError::JaqNativeDecode {
-        codec: codec.name.as_str().to_string(),
-        format: format_name,
-        reason,
-    })
-}
-
-fn write_jaq_native_payload(
-    codec: &CompiledCodec,
-    format: CodecJaqFormat,
-    value: JsonValue,
-) -> Result<Vec<u8>, CodecError> {
-    let format_name = codec_jaq_format_name(format);
-    let value: JaqVal =
-        serde_json::from_value(value).map_err(|error| CodecError::JaqNativeEncode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: error.to_string(),
-        })?;
-    let mut encoded = Vec::new();
-    let writer = JaqWriter {
-        format: codec_jaq_format_to_jaq(format),
-        pp: jaq_json::write::Pp {
-            sep_space: true,
-            ..Default::default()
-        },
-        join: true,
-    };
-    jaq_write::write(&mut encoded, &writer, &value).map_err(|error| {
-        CodecError::JaqNativeEncode {
-            codec: codec.name.as_str().to_string(),
-            format: format_name,
-            reason: error.to_string(),
-        }
-    })?;
-    Ok(encoded)
-}
-
-fn codec_jaq_format_to_jaq(format: CodecJaqFormat) -> JaqFormat {
-    match format {
-        CodecJaqFormat::Json => JaqFormat::Json,
-        CodecJaqFormat::Yaml => JaqFormat::Yaml,
-        CodecJaqFormat::Toml => JaqFormat::Toml,
-        CodecJaqFormat::Xml => JaqFormat::Xml,
-        CodecJaqFormat::Cbor => JaqFormat::Cbor,
-    }
-}
-
-fn codec_jaq_format_name(format: CodecJaqFormat) -> &'static str {
-    match format {
-        CodecJaqFormat::Json => "JSON",
-        CodecJaqFormat::Yaml => "YAML",
-        CodecJaqFormat::Toml => "TOML",
-        CodecJaqFormat::Xml => "XML",
-        CodecJaqFormat::Cbor => "CBOR",
-    }
+        .map_err(|source| source.to_string())?;
+    serde_json::from_slice(&encoded).map_err(|source| source.to_string())
 }
 
 fn decode_json_value(
@@ -1818,120 +2355,17 @@ fn decode_json_value(
     Ok(DecodedRecord::from_fields(fields))
 }
 
-fn validate_jaq_program(codec: &CreateCodec, program: &str) -> Result<(), CodecError> {
-    compile_jaq_filter(program)
-        .map(|_| ())
-        .map_err(|reason| CodecError::InvalidJaqTransformation {
-            codec: codec.name.as_str().to_string(),
-            reason,
-        })
-}
-
 fn run_jaq_transformation(
     codec: &CompiledCodec,
-    program: &str,
+    program: &CompiledJaqProgram,
     input: JsonValue,
 ) -> Result<JsonValue, CodecError> {
-    let filter = compile_jaq_filter(program).map_err(|reason| CodecError::JaqTransform {
-        codec: codec.name.as_str().to_string(),
-        reason,
-    })?;
-    let input: JaqVal =
-        serde_json::from_value(input).map_err(|reason| CodecError::JaqTransform {
-            codec: codec.name.as_str().to_string(),
-            reason: reason.to_string(),
-        })?;
-    let ctx = JaqCtx::<data::JustLut<JaqVal>>::new(&filter.lut, JaqVars::new([]));
-    let mut outputs = filter.id.run((ctx, input)).map(unwrap_valr);
-    let output = outputs
-        .next()
-        .ok_or_else(|| CodecError::JaqTransform {
-            codec: codec.name.as_str().to_string(),
-            reason: "transformation produced no output".to_string(),
-        })?
+    program
+        .run_single(input)
         .map_err(|error| CodecError::JaqTransform {
             codec: codec.name.as_str().to_string(),
             reason: error.to_string(),
-        })?;
-    if outputs.next().is_some() {
-        return Err(CodecError::JaqTransform {
-            codec: codec.name.as_str().to_string(),
-            reason: "transformation produced multiple outputs".to_string(),
-        });
-    }
-    jaq_value_to_json(output).map_err(|reason| CodecError::JaqTransform {
-        codec: codec.name.as_str().to_string(),
-        reason,
-    })
-}
-
-fn compile_jaq_filter(program: &str) -> Result<jaq_core::Filter<data::JustLut<JaqVal>>, String> {
-    let defs = jaq_core::defs()
-        .chain(jaq_std::defs())
-        .chain(jaq_json::defs());
-    let funs = jaq_core::funs()
-        .chain(jaq_std::funs())
-        .chain(jaq_json::funs())
-        .chain(jaq_fmts::funs());
-    let loader = Loader::new(defs);
-    let arena = Arena::default();
-    let modules = loader
-        .load(
-            &arena,
-            File {
-                code: program,
-                path: (),
-            },
-        )
-        .map_err(|errors| format!("{errors:?}"))?;
-    JaqCompiler::default()
-        .with_funs(funs)
-        .compile(modules)
-        .map_err(|errors| format!("{errors:?}"))
-}
-
-fn jaq_value_to_json(value: JaqVal) -> Result<JsonValue, String> {
-    match value {
-        JaqVal::Null => Ok(JsonValue::Null),
-        JaqVal::Bool(value) => Ok(JsonValue::Bool(value)),
-        JaqVal::Num(value) => jaq_num_to_json(value),
-        JaqVal::BStr(_) => {
-            Err("jaq output contains binary string, which is not valid JSON".to_string())
-        }
-        JaqVal::TStr(value) => String::from_utf8(value.to_vec())
-            .map(JsonValue::String)
-            .map_err(|error| error.to_string()),
-        JaqVal::Arr(values) => values
-            .iter()
-            .cloned()
-            .map(jaq_value_to_json)
-            .collect::<Result<Vec<_>, _>>()
-            .map(JsonValue::Array),
-        JaqVal::Obj(values) => {
-            let mut object = JsonMap::new();
-            for (key, value) in values.iter() {
-                let key = match key {
-                    JaqVal::TStr(key) => {
-                        String::from_utf8(key.to_vec()).map_err(|error| error.to_string())?
-                    }
-                    _ => {
-                        return Err("jaq output contains a non-string object key, which is not \
-                                    valid JSON"
-                            .to_string());
-                    }
-                };
-                object.insert(key, jaq_value_to_json(value.clone())?);
-            }
-            Ok(JsonValue::Object(object))
-        }
-    }
-}
-
-fn jaq_num_to_json(value: JaqNum) -> Result<JsonValue, String> {
-    let rendered = value.to_string();
-    serde_json::Number::from_str(&rendered)
-        .map(JsonValue::Number)
-        .map_err(|error| error.to_string())
+        })
 }
 
 fn decode_avro(
@@ -1987,170 +2421,6 @@ fn decode_avro(
     }
 
     Ok(DecodedRecord::from_fields(fields))
-}
-
-fn encode_json(codec: &CompiledCodec, record: &RuntimeRecord) -> Result<Vec<u8>, CodecError> {
-    match &codec.wire_schema {
-        CompiledWireSchema::Json(_) => {}
-        CompiledWireSchema::Cbor(_)
-        | CompiledWireSchema::Avro(_)
-        | CompiledWireSchema::JaqNative(_)
-        | CompiledWireSchema::Protobuf(_) => {
-            unreachable!("json encoder must only be used for json")
-        }
-    }
-    let value = record_to_json_value(codec, record)?;
-
-    serde_json::to_vec(&value).map_err(|source| CodecError::JsonDecode {
-        codec: codec.name.as_str().to_string(),
-        source,
-    })
-}
-
-fn encode_cbor(codec: &CompiledCodec, record: &RuntimeRecord) -> Result<Vec<u8>, CodecError> {
-    match &codec.wire_schema {
-        CompiledWireSchema::Cbor(_) => {}
-        CompiledWireSchema::Json(_)
-        | CompiledWireSchema::Avro(_)
-        | CompiledWireSchema::JaqNative(_)
-        | CompiledWireSchema::Protobuf(_) => {
-            unreachable!("cbor encoder must only be used for cbor")
-        }
-    }
-    let value = record_to_json_value(codec, record)?;
-    let mut encoded = Vec::new();
-    ciborium::into_writer(&value, &mut encoded).map_err(|source| CodecError::CborEncode {
-        codec: codec.name.as_str().to_string(),
-        reason: source.to_string(),
-    })?;
-    Ok(encoded)
-}
-
-fn encode_jaq_native(
-    codec: &CompiledCodec,
-    native: &CompiledJaqNativeCodec,
-    record: &RuntimeRecord,
-) -> Result<Vec<u8>, CodecError> {
-    let Some(program) = native.transformations.on_emitting.as_deref() else {
-        return Err(CodecError::InvalidCodec {
-            codec: codec.name.as_str().to_string(),
-            reason: "JAQ-native codec used for encoding must declare ON EMITTING transformation"
-                .to_string(),
-        });
-    };
-    let value = record_to_json_value(codec, record)?;
-    let value = run_jaq_transformation(codec, program, value)?;
-    write_jaq_native_payload(codec, native.format, value)
-}
-
-fn encode_protobuf(
-    codec: &CompiledCodec,
-    protobuf: &CompiledProtobufCodec,
-    record: &RuntimeRecord,
-) -> Result<Vec<u8>, CodecError> {
-    let Some(program) = protobuf.transformations.on_emitting.as_deref() else {
-        return Err(CodecError::InvalidCodec {
-            codec: codec.name.as_str().to_string(),
-            reason: "protobuf codec used for encoding must declare ON EMITTING transformation"
-                .to_string(),
-        });
-    };
-    let value = record_to_json_value(codec, record)?;
-    let value = run_jaq_transformation(codec, program, value)?;
-    let json = serde_json::to_vec(&value).map_err(|source| CodecError::JsonDecode {
-        codec: codec.name.as_str().to_string(),
-        source,
-    })?;
-    let mut deserializer = serde_json::Deserializer::from_slice(&json);
-    let options = ProtobufDeserializeOptions::new().deny_unknown_fields(true);
-    let message = DynamicMessage::deserialize_with_options(
-        protobuf.message.clone(),
-        &mut deserializer,
-        &options,
-    )
-    .map_err(|source| CodecError::ProtobufEncode {
-        codec: codec.name.as_str().to_string(),
-        reason: source.to_string(),
-    })?;
-    deserializer
-        .end()
-        .map_err(|source| CodecError::ProtobufEncode {
-            codec: codec.name.as_str().to_string(),
-            reason: source.to_string(),
-        })?;
-    let mut encoded = Vec::new();
-    message
-        .encode(&mut encoded)
-        .map_err(|source| CodecError::ProtobufEncode {
-            codec: codec.name.as_str().to_string(),
-            reason: source.to_string(),
-        })?;
-    Ok(encoded)
-}
-
-fn encode_avro(
-    codec: &CompiledCodec,
-    wire_schema: &CompiledAvroWireSchema,
-    record: &RuntimeRecord,
-) -> Result<Vec<u8>, CodecError> {
-    let mut fields = Vec::new();
-    for field in codec.schema.fields() {
-        let wire_ty =
-            wire_schema
-                .fields
-                .get(&field.name)
-                .ok_or_else(|| CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
-                    reason: format!("missing wire field '{}'", field.name),
-                })?;
-        let Some(value) = record.value(&field.name) else {
-            if wire_ty.optional {
-                fields.push((
-                    field.name.clone(),
-                    AvroValue::Union(0, Box::new(AvroValue::Null)),
-                ));
-                continue;
-            }
-            return Err(CodecError::EncodeField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: "missing field in runtime record".to_string(),
-            });
-        };
-        fields.push((
-            field.name.clone(),
-            runtime_value_to_avro(codec, &field.name, wire_ty.ty, wire_ty.optional, value)?,
-        ));
-    }
-
-    to_avro_datum(&wire_schema.schema, AvroValue::Record(fields)).map_err(|source| {
-        CodecError::AvroDecode {
-            codec: codec.name.as_str().to_string(),
-            source,
-        }
-    })
-}
-
-fn record_to_json_value(
-    codec: &CompiledCodec,
-    record: &RuntimeRecord,
-) -> Result<JsonValue, CodecError> {
-    let mut object = JsonMap::new();
-    for field in codec.schema.fields() {
-        let Some(value) = record.value(&field.name) else {
-            if field.optional {
-                continue;
-            }
-            return Err(CodecError::EncodeField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: "missing field in runtime record".to_string(),
-            });
-        };
-        object.insert(field.name.clone(), value.to_json_value());
-    }
-
-    Ok(JsonValue::Object(object))
 }
 
 fn parse_json_value(
@@ -2315,107 +2585,6 @@ fn parse_avro_array_values(
         .iter()
         .map(|value| parse_avro_value(codec, field, element, value))
         .collect()
-}
-
-fn runtime_value_to_avro(
-    codec: &CompiledCodec,
-    field: &str,
-    wire_ty: AvroType,
-    optional: bool,
-    value: &RuntimeValue,
-) -> Result<AvroValue, CodecError> {
-    let err = |reason: String| CodecError::EncodeField {
-        codec: codec.name.as_str().to_string(),
-        field: field.to_string(),
-        reason,
-    };
-
-    let value = match wire_ty {
-        AvroType::Boolean => match value {
-            RuntimeValue::Bool(v) => Ok(AvroValue::Boolean(*v)),
-            _ => Err(err("expected bool".to_string())),
-        },
-        AvroType::Int => match value {
-            RuntimeValue::I8(v) => Ok(AvroValue::Int(*v as i32)),
-            RuntimeValue::I16(v) => Ok(AvroValue::Int(*v as i32)),
-            RuntimeValue::I32(v) => Ok(AvroValue::Int(*v)),
-            RuntimeValue::U8(v) => Ok(AvroValue::Int(*v as i32)),
-            RuntimeValue::U16(v) => Ok(AvroValue::Int(*v as i32)),
-            RuntimeValue::U32(v) if i32::try_from(*v).is_ok() => Ok(AvroValue::Int(*v as i32)),
-            _ => Err(err("expected int-compatible value".to_string())),
-        },
-        AvroType::Long => match value {
-            RuntimeValue::I8(v) => Ok(AvroValue::Long(*v as i64)),
-            RuntimeValue::I16(v) => Ok(AvroValue::Long(*v as i64)),
-            RuntimeValue::I32(v) => Ok(AvroValue::Long(*v as i64)),
-            RuntimeValue::I64(v) => Ok(AvroValue::Long(*v)),
-            RuntimeValue::U8(v) => Ok(AvroValue::Long(*v as i64)),
-            RuntimeValue::U16(v) => Ok(AvroValue::Long(*v as i64)),
-            RuntimeValue::U32(v) => Ok(AvroValue::Long(*v as i64)),
-            RuntimeValue::U64(v) if i64::try_from(*v).is_ok() => Ok(AvroValue::Long(*v as i64)),
-            _ => Err(err("expected long-compatible value".to_string())),
-        },
-        AvroType::Float => match value {
-            RuntimeValue::F32(v) => Ok(AvroValue::Float(v.into_inner())),
-            _ => Err(err("expected f32".to_string())),
-        },
-        AvroType::Double => match value {
-            RuntimeValue::F32(v) => Ok(AvroValue::Double(v.into_inner() as f64)),
-            RuntimeValue::F64(v) => Ok(AvroValue::Double(v.into_inner())),
-            _ => Err(err("expected float-compatible value".to_string())),
-        },
-        AvroType::String => match value {
-            RuntimeValue::String(v) => Ok(AvroValue::String(v.clone())),
-            RuntimeValue::Datetime(v) => Ok(AvroValue::String(v.to_rfc3339())),
-            _ => Err(err("expected string-compatible value".to_string())),
-        },
-        AvroType::Array => match value {
-            RuntimeValue::Array(values) | RuntimeValue::Vec(values) => values
-                .iter()
-                .map(|value| runtime_value_to_avro_array_item(codec, field, value))
-                .collect::<Result<Vec<_>, _>>()
-                .map(AvroValue::Array),
-            _ => Err(err("expected list-compatible value".to_string())),
-        },
-        _ => Err(err(format!("unsupported avro type {wire_ty:?}"))),
-    }?;
-    if optional {
-        Ok(AvroValue::Union(1, Box::new(value)))
-    } else {
-        Ok(value)
-    }
-}
-
-fn runtime_value_to_avro_array_item(
-    codec: &CompiledCodec,
-    field: &str,
-    value: &RuntimeValue,
-) -> Result<AvroValue, CodecError> {
-    match value {
-        RuntimeValue::Bool(v) => Ok(AvroValue::Boolean(*v)),
-        RuntimeValue::I8(v) => Ok(AvroValue::Long(*v as i64)),
-        RuntimeValue::I16(v) => Ok(AvroValue::Long(*v as i64)),
-        RuntimeValue::I32(v) => Ok(AvroValue::Long(*v as i64)),
-        RuntimeValue::I64(v) => Ok(AvroValue::Long(*v)),
-        RuntimeValue::U8(v) => Ok(AvroValue::Long(*v as i64)),
-        RuntimeValue::U16(v) => Ok(AvroValue::Long(*v as i64)),
-        RuntimeValue::U32(v) => Ok(AvroValue::Long(*v as i64)),
-        RuntimeValue::U64(v) if i64::try_from(*v).is_ok() => Ok(AvroValue::Long(*v as i64)),
-        RuntimeValue::F32(v) => Ok(AvroValue::Float(v.into_inner())),
-        RuntimeValue::F64(v) => Ok(AvroValue::Double(v.into_inner())),
-        RuntimeValue::String(v) => Ok(AvroValue::String(v.clone())),
-        RuntimeValue::Datetime(v) => Ok(AvroValue::String(v.to_rfc3339())),
-        RuntimeValue::Array(values) | RuntimeValue::Vec(values) => values
-            .iter()
-            .map(|value| runtime_value_to_avro_array_item(codec, field, value))
-            .collect::<Result<Vec<_>, _>>()
-            .map(AvroValue::Array),
-        RuntimeValue::U64(_) => Err(CodecError::EncodeField {
-            codec: codec.name.as_str().to_string(),
-            field: field.to_string(),
-            reason: "array item U64 does not fit the Avro LONG representation".to_string(),
-        }),
-    }
 }
 
 fn avro_value_payload(value: &AvroValue) -> &AvroValue {
@@ -2960,8 +3129,8 @@ fn avro_type_name(ty: AvroType) -> &'static str {
 mod tests {
     use chrono::DateTime;
     use nervix_models::{
-        CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema, CreateWireSchema,
-        Identifier, SchemaField,
+        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema,
+        CreateWireSchema, Identifier, SchemaField,
     };
 
     use super::*;
@@ -3597,7 +3766,7 @@ mod tests {
         }
     }
 
-    fn protobuf_descriptor(codec: &CreateCodec) -> ProtobufCodecDescriptor {
+    fn protobuf_descriptor() -> MessageDescriptor {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let proto_path = dir.path().join("notification.proto");
         std::fs::write(
@@ -3616,12 +3785,10 @@ mod tests {
         .expect("proto file should be written");
         let file_descriptor_set =
             protox::compile([proto_path], [dir.path()]).expect("proto should compile");
-        ProtobufCodecDescriptor::from_file_descriptor_set(
-            codec,
-            file_descriptor_set,
-            "nervix.test.Notification",
-        )
-        .expect("descriptor should be built")
+        ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
+            .expect("descriptor pool should be built")
+            .message("nervix.test.Notification")
+            .expect("descriptor should be built")
     }
 
     fn primitive_arrays_record() -> RuntimeRecord {
@@ -3709,6 +3876,26 @@ mod tests {
             ("latency".to_string(), RuntimeValue::F64(OrderedFloat(12.5))),
             ("active".to_string(), RuntimeValue::Bool(true)),
         ])
+    }
+
+    fn encode_arrow_record(
+        codec: &CompiledCodec,
+        record: &RuntimeRecord,
+    ) -> Result<Vec<u8>, CodecError> {
+        let batch = codec
+            .schema
+            .arrow_batch_from_records(std::slice::from_ref(record))
+            .map_err(|reason| CodecError::InvalidCodec {
+                codec: codec.name.as_str().to_string(),
+                reason,
+            })?;
+        codec
+            .encode_batch(&batch, 0..1)?
+            .pop()
+            .ok_or_else(|| CodecError::InvalidCodec {
+                codec: codec.name.as_str().to_string(),
+                reason: "single-row columnar encode returned no payload".to_string(),
+            })
     }
 
     #[test]
@@ -3835,7 +4022,7 @@ mod tests {
             Some(&json_wire_schema()),
         )
         .expect("codec should compile");
-        let payload = encode_with_codec(&compiled_codec, &record()).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
@@ -3847,6 +4034,145 @@ mod tests {
     }
 
     #[test]
+    fn json_codec_encodes_arrow_rows_as_a_batch() {
+        let compiled_schema = Arc::new(compile_schema(&schema()));
+        let compiled_codec = compile_codec(
+            &codec("json_codec"),
+            compiled_schema.clone(),
+            Some(&json_wire_schema()),
+        )
+        .expect("codec should compile");
+        let mut second = record();
+        second
+            .fields
+            .insert("user_id".to_string(), RuntimeValue::U32(7));
+        let records = [record(), second];
+        let batch = compiled_schema
+            .arrow_batch_from_records(&records)
+            .expect("records should convert to arrow");
+
+        let payloads = compiled_codec
+            .encode_batch(&batch, 0..records.len())
+            .expect("arrow rows should encode directly");
+
+        assert_eq!(payloads.len(), records.len());
+        for (payload, expected_user_id) in payloads.iter().zip([42, 7]) {
+            let decoded = decode_with_codec(&compiled_codec, payload)
+                .expect("columnar JSON payload should decode");
+            assert_eq!(
+                decoded.value("user_id"),
+                Some(&RuntimeValue::U32(expected_user_id))
+            );
+        }
+
+        let second_payload = compiled_codec
+            .encode_batch(&batch, 1..2)
+            .expect("a bounded row range should encode");
+        assert_eq!(second_payload, vec![payloads[1].clone()]);
+        let error = compiled_codec
+            .encode_batch(&batch, 2..3)
+            .expect_err("an out-of-bounds row range must fail");
+        assert!(matches!(error, CodecError::InvalidCodec { .. }));
+    }
+
+    #[test]
+    fn codec_batch_encoder_reuses_payload_storage_for_arrow_rows() {
+        let compiled_schema = Arc::new(compile_schema(&schema()));
+        let compiled_codec = compile_codec(
+            &codec("json_codec"),
+            compiled_schema.clone(),
+            Some(&json_wire_schema()),
+        )
+        .expect("codec should compile");
+        let mut first = record();
+        first.fields.insert(
+            "tenant".to_string(),
+            RuntimeValue::String("a".repeat(4_096)),
+        );
+        let mut second = record();
+        second
+            .fields
+            .insert("tenant".to_string(), RuntimeValue::String("b".to_string()));
+        let batch = compiled_schema
+            .arrow_batch_from_records(&[first, second])
+            .expect("records should convert to arrow");
+        let encoder = compiled_codec
+            .batch_encoder(&batch)
+            .expect("arrow batch should be accepted");
+        let mut payload = Vec::new();
+
+        encoder
+            .encode_row_into(0, &mut payload)
+            .expect("first arrow row should encode");
+        let allocation = payload.as_ptr();
+        let capacity = payload.capacity();
+        encoder
+            .encode_row_into(1, &mut payload)
+            .expect("second arrow row should encode into the same buffer");
+
+        assert_eq!(payload.as_ptr(), allocation);
+        assert_eq!(payload.capacity(), capacity);
+        let decoded = decode_with_codec(&compiled_codec, &payload)
+            .expect("reused payload should contain only the second row");
+        assert_eq!(
+            decoded.value("tenant"),
+            Some(&RuntimeValue::String("b".to_string()))
+        );
+    }
+
+    #[test]
+    fn codec_batch_encoder_does_not_eagerly_encode_arrow_rows() {
+        let schema_model = CreateSchema {
+            name: identifier("counter"),
+            fields: vec![SchemaField {
+                name: identifier("value"),
+                ty: ParseAsType::U64,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let compiled_schema = Arc::new(compile_schema(&schema_model));
+        let codec_model = CreateCodec {
+            name: identifier("counter_avro"),
+            wire_format: CodecWireFormat::Avro,
+            wire_schema: Some(identifier("counter_wire")),
+            schema: schema_model.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let wire_schema = WireSchemaDefinition::Avro(CreateWireSchema {
+            name: identifier("counter_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: identifier("value"),
+                ty: AvroType::Long,
+                optional: false,
+            }],
+        });
+        let compiled_codec =
+            compile_codec(&codec_model, compiled_schema.clone(), Some(&wire_schema))
+                .expect("codec should compile");
+        let batch = compiled_schema
+            .arrow_batch_from_records(&[
+                RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::U64(1))]),
+                RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::U64(u64::MAX))]),
+            ])
+            .expect("records should convert to arrow");
+
+        let encoder = compiled_codec
+            .batch_encoder(&batch)
+            .expect("building an encoder must not serialize later rows");
+        let mut payload = Vec::new();
+        encoder
+            .encode_row_into(0, &mut payload)
+            .expect("the first row should encode independently");
+        let error = encoder
+            .encode_row_into(1, &mut payload)
+            .expect_err("the overflowing second row should fail only when requested");
+
+        assert!(matches!(error, CodecError::EncodeField { .. }));
+    }
+
+    #[test]
     fn avro_codec_roundtrips_runtime_records() {
         let compiled_schema = Arc::new(compile_schema(&schema()));
         let compiled_codec = compile_codec(
@@ -3855,7 +4181,7 @@ mod tests {
             Some(&avro_wire_schema()),
         )
         .expect("codec should compile");
-        let payload = encode_with_codec(&compiled_codec, &record()).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
@@ -3878,7 +4204,7 @@ mod tests {
             Some(&cbor_wire_schema(WireSchemaStrictness::Strict)),
         )
         .expect("codec should compile");
-        let payload = encode_with_codec(&compiled_codec, &record()).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
@@ -3976,7 +4302,7 @@ mod tests {
             .expect("multidimensional Avro codec should compile");
         let expected = multidimensional_array_record();
 
-        let payload = encode_with_codec(&codec, &expected).expect("must encode nested arrays");
+        let payload = encode_arrow_record(&codec, &expected).expect("must encode nested arrays");
         let decoded = decode_with_codec(&codec, &payload).expect("must decode nested arrays");
 
         assert_eq!(decoded.fields, expected.fields);
@@ -3992,7 +4318,7 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_with_codec(&compiled_codec, &array_record()).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &array_record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(
@@ -4012,7 +4338,7 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_with_codec(&compiled_codec, &array_record()).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &array_record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(
@@ -4032,7 +4358,7 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_with_codec(&compiled_codec, &array_record()).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &array_record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(
@@ -4095,7 +4421,7 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_with_codec(&compiled_codec, &expected).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &expected).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         for field in compiled_schema.fields() {
@@ -4123,7 +4449,7 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_with_codec(&compiled_codec, &expected).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &expected).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         for field in compiled_schema.fields() {
@@ -4147,7 +4473,7 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_with_codec(&compiled_codec, &expected).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &expected).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         for field in compiled_schema.fields() {
@@ -4262,7 +4588,7 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_with_codec(
+        let payload = encode_arrow_record(
             &compiled_codec,
             &RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(42))]),
         )
@@ -4283,7 +4609,7 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_with_codec(
+        let payload = encode_arrow_record(
             &compiled_codec,
             &RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(42))]),
         )
@@ -4295,14 +4621,8 @@ mod tests {
     }
 
     #[test]
-    fn avro_encode_rejects_incompatible_runtime_values() {
+    fn arrow_batch_rejects_incompatible_runtime_values_before_encoding() {
         let compiled_schema = Arc::new(compile_schema(&schema()));
-        let compiled_codec = compile_codec(
-            &codec("avro_codec"),
-            compiled_schema,
-            Some(&avro_wire_schema()),
-        )
-        .expect("codec should compile");
         let bad_record = RuntimeRecord::from_fields([
             ("user_id".to_string(), RuntimeValue::U32(42)),
             (
@@ -4323,8 +4643,10 @@ mod tests {
             ("active".to_string(), RuntimeValue::Bool(true)),
         ]);
 
-        let err = encode_with_codec(&compiled_codec, &bad_record).expect_err("must reject");
-        assert!(matches!(err, CodecError::EncodeField { field, .. } if field == "latency"));
+        let err = compiled_schema
+            .arrow_batch_from_records(&[bad_record])
+            .expect_err("must reject");
+        assert!(err.contains("latency"));
     }
 
     #[test]
@@ -4424,21 +4746,8 @@ mod tests {
     }
 
     #[test]
-    fn json_and_avro_encode_report_missing_runtime_fields() {
+    fn arrow_batch_rejects_missing_required_runtime_fields_before_encoding() {
         let compiled_schema = Arc::new(compile_schema(&schema()));
-        let json_codec = compile_codec(
-            &codec("json_codec"),
-            compiled_schema.clone(),
-            Some(&json_wire_schema()),
-        )
-        .expect("json codec should compile");
-        let avro_codec = compile_codec(
-            &codec("avro_codec"),
-            compiled_schema,
-            Some(&avro_wire_schema()),
-        )
-        .expect("avro codec should compile");
-
         let partial = RuntimeRecord::from_fields([
             ("user_id".to_string(), RuntimeValue::U32(42)),
             (
@@ -4447,11 +4756,10 @@ mod tests {
             ),
         ]);
 
-        let json_err = encode_with_codec(&json_codec, &partial).expect_err("json must reject");
-        assert!(matches!(json_err, CodecError::EncodeField { field, .. } if field == "created_at"));
-
-        let avro_err = encode_with_codec(&avro_codec, &partial).expect_err("avro must reject");
-        assert!(matches!(avro_err, CodecError::EncodeField { field, .. } if field == "created_at"));
+        let error = compiled_schema
+            .arrow_batch_from_records(&[partial])
+            .expect_err("missing required field must fail before encoding");
+        assert!(error.contains("created_at"));
     }
 
     #[test]
@@ -4499,7 +4807,7 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_with_codec(&compiled_codec, &record()).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&payload).expect("valid json"),
             serde_json::json!({
@@ -4556,13 +4864,9 @@ mod tests {
     fn protobuf_codec_applies_transformation_on_ingestion_before_decoding() {
         let codec = protobuf_codec("protobuf_ingest", Some("."), None);
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
-            compiled_schema,
-            None,
-            Some(protobuf_descriptor(&codec)),
-        )
-        .expect("codec should compile");
+        let compiled_codec =
+            compile_codec_with_protobuf(&codec, compiled_schema, None, Some(protobuf_descriptor()))
+                .expect("codec should compile");
         assert!(compiled_codec.requires_blocking_decode());
         assert!(!compiled_codec.requires_blocking_encode());
 
@@ -4586,13 +4890,9 @@ mod tests {
     fn protobuf_codec_applies_transformation_on_emitting_before_encoding() {
         let codec = protobuf_codec("protobuf_emit", None, Some("."));
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
-            compiled_schema,
-            None,
-            Some(protobuf_descriptor(&codec)),
-        )
-        .expect("codec should compile");
+        let compiled_codec =
+            compile_codec_with_protobuf(&codec, compiled_schema, None, Some(protobuf_descriptor()))
+                .expect("codec should compile");
         assert!(!compiled_codec.requires_blocking_decode());
         assert!(compiled_codec.requires_blocking_encode());
 
@@ -4607,7 +4907,7 @@ mod tests {
                 RuntimeValue::String("hello".to_string()),
             ),
         ]);
-        let payload = encode_with_codec(&compiled_codec, &record).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &record).expect("must encode");
 
         assert_eq!(
             payload,
@@ -4638,7 +4938,7 @@ mod tests {
             None,
         )
         .expect("codec should compile");
-        let payload = encode_with_codec(&compiled_codec, &record()).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
@@ -4666,7 +4966,7 @@ mod tests {
             None,
         )
         .expect("codec should compile");
-        let payload = encode_with_codec(&compiled_codec, &record()).expect("must encode");
+        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
 
         assert_eq!(
             String::from_utf8(payload).expect("xml must be utf8"),

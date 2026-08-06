@@ -116,9 +116,7 @@ fn mode_parser<'src>()
             }),
         kw(Identifier::NoAck)
             .ignore_then(kw(Identifier::Parallel))
-            .ignore_then(kw(Identifier::Max))
-            .ignore_then(max_in_flight())
-            .map(|max| KafkaIngestMode::NoAckParallel { max }),
+            .to(KafkaIngestMode::NoAckParallel),
     ))
 }
 
@@ -161,9 +159,7 @@ fn redis_pubsub_mode_parser<'src>()
 #[derive(Clone)]
 enum ParsedMqttIngestMode {
     NoAckSequential,
-    NoAckParallel {
-        max: u64,
-    },
+    NoAckParallel,
     AckSequential {
         timeout: String,
         retry_policy: RetryPolicy,
@@ -231,9 +227,7 @@ fn mqtt_mode_parser<'src>()
             ),
         kw(Identifier::NoAck)
             .ignore_then(kw(Identifier::Parallel))
-            .ignore_then(kw(Identifier::Max))
-            .ignore_then(max_in_flight())
-            .map(|max| ParsedMqttIngestMode::NoAckParallel { max }),
+            .to(ParsedMqttIngestMode::NoAckParallel),
         kw(Identifier::NoAck)
             .ignore_then(kw(Identifier::Sequential))
             .to(ParsedMqttIngestMode::NoAckSequential),
@@ -253,8 +247,8 @@ fn mqtt_mode_parser<'src>()
             ParsedMqttIngestMode::NoAckSequential => {
                 Ok(MqttIngestMode::NoAckSequential { session, qos })
             }
-            ParsedMqttIngestMode::NoAckParallel { max } => {
-                Ok(MqttIngestMode::NoAckParallel { max, session, qos })
+            ParsedMqttIngestMode::NoAckParallel => {
+                Ok(MqttIngestMode::NoAckParallel { session, qos })
             }
             ParsedMqttIngestMode::AckSequential {
                 timeout,
@@ -1049,7 +1043,7 @@ mod tests {
     fn parses_create_ingestor_no_ack_parallel() {
         let input = r#"
             CREATE INGESTOR i
-              FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE NO_ACK PARALLEL MAX 20
+              FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE NO_ACK PARALLEL
               DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1061,7 +1055,32 @@ mod tests {
         let IngestSource::Kafka { mode, .. } = &parsed.source else {
             panic!("expected kafka ingestor source");
         };
-        assert_eq!(mode, &KafkaIngestMode::NoAckParallel { max: 20 });
+        assert!(matches!(mode, KafkaIngestMode::NoAckParallel));
+    }
+
+    #[test]
+    fn rejects_create_ingestor_no_ack_parallel_max() {
+        let input = r#"
+            CREATE INGESTOR i
+              FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE NO_ACK PARALLEL MAX 20
+              DECODE USING sch
+              TO s BRANCHED BY u_branch SET u = message.u
+              FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+              ON GENERAL ERROR LOG;
+        "#;
+
+        parse_create_ingestor_tokens(&to_tokens(input))
+            .expect_err("NO_ACK must not accept an in-flight ACK bound");
+    }
+
+    #[test]
+    fn no_ack_parallel_completion_continues_to_decode_without_max() {
+        let input = "CREATE INGESTOR i FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE \
+                     NO_ACK PARALLEL ";
+        let suggestions = suggest_create_ingestor(input, input.len());
+
+        assert!(suggestions.contains(&"DECODE USING".to_string()));
+        assert!(!suggestions.contains(&"MAX".to_string()));
     }
 
     #[test]
@@ -1464,7 +1483,7 @@ mod tests {
     fn parses_create_ingestor_mqtt_no_ack_parallel_with_qos1() {
         let input = r#"
             CREATE INGESTOR mqtt_notifications
-              FROM MQTT mqtt_main TOPIC notifications QOS 1 MODE NO_ACK PARALLEL MAX 4
+              FROM MQTT mqtt_main TOPIC notifications QOS 1 MODE NO_ACK PARALLEL
               DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1473,20 +1492,20 @@ mod tests {
 
         let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
 
-        assert_eq!(
-            parsed.source,
-            IngestSource::Mqtt {
-                client: nervix_models::Identifier::try_from("mqtt_main")
-                    .expect("valid client identifier"),
-                topic: "notifications".to_string(),
-                instances: 1,
-                mode: MqttIngestMode::NoAckParallel {
-                    max: 4,
-                    session: MqttSession::Clean,
-                    qos: MqttQos::AtLeastOnce,
-                },
-            }
-        );
+        let IngestSource::Mqtt {
+            client,
+            topic,
+            instances,
+            mode: MqttIngestMode::NoAckParallel { session, qos, .. },
+        } = &parsed.source
+        else {
+            panic!("expected parallel NO_ACK MQTT source");
+        };
+        assert_eq!(client.as_str(), "mqtt_main");
+        assert_eq!(topic, "notifications");
+        assert_eq!(*instances, 1);
+        assert_eq!(*session, MqttSession::Clean);
+        assert_eq!(*qos, MqttQos::AtLeastOnce);
     }
 
     #[test]
@@ -1602,17 +1621,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_create_ingestor_mqtt_parallel_max_zero() {
+    fn rejects_create_ingestor_mqtt_no_ack_parallel_max() {
         let input = r#"
             CREATE INGESTOR mqtt_notifications
-              FROM MQTT mqtt_main TOPIC notifications MODE NO_ACK PARALLEL MAX 0
+              FROM MQTT mqtt_main TOPIC notifications MODE NO_ACK PARALLEL MAX 4
               DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
         "#;
 
-        parse_create_ingestor_tokens(&to_tokens(input)).expect_err("MAX must be greater than zero");
+        parse_create_ingestor_tokens(&to_tokens(input))
+            .expect_err("NO_ACK must not accept an in-flight ACK bound");
     }
 
     #[test]
@@ -1905,7 +1925,7 @@ mod tests {
     fn parses_create_ingestor_kafka_instances() {
         let input = r#"
             CREATE INGESTOR i
-              FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g INSTANCES 3 MODE NO_ACK PARALLEL MAX 20
+              FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g INSTANCES 3 MODE NO_ACK PARALLEL
               DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1962,7 +1982,7 @@ mod tests {
     fn rejects_zero_instances() {
         let input = r#"
             CREATE INGESTOR i
-              FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g INSTANCES 0 MODE NO_ACK PARALLEL MAX 20
+              FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g INSTANCES 0 MODE NO_ACK PARALLEL
               DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1981,7 +2001,7 @@ mod tests {
     fn parses_ingestor_with_filter_where_and_output_routes() {
         let input = r#"
             CREATE INGESTOR kafka_notifications
-              FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL MAX 10
+              FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL
               DECODE USING notification_kafka_message
               FILTER WHERE message.active
               TO notifications
@@ -2039,7 +2059,7 @@ mod tests {
               DECODE USING notification_kafka_message
               BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
 
-              FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL MAX 10 ON GENERAL ERROR LOG;
+              FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL ON GENERAL ERROR LOG;
         "#;
 
         let error = parse_create_ingestor(input).expect_err("parse should fail");

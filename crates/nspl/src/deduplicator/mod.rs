@@ -117,7 +117,8 @@ pub fn alter_deduplicator_parser<'src>()
     let operation = choice((
         set_deduplicate_on,
         set_max_time,
-        alter_processor_operation().map(AlterDeduplicatorOperation::Processor),
+        alter_processor_operation()
+            .map(|operation| AlterDeduplicatorOperation::Processor(Box::new(operation))),
     ))
     .boxed();
 

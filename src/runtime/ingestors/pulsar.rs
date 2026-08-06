@@ -49,14 +49,14 @@ impl PulsarIngestor {
             | PulsarIngestMode::AckSequential { timeout, .. } => {
                 Some(Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?)
             }
-            PulsarIngestMode::NoAckParallel { .. } => None,
+            PulsarIngestMode::NoAckParallel => None,
         };
         let retry_policy = match &ack_mode {
             PulsarIngestMode::AckParallel { retry_policy, .. }
             | PulsarIngestMode::AckSequential { retry_policy, .. } => Some(
                 Runtime::parse_retry_policy(domain, &ingestor.name, retry_policy)?,
             ),
-            PulsarIngestMode::NoAckParallel { .. } => None,
+            PulsarIngestMode::NoAckParallel => None,
         };
         let batch_timeout = match &ack_mode {
             PulsarIngestMode::AckParallel { batch_timeout, .. } => {
@@ -156,14 +156,15 @@ impl PulsarIngestor {
                 );
 
                 let ack_parallel_limit = match &task_ack_mode {
-                    PulsarIngestMode::AckParallel { max, .. }
-                    | PulsarIngestMode::NoAckParallel { max } => (*max).max(1) as usize,
-                    PulsarIngestMode::AckSequential { .. } => 1,
+                    PulsarIngestMode::AckParallel { max, .. } => (*max).max(1) as usize,
+                    PulsarIngestMode::AckSequential { .. } | PulsarIngestMode::NoAckParallel => 1,
                 };
                 let ack_timeout = task_ack_timeout;
                 let retry_policy = task_retry_policy;
                 let batch_timeout = task_batch_timeout;
                 let mut retry_delay = retry_policy.backoff;
+                let mut ingest_collector = IngestRouteCollector::default();
+                let mut no_ack_messages = Vec::new();
 
                 'ingest: loop {
                     tokio::task::consume_budget().await;
@@ -176,10 +177,40 @@ impl PulsarIngestor {
                     if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
                         continue;
                     }
+                    let next_flush = ingest_collector.next_flush();
+                    let flush_at =
+                        next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
+                            let _ = Self::flush_no_ack_group(
+                                &task_runtime,
+                                &task_domain,
+                                &task_ingestor,
+                                &task_branched_senders,
+                                &mut consumer,
+                                &mut ingest_collector,
+                                &mut no_ack_messages,
+                            ).await;
                             if changed.is_err() || *shutdown_rx.borrow() {
                                 break;
+                            }
+                        }
+                        _ = sleep_until(flush_at), if next_flush.is_some() => {
+                            if let Err(error) = Self::flush_no_ack_group(
+                                &task_runtime,
+                                &task_domain,
+                                &task_ingestor,
+                                &task_branched_senders,
+                                &mut consumer,
+                                &mut ingest_collector,
+                                &mut no_ack_messages,
+                            ).await {
+                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    "failed to flush pulsar messages for ingestor '{}' in domain '{}': {}",
+                                    task_ingestor.as_str(),
+                                    task_domain.as_str(),
+                                    error
+                                )));
                             }
                         }
                         message = consumer.next() => {
@@ -188,7 +219,7 @@ impl PulsarIngestor {
                                     task_runtime
                                         .clear_ingestor_transient_error(&task_domain, &task_ingestor);
                                     match &task_ack_mode {
-                                        PulsarIngestMode::NoAckParallel { .. } => {
+                                        PulsarIngestMode::NoAckParallel => {
                                             match Self::decode_message(
                                                 task_codec.clone(),
                                                 &task_domain,
@@ -202,29 +233,20 @@ impl PulsarIngestor {
                                                         IngestFilterMapMetadata::from_headers(
                                                             Self::headers_from_message(&message),
                                                         );
-                                                    let entry = PulsarBatchEntry {
-                                                        message,
-                                                        record,
-                                                        filter_map_metadata,
-                                                    };
-                                                    let mut output_routes =
-                                                        task_output_routes.clone();
+                                                    let collected_before = ingest_collector.len();
                                                     if let Err(error) = task_runtime
-                                                        .dispatch_ingested_record(IngestDispatch {
+                                                        .dispatch_ingested_records(IngestGroupDispatch {
+                                                            collector: &mut ingest_collector,
                                                             domain: &task_domain,
                                                             ingestor: &task_ingestor,
                                                             timestamp_source: task_timestamp_source
                                                                 .as_ref(),
-                                                            output_routes: &mut output_routes,
+                                                            output_routes: &task_output_routes,
                                                             filter_where: task_filter_where.as_ref(),
-                                                            branched_senders:
-                                                                &task_branched_senders,
-                                                            record: entry.record,
-                                                            filter_map_metadata: Some(
-                                                                entry.filter_map_metadata.clone(),
-                                                            ),
+                                                            records: vec![record],
+                                                            metadata: vec![filter_map_metadata],
                                                             ingested_at: current_timestamp(),
-                                                            acks: AckSet::empty(),
+                                                            acks: vec![AckSet::empty()],
                                                         })
                                                         .await
                                                     {
@@ -234,7 +256,7 @@ impl PulsarIngestor {
                                                             task_domain.as_str(),
                                                             error
                                                         )));
-                                                        if let Err(nack_error) = consumer.nack(&entry.message).await {
+                                                        if let Err(nack_error) = consumer.nack(&message).await {
                                                             let _ = task_events.send(RuntimeEvent::Error(format!(
                                                                 "failed to nack pulsar message for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
@@ -244,17 +266,38 @@ impl PulsarIngestor {
                                                         }
                                                         sleep(retry_delay).await;
                                                         retry_delay = next_retry_delay(retry_delay, retry_policy);
-                                                    } else if let Err(error) = consumer.ack(&entry.message).await {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                            "failed to ack pulsar message for ingestor '{}' in domain '{}': {}",
-                                                            task_ingestor.as_str(),
-                                                            task_domain.as_str(),
-                                                            error
-                                                        )));
-                                                        sleep(retry_delay).await;
-                                                        retry_delay = next_retry_delay(retry_delay, retry_policy);
                                                     } else {
-                                                        retry_delay = retry_policy.backoff;
+                                                        if ingest_collector.len() == collected_before {
+                                                            if let Err(error) = consumer.ack(&message).await {
+                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                    "failed to ack pulsar message for ingestor '{}' in domain '{}': {}",
+                                                                    task_ingestor.as_str(),
+                                                                    task_domain.as_str(),
+                                                                    error
+                                                                )));
+                                                            }
+                                                        } else {
+                                                            no_ack_messages.push(message);
+                                                        }
+                                                        if ingest_collector.len()
+                                                            >= INGEST_GROUP_MAX_ROWS
+                                                            && let Err(error) = Self::flush_no_ack_group(
+                                                                &task_runtime,
+                                                                &task_domain,
+                                                                &task_ingestor,
+                                                                &task_branched_senders,
+                                                                &mut consumer,
+                                                                &mut ingest_collector,
+                                                                &mut no_ack_messages,
+                                                            ).await
+                                                        {
+                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                "failed to flush pulsar messages for ingestor '{}' in domain '{}': {}",
+                                                                task_ingestor.as_str(),
+                                                                task_domain.as_str(),
+                                                                error
+                                                            )));
+                                                        }
                                                     }
                                                 }
                                                 Err(error) => {
@@ -322,30 +365,39 @@ impl PulsarIngestor {
                                                 tokio::task::consume_budget().await;
                                                 let (acks, completion) =
                                                     task_runtime.tracked_ack_root(&task_domain);
-                                                let mut output_routes =
-                                                    task_output_routes.clone();
-                                                let dispatched = task_runtime
-                                                    .dispatch_ingested_record(IngestDispatch {
+                                                let mut collector =
+                                                    IngestRouteCollector::default();
+                                                let dispatch_result = task_runtime
+                                                    .dispatch_ingested_records(IngestGroupDispatch {
+                                                        collector: &mut collector,
                                                         domain: &task_domain,
                                                         ingestor: &task_ingestor,
                                                         timestamp_source: task_timestamp_source
                                                             .as_ref(),
-                                                        output_routes: &mut output_routes,
+                                                        output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
-                                                        branched_senders:
-                                                            &task_branched_senders,
-                                                        record: entry.record.clone(),
-                                                        filter_map_metadata: Some(
+                                                        records: vec![entry.record.clone()],
+                                                        metadata: vec![
                                                             entry.filter_map_metadata.clone(),
-                                                        ),
+                                                        ],
                                                         ingested_at: current_timestamp(),
-                                                        acks: if !task_branched_senders.is_empty() {
+                                                        acks: vec![if !task_branched_senders.is_empty() {
                                                             acks.attached()
                                                         } else {
                                                             acks.clone()
-                                                        },
+                                                        }],
                                                     })
-                                                    .await
+                                                    .await;
+                                                let flush_result = task_runtime
+                                                    .flush_ingest_collector(
+                                                        &task_domain,
+                                                        &task_ingestor,
+                                                        &task_branched_senders,
+                                                        &mut collector,
+                                                    )
+                                                    .await;
+                                                let dispatched = dispatch_result
+                                                    .and(flush_result)
                                                     .map(|()| true)
                                                     .unwrap_or_else(|error| {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
@@ -525,96 +577,87 @@ impl PulsarIngestor {
                                                 }
                                             }
 
-                                            loop {
+                                            let mut messages = Vec::with_capacity(batch.len());
+                                            let mut records = Vec::with_capacity(batch.len());
+                                            for entry in batch {
+                                                messages.push(entry.message);
+                                                records.push((entry.record, entry.filter_map_metadata));
+                                            }
                                                 tokio::task::consume_budget().await;
-                                                let mut completions = Vec::with_capacity(batch.len());
+                                                let mut completions = Vec::with_capacity(records.len());
                                                 let mut batch_failure = None::<String>;
                                                 let ingested_at = current_timestamp();
-                                                let runtime_records = batch
-                                                    .iter()
-                                                    .map(|entry| {
-                                                        entry.record.clone().into_runtime_record(
-                                                            RuntimeRecordMetadata::from_ingested_at_watermarks(
-                                                                ingested_at,
-                                                                ingested_at,
-                                                            ),
-                                                        )
-                                                    })
-                                                    .collect::<Vec<_>>();
-                                                let filter_map_metadata = batch
-                                                    .iter()
-                                                    .map(|entry| entry.filter_map_metadata.clone())
-                                                    .collect::<Vec<_>>();
-                                                let selected_rows = match task_runtime
-                                                    .select_ingested_batch_rows(IngestBatchSelection {
-                                                        domain: &task_domain,
-                                                        filter_where: task_filter_where.as_ref(),
-                                                        records: &runtime_records,
-                                                        filter_map_metadata: Some(
-                                                            &filter_map_metadata,
-                                                        ),
-                                                    })
-                                                    .await
-                                                {
-                                                    Ok(selected_rows) => selected_rows,
-                                                    Err(error) => {
-                                                        batch_failure = Some(error);
-                                                        HashSet::default()
-                                                    }
-                                                };
+                                                let mut collector =
+                                                    IngestRouteCollector::default();
 
-                                                for (row, entry) in batch.iter().enumerate() {
+                                                // Every message keeps its own ack root; the group only
+                                                // shares the dispatch call, so an ack still resolves per
+                                                // message.
+                                                let mut roots = Vec::with_capacity(records.len());
+                                                let mut group_records = Vec::with_capacity(records.len());
+                                                let mut group_metadata = Vec::with_capacity(records.len());
+                                                let mut dispatch_acks = Vec::with_capacity(records.len());
+                                                for (record, filter_map_metadata) in records {
                                                     tokio::task::consume_budget().await;
                                                     let (acks, completion) =
                                                         task_runtime.tracked_ack_root(&task_domain);
-                                                    if !selected_rows.contains(&row) {
-                                                        acks.ack_success();
-                                                        completions.push(completion);
-                                                        continue;
-                                                    }
-                                                    let mut output_routes =
-                                                        task_output_routes.clone();
-                                                    let dispatched = task_runtime
-                                                        .dispatch_ingested_record(IngestDispatch {
-                                                            domain: &task_domain,
-                                                            ingestor: &task_ingestor,
-                                                            timestamp_source: task_timestamp_source
-                                                                .as_ref(),
-                                                            output_routes: &mut output_routes,
-                                                            filter_where: None,
-                                                            branched_senders:
-                                                                &task_branched_senders,
-                                                            record: entry.record.clone(),
-                                                            filter_map_metadata: Some(
-                                                                entry.filter_map_metadata.clone(),
-                                                            ),
-                                                            ingested_at,
-                                                            acks: if !task_branched_senders.is_empty()
-                                                            {
-                                                                acks.attached()
-                                                            } else {
-                                                                acks.clone()
-                                                            },
-                                                        })
-                                                        .await
-                                                        .map(|()| true)
-                                                        .unwrap_or_else(|error| {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                                "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                                                                task_ingestor.as_str(),
-                                                                task_domain.as_str(),
-                                                                error
-                                                            )));
-                                                            false
-                                                        });
-                                                    if dispatched {
-                                                        acks.ack_success();
-                                                        completions.push(completion);
-                                                    } else {
-                                                        batch_failure =
-                                                            Some("pulsar runtime dispatch failed".to_string());
-                                                        break;
-                                                    }
+                                                    dispatch_acks.push(
+                                                        if !task_branched_senders.is_empty() {
+                                                            acks.attached()
+                                                        } else {
+                                                            acks.clone()
+                                                        },
+                                                    );
+                                                    roots.push(acks);
+                                                    completions.push(completion);
+                                                    group_records.push(record);
+                                                    group_metadata.push(filter_map_metadata);
+                                                }
+                                                let dispatched = task_runtime
+                                                    .dispatch_ingested_records(IngestGroupDispatch {
+                                                        collector: &mut collector,
+                                                        domain: &task_domain,
+                                                        ingestor: &task_ingestor,
+                                                        timestamp_source: task_timestamp_source
+                                                            .as_ref(),
+                                                        output_routes: &task_output_routes,
+                                                        filter_where: task_filter_where.as_ref(),
+                                                        records: group_records,
+                                                        metadata: group_metadata,
+                                                        acks: dispatch_acks,
+                                                        ingested_at,
+                                                    })
+                                                    .await
+                                                    .map(|()| true)
+                                                    .unwrap_or_else(|error| {
+                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            "failed to dispatch message group for ingestor '{}' in domain '{}': {}",
+                                                            task_ingestor.as_str(),
+                                                            task_domain.as_str(),
+                                                            error
+                                                        )));
+                                                        false
+                                                    });
+                                                // Dispatch has taken its own reference to every message,
+                                                // so the root each one was created with is released here.
+                                                for acks in roots {
+                                                    acks.ack_success();
+                                                }
+                                                if !dispatched {
+                                                    batch_failure =
+                                                        Some("pulsar runtime dispatch failed".to_string());
+                                                }
+
+                                                if let Err(error) = task_runtime
+                                                    .flush_ingest_collector(
+                                                        &task_domain,
+                                                        &task_ingestor,
+                                                        &task_branched_senders,
+                                                        &mut collector,
+                                                    )
+                                                    .await
+                                                {
+                                                    batch_failure = Some(error);
                                                 }
 
                                                 if batch_failure.is_none() {
@@ -642,8 +685,8 @@ impl PulsarIngestor {
                                                         task_domain.as_str(),
                                                         error
                                                     )));
-                                                    for entry in &batch {
-                                                        if let Err(nack_error) = consumer.nack(&entry.message).await {
+                                                    for message in &messages {
+                                                        if let Err(nack_error) = consumer.nack(message).await {
                                                             let _ = task_events.send(RuntimeEvent::Error(format!(
                                                                 "failed to nack pulsar batch message for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
@@ -654,11 +697,12 @@ impl PulsarIngestor {
                                                     }
                                                     sleep(retry_delay).await;
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
+                                                    continue 'ingest;
                                                 } else {
                                                     retry_delay = retry_policy.backoff;
                                                     let mut ack_failure = None::<String>;
-                                                    for entry in &batch {
-                                                        if let Err(error) = consumer.ack(&entry.message).await {
+                                                    for message in &messages {
+                                                        if let Err(error) = consumer.ack(message).await {
                                                             ack_failure = Some(error.to_string());
                                                             let _ = task_events.send(RuntimeEvent::Error(format!(
                                                                 "failed to ack pulsar message for ingestor '{}' in domain '{}': {}",
@@ -669,13 +713,12 @@ impl PulsarIngestor {
                                                             break;
                                                         }
                                                     }
-                                                    if ack_failure.is_none() {
-                                                        break;
+                                                    if ack_failure.is_some() {
+                                                        sleep(retry_delay).await;
+                                                        retry_delay = next_retry_delay(retry_delay, retry_policy);
+                                                        continue 'ingest;
                                                     }
-                                                    sleep(retry_delay).await;
-                                                    retry_delay = next_retry_delay(retry_delay, retry_policy);
                                                 }
-                                            }
                                         }
                                     }
                                 }
@@ -820,6 +863,38 @@ impl PulsarIngestor {
         );
 
         decode_ingested_payload(codec, &payload).await
+    }
+
+    async fn flush_no_ack_group(
+        runtime: &Runtime,
+        domain: &Domain,
+        ingestor: &Identifier,
+        branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+        consumer: &mut PulsarConsumer<Vec<u8>, TokioExecutor>,
+        collector: &mut IngestRouteCollector,
+        messages: &mut Vec<PulsarMessage<Vec<u8>>>,
+    ) -> Result<(), String> {
+        if let Err(error) = runtime
+            .flush_ingest_collector(domain, ingestor, branched_senders, collector)
+            .await
+        {
+            for message in messages.drain(..) {
+                tokio::task::consume_budget().await;
+                let _ = consumer.nack(&message).await;
+            }
+            return Err(error);
+        }
+
+        let mut first_error = None;
+        for message in messages.drain(..) {
+            tokio::task::consume_budget().await;
+            if let Err(error) = consumer.ack(&message).await
+                && first_error.is_none()
+            {
+                first_error = Some(error.to_string());
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     fn headers_from_message(message: &PulsarMessage<Vec<u8>>) -> IngestHeaders {

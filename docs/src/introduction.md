@@ -2,9 +2,9 @@
 
 Nervix is experimental software in active development. It is intended for evaluation, local testing, and design exploration. It is not suitable for real production workloads.
 
-Nervix is a realtime relay processing system with a robust declarative DSL for defining data-flow graphs.
+Nervix is a realtime stream processing system with a robust declarative DSL for defining data-flow graphs.
 
-Nervix Relay Processing Language (NSPL) is used to declare the schemas, connections, runtime nodes, and external integrations that make up a Nervix graph:
+Nervix stream processing Language (NSPL) is used to declare the schemas, connections, runtime nodes, and external integrations that make up a Nervix graph:
 
 - schemas
 - wire schemas
@@ -23,7 +23,7 @@ The core runtime model is a graph of connected nodes:
 - processors, junctions, deduplicators, reingestors, and materializers transform or route that data
 - emitters push results out to external systems
 
-Current built-in transport integrations include Kafka, Pulsar, Kinesis, HTTP, Prometheus,
+Current built-in transport integrations include Kafka, Pulsar, HTTP, Prometheus,
 RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, and WebSockets, with Sentry event-envelope emission over
 HTTP.
 

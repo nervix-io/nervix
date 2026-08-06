@@ -52,11 +52,11 @@ Feature: Runtime node input collection
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "input_collector" is saved as placeholder "junction_owner"
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/input-collection"
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/input-collection"
       """
       {"tenant":"alpha","sequence":1}
       """
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/input-collection"
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/input-collection"
       """
       {"tenant":"beta","sequence":1}
       """
