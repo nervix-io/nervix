@@ -1,0 +1,40 @@
+[package]
+default-run = "nervix-benchmark"
+edition = "2024"
+license-file = "../../LICENSE.md"
+name = "nervix-benchmark"
+publish = false
+version = "0.1.0-dev"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+humantime = { workspace = true }
+nervix-client-core = { workspace = true }
+nervix-test-environment = { workspace = true }
+parking_lot = { workspace = true }
+rdkafka = { workspace = true, features = [
+  "tokio",
+  "curl-static",
+  "curl-rustls",
+  "libz-static",
+  "cmake_build",
+  "static-linking",
+  "aws-lc",
+] }
+reqwest = { workspace = true, features = ["rustls"] }
+serde = { workspace = true }
+testcontainers = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
+triomphe = { workspace = true }
+upon = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+nervix-nspl = { workspace = true }
+tempfile = { workspace = true }

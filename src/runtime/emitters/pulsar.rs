@@ -108,27 +108,49 @@ impl PulsarEmitter {
         format!("persistent://{namespace}/{topic}")
     }
 
-    pub(in crate::runtime) async fn publish(
+    pub(in crate::runtime) async fn publish_chunk(
         &mut self,
-        message: &RelayMessage,
-        payload: &[u8],
-        headers: &EmitterHeaders,
+        keys: &[Option<BranchKey>],
+        payloads: Vec<Vec<u8>>,
+        headers: &[EmitterHeaders],
+        max_in_flight: usize,
     ) -> EmitterRuntimeResult<()> {
         let Some(producer) = self.producer.as_mut() else {
             return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
                 .attach_printable("no initialized pulsar sink client"));
         };
-        let receipt = producer
-            .send_non_blocking(PulsarProducerMessage {
-                payload: payload.to_vec(),
-                properties: headers.iter().cloned().collect(),
-                partition_key: message.key.as_ref().map(|key| key.as_str().to_string()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|source| {
-                emitter_publish_error(format!("failed to enqueue pulsar message: {source}"))
-            })?;
-        receipt.await.map(|_| ()).map_err(emitter_publish_error)
+        if payloads.len() != keys.len() || payloads.len() != headers.len() {
+            return Err(emitter_publish_error(
+                "pulsar encoded payload, branch key, and header counts differ",
+            ));
+        }
+        let mut receipts = FuturesOrdered::new();
+        for ((payload, key), headers) in payloads.into_iter().zip(keys).zip(headers) {
+            tokio::task::consume_budget().await;
+            let receipt = producer
+                .send_non_blocking(PulsarProducerMessage {
+                    payload,
+                    properties: headers.iter().cloned().collect(),
+                    partition_key: key.as_ref().map(|key| key.as_str().to_string()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|source| {
+                    emitter_publish_error(format!("failed to enqueue pulsar message: {source}"))
+                })?;
+            receipts.push_back(receipt);
+            if receipts.len() >= max_in_flight {
+                receipts
+                    .next()
+                    .await
+                    .expect("pulsar receipt queue must contain an in-flight publish")
+                    .map_err(emitter_publish_error)?;
+            }
+        }
+        while let Some(receipt) = receipts.next().await {
+            tokio::task::consume_budget().await;
+            receipt.map_err(emitter_publish_error)?;
+        }
+        Ok(())
     }
 }

@@ -1,46 +1,18 @@
 use chumsky::prelude::*;
 use nervix_models::{
-    ClientConfigEntry, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-    CodecProtobufConfig, CodecWireFormat, CreateCodec, CreateStatement,
+    CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+    CodecWireFormat, CreateCodec, CreateStatement,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, codec_name, field_ref, if_not_exists_clause,
-        into_parse_error, kw, lex_input, resource_ref, schema_ref, string_lit, suggest_from, tok,
-        u64_value, wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
+        ParseError, ParseFromSourceError, codec_name, config_entries_block, field_ref,
+        if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref, schema_ref,
+        string_lit, suggest_from, tok, u64_value, wire_avro_schema_ref, wire_cbor_schema_ref,
+        wire_json_schema_ref,
     },
 };
-
-fn scalar_config_value<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    choice((
-        string_lit(),
-        select! { Token::NumberLiteral(v) => v },
-        crate::parser_support::word_raw(),
-    ))
-}
-
-fn protobuf_config_entry<'src>()
--> impl Parser<'src, &'src [Token], ClientConfigEntry, extra::Err<ParseError<'src>>> + Clone {
-    string_lit()
-        .labelled("config_key")
-        .then_ignore(tok(Token::Eq))
-        .then(scalar_config_value().labelled("config_value"))
-        .map(|(key, value)| ClientConfigEntry { key, value })
-}
-
-fn protobuf_config<'src>()
--> impl Parser<'src, &'src [Token], Vec<ClientConfigEntry>, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Config).ignore_then(
-        protobuf_config_entry()
-            .separated_by(tok(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
-    )
-}
 
 pub fn create_codec_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateCodec>, extra::Err<ParseError<'src>>> + Clone
@@ -145,7 +117,7 @@ pub fn create_codec_parser<'src>()
         .ignore_then(kw(Identifier::Resource))
         .ignore_then(resource_ref())
         .then(kw(Identifier::Version).ignore_then(u64_value()).or_not())
-        .then(protobuf_config())
+        .then(config_entries_block())
         .boxed()
         .then_ignore(kw(Identifier::Message))
         .then(string_lit())
@@ -228,6 +200,8 @@ pub fn suggest_create_codec(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::ClientConfigEntry;
+
     use super::*;
     use crate::lexer::lex;
 

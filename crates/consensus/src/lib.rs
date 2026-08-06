@@ -4,7 +4,7 @@ use std::{
     ops::RangeBounds,
     path::Path,
     sync::Arc as StdArc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
@@ -14,8 +14,8 @@ use nervix_models::{
     Identifier, ResourceNodeStatus, ResourceVersion, ResourceVersionStatus,
 };
 pub use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, SnapshotResponse,
-    TransferLeaderRequest, TransferLeaderResponse, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
+    TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::{
     BasicNode, Config, Entry, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta,
@@ -162,6 +162,12 @@ pub type LogIdOf = LogId<CommittedLeaderIdOf<TypeConfig>>;
 pub type VoteOf = Vote<LeaderIdOf<TypeConfig>>;
 pub type StoredMembershipOf = StoredMembership<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>;
 pub type SnapshotOf = Snapshot<CommittedLeaderIdOf<TypeConfig>, NodeId, Node, Cursor<Vec<u8>>>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotRelayHeader {
+    pub vote: VoteOf,
+    pub meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
+}
 
 pub const RAFT_APPEND_ENTRIES_PATH: &str = "/raft/append-entries";
 pub const RAFT_VOTE_PATH: &str = "/raft/vote";
@@ -1031,41 +1037,20 @@ impl ConsensusHandle {
         self.raft.trigger().transfer_leader(target_node_id).await
     }
 
-    pub async fn install_snapshot_chunks(
-        &self,
-        chunks: Vec<InstallSnapshotRequest<TypeConfig>>,
-    ) -> Result<SnapshotResponse<TypeConfig>, openraft::error::Fatal<TypeConfig>> {
-        let mut all = Vec::new();
-        let mut vote = None;
-        let mut meta = None;
-        for chunk in chunks {
-            vote = Some(chunk.vote);
-            meta = Some(chunk.meta);
-            all.extend_from_slice(&chunk.data);
-        }
-
-        let snapshot = Snapshot {
-            meta: meta.expect("snapshot relay must include metadata"),
-            snapshot: Cursor::new(all),
-        };
-
-        self.raft
-            .install_full_snapshot(vote.expect("snapshot relay must include vote"), snapshot)
-            .await
-    }
-
-    pub async fn begin_receiving_snapshot(&self) -> Result<Cursor<Vec<u8>>, RaftError<TypeConfig>> {
-        self.raft.begin_receiving_snapshot().await
-    }
-
     pub async fn install_full_snapshot(
         &self,
         vote: VoteOf,
         meta: openraft::SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
-        snapshot: Cursor<Vec<u8>>,
+        snapshot: Vec<u8>,
     ) -> Result<SnapshotResponse<TypeConfig>, openraft::error::Fatal<TypeConfig>> {
         self.raft
-            .install_full_snapshot(vote, Snapshot { meta, snapshot })
+            .install_full_snapshot(
+                vote,
+                Snapshot {
+                    meta,
+                    snapshot: Cursor::new(snapshot),
+                },
+            )
             .await
     }
 }
@@ -1201,37 +1186,33 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         let rpc_timeout = option.hard_ttl();
         std::mem::drop(cancel);
         let bytes = snapshot.snapshot.into_inner();
-        let chunk_size = option.snapshot_chunk_size().unwrap_or(256 * 1024);
-        let meta = snapshot.meta;
+        let chunk_size = option.snapshot_chunk_size().unwrap_or(256 * 1024).max(1);
+        let header = SnapshotRelayHeader {
+            vote,
+            meta: snapshot.meta,
+        };
+        let header = encode_stream_frame(
+            &encode(&header)
+                .map_err(unreachable_err)
+                .map_err(StreamingError::from)?,
+        );
         let stream = futures_util::stream::unfold(
-            (bytes, 0usize, vote, meta, chunk_size),
-            |(bytes, offset, vote, meta, chunk_size)| async move {
-                if offset >= bytes.len().max(1) {
+            (Some(header), bytes, 0usize, chunk_size),
+            |(header, bytes, offset, chunk_size)| async move {
+                if let Some(header) = header {
+                    return Some((
+                        Ok::<Vec<u8>, io::Error>(header),
+                        (None, bytes, offset, chunk_size),
+                    ));
+                }
+                if offset >= bytes.len() {
                     return None;
                 }
+
                 let end = (offset + chunk_size).min(bytes.len());
-                let done = end >= bytes.len();
-                let req = InstallSnapshotRequest::<TypeConfig> {
-                    vote: vote.clone(),
-                    meta: meta.clone(),
-                    offset: offset as u64,
-                    data: bytes[offset..end].to_vec(),
-                    done,
-                };
-                let terminal_offset = bytes.len().max(1);
-                let payload = match encode(&req) {
-                    Ok(payload) => payload,
-                    Err(error) => {
-                        return Some((
-                            Err(error),
-                            (bytes, terminal_offset, vote, meta, chunk_size),
-                        ));
-                    }
-                };
-                let next_offset = if done { terminal_offset } else { end };
                 Some((
-                    Ok::<Vec<u8>, io::Error>(encode_stream_frame(&payload)),
-                    (bytes, next_offset, vote, meta, chunk_size),
+                    Ok::<Vec<u8>, io::Error>(bytes[offset..end].to_vec()),
+                    (None, bytes, end, chunk_size),
                 ))
             },
         );
@@ -1568,10 +1549,6 @@ impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
         self.clone()
     }
 
-    async fn begin_receiving_snapshot(&mut self) -> Result<Cursor<Vec<u8>>, io::Error> {
-        Ok(Cursor::new(Vec::new()))
-    }
-
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
@@ -1612,22 +1589,9 @@ impl RaftSnapshotBuilder<TypeConfig> for StdArc<FjallStore> {
 
     async fn build_snapshot(&mut self) -> Result<SnapshotOf, io::Error> {
         let state = self.inner.state_machine.read().await.clone();
-        let snapshot_id = format!(
-            "{}-{}",
-            state
-                .last_applied_log_id
-                .as_ref()
-                .map(|v| v.index.to_string())
-                .unwrap_or_else(|| "0".to_string()),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        );
         let meta = SnapshotMeta {
             last_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
-            snapshot_id,
         };
         let data = encode(&state)?;
         let stored_snapshot = StoredSnapshotData {
@@ -1828,18 +1792,25 @@ fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Re
 
 #[cfg(test)]
 mod tests {
+    use std::{io::Cursor, sync::Arc as StdArc};
+
     use fjall::Database;
     use nervix_models::{
         Domain, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
         DomainStatus, Identifier, ResourceId, ResourceNodeState, ResourceNodeStatus,
         ResourceReplicaKey, ResourceVersion, ResourceVersionStatus,
     };
+    use openraft::{
+        SnapshotMeta,
+        storage::{RaftSnapshotBuilder, RaftStateMachine},
+    };
     use tempfile::tempdir;
 
     use super::{
         ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallStore, GossipNode, GossipState,
-        KEY_CLUSTER_SCHEDULE, StateMachineData, UserCredentials, apply_consensus_command, decode,
-        encode, io_error, load_value, read_key, write_key,
+        KEY_CLUSTER_SCHEDULE, KEY_SNAPSHOT, SnapshotRelayHeader, StateMachineData,
+        StoredMembershipOf, TypeConfig, UserCredentials, apply_consensus_command, decode, encode,
+        encode_stream_frame, io_error, load_value, read_key, write_key,
     };
     use crate::{ConsensusError, VoteOf};
 
@@ -1954,6 +1925,29 @@ mod tests {
 
         let err = decode::<ConsensusCommand>(b"not-cbor").expect_err("invalid bytes must fail");
         assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn snapshot_relay_header_roundtrips_in_length_delimited_cbor_frame() {
+        let header = SnapshotRelayHeader {
+            vote: VoteOf::new(7, "node-1".to_string()),
+            meta: SnapshotMeta {
+                last_log_id: None,
+                last_membership: StoredMembershipOf::default(),
+            },
+        };
+
+        let payload = encode(&header).expect("snapshot relay header should encode");
+        let frame = encode_stream_frame(&payload);
+        let length = u32::from_be_bytes(
+            frame[..4]
+                .try_into()
+                .expect("snapshot relay frame has a length prefix"),
+        ) as usize;
+        assert_eq!(length, payload.len());
+        let decoded: SnapshotRelayHeader =
+            decode(&frame[4..]).expect("snapshot relay header should decode");
+        assert_eq!(decoded, header);
     }
 
     #[test]
@@ -2196,6 +2190,58 @@ mod tests {
             .await
             .expect("vote should persist");
         assert!(store.has_raft_state().await);
+    }
+
+    #[tokio::test]
+    async fn snapshot_build_and_install_roundtrip_preserves_state() {
+        let tenant = domain("tenant");
+        let state = StateMachineData {
+            schedule: ClusterSchedule {
+                domains: vec![domain_schedule("tenant")],
+            },
+            domains: [(tenant, running_domain_state("tenant"))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut source = StdArc::new(
+            FjallStore::from_database(temp_database()).expect("source store should open"),
+        );
+        *source.inner.state_machine.write().await = state.clone();
+
+        let built = RaftSnapshotBuilder::<TypeConfig>::build_snapshot(&mut source)
+            .await
+            .expect("snapshot should build");
+        let meta = built.meta.clone();
+        let bytes = built.snapshot.into_inner();
+        let mut target = StdArc::new(
+            FjallStore::from_database(temp_database()).expect("target store should open"),
+        );
+
+        RaftStateMachine::<TypeConfig>::install_snapshot(
+            &mut target,
+            &meta,
+            Cursor::new(bytes.clone()),
+        )
+        .await
+        .expect("snapshot should install");
+
+        assert_eq!(*target.inner.state_machine.read().await, state);
+        let persisted: StateMachineData = read_key(&target.inner.sm, super::KEY_STATE_MACHINE)
+            .expect("persisted state should read")
+            .expect("persisted state should exist");
+        assert_eq!(persisted, state);
+        let current = RaftStateMachine::<TypeConfig>::get_current_snapshot(&mut target)
+            .await
+            .expect("current snapshot should read")
+            .expect("current snapshot should exist");
+        assert_eq!(current.meta, meta);
+        assert_eq!(current.snapshot.into_inner(), bytes);
+        assert!(
+            read_key::<super::StoredSnapshotData>(&target.inner.snapshot, KEY_SNAPSHOT)
+                .expect("stored snapshot should read")
+                .is_some()
+        );
     }
 
     #[test]

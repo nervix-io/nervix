@@ -1,0 +1,29 @@
+dependencies = ["kafka"]
+description = "Kafka JSON ingestion, contains filter, uppercase map, and Kafka emission"
+name = "kafka-filter-map"
+
+[load]
+duration = "auto"
+max_backlog_messages = 4194304
+partitions = 16
+value_bytes = 128
+wait_timeout_seconds = 120
+
+[parameters]
+emitter_flush_each = "10ms"
+emitter_max_batch_size = "8MiB"
+ingestor_flush_each = "10ms"
+ingestor_max_batch_size = "8MiB"
+
+[implementations.nervix]
+kind = "nervix"
+template = "nervix.nspl"
+
+[implementations.vector]
+command = ["--config", "/etc/vector/vector.yaml"]
+config_path = "/etc/vector/vector.yaml"
+image = "timberio/vector:0.57.0-debian"
+kind = "container"
+readiness_path = "/health"
+readiness_port = 8686
+template = "vector.yaml"

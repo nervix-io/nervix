@@ -233,20 +233,22 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 mod tests {
     use bolero::check;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchSelection, CodecWireFormat,
-        CordonNode, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
-        CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientPrometheus,
-        CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-        CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter,
-        CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateWireSchema, DescribeRelay, DrainNode, DropModel, DropNode,
-        EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
-        Identifier as ModelIdentifier, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
-        KafkaOffsetMode, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
-        OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SchemaField,
-        SignalingProtocolOnConnect, SqsIngestMode, Statement, SubscriptionBinding,
-        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
+        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchSelection, ClientConfigEntry,
+        CodecWireFormat, CordonNode, CreateClientAzureBlob, CreateClientGcs,
+        CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
+        CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+        CreateClientS3, CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator,
+        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, DescribeRelay,
+        DrainNode, DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
+        GeneralErrorPolicy, Identifier as ModelIdentifier, IngestSource, JsonType,
+        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, MqttIngestMode,
+        MqttQos, MqttSession, NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RetryPolicy, SchemaField, SignalingProtobufConfig,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+        SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
+        WireSchemaField, ZeroMqIngestMode,
     };
 
     use super::*;
@@ -521,9 +523,7 @@ mod tests {
                                 max_backoff: format!("{}s", g.bounded_u64(1, 300)),
                             },
                         },
-                        _ => KafkaIngestMode::NoAckParallel {
-                            max: g.bounded_u64(1, 1024),
-                        },
+                        _ => KafkaIngestMode::NoAckParallel,
                     };
 
                     if g.bool() {
@@ -572,8 +572,8 @@ mod tests {
                                         timeout,
                                         retry_policy,
                                     },
-                                    KafkaIngestMode::NoAckParallel { max } => {
-                                        PulsarIngestMode::NoAckParallel { max }
+                                    KafkaIngestMode::NoAckParallel => {
+                                        PulsarIngestMode::NoAckParallel
                                     }
                                 },
                             },
@@ -940,9 +940,64 @@ mod tests {
             }),
             28 => Model::SignalingProtocol(CreateSignalingProtocol {
                 name: g.ident(),
+                format: if g.bool() {
+                    g.choose(&[
+                        SignalingWireFormat::Json,
+                        SignalingWireFormat::Yaml,
+                        SignalingWireFormat::Toml,
+                        SignalingWireFormat::Xml,
+                        SignalingWireFormat::Cbor,
+                        SignalingWireFormat::Raw,
+                    ])
+                } else {
+                    SignalingWireFormat::Protobuf(SignalingProtobufConfig {
+                        resource: g.ident(),
+                        resource_version: if g.bool() {
+                            Some(g.bounded_u64(1, 8))
+                        } else {
+                            None
+                        },
+                        config: vec![ClientConfigEntry {
+                            key: "file".to_string(),
+                            value: "signaling.proto".to_string(),
+                        }],
+                        send_message: "nervix.test.Subscribe".to_string(),
+                        wait_message: "nervix.test.Ack".to_string(),
+                    })
+                },
                 on_connect: SignalingProtocolOnConnect {
-                    send_bodies: vec![r#"{"method":"SUBSCRIBE","id":1}"#.to_string()],
-                    wait_bodies: vec![r#"{"id":1,"result":null}"#.to_string()],
+                    accept_data: g.bool(),
+                    steps: if g.bool() {
+                        vec![
+                            SignalingStep::Send(vec![
+                                r#"{method: "SUBSCRIBE", id: 1}"#.to_string(),
+                            ]),
+                            SignalingStep::Wait(SignalingWaitStep::new(vec![
+                                ".id == 1 and .result == null".to_string(),
+                            ])),
+                        ]
+                    } else {
+                        vec![
+                            SignalingStep::Send(vec![r#"{op: "auth"}"#.to_string()]),
+                            SignalingStep::Wait(SignalingWaitStep {
+                                matchers: vec![".authed".to_string()],
+                                capture: Some("{token: .token}".to_string()),
+                                fail_matchers: vec![".denied".to_string()],
+                                accept_data: g.bool(),
+                            }),
+                            SignalingStep::Send(vec![
+                                r#"{op: "subscribe", token: $state.token}"#.to_string(),
+                            ]),
+                            SignalingStep::Wait(SignalingWaitStep::new(vec![
+                                ".subscribed".to_string(),
+                            ])),
+                        ]
+                    },
+                    fail_matchers: if g.bool() {
+                        vec![".error".to_string()]
+                    } else {
+                        Vec::new()
+                    },
                     timeout: "5s".to_string(),
                 },
             }),

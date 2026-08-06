@@ -6,12 +6,14 @@ use super::*;
 
 pub(in crate::runtime) struct SqsEmitter {
     client: Option<SqsClient>,
+    queue_url: String,
 }
 
 impl SqsEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientSqs,
         resolved: Option<&ResolvedClientConfig>,
+        queue: &Identifier,
     ) -> EmitterRuntimeResult<Self> {
         let client = Self::client_from_config(
             resolved
@@ -19,8 +21,10 @@ impl SqsEmitter {
                 .unwrap_or(client.config.as_slice()),
         )
         .await?;
+        let queue_url = Self::queue_url(&client, queue.as_str()).await?;
         Ok(Self {
             client: Some(client),
+            queue_url,
         })
     }
 
@@ -83,20 +87,20 @@ impl SqsEmitter {
     }
 
     pub(in crate::runtime) async fn publish(
-        &mut self,
-        queue: &Identifier,
-        payload: &[u8],
+        &self,
+        payload: Vec<u8>,
         headers: &EmitterHeaders,
     ) -> EmitterRuntimeResult<()> {
-        let Some(client) = self.client.as_mut() else {
+        let Some(client) = self.client.as_ref() else {
             return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
                 .attach_printable("no initialized sqs sink client"));
         };
-        let queue_url = Self::queue_url(client, queue.as_str()).await?;
+        let message_body = String::from_utf8(payload)
+            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
         let mut request = client
             .send_message()
-            .queue_url(queue_url)
-            .message_body(String::from_utf8_lossy(payload).to_string());
+            .queue_url(&self.queue_url)
+            .message_body(message_body);
         for (name, value) in headers {
             let attribute = MessageAttributeValue::builder()
                 .data_type("String")

@@ -571,7 +571,7 @@ CREATE INGESTOR auth_server_activity
   TOPIC datalake_auth_activity
   OFFSET BY CONSUMER GROUP datalake_demo_auth
   INSTANCES 4
-  MODE NO_ACK PARALLEL MAX 1024
+  MODE NO_ACK PARALLEL
   DECODE USING auth_activity_json_codec
   TIMESTAMP AT ts
   TO auth_activity_landing

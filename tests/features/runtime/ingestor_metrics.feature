@@ -144,6 +144,55 @@ Feature: Ingestor metrics
       | 1            |
       | 3            |
 
+  @ingestor_payload_size
+  Scenario Outline: Ingestor MAX BATCH SIZE counts Arrow payload bytes
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge payload-size-{{test_id}}.example.com;
+      CREATE ENDPOINT payload_size_ingress ON edge PATH '/payload-size' TYPE HTTP;
+      CREATE INGESTOR payload_size_source
+        FROM ENDPOINT payload_size_ingress MODE NO_ACK SEQUENTIAL
+        DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH EACH 1s MAX BATCH SIZE 64B
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "payload-size-{{test_id}}.example.com" path "/payload-size"
+      """
+      {"user_id":42}
+      """
+    Then the relay subscription does not receive a payload within "300ms"
+    And within "3s" the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: DESCRIBE INGESTOR reports flush-sized batches for rapid <branch_strategy> <source_kind> input
     Given Redis is running
     And MQTT is running
