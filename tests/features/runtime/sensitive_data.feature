@@ -248,7 +248,7 @@ Feature: Sensitive data
 
       CREATE EMITTER sensitive_notifications_out
         FROM notifications
-        TO ZEROMQ zeromq_main ENCODE USING emitted_notification_codec
+        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING emitted_notification_codec
         INHERIT user_id, action
         SET secret = leak_sensitive(input.secret)
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

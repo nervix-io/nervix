@@ -74,7 +74,7 @@ impl RelayDispatchGate {
         }
     }
 
-    fn engage(&self, deadline: Instant, reason: impl Into<String>) -> u64 {
+    pub(super) fn engage(&self, deadline: Instant, reason: impl Into<String>) -> u64 {
         let mut state = self.state.lock();
         loop {
             state.generation = state.generation.wrapping_add(1);
@@ -96,7 +96,7 @@ impl RelayDispatchGate {
         generation
     }
 
-    fn release(&self, generation: u64) {
+    pub(super) fn release(&self, generation: u64) {
         let mut state = self.state.lock();
         if state.engagements.remove(&generation).is_none() {
             return;

@@ -30,7 +30,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `NSPL Overview` and `Examples` |
-| Sink transports, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
+| Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions | `Sessions` |
 | Metrics and runtime inspection | `Metrics And Observability` |
@@ -54,7 +54,7 @@ Capture these decisions before choosing syntax:
 | Source | Which connector/client, external entity, offset policy, delivery mode, ordering, timestamp source, and headers are required? |
 | Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, enriched, or handled by a trusted Roto UDF? |
 | State | Which relays are materialized? Should missing state wait, skip, or use a typed default? |
-| Output | Which connector/sink, payload shape, codec or direct mapping, headers, and sensitivity leaks are required? |
+| Output | Which connector/sink, publishing mode, confirmation window/timeout, retry pacing, payload shape, codec or direct mapping, headers, and sensitivity leaks are required? |
 | Operations | What input collection and output flush size/cadence, error behavior, TLS resources, metrics, and subscriptions are required? |
 
 If the user supplied a real payload, derive wire and internal schemas field by field and call out
@@ -124,6 +124,12 @@ relay. Do not use them to scan across branches.
 - Every multi-input emitter source declares the same payload schema. Its sources may use different
   branch names, but each source retains its own branch through collection and external publish;
   node-wide materialized dependencies and message-error relays match every source branch exactly.
+- Every emitter sink declares its transport-supported `MODE` in the documented position and
+  supplies the complete retry policy plus the confirmation window and timeout when that mode
+  confirms asynchronously. No operational mode variable is inferred.
+- ClickHouse, Postgres, MySQL, and MongoDB emitter sinks declare a positive `WITH MAX BATCH`.
+  SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
+  only with branched input.
 - Every optional `COLLECT FOR` policy follows the complete relay input list, has a positive
   duration, and is absent when immediate input execution is intended. Correlator sides are checked
   independently; ingestors never declare input collection.

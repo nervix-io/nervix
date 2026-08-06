@@ -680,7 +680,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         ];
         let container = self
             .start_container("mongodb", 27017.tcp(), "MongoDB", || {
-                GenericImage::new("mongo", "7.0")
+                GenericImage::new("mongo", "8.2")
                     .with_exposed_port(27017.tcp())
                     .with_entrypoint("bash")
                     .with_wait_for(WaitFor::message_on_either_std("Waiting for connections"))
@@ -718,6 +718,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                 GenericImage::new("nats", "2.11-alpine")
                     .with_exposed_port(4222.tcp())
                     .with_wait_for(WaitFor::message_on_either_std("Server is ready"))
+                    .with_cmd(["--jetstream"])
                     .with_startup_timeout(STARTUP_TIMEOUT)
             })
             .await?;

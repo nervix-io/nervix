@@ -246,6 +246,7 @@ async-broadcast = "0.7.2"
 # 0.49 uses provider-selectable rustls-webpki 0.103; the previous 0.42 line pulled in Ring.
 async-nats = { version = "0.49.1", default-features = false, features = [
   "aws-lc-rs",
+  "jetstream",
   "server_2_10",
   "server_2_11",
 ] }

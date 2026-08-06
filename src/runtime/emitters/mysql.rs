@@ -14,7 +14,63 @@ struct MySqlEmitterClient {
     pool: MySqlPool,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum MySqlWriteError {
+    #[error("invalid MySQL VALUES: {0}")]
+    InvalidValues(String),
+    #[error("failed to connect to MySQL: {0}")]
+    Connect(mysql_async::Error),
+    #[error("MySQL insert failed: {0}")]
+    Execute(mysql_async::Error),
+}
+
+impl MySqlWriteError {
+    fn is_record_error(&self) -> bool {
+        let Self::Execute(mysql_async::Error::Server(error)) = self else {
+            return false;
+        };
+        MySqlEmitter::is_record_server_error(&error.state, error.code)
+    }
+
+    fn record_reason(&self) -> String {
+        let server_error = match self {
+            Self::Execute(mysql_async::Error::Server(error)) => Some(error),
+            _ => None,
+        };
+        server_error.map_or_else(
+            || "MySQL rejected record".to_string(),
+            |error| {
+                format!(
+                    "MySQL rejected record with SQLSTATE {} and code {}",
+                    error.state, error.code
+                )
+            },
+        )
+    }
+
+    fn into_report(self) -> Report<EmitterRuntimeError> {
+        match self {
+            Self::InvalidValues(reason) => {
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
+            }
+            Self::Execute(mysql_async::Error::Server(error)) => {
+                Report::new(EmitterRuntimeError::PublishBatch).attach_printable(format!(
+                    "MySQL request failed with SQLSTATE {} and code {}",
+                    error.state, error.code
+                ))
+            }
+            error => {
+                Report::new(EmitterRuntimeError::PublishBatch).attach_printable(error.to_string())
+            }
+        }
+    }
+}
+
 impl MySqlEmitter {
+    fn is_record_server_error(state: &str, code: u16) -> bool {
+        state.starts_with("22") || state.starts_with("23") || matches!(code, 1153 | 1366)
+    }
+
     pub(in crate::runtime) async fn new(
         client: &nervix_models::CreateClientMySql,
         resolved: Option<&ResolvedClientConfig>,
@@ -116,8 +172,8 @@ impl MySqlEmitter {
         table: &Identifier,
         mappings: &[MySqlValueMapping],
         conflict_action: &MySqlConflictAction,
-        rows: &[Vec<serde_json::Value>],
-    ) -> EmitterRuntimeResult<u64> {
+        rows: &[&[serde_json::Value]],
+    ) -> Result<u64, MySqlWriteError> {
         if rows.is_empty() {
             return Ok(0);
         }
@@ -151,52 +207,46 @@ impl MySqlEmitter {
         let mut params = Vec::with_capacity(rows.len() * mappings.len());
         for row in rows {
             if row.len() != mappings.len() {
-                return Err(
-                    Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                        "MySQL VALUES produced {} columns for {} mappings",
-                        row.len(),
-                        mappings.len()
-                    )),
-                );
+                return Err(MySqlWriteError::InvalidValues(format!(
+                    "MySQL VALUES produced {} columns for {} mappings",
+                    row.len(),
+                    mappings.len()
+                )));
             }
             params.extend(row.iter().map(Self::value));
         }
-        let mut conn = client.pool.get_conn().await.map_err(|source| {
-            Report::new(EmitterRuntimeError::PublishBatch)
-                .attach_printable(format!("failed to connect to MySQL: {source}"))
-        })?;
+        let mut conn = client
+            .pool
+            .get_conn()
+            .await
+            .map_err(MySqlWriteError::Connect)?;
         conn.exec_drop(sql, MySqlParams::Positional(params))
             .await
-            .map_err(|source| {
-                Report::new(EmitterRuntimeError::PublishBatch)
-                    .attach_printable(format!("failed to publish MySQL rows: {source}"))
-            })?;
+            .map_err(MySqlWriteError::Execute)?;
         Ok(conn.affected_rows())
     }
 
     fn conflict_clause(
         quoted_columns: &[String],
         conflict_action: &MySqlConflictAction,
-    ) -> EmitterRuntimeResult<String> {
+    ) -> Result<String, MySqlWriteError> {
         match conflict_action {
             MySqlConflictAction::None => Ok(String::new()),
             MySqlConflictAction::DoNothing => {
                 let Some(column) = quoted_columns.first() else {
-                    return Err(
-                        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(
-                            "MySQL ON CONFLICT DO NOTHING requires at least one VALUES column",
-                        ),
-                    );
+                    return Err(MySqlWriteError::InvalidValues(
+                        "MySQL ON CONFLICT DO NOTHING requires at least one VALUES column"
+                            .to_string(),
+                    ));
                 };
                 Ok(format!(" ON DUPLICATE KEY UPDATE {column} = {column}"))
             }
             MySqlConflictAction::DoUpdate => {
                 if quoted_columns.is_empty() {
-                    return Err(
-                        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(
-                            "MySQL ON CONFLICT DO UPDATE requires at least one VALUES column",
-                        ),
-                    );
+                    return Err(MySqlWriteError::InvalidValues(
+                        "MySQL ON CONFLICT DO UPDATE requires at least one VALUES column"
+                            .to_string(),
+                    ));
                 }
                 let updates = quoted_columns
                     .iter()
@@ -208,24 +258,163 @@ impl MySqlEmitter {
         }
     }
 
-    pub(super) async fn publish_batch(
+    pub(super) async fn publish_pending_chunks(
         &self,
+        batch_index: usize,
         table: &Identifier,
         values: &[MySqlValueMapping],
         conflict_action: &MySqlConflictAction,
         batch: &RelayRecordBatch,
-    ) -> EmitterRuntimeResult<()> {
+        pending_chunks: &[Vec<usize>],
+    ) -> PerRecordPublishOutcome {
+        let mut outcome = PerRecordPublishOutcome::empty();
+        if pending_chunks.is_empty() {
+            return outcome;
+        }
         let (Some(client), Some(program)) = (self.client.as_ref(), self.program.as_ref()) else {
-            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("no initialized mysql sink client"));
+            outcome.fail(
+                Report::new(EmitterRuntimeError::SinkNotInitialized)
+                    .attach_printable("no initialized mysql sink client"),
+            );
+            return outcome;
         };
-        let rows = sql_mapped_batch_values(program, values, batch, current_timestamp()).await?;
-        Self::publish_rows(client, table, values, conflict_action, &rows).await?;
+        let rows = match sql_mapped_batch_values(program, values, batch, current_timestamp()).await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                outcome.fail(error);
+                return outcome;
+            }
+        };
+        let pending_chunks =
+            match outcome.filter_mapped_chunks(batch_index, &rows, pending_chunks, "mysql") {
+                Ok(pending_chunks) => pending_chunks,
+                Err(error) => {
+                    outcome.fail(error);
+                    return outcome;
+                }
+            };
+        if pending_chunks.is_empty() {
+            return outcome;
+        }
+        let request_acks = batch.merged_acks();
+        for chunk in &pending_chunks {
+            tokio::task::consume_budget().await;
+            let chunk_rows = match Self::rows_at_indices(&rows, chunk) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    outcome.fail(error.into_report());
+                    return outcome;
+                }
+            };
+            match await_emitter_confirmation(
+                &request_acks,
+                Self::publish_rows(client, table, values, conflict_action, &chunk_rows),
+            )
+            .await
+            {
+                Ok(_) => {
+                    for row in chunk {
+                        outcome.deliver((batch_index, *row));
+                    }
+                }
+                Err(error) if error.is_record_error() && chunk.len() > 1 => {
+                    for row in chunk {
+                        tokio::task::consume_budget().await;
+                        let single_row = match rows.get(*row) {
+                            Some(Ok(row_values)) => [row_values.as_slice()],
+                            _ => {
+                                outcome.fail(
+                                    MySqlWriteError::InvalidValues(format!(
+                                        "pending row {row} has no mapped VALUES in batch with {} \
+                                         rows",
+                                        rows.len()
+                                    ))
+                                    .into_report(),
+                                );
+                                return outcome;
+                            }
+                        };
+                        match await_emitter_confirmation(
+                            &request_acks,
+                            Self::publish_rows(client, table, values, conflict_action, &single_row),
+                        )
+                        .await
+                        {
+                            Ok(_) => outcome.deliver((batch_index, *row)),
+                            Err(error) if error.is_record_error() => {
+                                outcome.reject((batch_index, *row), error.record_reason())
+                            }
+                            Err(error) => {
+                                outcome.fail(error.into_report());
+                                return outcome;
+                            }
+                        }
+                    }
+                }
+                Err(error) if error.is_record_error() => {
+                    if let Some(row) = chunk.first() {
+                        outcome.reject((batch_index, *row), error.record_reason());
+                    }
+                }
+                Err(error) => {
+                    outcome.fail(error.into_report());
+                    return outcome;
+                }
+            }
+        }
         trace!(
             table = table.as_str(),
-            rows = rows.len(),
+            rows = outcome.delivered.len(),
+            rejected = outcome.rejected.len(),
             "emitter published mysql rows"
         );
-        Ok(())
+        outcome
+    }
+
+    fn rows_at_indices<'a>(
+        rows: &'a [Result<Vec<serde_json::Value>, StructuredMessageError>],
+        indices: &[usize],
+    ) -> Result<Vec<&'a [serde_json::Value]>, MySqlWriteError> {
+        indices
+            .iter()
+            .map(|row| {
+                rows.get(*row)
+                    .and_then(|values| values.as_ref().ok())
+                    .map(Vec::as_slice)
+                    .ok_or_else(|| {
+                        MySqlWriteError::InvalidValues(format!(
+                            "pending row {row} has no mapped VALUES in batch with {} rows",
+                            rows.len()
+                        ))
+                    })
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_only_definitive_mysql_server_errors_as_record_errors() {
+        for state in ["22001", "22003", "22007", "23000"] {
+            assert!(
+                MySqlEmitter::is_record_server_error(state, 0),
+                "{state} should be a definitive record error"
+            );
+        }
+        assert!(MySqlEmitter::is_record_server_error("08S01", 1153));
+        assert!(
+            MySqlEmitter::is_record_server_error("HY000", 1366),
+            "invalid string values are definitive record errors even when MySQL reports HY000"
+        );
+        for state in ["08S01", "40001", "42S02", "HY000"] {
+            assert!(
+                !MySqlEmitter::is_record_server_error(state, 0),
+                "{state} requires infrastructure retry"
+            );
+        }
     }
 }

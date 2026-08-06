@@ -40,11 +40,12 @@ CREATE JUNCTION benchmark_transform_{{ lane }}
     ON MESSAGE ERROR LOG;
 CREATE EMITTER kafka_out_{{ lane }}
   FROM benchmark_records_{{ lane }}
-  TO KAFKA kafka_local TOPIC {{ output_topic }} ENCODE USING benchmark_codec
+  TO KAFKA kafka_local TOPIC {{ output_topic }}
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING benchmark_codec
   INHERIT ALL
   FLUSH EACH {{ parameters.emitter_flush_each }} MAX BATCH SIZE {{ parameters.emitter_max_batch_size }}
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 {% endfor %}
 COMMIT;
-

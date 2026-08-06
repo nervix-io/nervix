@@ -22,12 +22,12 @@ Feature: Altering emitters
         'bind' = 'false'
       };
       CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink_a ENCODE USING event_codec INHERIT ALL
+        TO ZEROMQ sink_a MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       ALTER EMITTER event_sink
-        SET TO ZEROMQ sink_b,
+        SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s,
         SET COLLECT FOR 10ms MAX BATCH SIZE 512KiB,
         SET DETACHED,
         SET FLUSH IMMEDIATE;
@@ -35,7 +35,7 @@ Feature: Altering emitters
       """
     Then the last command output contains
       """
-      CREATE DETACHED EMITTER event_sink FROM outgoing COLLECT FOR 10ms MAX BATCH SIZE 512KiB TO ZEROMQ sink_b ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DETACHED EMITTER event_sink FROM outgoing COLLECT FOR 10ms MAX BATCH SIZE 512KiB TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
     Examples:
@@ -70,7 +70,7 @@ Feature: Altering emitters
         'bind' = 'false'
       };
       CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink ENCODE USING event_codec INHERIT ALL
+        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -130,7 +130,7 @@ Feature: Altering emitters
         'bind' = 'false'
       };
       CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink_a ENCODE USING event_codec INHERIT ALL
+        TO ZEROMQ sink_a MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

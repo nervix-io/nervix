@@ -29,7 +29,7 @@ use arrow_select::{
 use chrono::{TimeDelta, TimeZone, Utc};
 use dashmap::DashMap;
 use fjall::Database;
-use futures_util::stream::{FuturesOrdered, FuturesUnordered};
+use futures_util::stream::FuturesUnordered;
 use nervix_interconnect::{
     Envelope, RelayPayload, RelayPayloadKind, Transport, TransportMode as InterconnectTransportMode,
 };
@@ -42,17 +42,18 @@ use nervix_models::{
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint,
     CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
     CreateSignalingProtocol, CreateUdf, Domain, DomainConfig, DomainPace, DomainSchedule,
-    DomainState, DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy,
-    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
-    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
-    Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
-    MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
-    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
-    RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
-    SignalingWireFormat, SqsIngestMode, StructuredMessageError, Timestamp, WireSchemaDefinition,
+    DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointType,
+    ErrorPolicies, FieldPath, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend,
+    IcebergValueMapping, Identifier, InferencerExecutionMode, InferencerTensorDeclaration,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode,
+    MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction,
+    MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+    MySqlValueMapping, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
+    PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, RouteConstruction,
+    ScheduledNode, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, StructuredMessageError,
+    Timestamp, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -212,7 +213,9 @@ pub(crate) use state_store::{
     RuntimeStateStore,
 };
 use test_hooks::EmitterFaultMode;
-pub use test_hooks::{EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks};
+pub use test_hooks::{
+    EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks, SchedulePublicationFaultInjector,
+};
 use tls::RustlsClientConfigSource;
 use wasm_state::ReplicatedWasmProcessorState;
 pub use websocket_signaling::CompiledSignalingProtocol;
@@ -505,25 +508,43 @@ struct DomainExecution {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitterPublishingDrainState {
+    AwaitingConfirmation,
+    RetryingInfrastructure,
+    RetryingIcebergCommit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmitterPublishingDrainStatus {
+    pub emitter: Identifier,
+    pub state: EmitterPublishingDrainState,
+    pub pending_messages: usize,
+    pub retry_backoff: Option<Duration>,
+    pub retry_wait: Option<Duration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainDrainStatus {
     pub active_ingestors: usize,
     pub active_generators: usize,
     pub outstanding_acks: usize,
     pub buffered_emitter_messages: usize,
+    pub emitter_publishing: Vec<EmitterPublishingDrainStatus>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityDrainStatus {
     pub buffered_relay_batches: usize,
     pub node_work_items: usize,
+    pub emitter_publishing: Vec<EmitterPublishingDrainStatus>,
 }
 
 impl EntityDrainStatus {
-    pub fn is_drained(self) -> bool {
+    pub fn is_drained(&self) -> bool {
         self.buffered_relay_batches == 0 && self.node_work_items == 0
     }
 
-    pub fn outstanding_work(self) -> usize {
+    pub fn outstanding_work(&self) -> usize {
         self.buffered_relay_batches
             .saturating_add(self.node_work_items)
     }
@@ -673,14 +694,14 @@ impl Drop for EntityGateHold {
 }
 
 impl DomainDrainStatus {
-    pub fn is_drained(self) -> bool {
+    pub fn is_drained(&self) -> bool {
         self.active_ingestors == 0
             && self.active_generators == 0
             && self.outstanding_acks == 0
             && self.buffered_emitter_messages == 0
     }
 
-    pub fn outstanding_work(self) -> usize {
+    pub fn outstanding_work(&self) -> usize {
         self.active_ingestors
             .saturating_add(self.active_generators)
             .saturating_add(self.outstanding_acks)
@@ -1966,8 +1987,31 @@ struct RuntimeReconnectStatus {
     retry_at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmitterRetryKind {
+    Infrastructure,
+    IcebergCommit,
+}
+
+#[derive(Debug, Clone)]
+struct EmitterRetryStatus {
+    kind: EmitterRetryKind,
+    reconnect: RuntimeReconnectStatus,
+}
+
+struct EmitterConfirmationWaitGuard {
+    active_waits: Arc<AtomicUsize>,
+}
+
+impl Drop for EmitterConfirmationWaitGuard {
+    fn drop(&mut self) {
+        self.active_waits.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct RuntimeReconnectBackoff {
+    initial: Duration,
     next: Duration,
     max: Duration,
 }
@@ -1975,6 +2019,7 @@ pub(in crate::runtime) struct RuntimeReconnectBackoff {
 impl Default for RuntimeReconnectBackoff {
     fn default() -> Self {
         Self {
+            initial: Duration::from_millis(250),
             next: Duration::from_millis(250),
             max: Duration::from_secs(30),
         }
@@ -1982,8 +2027,16 @@ impl Default for RuntimeReconnectBackoff {
 }
 
 impl RuntimeReconnectBackoff {
+    pub(in crate::runtime) fn from_policy(policy: ParsedRetryPolicy) -> Self {
+        Self {
+            initial: policy.backoff,
+            next: policy.backoff,
+            max: policy.max_backoff,
+        }
+    }
+
     pub(in crate::runtime) fn reset(&mut self) {
-        self.next = Duration::from_millis(250);
+        self.next = self.initial;
     }
 
     pub(in crate::runtime) fn next_delay(&self) -> Duration {
@@ -2006,6 +2059,38 @@ impl RuntimeReconnectBackoff {
                 !(changed.is_err() || *shutdown_rx.borrow())
             }
             _ = sleep(delay) => true,
+        }
+    }
+    pub(in crate::runtime) async fn wait_with_ack_alive(
+        &mut self,
+        shutdown_rx: &mut watch::Receiver<bool>,
+        acks: &AckSet,
+    ) -> bool {
+        let delay = self.take_next_delay();
+        Self::wait_duration_with_ack_alive(delay, shutdown_rx, acks).await
+    }
+
+    pub(in crate::runtime) async fn wait_duration_with_ack_alive(
+        delay: Duration,
+        shutdown_rx: &mut watch::Receiver<bool>,
+        acks: &AckSet,
+    ) -> bool {
+        let deadline = Instant::now() + delay;
+        loop {
+            tokio::task::consume_budget().await;
+            acks.ack_alive();
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return true;
+            }
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    return !(changed.is_err() || *shutdown_rx.borrow());
+                }
+                _ = sleep(remaining.min(Duration::from_millis(100))) => {}
+            }
         }
     }
 }
@@ -2425,7 +2510,8 @@ pub struct Runtime {
     ingestor_reconnect_backoffs: Arc<DashMap<RuntimeKey, RuntimeReconnectStatus, RandomState>>,
     ingestor_readiness: Arc<DashMap<RuntimeKey, IngestorReadiness, RandomState>>,
     emitter_transient_errors: Arc<DashMap<RuntimeKey, String, RandomState>>,
-    emitter_reconnect_backoffs: Arc<DashMap<RuntimeKey, RuntimeReconnectStatus, RandomState>>,
+    emitter_retry_statuses: Arc<DashMap<RuntimeKey, EmitterRetryStatus, RandomState>>,
+    emitter_confirmation_waits: Arc<DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>>,
     executions: Arc<DashMap<Domain, DomainExecution, RandomState>>,
     message_error_routes:
         Arc<DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>>,
@@ -2449,6 +2535,7 @@ pub struct Runtime {
     events: broadcast::Sender<RuntimeEvent>,
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
+    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,
@@ -7276,6 +7363,7 @@ enum EmitterTaskCommand {
         response: oneshot::Sender<()>,
     },
     Stop {
+        deadline: Instant,
         response: oneshot::Sender<Result<(), String>>,
     },
 }
@@ -7290,18 +7378,48 @@ impl RelayInteractionCommand for EmitterTaskCommand {
     }
 }
 
+#[derive(Debug)]
 struct ScheduledEmitterTask {
     commands: mpsc::Sender<EmitterTaskCommand>,
-    work_cancel: watch::Sender<bool>,
+    stop_signal: watch::Sender<Option<Instant>>,
     task: JoinHandle<()>,
 }
 
-impl ScheduledEmitterTask {
-    async fn abort_and_join(&mut self) {
-        self.task.abort();
-        let _ = (&mut self.task).await;
+#[derive(Debug)]
+struct ScheduledEmitterStopError {
+    reason: String,
+    task: Option<ScheduledEmitterTask>,
+}
+
+fn clear_emitter_stop_signal(stop_signal: &watch::Sender<Option<Instant>>, deadline: Instant) {
+    stop_signal.send_if_modified(|pending| {
+        if *pending == Some(deadline) {
+            *pending = None;
+            true
+        } else {
+            false
+        }
+    });
+}
+
+impl ScheduledEmitterStopError {
+    fn recoverable(reason: impl Into<String>, task: ScheduledEmitterTask) -> Self {
+        Self {
+            reason: reason.into(),
+            task: Some(task),
+        }
     }
 
+    fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    fn into_task(self) -> Option<ScheduledEmitterTask> {
+        self.task
+    }
+}
+
+impl ScheduledEmitterTask {
     async fn reconfigure_via(
         commands: &mpsc::Sender<EmitterTaskCommand>,
         config: Box<CreateEmitter>,
@@ -7320,53 +7438,62 @@ impl ScheduledEmitterTask {
             .map_err(|_| "scheduled emitter task dropped its reconfiguration response".to_string())
     }
 
-    async fn stop(self) -> Result<(), String> {
-        self.stop_with_grace(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
-            .await
-    }
-
-    async fn stop_with_grace(mut self, grace: Duration) -> Result<(), String> {
-        self.work_cancel.send_replace(true);
-        // Let data-bearing connector futures finish within the grace period: racing them locally
-        // can lose track of whether ownership already moved into a sink (especially Iceberg).
-        // Ownership-neutral waits observe `work_cancel`; every failure below hard-aborts and joins
-        // the task so the grace bound never leaves detached emitter work behind.
+    async fn stop(mut self, drain_timeout: Duration) -> Result<(), ScheduledEmitterStopError> {
         let (response, receiver) = oneshot::channel();
-        let send_result = tokio::time::timeout(
-            grace,
-            self.commands.send(EmitterTaskCommand::Stop { response }),
-        )
-        .await;
-        let send_error = match send_result {
-            Ok(Ok(())) => None,
-            Ok(Err(_)) => Some("scheduled emitter task is unavailable for stopping".to_string()),
-            Err(_) => Some("scheduled emitter task timed out accepting stop".to_string()),
-        };
-        if let Some(error) = send_error {
-            self.abort_and_join().await;
-            return Err(error);
-        }
-        let stop_result = match tokio::time::timeout(grace, receiver).await {
-            Ok(Ok(result)) => result,
+        let deadline = Instant::now() + drain_timeout;
+        let command = EmitterTaskCommand::Stop { deadline, response };
+        match tokio::time::timeout_at(deadline, self.commands.send(command)).await {
+            Ok(Ok(())) => {}
             Ok(Err(_)) => {
-                self.abort_and_join().await;
-                return Err("scheduled emitter task dropped its stop response".to_string());
+                return Err(ScheduledEmitterStopError::recoverable(
+                    "scheduled emitter task is unavailable for stopping",
+                    self,
+                ));
             }
             Err(_) => {
-                self.abort_and_join().await;
-                return Err("scheduled emitter task timed out stopping".to_string());
+                return Err(ScheduledEmitterStopError::recoverable(
+                    "scheduled emitter task timed out accepting its stop command",
+                    self,
+                ));
+            }
+        }
+        self.stop_signal.send_replace(Some(deadline));
+        let response_deadline = deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE;
+        let response = match tokio::time::timeout_at(response_deadline, receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => {
+                clear_emitter_stop_signal(&self.stop_signal, deadline);
+                return Err(ScheduledEmitterStopError::recoverable(
+                    "scheduled emitter task dropped its stop response",
+                    self,
+                ));
+            }
+            Err(_) => {
+                clear_emitter_stop_signal(&self.stop_signal, deadline);
+                return Err(ScheduledEmitterStopError::recoverable(
+                    "scheduled emitter task timed out draining",
+                    self,
+                ));
             }
         };
-        let task_result = match tokio::time::timeout(grace, &mut self.task).await {
+        if let Err(reason) = response {
+            clear_emitter_stop_signal(&self.stop_signal, deadline);
+            return Err(ScheduledEmitterStopError::recoverable(reason, self));
+        }
+        match tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(format!("scheduled emitter task join failed: {error}")),
-            Err(_) => {
-                self.abort_and_join().await;
-                Err("scheduled emitter task timed out terminating".to_string())
+            Ok(Err(error)) => {
+                // A successful stop response means the buffered work and transport drain already
+                // completed. The task has no work left to preserve even if its final join failed.
+                warn!(error = %error, "scheduled emitter task join failed after a successful drain");
+                Ok(())
             }
-        };
-        stop_result?;
-        task_result
+            Err(_) => {
+                self.task.abort();
+                let _ = self.task.await;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -9695,6 +9822,68 @@ pub(crate) fn compile_emitter_filter_map_program(
         materialized_interest,
         codec_route,
     }))
+}
+
+pub(crate) fn compile_sqs_fifo_group_program(
+    domain: &Domain,
+    emitter: &CreateEmitter,
+    input_schema: StdArc<arrow_schema::Schema>,
+    input_sensitivity: VmSchemaSensitivity,
+    context: RuntimeVmCompileContext<'_>,
+) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+    let EmitSink::Sqs {
+        fifo_group: Some(SqsFifoGroup::Expression(expression)),
+        ..
+    } = &emitter.sink
+    else {
+        return Ok(None);
+    };
+    let field = Identifier::parse("fifo_group").expect("internal FIFO field name is valid");
+    let output_schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        field.as_str(),
+        ArrowDataType::Utf8,
+        false,
+    )]));
+    let parsed = lower_transforming_route(
+        &RouteConstruction {
+            assignments: vec![Assignment {
+                target: nervix_models::AssignmentTarget::bare(field),
+                value: expression.clone(),
+            }],
+            ..RouteConstruction::default()
+        },
+        input_schema.as_ref(),
+        output_schema.as_ref(),
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "SQS FIFO GROUP expression for emitter '{}' is invalid: {reason}",
+            emitter.name.as_str()
+        ),
+    })?;
+    let error_sites = compiled_message_error_sites(&parsed, &[MessageErrorOperation::Set], None)
+        .map_err(|reason| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason,
+        })?;
+    compile_emitter_filter_map_part(
+        RuntimeCompileTarget {
+            domain,
+            identifier: &emitter.name,
+        },
+        parsed,
+        RuntimeVmSchemaPair {
+            input: input_schema,
+            input_sensitivity,
+            output: output_schema,
+            output_sensitivity: VmSchemaSensitivity::default(),
+        },
+        true,
+        error_sites,
+        context,
+    )
+    .map(Some)
 }
 
 fn compile_emitter_filter_map_part(
@@ -12410,6 +12599,7 @@ async fn plan_filter_map_messages(
 struct EmitterFilterMapPlan {
     batch: Option<RelayRecordBatch>,
     headers: Option<Vec<EmitterHeaders>>,
+    source_rows: Vec<usize>,
     message_errors: Vec<PlannedMessageError>,
 }
 
@@ -12633,8 +12823,68 @@ async fn plan_emitter_filter_map_batch(
     Ok(EmitterFilterMapPlan {
         batch,
         headers,
+        source_rows: successful_input_rows,
         message_errors,
     })
+}
+
+pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
+    emitter: &Identifier,
+    program: &CompiledProgramWithMaterializedInterest,
+    batch: &RelayRecordBatch,
+    execution_now: Timestamp,
+    side_inputs: &HashMap<String, RuntimeValue>,
+) -> Result<Vec<Result<Option<String>, String>>, PlannedGeneralError> {
+    let row_count = batch.batch.batch().num_rows();
+    let result = execute_filter_map_program_on_batch(
+        "emitter",
+        emitter,
+        program,
+        FilterMapBatchInputs {
+            carrier: &batch.batch,
+            keys: &batch.keys,
+            side_inputs,
+        },
+        execution_now,
+        batch.acks.clone(),
+    )
+    .await?;
+    let mut groups = (0..row_count)
+        .map(|_| Err("SQS FIFO GROUP expression omitted its input row".to_string()))
+        .collect::<Vec<_>>();
+    for (output_row, input_row) in result.selected_rows.into_iter().enumerate() {
+        if input_row >= row_count {
+            return Err(PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason: format!(
+                    "emitter '{}' SQS FIFO GROUP expression referenced missing input row \
+                     {input_row}",
+                    emitter.as_str()
+                ),
+            });
+        }
+        if let Some(side_error) = result.batch.errors()[output_row].first() {
+            groups[input_row] = Err(format!(
+                "SQS FIFO GROUP expression failed with {} at {}",
+                side_error.code.as_str(),
+                side_error.span
+            ));
+            continue;
+        }
+        groups[input_row] = match vm_output_row_to_decoded_record(&result.batch, output_row)
+            .and_then(|record| match record.value("fifo_group") {
+                Some(RuntimeValue::String(value)) => Ok(value.clone()),
+                Some(value) => Err(format!(
+                    "SQS FIFO GROUP expression produced {}, expected STRING",
+                    runtime_value_type_name(value)
+                )),
+                None => Err("SQS FIFO GROUP expression produced NULL".to_string()),
+            }) {
+            Ok(value) => Ok(Some(value)),
+            Err(reason) => Err(reason),
+        };
+    }
+    Ok(groups)
 }
 
 struct ExecutedFilterMap {

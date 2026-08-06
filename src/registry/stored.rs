@@ -11,19 +11,20 @@ use nervix_models::{
     CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
     CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
     CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, EmitSink, EndpointIngestMode,
-    EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog,
-    IcebergStorageBackend, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestSource, IngestTimestampSource, InputCollectPolicy, JsonType,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy,
-    Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
-    NameError, NatsIngestMode, OutputFlushPolicy, ParseAsType, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
-    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, SchemaField,
-    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource,
-    WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterAckWindow,
+    EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies, Expression,
+    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, Identifier,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
+    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestSource,
+    IngestTimestampSource, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode,
+    KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
+    OutputFlushPolicy, ParseAsType, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode,
+    RelayBranching, RetryPolicy, SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource, WebsocketsIngestMode, WindowBound,
+    WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -36,6 +37,7 @@ pub enum StoredModelVersioned {
     Codec(StoredCreateCodec),
     TransportKafka(StoredCreateClientKafka),
     TransportPulsar(StoredCreateClientPulsar),
+    RemovedTransport(StoredRemovedClient),
     TransportHttp(StoredCreateClientHttp),
     TransportSentry(StoredCreateClientSentry),
     TransportPrometheus(StoredCreateClientPrometheus),
@@ -72,12 +74,207 @@ pub enum StoredModelVersioned {
     WindowProcessor(StoredCreateWindowProcessor),
     Emitter(StoredCreateEmitter),
     Udf(StoredCreateUdf),
+    EmitterPublishing(StoredCreateEmitterPublishing),
+}
+
+/// The exact archive shape used before emitter publishing modes were introduced.
+///
+/// The persistence boundary maps unchanged non-emitter variants into the current envelope. The
+/// legacy emitter variant is recognition-only: it is never converted into a runtime model and
+/// exists solely so an archived emitter with no `MODE` receives an actionable error.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+enum PrePublishingModeStoredModelVersioned {
+    Schema(StoredCreateSchema),
+    WireJsonSchema(StoredCreateWireSchema<StoredJsonType>),
+    WireCborSchema(StoredCreateWireSchema<StoredJsonType>),
+    WireAvroSchema(StoredCreateWireSchema<StoredAvroType>),
+    Codec(StoredCreateCodec),
+    TransportKafka(StoredCreateClientKafka),
+    TransportPulsar(StoredCreateClientPulsar),
+    RemovedTransport(StoredRemovedClient),
+    TransportHttp(StoredCreateClientHttp),
+    TransportSentry(StoredCreateClientSentry),
+    TransportPrometheus(StoredCreateClientPrometheus),
+    TransportRabbitMq(StoredCreateClientRabbitMq),
+    TransportRedis(StoredCreateClientRedis),
+    TransportMqtt(StoredCreateClientMqtt),
+    TransportNats(StoredCreateClientNats),
+    TransportZeroMq(StoredCreateClientZeroMq),
+    TransportSqs(StoredCreateClientSqs),
+    TransportWebsockets(StoredCreateClientWebsockets),
+    TransportClickHouse(StoredCreateClientClickHouse),
+    TransportPostgres(StoredCreateClientPostgres),
+    TransportMySql(StoredCreateClientMySql),
+    TransportMongoDb(StoredCreateClientMongoDb),
+    TransportS3(StoredCreateClientS3),
+    TransportGcs(StoredCreateClientGcs),
+    TransportAzureBlob(StoredCreateClientAzureBlob),
+    TransportIcebergRest(StoredCreateClientIcebergRest),
+    Vhost(StoredCreateVhost),
+    Branch(StoredCreateBranch),
+    Endpoint(StoredCreateEndpoint),
+    SignalingProtocol(StoredCreateSignalingProtocol),
+    Generator(StoredCreateGenerator),
+    Inferencer(StoredCreateInferencer),
+    WasmProcessor(StoredCreateWasmProcessor),
+    Ingestor(StoredCreateIngestor),
+    Reingestor(StoredCreateReingestor),
+    Relay(StoredCreateRelay),
+    Lookup(StoredCreateLookup),
+    Deduplicator(StoredCreateDeduplicator),
+    Correlator(StoredCreateCorrelator),
+    Reorderer(StoredCreateReorderer),
+    Junction(StoredCreateJunction),
+    WindowProcessor(StoredCreateWindowProcessor),
+    Emitter(PrePublishingModeStoredCreateEmitter),
+    Udf(StoredCreateUdf),
+}
+
+pub(super) enum PrePublishingModeStoredDecode {
+    Model(Box<StoredModelVersioned>),
+    EmitterWithoutMode,
+}
+
+pub(super) fn decode_pre_publishing_mode_model(
+    bytes: &[u8],
+) -> Option<PrePublishingModeStoredDecode> {
+    let stored =
+        rkyv::from_bytes::<PrePublishingModeStoredModelVersioned, rkyv::rancor::Error>(bytes)
+            .ok()?;
+    let decoded = match stored {
+        PrePublishingModeStoredModelVersioned::Schema(value) => StoredModelVersioned::Schema(value),
+        PrePublishingModeStoredModelVersioned::WireJsonSchema(value) => {
+            StoredModelVersioned::WireJsonSchema(value)
+        }
+        PrePublishingModeStoredModelVersioned::WireCborSchema(value) => {
+            StoredModelVersioned::WireCborSchema(value)
+        }
+        PrePublishingModeStoredModelVersioned::WireAvroSchema(value) => {
+            StoredModelVersioned::WireAvroSchema(value)
+        }
+        PrePublishingModeStoredModelVersioned::Codec(value) => StoredModelVersioned::Codec(value),
+        PrePublishingModeStoredModelVersioned::TransportKafka(value) => {
+            StoredModelVersioned::TransportKafka(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportPulsar(value) => {
+            StoredModelVersioned::TransportPulsar(value)
+        }
+        PrePublishingModeStoredModelVersioned::RemovedTransport(value) => {
+            StoredModelVersioned::RemovedTransport(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportHttp(value) => {
+            StoredModelVersioned::TransportHttp(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportSentry(value) => {
+            StoredModelVersioned::TransportSentry(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportPrometheus(value) => {
+            StoredModelVersioned::TransportPrometheus(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportRabbitMq(value) => {
+            StoredModelVersioned::TransportRabbitMq(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportRedis(value) => {
+            StoredModelVersioned::TransportRedis(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportMqtt(value) => {
+            StoredModelVersioned::TransportMqtt(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportNats(value) => {
+            StoredModelVersioned::TransportNats(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportZeroMq(value) => {
+            StoredModelVersioned::TransportZeroMq(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportSqs(value) => {
+            StoredModelVersioned::TransportSqs(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportWebsockets(value) => {
+            StoredModelVersioned::TransportWebsockets(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportClickHouse(value) => {
+            StoredModelVersioned::TransportClickHouse(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportPostgres(value) => {
+            StoredModelVersioned::TransportPostgres(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportMySql(value) => {
+            StoredModelVersioned::TransportMySql(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportMongoDb(value) => {
+            StoredModelVersioned::TransportMongoDb(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportS3(value) => {
+            StoredModelVersioned::TransportS3(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportGcs(value) => {
+            StoredModelVersioned::TransportGcs(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportAzureBlob(value) => {
+            StoredModelVersioned::TransportAzureBlob(value)
+        }
+        PrePublishingModeStoredModelVersioned::TransportIcebergRest(value) => {
+            StoredModelVersioned::TransportIcebergRest(value)
+        }
+        PrePublishingModeStoredModelVersioned::Vhost(value) => StoredModelVersioned::Vhost(value),
+        PrePublishingModeStoredModelVersioned::Branch(value) => StoredModelVersioned::Branch(value),
+        PrePublishingModeStoredModelVersioned::Endpoint(value) => {
+            StoredModelVersioned::Endpoint(value)
+        }
+        PrePublishingModeStoredModelVersioned::SignalingProtocol(value) => {
+            StoredModelVersioned::SignalingProtocol(value)
+        }
+        PrePublishingModeStoredModelVersioned::Generator(value) => {
+            StoredModelVersioned::Generator(value)
+        }
+        PrePublishingModeStoredModelVersioned::Inferencer(value) => {
+            StoredModelVersioned::Inferencer(value)
+        }
+        PrePublishingModeStoredModelVersioned::WasmProcessor(value) => {
+            StoredModelVersioned::WasmProcessor(value)
+        }
+        PrePublishingModeStoredModelVersioned::Ingestor(value) => {
+            StoredModelVersioned::Ingestor(value)
+        }
+        PrePublishingModeStoredModelVersioned::Reingestor(value) => {
+            StoredModelVersioned::Reingestor(value)
+        }
+        PrePublishingModeStoredModelVersioned::Relay(value) => StoredModelVersioned::Relay(value),
+        PrePublishingModeStoredModelVersioned::Lookup(value) => StoredModelVersioned::Lookup(value),
+        PrePublishingModeStoredModelVersioned::Deduplicator(value) => {
+            StoredModelVersioned::Deduplicator(value)
+        }
+        PrePublishingModeStoredModelVersioned::Correlator(value) => {
+            StoredModelVersioned::Correlator(value)
+        }
+        PrePublishingModeStoredModelVersioned::Reorderer(value) => {
+            StoredModelVersioned::Reorderer(value)
+        }
+        PrePublishingModeStoredModelVersioned::Junction(value) => {
+            StoredModelVersioned::Junction(value)
+        }
+        PrePublishingModeStoredModelVersioned::WindowProcessor(value) => {
+            StoredModelVersioned::WindowProcessor(value)
+        }
+        PrePublishingModeStoredModelVersioned::Emitter(_) => {
+            return Some(PrePublishingModeStoredDecode::EmitterWithoutMode);
+        }
+        PrePublishingModeStoredModelVersioned::Udf(value) => StoredModelVersioned::Udf(value),
+    };
+    Some(PrePublishingModeStoredDecode::Model(Box::new(decoded)))
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoredModelConversionError {
     #[error("stored model contains an invalid name")]
     InvalidName,
+    #[error("stored model uses the removed Kinesis integration")]
+    RemovedIntegration,
+    #[error(
+        "stored emitter definition has no publishing MODE; recreate the emitter with an explicit \
+         MODE"
+    )]
+    EmitterPublishingModeMissing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -223,6 +420,13 @@ pub struct StoredCreateClientKafka {
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateClientPulsar {
+    pub name: String,
+    pub mount: Option<String>,
+    pub config: Vec<StoredClientConfigEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredRemovedClient {
     pub name: String,
     pub mount: Option<String>,
     pub config: Vec<StoredClientConfigEntry>,
@@ -987,6 +1191,86 @@ pub struct StoredCreateEmitter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+struct PrePublishingModeStoredCreateEmitter {
+    name: String,
+    from: StoredProcessorInputs,
+    encode_using_codec: Option<String>,
+    sink: PrePublishingModeStoredEmitSink,
+    flush_each: String,
+    max_batch_size: Option<String>,
+    mode: AckMode,
+    error_policies: StoredErrorPolicies,
+    construction: nervix_models::RouteConstruction,
+    materialized_state: Vec<nervix_models::MaterializedStateDependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredCreateEmitterPublishing {
+    pub name: String,
+    pub from: StoredProcessorInputs,
+    pub encode_using_codec: Option<String>,
+    pub sink: StoredEmitSink,
+    pub flush_each: String,
+    pub max_batch_size: Option<String>,
+    pub publishing_mode: StoredEmitterPublishingMode,
+    pub mode: AckMode,
+    pub error_policies: StoredErrorPolicies,
+    pub construction: nervix_models::RouteConstruction,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredEmitterAckWindow {
+    Sequential,
+    Parallel { max: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredEmitterRetryPolicy {
+    pub backoff: String,
+    pub max_backoff: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredEmitterPublishingMode {
+    NoAck {
+        retry_policy: StoredEmitterRetryPolicy,
+    },
+    BrokerAck {
+        window: StoredEmitterAckWindow,
+        ack_timeout: String,
+        retry_policy: StoredEmitterRetryPolicy,
+    },
+    MqttQos0 {
+        retry_policy: StoredEmitterRetryPolicy,
+    },
+    MqttQos1 {
+        window: StoredEmitterAckWindow,
+        ack_timeout: String,
+        retry_policy: StoredEmitterRetryPolicy,
+    },
+    MqttQos2 {
+        window: StoredEmitterAckWindow,
+        ack_timeout: String,
+        retry_policy: StoredEmitterRetryPolicy,
+    },
+    NatsJetStream {
+        window: StoredEmitterAckWindow,
+        ack_timeout: String,
+        retry_policy: StoredEmitterRetryPolicy,
+    },
+    SqsSingle {
+        retry_policy: StoredEmitterRetryPolicy,
+    },
+    SqsBatch {
+        retry_policy: StoredEmitterRetryPolicy,
+    },
+    RequestAck {
+        retry_policy: StoredEmitterRetryPolicy,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredEmitSink {
     Kafka {
         client: String,
@@ -995,6 +1279,10 @@ pub enum StoredEmitSink {
     Pulsar {
         client: String,
         topic: String,
+    },
+    RemovedIntegration {
+        client: String,
+        relay: String,
     },
     RabbitMq {
         client: String,
@@ -1064,6 +1352,114 @@ pub enum StoredEmitSink {
         commit_each: String,
         max_commit_size: String,
     },
+    SqsPublishing {
+        client: String,
+        queue: String,
+        fifo_group: Option<StoredSqsFifoGroup>,
+    },
+    ClickHousePublishing {
+        client: String,
+        table: String,
+        values: Vec<StoredClickHouseValueMapping>,
+        max_batch: u64,
+        flush_each: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+enum PrePublishingModeStoredEmitSink {
+    Kafka {
+        client: String,
+        topic: String,
+    },
+    Pulsar {
+        client: String,
+        topic: String,
+    },
+    RemovedIntegration {
+        client: String,
+        relay: String,
+    },
+    RabbitMq {
+        client: String,
+        queue: String,
+    },
+    Redis {
+        client: String,
+        channel: String,
+    },
+    Mqtt {
+        client: String,
+        topic: String,
+    },
+    Nats {
+        client: String,
+        subject: String,
+    },
+    ZeroMq {
+        client: String,
+    },
+    Sqs {
+        client: String,
+        queue: String,
+    },
+    Sentry {
+        client: String,
+    },
+    ClickHouse {
+        client: String,
+        table: String,
+        values: Vec<StoredClickHouseValueMapping>,
+        flush_each: String,
+    },
+    Postgres {
+        client: String,
+        table: String,
+        values: Vec<StoredPostgresValueMapping>,
+        conflict_action: StoredPostgresConflictAction,
+        max_batch: u64,
+        flush_each: String,
+    },
+    MySql {
+        client: String,
+        table: String,
+        values: Vec<StoredMySqlValueMapping>,
+        conflict_action: StoredMySqlConflictAction,
+        max_batch: u64,
+        flush_each: String,
+    },
+    MongoDb {
+        client: String,
+        collection: String,
+        values: Vec<StoredMongoDbValueMapping>,
+        conflict_action: StoredMongoDbConflictAction,
+        max_batch: u64,
+        flush_each: String,
+    },
+    Iceberg {
+        backend: StoredIcebergStorageBackend,
+        client: String,
+        table: String,
+        values: Vec<StoredClickHouseValueMapping>,
+        location: String,
+        catalog: StoredIcebergCatalog,
+        flush_each: String,
+        max_batch_size: Option<String>,
+        commit_each: String,
+        max_commit_size: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredSqsFifoGroup {
+    FromBranch,
+    Expression(Expression),
+}
+
+impl StoredEmitSink {
+    fn is_removed_integration(&self) -> bool {
+        matches!(self, Self::RemovedIntegration { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1155,7 +1551,7 @@ impl From<Model> for StoredModelVersioned {
             Model::Reorderer(v) => Self::Reorderer(v.into()),
             Model::Junction(v) => Self::Junction(v.into()),
             Model::WindowProcessor(v) => Self::WindowProcessor(v.into()),
-            Model::Emitter(v) => Self::Emitter(v.into()),
+            Model::Emitter(v) => Self::EmitterPublishing(v.into()),
             Model::Udf(v) => Self::Udf(v.into()),
             Model::Materializer(_) => {
                 unreachable!("synthetic materializers must not be stored")
@@ -1189,6 +1585,9 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Codec(v) => Ok(Model::Codec(convert_stored(v)?)),
             StoredModelVersioned::TransportKafka(v) => Ok(Model::ClientKafka(convert_stored(v)?)),
             StoredModelVersioned::TransportPulsar(v) => Ok(Model::ClientPulsar(convert_stored(v)?)),
+            StoredModelVersioned::RemovedTransport(_) => {
+                Err(Report::new(StoredModelConversionError::RemovedIntegration))
+            }
             StoredModelVersioned::TransportHttp(v) => Ok(Model::ClientHttp(convert_stored(v)?)),
             StoredModelVersioned::TransportSentry(v) => Ok(Model::ClientSentry(convert_stored(v)?)),
             StoredModelVersioned::TransportPrometheus(v) => {
@@ -1243,8 +1642,17 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::WindowProcessor(v) => {
                 Ok(Model::WindowProcessor(convert_stored(v)?))
             }
-            StoredModelVersioned::Emitter(v) => Ok(Model::Emitter(convert_stored(v)?)),
+            StoredModelVersioned::Emitter(v) if v.sink.is_removed_integration() => {
+                Err(Report::new(StoredModelConversionError::RemovedIntegration))
+            }
+            StoredModelVersioned::Emitter(_) => Err(Report::new(
+                StoredModelConversionError::EmitterPublishingModeMissing,
+            )),
             StoredModelVersioned::Udf(v) => Ok(Model::Udf(convert_stored(v)?)),
+            StoredModelVersioned::EmitterPublishing(v) if v.sink.is_removed_integration() => {
+                Err(Report::new(StoredModelConversionError::RemovedIntegration))
+            }
+            StoredModelVersioned::EmitterPublishing(v) => Ok(Model::Emitter(convert_stored(v)?)),
         }
     }
 }
@@ -4027,7 +4435,7 @@ impl TryFrom<StoredCreateJunction> for CreateJunction {
     }
 }
 
-impl From<CreateEmitter> for StoredCreateEmitter {
+impl From<CreateEmitter> for StoredCreateEmitterPublishing {
     fn from(value: CreateEmitter) -> Self {
         Self {
             name: value.name.to_string(),
@@ -4036,6 +4444,7 @@ impl From<CreateEmitter> for StoredCreateEmitter {
             sink: value.sink.into(),
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
+            publishing_mode: value.publishing_mode.into(),
             mode: value.mode,
             error_policies: value.error_policies.into(),
             construction: value.construction,
@@ -4044,10 +4453,10 @@ impl From<CreateEmitter> for StoredCreateEmitter {
     }
 }
 
-impl TryFrom<StoredCreateEmitter> for CreateEmitter {
+impl TryFrom<StoredCreateEmitterPublishing> for CreateEmitter {
     type Error = Report<NameError>;
 
-    fn try_from(value: StoredCreateEmitter) -> Result<Self, Self::Error> {
+    fn try_from(value: StoredCreateEmitterPublishing) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
@@ -4058,11 +4467,182 @@ impl TryFrom<StoredCreateEmitter> for CreateEmitter {
             sink: value.sink.try_into()?,
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
+            publishing_mode: value.publishing_mode.into(),
             mode: value.mode,
             error_policies: value.error_policies.try_into()?,
             construction: value.construction,
             materialized_state: value.materialized_state,
         })
+    }
+}
+
+impl From<RetryPolicy> for StoredEmitterRetryPolicy {
+    fn from(value: RetryPolicy) -> Self {
+        Self {
+            backoff: value.backoff,
+            max_backoff: value.max_backoff,
+        }
+    }
+}
+
+impl From<StoredEmitterRetryPolicy> for RetryPolicy {
+    fn from(value: StoredEmitterRetryPolicy) -> Self {
+        Self {
+            backoff: value.backoff,
+            max_backoff: value.max_backoff,
+        }
+    }
+}
+
+impl From<EmitterAckWindow> for StoredEmitterAckWindow {
+    fn from(value: EmitterAckWindow) -> Self {
+        match value {
+            EmitterAckWindow::Sequential => Self::Sequential,
+            EmitterAckWindow::Parallel { max } => Self::Parallel { max },
+        }
+    }
+}
+
+impl From<StoredEmitterAckWindow> for EmitterAckWindow {
+    fn from(value: StoredEmitterAckWindow) -> Self {
+        match value {
+            StoredEmitterAckWindow::Sequential => Self::Sequential,
+            StoredEmitterAckWindow::Parallel { max } => Self::Parallel { max },
+        }
+    }
+}
+
+impl From<EmitterPublishingMode> for StoredEmitterPublishingMode {
+    fn from(value: EmitterPublishingMode) -> Self {
+        match value {
+            EmitterPublishingMode::NoAck { retry_policy } => Self::NoAck {
+                retry_policy: retry_policy.into(),
+            },
+            EmitterPublishingMode::BrokerAck {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => Self::BrokerAck {
+                window: window.into(),
+                ack_timeout,
+                retry_policy: retry_policy.into(),
+            },
+            EmitterPublishingMode::MqttQos0 { retry_policy } => Self::MqttQos0 {
+                retry_policy: retry_policy.into(),
+            },
+            EmitterPublishingMode::MqttQos1 {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => Self::MqttQos1 {
+                window: window.into(),
+                ack_timeout,
+                retry_policy: retry_policy.into(),
+            },
+            EmitterPublishingMode::MqttQos2 {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => Self::MqttQos2 {
+                window: window.into(),
+                ack_timeout,
+                retry_policy: retry_policy.into(),
+            },
+            EmitterPublishingMode::NatsJetStream {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => Self::NatsJetStream {
+                window: window.into(),
+                ack_timeout,
+                retry_policy: retry_policy.into(),
+            },
+            EmitterPublishingMode::SqsSingle { retry_policy } => Self::SqsSingle {
+                retry_policy: retry_policy.into(),
+            },
+            EmitterPublishingMode::SqsBatch { retry_policy } => Self::SqsBatch {
+                retry_policy: retry_policy.into(),
+            },
+            EmitterPublishingMode::RequestAck { retry_policy } => Self::RequestAck {
+                retry_policy: retry_policy.into(),
+            },
+        }
+    }
+}
+
+impl From<StoredEmitterPublishingMode> for EmitterPublishingMode {
+    fn from(value: StoredEmitterPublishingMode) -> Self {
+        match value {
+            StoredEmitterPublishingMode::NoAck { retry_policy } => Self::NoAck {
+                retry_policy: retry_policy.into(),
+            },
+            StoredEmitterPublishingMode::BrokerAck {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => Self::BrokerAck {
+                window: window.into(),
+                ack_timeout,
+                retry_policy: retry_policy.into(),
+            },
+            StoredEmitterPublishingMode::MqttQos0 { retry_policy } => Self::MqttQos0 {
+                retry_policy: retry_policy.into(),
+            },
+            StoredEmitterPublishingMode::MqttQos1 {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => Self::MqttQos1 {
+                window: window.into(),
+                ack_timeout,
+                retry_policy: retry_policy.into(),
+            },
+            StoredEmitterPublishingMode::MqttQos2 {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => Self::MqttQos2 {
+                window: window.into(),
+                ack_timeout,
+                retry_policy: retry_policy.into(),
+            },
+            StoredEmitterPublishingMode::NatsJetStream {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => Self::NatsJetStream {
+                window: window.into(),
+                ack_timeout,
+                retry_policy: retry_policy.into(),
+            },
+            StoredEmitterPublishingMode::SqsSingle { retry_policy } => Self::SqsSingle {
+                retry_policy: retry_policy.into(),
+            },
+            StoredEmitterPublishingMode::SqsBatch { retry_policy } => Self::SqsBatch {
+                retry_policy: retry_policy.into(),
+            },
+            StoredEmitterPublishingMode::RequestAck { retry_policy } => Self::RequestAck {
+                retry_policy: retry_policy.into(),
+            },
+        }
+    }
+}
+
+impl From<SqsFifoGroup> for StoredSqsFifoGroup {
+    fn from(value: SqsFifoGroup) -> Self {
+        match value {
+            SqsFifoGroup::FromBranch => Self::FromBranch,
+            SqsFifoGroup::Expression(expression) => Self::Expression(expression),
+        }
+    }
+}
+
+impl From<StoredSqsFifoGroup> for SqsFifoGroup {
+    fn from(value: StoredSqsFifoGroup) -> Self {
+        match value {
+            StoredSqsFifoGroup::FromBranch => Self::FromBranch,
+            StoredSqsFifoGroup::Expression(expression) => Self::Expression(expression),
+        }
     }
 }
 
@@ -4156,9 +4736,14 @@ impl From<EmitSink> for StoredEmitSink {
             EmitSink::ZeroMq { client } => Self::ZeroMq {
                 client: client.to_string(),
             },
-            EmitSink::Sqs { client, queue } => Self::Sqs {
+            EmitSink::Sqs {
+                client,
+                queue,
+                fifo_group,
+            } => Self::SqsPublishing {
                 client: client.to_string(),
-                queue: queue.to_string(),
+                queue,
+                fifo_group: fifo_group.map(Into::into),
             },
             EmitSink::Sentry { client } => Self::Sentry {
                 client: client.to_string(),
@@ -4167,11 +4752,13 @@ impl From<EmitSink> for StoredEmitSink {
                 client,
                 table,
                 values,
+                max_batch,
                 flush_each,
-            } => Self::ClickHouse {
+            } => Self::ClickHousePublishing {
                 client: client.to_string(),
                 table: table.to_string(),
                 values: values.into_iter().map(Into::into).collect(),
+                max_batch,
                 flush_each,
             },
             EmitSink::Postgres {
@@ -4259,6 +4846,8 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 client: Identifier::parse(&client)?,
                 topic: Identifier::parse(&topic)?,
             }),
+            StoredEmitSink::RemovedIntegration { .. } => Err(Report::new(NameError::Empty)
+                .attach_printable("stored model uses the removed Kinesis integration")),
             StoredEmitSink::RabbitMq { client, queue } => Ok(Self::RabbitMq {
                 client: Identifier::parse(&client)?,
                 queue: Identifier::parse(&queue)?,
@@ -4278,24 +4867,13 @@ impl TryFrom<StoredEmitSink> for EmitSink {
             StoredEmitSink::ZeroMq { client } => Ok(Self::ZeroMq {
                 client: Identifier::parse(&client)?,
             }),
-            StoredEmitSink::Sqs { client, queue } => Ok(Self::Sqs {
-                client: Identifier::parse(&client)?,
-                queue: Identifier::parse(&queue)?,
-            }),
+            StoredEmitSink::Sqs { .. } => Err(Report::new(NameError::Empty)
+                .attach_printable("stored SQS emitter sink has no FIFO group contract")),
             StoredEmitSink::Sentry { client } => Ok(Self::Sentry {
                 client: Identifier::parse(&client)?,
             }),
-            StoredEmitSink::ClickHouse {
-                client,
-                table,
-                values,
-                flush_each,
-            } => Ok(Self::ClickHouse {
-                client: Identifier::parse(&client)?,
-                table: Identifier::parse(&table)?,
-                values: values.into_iter().map(Into::into).collect(),
-                flush_each,
-            }),
+            StoredEmitSink::ClickHouse { .. } => Err(Report::new(NameError::Empty)
+                .attach_printable("stored ClickHouse emitter sink has no maximum batch")),
             StoredEmitSink::Postgres {
                 client,
                 table,
@@ -4363,6 +4941,28 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 max_batch_size,
                 commit_each,
                 max_commit_size,
+            }),
+            StoredEmitSink::SqsPublishing {
+                client,
+                queue,
+                fifo_group,
+            } => Ok(Self::Sqs {
+                client: Identifier::parse(&client)?,
+                queue,
+                fifo_group: fifo_group.map(Into::into),
+            }),
+            StoredEmitSink::ClickHousePublishing {
+                client,
+                table,
+                values,
+                max_batch,
+                flush_each,
+            } => Ok(Self::ClickHouse {
+                client: Identifier::parse(&client)?,
+                table: Identifier::parse(&table)?,
+                values: values.into_iter().map(Into::into).collect(),
+                max_batch,
+                flush_each,
             }),
         }
     }
@@ -4656,6 +5256,12 @@ mod tests {
                     client: identifier("nats_client"),
                     subject: identifier("events_subject"),
                 },
+                publishing_mode: EmitterPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Detached,
@@ -4720,7 +5326,51 @@ mod tests {
 
     #[test]
     fn stored_model_try_from_rejects_invalid_identifiers() {
-        let err = Model::try_from(StoredModelVersioned::Emitter(StoredCreateEmitter {
+        let err = Model::try_from(StoredModelVersioned::EmitterPublishing(
+            StoredCreateEmitterPublishing {
+                name: "events_emitter".to_string(),
+                from: StoredProcessorInputs {
+                    from: vec!["events_stream".to_string()],
+                    r#where: Vec::new(),
+                    collect_policy: None,
+                },
+                encode_using_codec: Some("events_codec".to_string()),
+                sink: StoredEmitSink::Kafka {
+                    client: "bad client".to_string(),
+                    topic: "events_topic".to_string(),
+                },
+                flush_each: "100ms".to_string(),
+                max_batch_size: Some("1MiB".to_string()),
+                publishing_mode: StoredEmitterPublishingMode::NoAck {
+                    retry_policy: StoredEmitterRetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                mode: AckMode::Attached,
+                error_policies: StoredErrorPolicies {
+                    message: StoredMessageErrorPolicy::Log,
+                    general: StoredGeneralErrorPolicy::Log,
+                },
+                construction: nervix_models::RouteConstruction::default(),
+                materialized_state: Vec::new(),
+            },
+        ))
+        .expect_err("invalid identifiers must fail");
+
+        assert!(matches!(
+            err.current_context(),
+            StoredModelConversionError::InvalidName
+        ));
+        assert!(format!("{err:?}").contains("invalid character ' ' in name"));
+    }
+
+    #[test]
+    fn stored_legacy_emitter_requires_recreation_with_a_publishing_mode() {
+        // The raw historical archive path is covered at the registry decode boundary. This test
+        // separately guards the semantic boundary: a retained legacy discriminant that reaches
+        // model conversion is rejected clearly and is never reinterpreted.
+        let error = Model::try_from(StoredModelVersioned::Emitter(StoredCreateEmitter {
             name: "events_emitter".to_string(),
             from: StoredProcessorInputs {
                 from: vec!["events_stream".to_string()],
@@ -4729,7 +5379,7 @@ mod tests {
             },
             encode_using_codec: Some("events_codec".to_string()),
             sink: StoredEmitSink::Kafka {
-                client: "bad client".to_string(),
+                client: "kafka_main".to_string(),
                 topic: "events_topic".to_string(),
             },
             flush_each: "100ms".to_string(),
@@ -4742,13 +5392,13 @@ mod tests {
             construction: nervix_models::RouteConstruction::default(),
             materialized_state: Vec::new(),
         }))
-        .expect_err("invalid identifiers must fail");
+        .expect_err("legacy emitters without MODE must not be reinterpreted");
 
         assert!(matches!(
-            err.current_context(),
-            StoredModelConversionError::InvalidName
+            error.current_context(),
+            StoredModelConversionError::EmitterPublishingModeMissing
         ));
-        assert!(format!("{err:?}").contains("invalid character ' ' in name"));
+        assert!(format!("{error:#}").contains("recreate the emitter with an explicit MODE"));
     }
 
     #[test]

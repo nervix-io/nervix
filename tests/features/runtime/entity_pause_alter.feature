@@ -114,7 +114,7 @@ Feature: Entity-pause model alterations
         'bind' = 'false'
       };
       CREATE EMITTER blocked_sink FROM outgoing
-        TO ZEROMQ sink ENCODE USING event_codec INHERIT ALL
+        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """

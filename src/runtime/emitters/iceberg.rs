@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs::File,
     path::{Path, PathBuf},
     sync::Arc as StdArc,
@@ -15,7 +16,7 @@ use ::iceberg::{
         S3_ALLOW_ANONYMOUS, S3_DISABLE_CONFIG_LOAD, S3_DISABLE_EC2_METADATA, S3_ENDPOINT,
         S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN,
     },
-    spec::DataFileFormat,
+    spec::{DataFile, DataFileFormat, Snapshot, TableProperties},
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
@@ -29,9 +30,9 @@ use ::iceberg::{
     },
 };
 use ahash::{HashMap, HashSet};
-use arrow_array::{RecordBatch, RecordBatchOptions};
+use arrow_array::{BooleanArray, RecordBatch, RecordBatchOptions};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
-use arrow_select::concat::concat as concat_arrow_arrays;
+use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array};
 use error_stack::{Report, ResultExt};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_storage_opendal::OpenDalStorageFactory;
@@ -44,9 +45,9 @@ use super::*;
 
 pub(in crate::runtime) struct IcebergEmitter {
     client: IcebergEmitterClient,
+    commit_state: IcebergCommitState,
     program: CompiledSqlValuesProgram,
     mapped_schema: StdArc<arrow_schema::Schema>,
-    input_schema: Arc<CompiledSchema>,
     flush_policy: RuntimeFlushPolicy,
     commit_policy: IcebergCommitPolicy,
     staging_dir: TempDir,
@@ -59,6 +60,7 @@ pub(in crate::runtime) struct IcebergEmitter {
     staged_rows: u64,
     staged_bytes: u64,
     commit_at: Option<Instant>,
+    rejected_records: VecDeque<IcebergRejectedRecord>,
     buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
@@ -67,6 +69,88 @@ struct IcebergEmitterClient {
     table: Table,
     file_name_prefix: String,
     data_file_sequence: u64,
+}
+
+const ICEBERG_APPEND_ID_PROPERTY: &str = "nervix.emitter.append-id";
+
+struct IcebergPreparedCommit {
+    append_id: uuid::Uuid,
+    data_files: Vec<DataFile>,
+}
+
+impl IcebergPreparedCommit {
+    fn new(data_files: Vec<DataFile>) -> Self {
+        Self::with_append_id(data_files, uuid::Uuid::now_v7())
+    }
+
+    fn with_append_id(data_files: Vec<DataFile>, append_id: uuid::Uuid) -> Self {
+        Self {
+            append_id,
+            data_files,
+        }
+    }
+
+    fn append_id(&self) -> uuid::Uuid {
+        self.append_id
+    }
+
+    fn data_files(&self) -> &[DataFile] {
+        self.data_files.as_slice()
+    }
+
+    fn snapshot_properties(&self) -> impl Iterator<Item = (String, String)> {
+        [(
+            ICEBERG_APPEND_ID_PROPERTY.to_string(),
+            self.append_id.to_string(),
+        )]
+        .into_iter()
+    }
+
+    fn matches_snapshot(&self, snapshot: &Snapshot) -> bool {
+        snapshot
+            .summary()
+            .additional_properties
+            .get(ICEBERG_APPEND_ID_PROPERTY)
+            .and_then(|append_id| uuid::Uuid::parse_str(append_id).ok())
+            .is_some_and(|append_id| append_id == self.append_id)
+    }
+
+    fn is_committed_to(&self, table: &Table) -> bool {
+        let metadata = table.metadata();
+        let mut snapshot = metadata
+            .current_snapshot()
+            .map(|snapshot| snapshot.as_ref());
+        while let Some(current) = snapshot {
+            if self.matches_snapshot(current) {
+                return true;
+            }
+            snapshot = current
+                .parent_snapshot_id()
+                .and_then(|parent| metadata.snapshot_by_id(parent))
+                .map(|parent| parent.as_ref());
+        }
+        false
+    }
+}
+
+#[derive(Default)]
+struct IcebergCommitState {
+    prepared: Option<IcebergPreparedCommit>,
+}
+
+impl IcebergCommitState {
+    fn store(&mut self, prepared: IcebergPreparedCommit) {
+        debug_assert!(self.prepared.is_none());
+        self.prepared = Some(prepared);
+    }
+
+    fn prepared(&self) -> Option<&IcebergPreparedCommit> {
+        self.prepared.as_ref()
+    }
+
+    fn finish(&mut self) {
+        self.prepared = None;
+    }
 }
 
 pub(in crate::runtime::emitters) type IcebergEmitterResult<T> =
@@ -104,7 +188,21 @@ pub(in crate::runtime::emitters) enum IcebergEmitterError {
 
 impl IcebergEmitterError {
     pub(in crate::runtime::emitters) fn is_retryable_publish_failure(self) -> bool {
-        false
+        match self {
+            Self::FlushToDisk
+            | Self::MapBatch
+            | Self::WriteStagedIpc
+            | Self::ReadStagedIpc
+            | Self::Commit => true,
+            Self::InvalidFlushPolicy
+            | Self::InvalidCommitPolicy
+            | Self::CompileValues
+            | Self::CreateStagingDir
+            | Self::BuildSchema
+            | Self::InvalidLocation
+            | Self::InitializeCatalog
+            | Self::InitializeTable => false,
+        }
     }
 }
 
@@ -128,6 +226,42 @@ struct IcebergStagedBatch {
     bytes: u64,
     acks: Vec<AckSet>,
     domain_timestamp: Timestamp,
+}
+
+pub(super) struct IcebergRejectedRecord {
+    batch: RuntimeRecordBatch,
+    row: usize,
+    metadata: RuntimeRecordMetadata,
+    key: Option<BranchKey>,
+    acks: AckSet,
+    error: StructuredMessageError,
+}
+
+struct IcebergRejectedRow {
+    row: usize,
+    error: StructuredMessageError,
+}
+
+struct IcebergMappedBatch {
+    accepted: Option<RecordBatch>,
+    rejected: Vec<IcebergRejectedRow>,
+}
+
+impl IcebergRejectedRecord {
+    fn message(&self) -> Result<(RelayMessage, StructuredMessageError), (String, AckSet)> {
+        let record = self
+            .batch
+            .runtime_record(self.row, self.metadata.clone())
+            .map_err(|reason| (reason, self.acks.clone()))?;
+        Ok((
+            RelayMessage {
+                key: self.key.clone(),
+                record,
+                acks: self.acks.clone(),
+            },
+            self.error.clone(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +349,26 @@ impl IcebergEmitterClientConfig<'_> {
 }
 
 impl IcebergEmitter {
+    fn buffered_message_count(
+        pending_rows: u64,
+        staged_rows: u64,
+        rejected_records: usize,
+    ) -> usize {
+        let records = pending_rows
+            .saturating_add(staged_rows)
+            .saturating_add(u64::try_from(rejected_records).unwrap_or(u64::MAX));
+        usize::try_from(records).unwrap_or(usize::MAX)
+    }
+
+    fn update_buffered_messages(&self) {
+        self.buffered_messages
+            .set_iceberg(Self::buffered_message_count(
+                self.pending_rows,
+                self.staged_rows,
+                self.rejected_records.len(),
+            ));
+    }
+
     pub(in crate::runtime) async fn new(
         init: IcebergEmitterInit<'_>,
     ) -> IcebergEmitterResult<Self> {
@@ -276,9 +430,9 @@ impl IcebergEmitter {
         let client = Self::client_from_config(client_init).await?;
         Ok(Self {
             client,
+            commit_state: IcebergCommitState::default(),
             program,
             mapped_schema,
-            input_schema,
             flush_policy,
             commit_policy,
             staging_dir,
@@ -291,6 +445,7 @@ impl IcebergEmitter {
             staged_rows: 0,
             staged_bytes: 0,
             commit_at: None,
+            rejected_records: VecDeque::new(),
             buffered_messages,
         })
     }
@@ -548,23 +703,55 @@ impl IcebergEmitter {
         self.commit_if_due(true).await
     }
 
+    pub(in crate::runtime) fn pending_acks(&self) -> AckSet {
+        AckSet::merged(
+            self.pending_batches
+                .iter()
+                .flat_map(|batch| batch.acks.iter().cloned())
+                .chain(
+                    self.staged_batches
+                        .iter()
+                        .flat_map(|batch| batch.acks.iter().cloned()),
+                )
+                .chain(
+                    self.rejected_records
+                        .iter()
+                        .map(|record| record.acks.clone()),
+                ),
+        )
+    }
+
+    pub(super) fn next_rejected_record_message(
+        &self,
+    ) -> Option<Result<(RelayMessage, StructuredMessageError), (String, AckSet)>> {
+        self.rejected_records
+            .front()
+            .map(IcebergRejectedRecord::message)
+    }
+
+    pub(super) fn finish_rejected_record(&mut self) {
+        let _ = self.rejected_records.pop_front();
+        self.update_buffered_messages();
+    }
+
     async fn flush_to_disk(&mut self) -> IcebergEmitterResult<()> {
         if self.pending_rows == 0 {
             self.flush_at = None;
             return Ok(());
         }
+        let acks = self.pending_acks();
+        await_emitter_confirmation(&acks, self.flush_pending_to_disk()).await
+    }
+
+    async fn flush_pending_to_disk(&mut self) -> IcebergEmitterResult<()> {
         let pending_batches = self
             .pending_batches
             .iter()
             .map(|batch| &batch.batch)
             .collect::<Vec<_>>();
-        let input_batch = match RuntimeRecordBatch::concat(&pending_batches) {
-            Ok(batch) => batch,
-            Err(error) => {
-                self.flush_at = Some(Instant::now() + Duration::from_secs(1));
-                return Err(Report::new(IcebergEmitterError::FlushToDisk).attach_printable(error));
-            }
-        };
+        let input_batch = RuntimeRecordBatch::concat(&pending_batches).map_err(|error| {
+            Report::new(IcebergEmitterError::FlushToDisk).attach_printable(error)
+        })?;
         let metadata = self
             .pending_batches
             .iter()
@@ -575,25 +762,70 @@ impl IcebergEmitter {
             .iter()
             .flat_map(|batch| batch.keys.iter().cloned())
             .collect::<Vec<_>>();
-        let batch = match self
-            .mapped_arrow_batch_from_runtime_batch(&input_batch, metadata, keys)
-            .await
-        {
-            Ok(batch) => batch,
-            Err(error) => {
-                self.flush_at = Some(Instant::now() + Duration::from_secs(1));
-                return Err(error);
+        let row_count = input_batch.batch().num_rows();
+        let ack_count = self
+            .pending_batches
+            .iter()
+            .map(|batch| batch.acks.len())
+            .sum::<usize>();
+        if metadata.len() != row_count || keys.len() != row_count || ack_count != row_count {
+            return Err(
+                Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
+                    "Iceberg pending metadata/key/ack counts {}/{}/{} do not match {row_count} \
+                     rows",
+                    metadata.len(),
+                    keys.len(),
+                    ack_count
+                )),
+            );
+        }
+        let IcebergMappedBatch { accepted, rejected } = self
+            .mapped_arrow_batch_from_runtime_batch(&input_batch, &keys)
+            .await?;
+        let mut rejected_errors = vec![None; row_count];
+        for rejected in rejected {
+            let Some(error) = rejected_errors.get_mut(rejected.row) else {
+                return Err(
+                    Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
+                        "Iceberg VALUES rejected row {} outside {row_count} rows",
+                        rejected.row
+                    )),
+                );
+            };
+            if error.is_some() {
+                return Err(
+                    Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
+                        "Iceberg VALUES rejected row {} more than once",
+                        rejected.row
+                    )),
+                );
             }
-        };
-        let path = self.next_staged_path();
-        let staged_bytes = match Self::write_ipc_batch(path.clone(), batch).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.flush_at = Some(Instant::now() + Duration::from_secs(1));
-                return Err(error);
+            *error = Some(rejected.error);
+        }
+        let expected_accepted_rows = rejected_errors
+            .iter()
+            .filter(|error| error.is_none())
+            .count();
+        let actual_accepted_rows = accepted.as_ref().map_or(0, RecordBatch::num_rows);
+        if actual_accepted_rows != expected_accepted_rows {
+            return Err(
+                Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
+                    "Iceberg VALUES selected {actual_accepted_rows} accepted rows but retained \
+                     {expected_accepted_rows} input acknowledgments"
+                )),
+            );
+        }
+        let accepted_rows = u64::try_from(actual_accepted_rows).map_err(|error| {
+            Report::new(IcebergEmitterError::MapBatch).attach_printable(error.to_string())
+        })?;
+        let (path, staged_bytes, accepted_rows) = match accepted {
+            Some(batch) => {
+                let path = self.next_staged_path();
+                let staged_bytes = Self::write_ipc_batch(path.clone(), batch).await?;
+                (Some(path), staged_bytes, accepted_rows)
             }
+            None => (None, 0, 0),
         };
-        let rows = self.pending_rows;
         let domain_timestamp = self
             .pending_batches
             .iter()
@@ -605,22 +837,41 @@ impl IcebergEmitter {
             .into_iter()
             .flat_map(|batch| batch.acks)
             .collect::<Vec<_>>();
-        self.staged_batches.push(IcebergStagedBatch {
-            path,
-            rows,
-            bytes: staged_bytes,
-            acks,
-            domain_timestamp,
-        });
-        self.staged_rows = self.staged_rows.saturating_add(rows);
-        self.staged_bytes = self.staged_bytes.saturating_add(staged_bytes);
+        let mut accepted_acks = Vec::with_capacity(usize::try_from(accepted_rows).unwrap_or(0));
+        for (row, ((metadata, key), acks)) in metadata.into_iter().zip(keys).zip(acks).enumerate() {
+            if let Some(error) = rejected_errors[row].take() {
+                self.rejected_records.push_back(IcebergRejectedRecord {
+                    batch: input_batch.clone(),
+                    row,
+                    metadata,
+                    key,
+                    acks,
+                    error,
+                });
+            } else {
+                accepted_acks.push(acks);
+            }
+        }
+        debug_assert_eq!(accepted_acks.len(), actual_accepted_rows);
+        if let Some(path) = path {
+            self.staged_batches.push(IcebergStagedBatch {
+                path,
+                rows: accepted_rows,
+                bytes: staged_bytes,
+                acks: accepted_acks,
+                domain_timestamp,
+            });
+            self.staged_rows = self.staged_rows.saturating_add(accepted_rows);
+            self.staged_bytes = self.staged_bytes.saturating_add(staged_bytes);
+        }
         self.pending_rows = 0;
         self.pending_bytes = 0;
         self.update_buffered_messages();
         self.flush_at = None;
-        if self.commit_at.is_none() {
+        if !self.staged_batches.is_empty() && self.commit_at.is_none() {
             self.commit_at = Some(Instant::now() + self.commit_policy.interval);
         }
+        self.update_buffered_messages();
         Ok(())
     }
 
@@ -635,23 +886,30 @@ impl IcebergEmitter {
         if !force && !time_due && !size_due {
             return Ok(None);
         }
-        let paths = self
-            .staged_batches
-            .iter()
-            .map(|batch| batch.path.clone())
-            .collect::<Vec<_>>();
-        let batch = match Self::read_ipc_batches(self.mapped_schema.clone(), paths.as_slice()).await
-        {
-            Ok(batch) => batch,
-            Err(error) => {
-                self.commit_at = Some(Instant::now() + Duration::from_secs(1));
-                return Err(error);
-            }
-        };
-        if let Err(error) = self.client.write_batch(batch).await {
-            self.commit_at = Some(Instant::now() + Duration::from_secs(1));
-            return Err(error);
+        let acks = self.pending_acks();
+        await_emitter_confirmation(&acks, self.commit_staged_batches()).await
+    }
+
+    async fn commit_staged_batches(&mut self) -> IcebergEmitterResult<Option<PublishReport>> {
+        if self.commit_state.prepared().is_none() {
+            let paths = self
+                .staged_batches
+                .iter()
+                .map(|batch| batch.path.clone())
+                .collect::<Vec<_>>();
+            let batch =
+                Self::read_ipc_batches(self.mapped_schema.clone(), paths.as_slice()).await?;
+            let prepared = self.client.prepare_batch(batch).await?;
+            self.commit_state.store(prepared);
         }
+        self.client
+            .commit_prepared(
+                self.commit_state
+                    .prepared()
+                    .expect("Iceberg commit must remain prepared until it finishes"),
+            )
+            .await?;
+        self.commit_state.finish();
         let staged = std::mem::take(&mut self.staged_batches);
         let messages = staged
             .iter()
@@ -691,18 +949,6 @@ impl IcebergEmitter {
         )))
     }
 
-    fn update_buffered_messages(&self) {
-        self.buffered_messages
-            .set_iceberg(Self::buffered_message_count(
-                self.pending_rows,
-                self.staged_rows,
-            ));
-    }
-
-    fn buffered_message_count(pending_rows: u64, staged_rows: u64) -> usize {
-        usize::try_from(pending_rows.saturating_add(staged_rows)).unwrap_or(usize::MAX)
-    }
-
     fn no_ack_retained_batches(
         pending_batches: &[IcebergPendingBatch],
         staged_batches: &[IcebergStagedBatch],
@@ -716,68 +962,45 @@ impl IcebergEmitter {
         }
     }
 
-    fn retained_acks(
-        pending_batches: &[IcebergPendingBatch],
-        staged_batches: &[IcebergStagedBatch],
-    ) -> AckSet {
-        AckSet::merged(
-            pending_batches
-                .iter()
-                .flat_map(|batch| batch.acks.iter().cloned())
-                .chain(
-                    staged_batches
-                        .iter()
-                        .flat_map(|batch| batch.acks.iter().cloned()),
-                ),
-        )
-    }
-
-    pub(in crate::runtime::emitters) fn pending_acks(&self) -> AckSet {
-        Self::retained_acks(&self.pending_batches, &self.staged_batches)
-    }
-
     async fn mapped_arrow_batch_from_runtime_batch(
         &self,
         batch: &RuntimeRecordBatch,
-        metadata: Vec<RuntimeRecordMetadata>,
-        keys: Vec<Option<BranchKey>>,
-    ) -> IcebergEmitterResult<RecordBatch> {
-        let decoded = self
-            .input_schema
-            .decoded_records_from_arrow_batch(batch)
-            .map_err(|error| Report::new(IcebergEmitterError::MapBatch).attach_printable(error))?;
-        if decoded.len() != metadata.len() {
-            return Err(
-                Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
-                    "metadata count {} does not match row count {}",
-                    metadata.len(),
-                    decoded.len()
-                )),
-            );
-        }
-        if decoded.len() != keys.len() {
+        keys: &[Option<BranchKey>],
+    ) -> IcebergEmitterResult<IcebergMappedBatch> {
+        Self::map_values_batch(&self.program, &self.mapped_schema, batch, keys).await
+    }
+
+    async fn map_values_batch(
+        program: &CompiledSqlValuesProgram,
+        mapped_schema: &StdArc<arrow_schema::Schema>,
+        batch: &RuntimeRecordBatch,
+        keys: &[Option<BranchKey>],
+    ) -> IcebergEmitterResult<IcebergMappedBatch> {
+        let row_count = batch.batch().num_rows();
+        if row_count != keys.len() {
             return Err(
                 Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
                     "branch key count {} does not match row count {}",
                     keys.len(),
-                    decoded.len()
+                    row_count
                 )),
             );
         }
-        let records = decoded
-            .into_iter()
-            .zip(metadata)
-            .map(|(record, metadata)| record.into_runtime_record(metadata))
-            .collect::<Vec<_>>();
-        let records = augment_runtime_records_with_branch_keys(records, &keys)
-            .map_err(|error| Report::new(IcebergEmitterError::MapBatch).attach_printable(error))?;
-        let input =
-            vm_typed_batch_from_runtime_records(&records, &self.program.program.input_schema)
-                .map_err(|error| {
-                    Report::new(IcebergEmitterError::MapBatch).attach_printable(error)
-                })?;
+        let side_inputs = HashMap::default();
+        let lookup_columns = HashMap::default();
+        let input = project_vm_input_batch(
+            &program.program.input_schema,
+            &VmInputProjectionSources {
+                carrier: batch,
+                keys,
+                side_inputs: &side_inputs,
+                lookup_columns: &lookup_columns,
+                uninitialized: None,
+            },
+        )
+        .map_err(|error| Report::new(IcebergEmitterError::MapBatch).attach_printable(error))?;
         let result = execute_program_with_selection_in_context(
-            self.program.program.as_ref(),
+            program.program.as_ref(),
             &input,
             &VmExecutionContext {
                 now: current_timestamp(),
@@ -788,34 +1011,80 @@ impl IcebergEmitter {
         .map_err(|error| {
             Report::new(IcebergEmitterError::MapBatch).attach_printable(error.to_string())
         })?;
-        if result.batch.row_count() != batch.batch().num_rows() {
+        if result.batch.row_count() != row_count
+            || result.selected_rows.len() != row_count
+            || result
+                .selected_rows
+                .iter()
+                .enumerate()
+                .any(|(output_row, input_row)| output_row != *input_row)
+        {
             return Err(
                 Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
-                    "VALUES produced {} rows for {} staged records",
+                    "VALUES produced {} rows with {} selections for {row_count} staged records",
                     result.batch.row_count(),
-                    batch.batch().num_rows()
+                    result.selected_rows.len()
                 )),
             );
         }
-        if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-            return Err(
-                Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
-                    "VALUES side error {}: {} at {}",
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
-                )),
-            );
+        let mut rejected = Vec::new();
+        let accepted_rows = result
+            .batch
+            .errors()
+            .iter()
+            .enumerate()
+            .filter_map(|(row, errors)| {
+                if let Some(side_error) = errors.first() {
+                    let reason = format!(
+                        "Iceberg VALUES side error {}: {} at {}",
+                        side_error.code.as_str(),
+                        side_error.message,
+                        side_error.span
+                    );
+                    rejected.push(IcebergRejectedRow {
+                        row,
+                        error: program.structured_side_error(reason, side_error.span),
+                    });
+                    None
+                } else {
+                    Some(row)
+                }
+            })
+            .collect::<Vec<_>>();
+        if accepted_rows.is_empty() {
+            return Ok(IcebergMappedBatch {
+                accepted: None,
+                rejected,
+            });
         }
+        let predicate = BooleanArray::from_iter(
+            result
+                .batch
+                .errors()
+                .iter()
+                .map(|errors| Some(errors.is_empty())),
+        );
         let columns = result
             .batch
             .columns()
             .iter()
-            .zip(self.mapped_schema.fields())
-            .map(|(array, field)| Self::typed_array_to_array_ref(array, field.data_type()))
-            .collect::<Vec<_>>();
-        RecordBatch::try_new(self.mapped_schema.clone(), columns)
-            .change_context(IcebergEmitterError::MapBatch)
+            .zip(mapped_schema.fields())
+            .map(|(array, field)| {
+                let array = Self::typed_array_to_array_ref(array, field.data_type());
+                if accepted_rows.len() == row_count {
+                    Ok(array)
+                } else {
+                    filter_arrow_array(array.as_ref(), &predicate)
+                        .change_context(IcebergEmitterError::MapBatch)
+                }
+            })
+            .collect::<IcebergEmitterResult<Vec<_>>>()?;
+        let accepted = RecordBatch::try_new(mapped_schema.clone(), columns)
+            .change_context(IcebergEmitterError::MapBatch)?;
+        Ok(IcebergMappedBatch {
+            accepted: Some(accepted),
+            rejected,
+        })
     }
 
     fn typed_array_to_array_ref(
@@ -962,12 +1231,62 @@ impl IcebergEmitter {
 impl Drop for IcebergEmitter {
     fn drop(&mut self) {
         Self::no_ack_retained_batches(&self.pending_batches, &self.staged_batches);
+        for rejected in &self.rejected_records {
+            rejected
+                .acks
+                .no_ack("Iceberg emitter dropped rejected record");
+        }
         self.buffered_messages.set_iceberg(0);
     }
 }
 
 impl IcebergEmitterClient {
-    async fn write_batch(&mut self, batch: RecordBatch) -> IcebergEmitterResult<()> {
+    fn single_attempt_table(table: &Table) -> IcebergEmitterResult<Table> {
+        let metadata = table
+            .metadata()
+            .clone()
+            .into_builder(None)
+            .set_properties(
+                [(
+                    TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_string(),
+                    "0".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            )
+            .change_context(IcebergEmitterError::Commit)?
+            .build()
+            .change_context(IcebergEmitterError::Commit)?
+            .metadata;
+        let mut builder = Table::builder()
+            .file_io(table.file_io().clone())
+            .metadata(metadata)
+            .identifier(table.identifier().clone())
+            .runtime(
+                ::iceberg::Runtime::try_current().change_context(IcebergEmitterError::Commit)?,
+            );
+        if let Some(metadata_location) = table.metadata_location() {
+            builder = builder.metadata_location(metadata_location);
+        }
+        builder.build().change_context(IcebergEmitterError::Commit)
+    }
+
+    async fn refresh_table(&mut self) -> IcebergEmitterResult<()> {
+        let table_ident = self.table.identifier().clone();
+        self.table = self
+            .catalog
+            .load_table(&table_ident)
+            .await
+            .change_context(IcebergEmitterError::Commit)
+            .attach_printable(format!("table: {table_ident}"))?;
+        Ok(())
+    }
+
+    async fn prepare_batch(
+        &mut self,
+        batch: RecordBatch,
+    ) -> IcebergEmitterResult<IcebergPreparedCommit> {
+        self.refresh_table().await?;
         let location_generator = DefaultLocationGenerator::new(self.table.metadata())
             .change_context(IcebergEmitterError::Commit)?;
         self.data_file_sequence = self.data_file_sequence.saturating_add(1);
@@ -999,16 +1318,45 @@ impl IcebergEmitterClient {
             .close()
             .await
             .change_context(IcebergEmitterError::Commit)?;
-        let tx = Transaction::new(&self.table);
-        let action = tx.fast_append().add_data_files(data_files);
+        Ok(IcebergPreparedCommit::new(data_files))
+    }
+
+    async fn commit_prepared(
+        &mut self,
+        prepared: &IcebergPreparedCommit,
+    ) -> IcebergEmitterResult<()> {
+        self.refresh_table().await?;
+        if prepared.is_committed_to(&self.table) {
+            return Ok(());
+        }
+        let single_attempt_table = Self::single_attempt_table(&self.table)?;
+        let tx = Transaction::new(&single_attempt_table);
+        let action = tx
+            .fast_append()
+            .set_commit_uuid(prepared.append_id())
+            .set_snapshot_properties(prepared.snapshot_properties().collect())
+            .add_data_files(prepared.data_files().iter().cloned());
         let tx = action
             .apply(tx)
             .change_context(IcebergEmitterError::Commit)?;
-        self.table = tx
-            .commit(self.catalog.as_ref())
-            .await
-            .change_context(IcebergEmitterError::Commit)?;
-        Ok(())
+        match tx.commit(self.catalog.as_ref()).await {
+            Ok(table) => {
+                self.table = table;
+                Ok(())
+            }
+            Err(error) => {
+                let commit_error = Report::new(error).change_context(IcebergEmitterError::Commit);
+                let table_ident = self.table.identifier().clone();
+                if let Ok(refreshed) = self.catalog.load_table(&table_ident).await {
+                    let committed = prepared.is_committed_to(&refreshed);
+                    self.table = refreshed;
+                    if committed {
+                        return Ok(());
+                    }
+                }
+                Err(commit_error)
+            }
+        }
     }
 }
 
@@ -1134,11 +1482,131 @@ impl IcebergObjectStoreProperties {
 
 #[cfg(test)]
 mod tests {
-    use ::iceberg::arrow::arrow_schema_to_schema_auto_assign_ids;
-    use arrow_array::{Array, TimestampMicrosecondArray, TimestampNanosecondArray};
+    use ::iceberg::{
+        arrow::arrow_schema_to_schema_auto_assign_ids,
+        io::FileIO,
+        spec::{
+            DataContentType, DataFileBuilder, FormatVersion, Operation, PartitionSpec, Schema,
+            Snapshot, SortOrder, Struct, Summary, TableMetadataBuilder,
+        },
+    };
+    use arrow_array::{Array, Int64Array, TimestampMicrosecondArray, TimestampNanosecondArray};
     use arrow_schema::{DataType, Field, TimeUnit};
+    use tokio::time::timeout;
 
     use super::*;
+
+    #[tokio::test]
+    async fn iceberg_catalog_transaction_disables_library_internal_retries() {
+        let metadata = TableMetadataBuilder::new(
+            Schema::builder().build().expect("valid empty schema"),
+            PartitionSpec::unpartition_spec(),
+            SortOrder::unsorted_order(),
+            "memory://warehouse/table".to_string(),
+            FormatVersion::V2,
+            [(
+                TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_string(),
+                "7".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .expect("valid table metadata builder")
+        .build()
+        .expect("valid table metadata")
+        .metadata;
+        let table = Table::builder()
+            .metadata(metadata)
+            .metadata_location("memory://warehouse/table/metadata/v1.json")
+            .identifier(TableIdent::from_strs(["test", "table"]).expect("valid table ident"))
+            .file_io(FileIO::new_with_memory())
+            .runtime(::iceberg::Runtime::try_current().expect("test runs in Tokio runtime"))
+            .build()
+            .expect("valid in-memory table");
+
+        let single_attempt = IcebergEmitterClient::single_attempt_table(&table)
+            .expect("single-attempt table must build");
+
+        assert_eq!(
+            single_attempt
+                .metadata()
+                .table_properties()
+                .expect("valid transient table properties")
+                .commit_num_retries,
+            0
+        );
+        assert_eq!(
+            table
+                .metadata()
+                .table_properties()
+                .expect("valid source table properties")
+                .commit_num_retries,
+            7,
+            "the catalog table metadata must not be mutated"
+        );
+    }
+
+    #[test]
+    fn iceberg_catalog_retry_retains_prepared_data_files_until_commit_finishes() {
+        let append_id = uuid::Uuid::now_v7();
+        let data_file = DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path("s3://bucket/table/data/prepared.parquet".to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(128)
+            .record_count(2)
+            .partition_spec_id(0)
+            .partition(Struct::empty())
+            .build()
+            .expect("valid prepared Iceberg data file");
+        let mut state = IcebergCommitState::default();
+        state.store(IcebergPreparedCommit::with_append_id(
+            vec![data_file],
+            append_id,
+        ));
+
+        let first_attempt = state.prepared().expect("prepared append must be retained");
+        assert_eq!(first_attempt.append_id(), append_id);
+        assert_eq!(
+            first_attempt.data_files()[0].file_path(),
+            "s3://bucket/table/data/prepared.parquet"
+        );
+        let retry_attempt = state
+            .prepared()
+            .expect("a failed catalog attempt must not discard prepared files");
+        assert_eq!(retry_attempt.append_id(), append_id);
+        assert_eq!(retry_attempt.data_files(), first_attempt.data_files());
+
+        state.finish();
+        assert!(state.prepared().is_none());
+    }
+
+    #[test]
+    fn iceberg_append_marker_identifies_an_ambiguously_successful_commit() {
+        let append_id = uuid::Uuid::now_v7();
+        let prepared = IcebergPreparedCommit::with_append_id(Vec::new(), append_id);
+        let snapshot = Snapshot::builder()
+            .with_snapshot_id(1)
+            .with_sequence_number(1)
+            .with_timestamp_ms(1)
+            .with_manifest_list("s3://bucket/table/metadata/manifest-list.avro")
+            .with_summary(Summary {
+                operation: Operation::Append,
+                additional_properties: [(
+                    ICEBERG_APPEND_ID_PROPERTY.to_string(),
+                    append_id.to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            })
+            .build();
+
+        assert!(prepared.matches_snapshot(&snapshot));
+        assert!(
+            !IcebergPreparedCommit::with_append_id(Vec::new(), uuid::Uuid::now_v7())
+                .matches_snapshot(&snapshot)
+        );
+    }
 
     #[test]
     fn iceberg_schema_uses_microsecond_utc_timestamps() {
@@ -1187,12 +1655,141 @@ mod tests {
     }
 
     #[test]
-    fn iceberg_buffered_message_count_includes_pending_and_staged_rows() {
-        assert_eq!(IcebergEmitter::buffered_message_count(2, 3), 5);
+    fn iceberg_publish_failures_retain_records_for_declared_policy_retries() {
+        for error in [
+            IcebergEmitterError::FlushToDisk,
+            IcebergEmitterError::MapBatch,
+            IcebergEmitterError::WriteStagedIpc,
+            IcebergEmitterError::ReadStagedIpc,
+            IcebergEmitterError::Commit,
+        ] {
+            assert!(
+                error.is_retryable_publish_failure(),
+                "{error:?} must retain staged records and retry under the declared policy"
+            );
+        }
+        assert!(!IcebergEmitterError::InitializeTable.is_retryable_publish_failure());
+    }
+
+    #[test]
+    fn iceberg_drain_count_includes_pending_staged_and_rejected_records() {
+        assert_eq!(IcebergEmitter::buffered_message_count(2, 3, 4), 9);
         assert_eq!(
-            IcebergEmitter::buffered_message_count(u64::MAX, 1),
+            IcebergEmitter::buffered_message_count(u64::MAX, u64::MAX, usize::MAX),
             usize::MAX
         );
+    }
+
+    #[test]
+    fn iceberg_rejected_record_remains_materializable_until_delivery_finishes() {
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![StdArc::new(Int64Array::from(vec![7]))])
+                .expect("valid rejected-record batch");
+        let batch = RuntimeRecordBatch::from_record_batch(schema, batch)
+            .expect("matching rejected-record schema");
+        let (acks, _completion) = AckSet::root();
+        let error = structured_message_error(
+            MessageErrorCode::External,
+            "rejected".to_string(),
+            MessageErrorOperation::Publish,
+            None,
+            std::iter::empty(),
+        );
+        let rejected = IcebergRejectedRecord {
+            batch,
+            row: 0,
+            metadata: RuntimeRecordMetadata::test(),
+            key: None,
+            acks,
+            error: error.clone(),
+        };
+
+        let (_, first_error) = rejected
+            .message()
+            .expect("the queued rejection must materialize");
+        let (_, second_error) = rejected
+            .message()
+            .expect("cancellation must leave the queued rejection materializable");
+        assert_eq!(first_error.reference, error.reference);
+        assert_eq!(second_error.reference, error.reference);
+    }
+
+    #[tokio::test]
+    async fn iceberg_values_side_errors_are_isolated_from_accepted_arrow_rows() {
+        let input_schema = StdArc::new(arrow_schema::Schema::new(vec![
+            Field::new("numerator", DataType::Int64, false),
+            Field::new("denominator", DataType::Int64, false),
+        ]));
+        let input = RecordBatch::try_new(
+            input_schema.clone(),
+            vec![
+                StdArc::new(Int64Array::from(vec![10, 11, 12])),
+                StdArc::new(Int64Array::from(vec![2, 0, 3])),
+            ],
+        )
+        .expect("valid Iceberg VALUES input batch");
+        let input = RuntimeRecordBatch::from_record_batch(input_schema.clone(), input)
+            .expect("matching runtime input schema");
+        let values = vec![IcebergValueMapping {
+            column: "quotient".to_string(),
+            expression: nervix_nspl::parse_expression("input.numerator / input.denominator")
+                .expect("valid VALUES expression"),
+        }];
+        let program = compile_iceberg_values_program(
+            &Domain::parse("test").expect("valid domain"),
+            &Identifier::parse("iceberg_values").expect("valid emitter"),
+            &values,
+            input_schema,
+            None,
+        )
+        .expect("Iceberg VALUES program must compile");
+        let mapped_schema = IcebergEmitter::mapped_arrow_schema(&program, &values)
+            .expect("Iceberg schema must map");
+
+        let mapped =
+            IcebergEmitter::map_values_batch(&program, &mapped_schema, &input, &[None, None, None])
+                .await
+                .expect("a row side error must not fail the batch");
+
+        assert_eq!(mapped.rejected.len(), 1);
+        assert_eq!(mapped.rejected[0].row, 1);
+        assert_eq!(mapped.rejected[0].error.code, MessageErrorCode::Evaluation);
+        assert_eq!(
+            mapped.rejected[0].error.operation,
+            MessageErrorOperation::Values
+        );
+        let accepted = mapped.accepted.expect("healthy rows must remain accepted");
+        assert_eq!(accepted.num_rows(), 2);
+        let quotient = accepted
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("quotient must retain its exact INT64 type");
+        assert_eq!(quotient.values(), &[5, 4]);
+    }
+
+    #[tokio::test]
+    async fn iceberg_confirmation_waits_refresh_ack_leases() {
+        let (acks, mut completion) = AckSet::root();
+        let wait_acks = acks.clone();
+        let wait = tokio::spawn(async move {
+            await_emitter_confirmation(&wait_acks, sleep(Duration::from_millis(150))).await;
+        });
+
+        assert_eq!(
+            timeout(Duration::from_secs(1), completion.wait_for_progress())
+                .await
+                .expect("Iceberg wait must refresh its acknowledgment lease"),
+            crate::runtime_ack::AckProgress::Alive
+        );
+        wait.await.expect("confirmation wait task must finish");
+        acks.ack_success();
+        assert_eq!(completion.wait().await, crate::runtime_ack::AckOutcome::Ack);
     }
 
     #[tokio::test]
@@ -1228,46 +1825,5 @@ mod tests {
         let expected = AckOutcome::NoAck("Iceberg emitter dropped buffered batch".to_string());
         assert_eq!(pending_completion.wait().await, expected);
         assert_eq!(staged_completion.wait().await, expected);
-    }
-
-    #[tokio::test]
-    async fn iceberg_retained_ack_view_heartbeats_pending_and_staged_rows() {
-        let schema = StdArc::new(arrow_schema::Schema::empty());
-        let batch = RecordBatch::try_new_with_options(
-            schema.clone(),
-            Vec::new(),
-            &RecordBatchOptions::new().with_row_count(Some(1)),
-        )
-        .expect("one-row empty batch must build");
-        let batch = RuntimeRecordBatch::from_record_batch(schema, batch)
-            .expect("runtime batch schema must match");
-        let (pending_acks, mut pending_completion) = AckSet::root();
-        let (staged_acks, mut staged_completion) = AckSet::root();
-        let pending = IcebergPendingBatch {
-            batch,
-            metadata: vec![RuntimeRecordMetadata::test()],
-            keys: vec![None],
-            acks: vec![pending_acks],
-            domain_timestamp: Timestamp::from_unix_nanos(0),
-        };
-        let staged = IcebergStagedBatch {
-            path: PathBuf::from("unwritten-test-batch.arrow"),
-            rows: 1,
-            bytes: 0,
-            acks: vec![staged_acks],
-            domain_timestamp: Timestamp::from_unix_nanos(0),
-        };
-
-        let retained = IcebergEmitter::retained_acks(&[pending], &[staged]);
-        retained.ack_alive();
-
-        assert_eq!(
-            pending_completion.wait_for_progress().await,
-            AckProgress::Alive
-        );
-        assert_eq!(
-            staged_completion.wait_for_progress().await,
-            AckProgress::Alive
-        );
     }
 }

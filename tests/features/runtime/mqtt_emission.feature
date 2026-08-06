@@ -44,7 +44,7 @@ Feature: MQTT emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
         };
-        CREATE EMITTER mqtt_notifications_out FROM notifications TO MQTT mqtt_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
+        CREATE EMITTER mqtt_notifications_out FROM notifications TO MQTT mqtt_main TOPIC notifications_out_{{test_id}} MODE QOS 1 ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -75,3 +75,86 @@ Feature: MQTT emission
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  @mqtt_emitter_qos1_boundary
+  Scenario Outline: MQTT QoS 1 holds the input offset until PUBACK
+    Given Kafka is running
+    And MQTT is running
+    And a stallable MQTT endpoint is configured
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "mqtt_boundary_in_{{test_id}}" exists with 1 partitions
+    And MQTT topic "mqtt_boundary_out_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE SCHEMA emitter_error (
+        error_code STRING,
+        source_user_id I64
+      );
+      CREATE SCHEMA user_id_branch ( user_id I64 );
+      CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+      CREATE RELAY emitter_errors SCHEMA emitter_error BRANCHED BY by_kafka_notifications;
+      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE INGESTOR kafka_notifications
+        FROM KAFKA kafka_ingress TOPIC mqtt_boundary_in_{{test_id}}
+          OFFSET BY CONSUMER GROUP mqtt_boundary_group_{{test_id}}
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+        DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          BRANCHED BY by_kafka_notifications
+          SET user_id = message.user_id
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT mqtt_sink TYPE MQTT CONFIG {
+        'addr' = '{{mqtt_stallable_addr}}',
+        'client_id' = 'nervix-mqtt-boundary-{{test_id}}'
+      };
+      CREATE ATTACHED EMITTER mqtt_boundary FROM notifications
+        TO MQTT mqtt_sink TOPIC mqtt_boundary_out_{{test_id}}
+          MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 300ms
+            RETRY POLICY BACKOFF 100ms MAX 200ms
+          ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO emitter_errors
+          SET error_code = error.code,
+              source_user_id = input.user_id
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
+      START;
+      """
+    Then Kafka consumer group "mqtt_boundary_group_{{test_id}}" eventually has 1 consumers
+    When the stallable endpoint "mqtt" is paused
+    And Kafka message is published to topic "mqtt_boundary_in_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then within "2s" Kafka consumer group "mqtt_boundary_group_{{test_id}}" next offset for topic "mqtt_boundary_in_{{test_id}}" partition 0 is "below 1"
+    And the relay subscription does not receive a payload within "500ms"
+    When the stallable endpoint "mqtt" is resumed
+    Then the observed broker receives a payload
+      """
+      {"user_id":42}
+      """
+    And within "5s" Kafka consumer group "mqtt_boundary_group_{{test_id}}" next offset for topic "mqtt_boundary_in_{{test_id}}" partition 0 is "at least 1"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -9,12 +9,13 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, alter_ingestor_route_body, alter_op_separator,
-        boxed_choice, channel_ref, client_ref, codec_ref, consumer_group_ref, duration_lit,
-        endpoint_ref, field_ref, filter_where_clause, flushed_ingestor_outputs,
+        ParseError, ParseFromSourceError, ack_timeout, alter_ingestor_route_body,
+        alter_op_separator, boxed_choice, channel_ref, client_ref, codec_ref, consumer_group_ref,
+        duration_lit, endpoint_ref, field_ref, filter_where_clause, flushed_ingestor_outputs,
         general_error_policy, if_not_exists_clause, ingestor_name, into_parse_error, kw,
-        kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref, queue_ref, relay_ref,
-        string_lit, subscription_ref, suggest_from, tok, topic_ref, u64_value, where_expression,
+        kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref, parallel_ack_window,
+        queue_ref, relay_ref, retry_policy, sequential_ack_window, string_lit, subscription_ref,
+        suggest_from, tok, topic_ref, u64_value, where_expression,
     },
 };
 
@@ -41,38 +42,11 @@ fn instance_count<'src>()
     positive_count("instance_count")
 }
 
-/// The bound after `PARALLEL MAX`.
-fn max_in_flight<'src>()
--> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
-    positive_count("max_in_flight")
-}
-
-fn ack_timeout_parser<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Ack)
-        .ignore_then(kw(Identifier::Timeout))
-        .ignore_then(duration_lit())
-}
-
 fn batch_timeout_parser<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Batch)
         .ignore_then(kw(Identifier::Timeout))
         .ignore_then(duration_lit())
-}
-
-fn retry_policy_parser<'src>()
--> impl Parser<'src, &'src [Token], RetryPolicy, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Retry)
-        .ignore_then(kw(Identifier::Policy))
-        .ignore_then(kw(Identifier::Backoff))
-        .ignore_then(duration_lit())
-        .then_ignore(kw(Identifier::Max))
-        .then(duration_lit())
-        .map(|(backoff, max_backoff)| RetryPolicy {
-            backoff,
-            max_backoff,
-        })
 }
 
 fn timestamp_source<'src>()
@@ -87,14 +61,12 @@ fn timestamp_source<'src>()
 
 fn mode_parser<'src>()
 -> impl Parser<'src, &'src [Token], KafkaIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    let ack_timeout = ack_timeout_parser();
+    let ack_timeout = ack_timeout();
     let batch_timeout = batch_timeout_parser();
-    let retry_policy = retry_policy_parser();
+    let retry_policy = retry_policy();
     choice((
         kw(Identifier::Ack)
-            .ignore_then(kw(Identifier::Parallel))
-            .ignore_then(kw(Identifier::Max))
-            .ignore_then(max_in_flight())
+            .ignore_then(parallel_ack_window())
             .then(batch_timeout)
             .then(ack_timeout.clone())
             .then(retry_policy.clone())
@@ -107,7 +79,7 @@ fn mode_parser<'src>()
                 },
             ),
         kw(Identifier::Ack)
-            .ignore_then(kw(Identifier::Sequential))
+            .ignore_then(sequential_ack_window())
             .ignore_then(ack_timeout)
             .then(retry_policy)
             .map(|(timeout, retry_policy)| KafkaIngestMode::AckSequential {
@@ -128,23 +100,13 @@ fn pulsar_mode_parser<'src>()
 fn rabbitmq_mode_parser<'src>()
 -> impl Parser<'src, &'src [Token], RabbitMqIngestMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Ack)
-        .ignore_then(kw(Identifier::Sequential))
-        .ignore_then(kw(Identifier::Ack))
-        .ignore_then(kw(Identifier::Timeout))
-        .ignore_then(duration_lit())
-        .then_ignore(kw(Identifier::Retry))
-        .then_ignore(kw(Identifier::Policy))
-        .then_ignore(kw(Identifier::Backoff))
-        .then(duration_lit())
-        .then_ignore(kw(Identifier::Max))
-        .then(duration_lit())
+        .ignore_then(sequential_ack_window())
+        .ignore_then(ack_timeout())
+        .then(retry_policy())
         .map(
-            |((timeout, backoff), max_backoff)| RabbitMqIngestMode::AckSequential {
+            |(timeout, retry_policy)| RabbitMqIngestMode::AckSequential {
                 timeout,
-                retry_policy: RetryPolicy {
-                    backoff,
-                    max_backoff,
-                },
+                retry_policy,
             },
         )
 }
@@ -152,7 +114,7 @@ fn rabbitmq_mode_parser<'src>()
 fn redis_pubsub_mode_parser<'src>()
 -> impl Parser<'src, &'src [Token], RedisPubSubIngestMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::NoAck)
-        .ignore_then(kw(Identifier::Sequential))
+        .ignore_then(sequential_ack_window())
         .to(RedisPubSubIngestMode::NoAckSequential)
 }
 
@@ -195,15 +157,13 @@ fn mqtt_qos_clause<'src>()
 
 fn mqtt_mode_parser<'src>()
 -> impl Parser<'src, &'src [Token], MqttIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    let ack_timeout = ack_timeout_parser();
+    let ack_timeout = ack_timeout();
     let batch_timeout = batch_timeout_parser();
-    let retry_policy = retry_policy_parser();
+    let retry_policy = retry_policy();
 
     let raw_mode = choice((
         kw(Identifier::Ack)
-            .ignore_then(kw(Identifier::Parallel))
-            .ignore_then(kw(Identifier::Max))
-            .ignore_then(max_in_flight())
+            .ignore_then(parallel_ack_window())
             .then(batch_timeout)
             .then(ack_timeout.clone())
             .then(retry_policy.clone())
@@ -216,7 +176,7 @@ fn mqtt_mode_parser<'src>()
                 }
             }),
         kw(Identifier::Ack)
-            .ignore_then(kw(Identifier::Sequential))
+            .ignore_then(sequential_ack_window())
             .ignore_then(ack_timeout)
             .then(retry_policy)
             .map(
@@ -229,7 +189,7 @@ fn mqtt_mode_parser<'src>()
             .ignore_then(kw(Identifier::Parallel))
             .to(ParsedMqttIngestMode::NoAckParallel),
         kw(Identifier::NoAck)
-            .ignore_then(kw(Identifier::Sequential))
+            .ignore_then(sequential_ack_window())
             .to(ParsedMqttIngestMode::NoAckSequential),
     ));
 
@@ -296,53 +256,41 @@ fn mqtt_mode_parser<'src>()
 fn nats_mode_parser<'src>()
 -> impl Parser<'src, &'src [Token], NatsIngestMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::NoAck)
-        .ignore_then(kw(Identifier::Sequential))
+        .ignore_then(sequential_ack_window())
         .to(NatsIngestMode::NoAckSequential)
 }
 
 fn endpoint_mode_parser<'src>()
 -> impl Parser<'src, &'src [Token], EndpointIngestMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::NoAck)
-        .ignore_then(kw(Identifier::Sequential))
+        .ignore_then(sequential_ack_window())
         .to(EndpointIngestMode::NoAckSequential)
 }
 
 fn websockets_mode_parser<'src>()
 -> impl Parser<'src, &'src [Token], WebsocketsIngestMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::NoAck)
-        .ignore_then(kw(Identifier::Sequential))
+        .ignore_then(sequential_ack_window())
         .to(WebsocketsIngestMode::NoAckSequential)
 }
 
 fn zeromq_mode_parser<'src>()
 -> impl Parser<'src, &'src [Token], ZeroMqIngestMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::NoAck)
-        .ignore_then(kw(Identifier::Sequential))
+        .ignore_then(sequential_ack_window())
         .to(ZeroMqIngestMode::NoAckSequential)
 }
 
 fn sqs_mode_parser<'src>()
 -> impl Parser<'src, &'src [Token], SqsIngestMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Ack)
-        .ignore_then(kw(Identifier::Sequential))
-        .ignore_then(kw(Identifier::Ack))
-        .ignore_then(kw(Identifier::Timeout))
-        .ignore_then(duration_lit())
-        .then_ignore(kw(Identifier::Retry))
-        .then_ignore(kw(Identifier::Policy))
-        .then_ignore(kw(Identifier::Backoff))
-        .then(duration_lit())
-        .then_ignore(kw(Identifier::Max))
-        .then(duration_lit())
-        .map(
-            |((timeout, backoff), max_backoff)| SqsIngestMode::AckSequential {
-                timeout,
-                retry_policy: RetryPolicy {
-                    backoff,
-                    max_backoff,
-                },
-            },
-        )
+        .ignore_then(sequential_ack_window())
+        .ignore_then(ack_timeout())
+        .then(retry_policy())
+        .map(|(timeout, retry_policy)| SqsIngestMode::AckSequential {
+            timeout,
+            retry_policy,
+        })
 }
 
 fn kafka_ingest_source_parser<'src>()

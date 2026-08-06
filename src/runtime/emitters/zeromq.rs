@@ -63,4 +63,22 @@ impl ZeroMqEmitter {
             .await
             .map_err(emitter_publish_error)
     }
+
+    pub(in crate::runtime) async fn publish_records(
+        &mut self,
+        records: Vec<EncodedBrokerRecord>,
+    ) -> PerRecordPublishOutcome {
+        let mut outcome = PerRecordPublishOutcome::empty();
+        for record in records {
+            tokio::task::consume_budget().await;
+            match await_emitter_confirmation(&record.acks, self.publish(record.payload)).await {
+                Ok(()) => outcome.deliver((record.batch_index, record.row_index)),
+                Err(error) => {
+                    outcome.fail(error);
+                    break;
+                }
+            }
+        }
+        outcome
+    }
 }

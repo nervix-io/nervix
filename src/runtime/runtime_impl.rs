@@ -413,7 +413,8 @@ impl Runtime {
             ingestor_reconnect_backoffs: Arc::new(DashMap::default()),
             ingestor_readiness: Arc::new(DashMap::default()),
             emitter_transient_errors: Arc::new(DashMap::default()),
-            emitter_reconnect_backoffs: Arc::new(DashMap::default()),
+            emitter_retry_statuses: Arc::new(DashMap::default()),
+            emitter_confirmation_waits: Arc::new(DashMap::default()),
             executions: Arc::new(DashMap::default()),
             message_error_routes: Arc::new(DashMap::default()),
             compiled_domain_udfs: Arc::new(DashMap::default()),
@@ -436,6 +437,7 @@ impl Runtime {
             events,
             emitter_faults: hooks.emitter_faults,
             ingestor_faults: hooks.ingestor_faults,
+            schedule_publication_faults: hooks.schedule_publication_faults,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
             remote_dispatcher: Arc::new(RwLock::new(None)),
@@ -683,10 +685,63 @@ impl Runtime {
                 quiesce_work.saturating_add(emitter_work)
             })
             .sum();
+        let mut emitter_publishing = affected_entities
+            .iter()
+            .filter(|entity| entity.kind == ModelKind::Emitter)
+            .filter_map(|entity| {
+                self.emitter_publishing_drain_status(&RuntimeKey::new(
+                    domain.clone(),
+                    entity.identifier.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        emitter_publishing.sort_by(|left, right| left.emitter.cmp(&right.emitter));
         EntityDrainStatus {
             buffered_relay_batches,
             node_work_items,
+            emitter_publishing,
         }
+    }
+
+    fn emitter_publishing_drain_status(
+        &self,
+        key: &RuntimeKey,
+    ) -> Option<EmitterPublishingDrainStatus> {
+        let pending_messages = self
+            .emitter_buffers
+            .get(key)
+            .map(|buffered| buffered.load(Ordering::Acquire))
+            .unwrap_or(0);
+        let awaiting_confirmation = self
+            .emitter_confirmation_waits
+            .get(key)
+            .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
+        if awaiting_confirmation {
+            return Some(EmitterPublishingDrainStatus {
+                emitter: key.identifier.clone(),
+                state: EmitterPublishingDrainState::AwaitingConfirmation,
+                pending_messages,
+                retry_backoff: None,
+                retry_wait: None,
+            });
+        }
+        let retry = self.emitter_retry_statuses.get(key)?;
+        let state = match retry.kind {
+            EmitterRetryKind::Infrastructure => EmitterPublishingDrainState::RetryingInfrastructure,
+            EmitterRetryKind::IcebergCommit => EmitterPublishingDrainState::RetryingIcebergCommit,
+        };
+        Some(EmitterPublishingDrainStatus {
+            emitter: key.identifier.clone(),
+            state,
+            pending_messages,
+            retry_backoff: Some(retry.reconnect.backoff),
+            retry_wait: Some(
+                retry
+                    .reconnect
+                    .retry_at
+                    .saturating_duration_since(Instant::now()),
+            ),
+        })
     }
 
     pub(super) fn node_quiesce_counters(
@@ -802,6 +857,11 @@ impl Runtime {
 
     pub fn domain_alter_is_active(&self, domain: &Domain) -> bool {
         self.active_domain_alters.contains_key(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn take_armed_schedule_publication_fault(&self, domain: &Domain) -> bool {
+        self.schedule_publication_faults.take_armed_fault(domain)
     }
 
     pub(in crate::runtime) fn record_ingestor_transient_error(
@@ -947,16 +1007,66 @@ impl Runtime {
         error: impl Into<String>,
         backoff: Duration,
     ) {
+        self.record_emitter_retry_with_backoff(
+            domain,
+            emitter,
+            error,
+            backoff,
+            EmitterRetryKind::Infrastructure,
+        );
+    }
+
+    pub(in crate::runtime) fn record_iceberg_commit_failure_with_backoff(
+        &self,
+        domain: &Domain,
+        emitter: &Identifier,
+        error: impl Into<String>,
+        backoff: Duration,
+    ) {
+        self.record_emitter_retry_with_backoff(
+            domain,
+            emitter,
+            error,
+            backoff,
+            EmitterRetryKind::IcebergCommit,
+        );
+    }
+
+    fn record_emitter_retry_with_backoff(
+        &self,
+        domain: &Domain,
+        emitter: &Identifier,
+        error: impl Into<String>,
+        backoff: Duration,
+        kind: EmitterRetryKind,
+    ) {
         let key = RuntimeKey::new(domain.clone(), emitter.clone());
         self.emitter_transient_errors
             .insert(key.clone(), error.into());
-        self.emitter_reconnect_backoffs.insert(
+        self.emitter_retry_statuses.insert(
             key,
-            RuntimeReconnectStatus {
-                backoff,
-                retry_at: Instant::now() + backoff,
+            EmitterRetryStatus {
+                kind,
+                reconnect: RuntimeReconnectStatus {
+                    backoff,
+                    retry_at: Instant::now() + backoff,
+                },
             },
         );
+    }
+
+    pub(in crate::runtime) fn begin_emitter_confirmation_wait(
+        &self,
+        domain: &Domain,
+        emitter: &Identifier,
+    ) -> EmitterConfirmationWaitGuard {
+        let active_waits = self
+            .emitter_confirmation_waits
+            .entry(RuntimeKey::new(domain.clone(), emitter.clone()))
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
+        active_waits.fetch_add(1, Ordering::AcqRel);
+        EmitterConfirmationWaitGuard { active_waits }
     }
 
     pub(in crate::runtime) fn clear_emitter_transient_error(
@@ -966,7 +1076,7 @@ impl Runtime {
     ) {
         self.emitter_transient_errors
             .remove(&RuntimeKey::new(domain.clone(), emitter.clone()));
-        self.emitter_reconnect_backoffs
+        self.emitter_retry_statuses
             .remove(&RuntimeKey::new(domain.clone(), emitter.clone()));
     }
 
@@ -981,18 +1091,19 @@ impl Runtime {
         domain: &Domain,
         emitter: &Identifier,
     ) -> Option<String> {
-        self.emitter_reconnect_backoffs
+        self.emitter_retry_statuses
             .get(&RuntimeKey::new(domain.clone(), emitter.clone()))
-            .map(|status| humantime::format_duration(status.value().backoff).to_string())
+            .map(|status| humantime::format_duration(status.value().reconnect.backoff).to_string())
     }
 
     fn emitter_reconnect_wait_millis(&self, domain: &Domain, emitter: &Identifier) -> Option<u64> {
-        self.emitter_reconnect_backoffs
+        self.emitter_retry_statuses
             .get(&RuntimeKey::new(domain.clone(), emitter.clone()))
             .map(|status| {
                 u64::try_from(
                     status
                         .value()
+                        .reconnect
                         .retry_at
                         .saturating_duration_since(Instant::now())
                         .as_millis(),
@@ -2397,11 +2508,71 @@ impl Runtime {
             .filter(|entry| &entry.key().domain == domain)
             .map(|entry| entry.value().load(Ordering::Acquire))
             .sum();
+        let mut publishing_keys = self
+            .emitter_confirmation_waits
+            .iter()
+            .filter(|entry| {
+                &entry.key().domain == domain && entry.value().load(Ordering::Acquire) > 0
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<HashSet<_>>();
+        publishing_keys.extend(
+            self.emitter_retry_statuses
+                .iter()
+                .filter(|entry| &entry.key().domain == domain)
+                .map(|entry| entry.key().clone()),
+        );
+        let mut emitter_publishing = publishing_keys
+            .into_iter()
+            .filter_map(|key| {
+                let pending_messages = self
+                    .emitter_buffers
+                    .get(&key)
+                    .map(|buffered| buffered.load(Ordering::Acquire))
+                    .unwrap_or(0);
+                let awaiting_confirmation = self
+                    .emitter_confirmation_waits
+                    .get(&key)
+                    .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
+                if awaiting_confirmation {
+                    return Some(EmitterPublishingDrainStatus {
+                        emitter: key.identifier,
+                        state: EmitterPublishingDrainState::AwaitingConfirmation,
+                        pending_messages,
+                        retry_backoff: None,
+                        retry_wait: None,
+                    });
+                }
+                let retry = self.emitter_retry_statuses.get(&key)?;
+                let state = match retry.kind {
+                    EmitterRetryKind::Infrastructure => {
+                        EmitterPublishingDrainState::RetryingInfrastructure
+                    }
+                    EmitterRetryKind::IcebergCommit => {
+                        EmitterPublishingDrainState::RetryingIcebergCommit
+                    }
+                };
+                Some(EmitterPublishingDrainStatus {
+                    emitter: key.identifier,
+                    state,
+                    pending_messages,
+                    retry_backoff: Some(retry.reconnect.backoff),
+                    retry_wait: Some(
+                        retry
+                            .reconnect
+                            .retry_at
+                            .saturating_duration_since(Instant::now()),
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
+        emitter_publishing.sort_by(|left, right| left.emitter.cmp(&right.emitter));
         DomainDrainStatus {
             active_ingestors,
             active_generators,
             outstanding_acks: self.domain_outstanding_work(domain),
             buffered_emitter_messages,
+            emitter_publishing,
         }
     }
 
@@ -5022,14 +5193,19 @@ impl Runtime {
                     (old_emitter, old_task)
                 };
                 let had_old_task = old_task.is_some();
-                if let Some(old_task) = old_task {
-                    old_task
-                        .stop()
-                        .await
-                        .map_err(|reason| RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason,
-                        })?;
+                if let Some(old_task) = old_task
+                    && let Err(error) = old_task.stop(self.domain_drain_timeout()).await
+                {
+                    let reason = error.reason().to_string();
+                    if let Some(old_task) = error.into_task()
+                        && let Some(mut execution) = self.executions.get_mut(domain)
+                    {
+                        execution.emitter_tasks.insert(entity.clone(), old_task);
+                    }
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason,
+                    });
                 }
 
                 let executes_locally = local_node_id
@@ -11414,11 +11590,13 @@ impl Runtime {
             .await;
         }
         for (entity, emitter_task) in execution.emitter_tasks {
-            Self::await_shutdown_task(
+            Self::await_shutdown_task_with_grace(
                 emitter_task.task,
                 domain,
                 Some(&entity.identifier),
                 "scheduled emitter",
+                self.domain_drain_timeout()
+                    .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
             )
             .await;
         }
@@ -11898,14 +12076,31 @@ impl Runtime {
     }
 
     pub(in crate::runtime) async fn await_shutdown_task(
-        mut task: JoinHandle<()>,
+        task: JoinHandle<()>,
         domain: &Domain,
         ingestor: Option<&Identifier>,
         task_kind: &str,
     ) {
         const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
-        match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut task).await {
+        Self::await_shutdown_task_with_grace(
+            task,
+            domain,
+            ingestor,
+            task_kind,
+            SHUTDOWN_GRACE_PERIOD,
+        )
+        .await;
+    }
+
+    async fn await_shutdown_task_with_grace(
+        mut task: JoinHandle<()>,
+        domain: &Domain,
+        ingestor: Option<&Identifier>,
+        task_kind: &str,
+        grace_period: Duration,
+    ) {
+        match tokio::time::timeout(grace_period, &mut task).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 if error.is_cancelled() {
@@ -11930,7 +12125,7 @@ impl Runtime {
                     domain = domain.as_str(),
                     ingestor = ingestor.map(Identifier::as_str),
                     task_kind,
-                    grace_period = %humantime::format_duration(SHUTDOWN_GRACE_PERIOD),
+                    grace_period = %humantime::format_duration(grace_period),
                     "shutdown task exceeded grace period; aborting"
                 );
                 task.abort();

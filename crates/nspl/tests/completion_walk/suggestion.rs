@@ -63,6 +63,7 @@ const FREE_FORM_FILLERS: &[(&str, &str)] = &[
     ("correlate_expression", "left.nx_field = right.nx_field"),
     ("default_assignments", "nx_field = 1"),
     ("deduplicate_on", "input.nx_field"),
+    ("fifo_group_expression", "'nx_group'"),
     ("inherit_targets", "ALL"),
     ("invocations", "nx_udf()"),
     ("reorder_by", "input.nx_field"),

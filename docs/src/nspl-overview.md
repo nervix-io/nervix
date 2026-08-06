@@ -121,7 +121,8 @@ ALTER EMITTER <name>
   DROP FROM <relay> |
   ALTER FROM <relay> SET WHERE <expr> |
   ALTER FROM <relay> DROP WHERE |
-  SET TO <sink> |
+  SET TO <full sink clause including MODE> |
+  SET MODE <transport-specific publishing mode body> |
   SET CLIENT <client> |
   SET ENCODE USING <codec> | DROP ENCODE |
   SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>] | DROP COLLECT |
@@ -396,7 +397,10 @@ Another example showing nested conditions and chained calls:
 ```nspl
 CREATE EMITTER outbound
   FROM notifications
-  TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
+  TO KAFKA kafka_main TOPIC notifications_out
+    MODE ACK PARALLEL MAX 1000 ACK TIMEOUT 30s
+      RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING notification_codec
   INHERIT ALL EXCEPT raw
   SET normalized = lower(trim(input.raw)), magnitude = abs(input.amount)
   WHERE (output.active AND output.amount > 5) OR contains(lower(trim(input.raw)), 'urgent')

@@ -40,7 +40,7 @@ Feature: Config entity quiesce classification
 
       CREATE EMITTER config_out
         FROM config_events
-        TO ZEROMQ config_sink ENCODE USING config_event_codec
+        TO ZEROMQ config_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -109,7 +109,7 @@ Feature: Config entity quiesce classification
         };
       CREATE EMITTER config_out
         FROM config_events
-        TO ZEROMQ config_sink ENCODE USING config_event_codec
+        TO ZEROMQ config_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

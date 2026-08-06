@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc as StdArc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -22,16 +22,16 @@ use nervix_models::{
     CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer,
     CreateIngestor, CreateJsonWireSchema, CreateJunction, CreateLookup, CreateReingestor,
     CreateRelay, CreateSchema, CreateWasmProcessor, CreateWindowProcessor, Domain, DomainConfig,
-    DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink, ErrorPolicies,
-    Expression, FieldPath, FieldReference, FieldScope, GeneralErrorPolicy, Identifier,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
-    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestSource,
-    IngestTimestampSource, JsonType, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy,
-    ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-    RemoteAckOutcome, RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus,
-    RetryPolicy, ScheduledNode, SchemaField, StructuredMessageError, Timestamp, WindowBound,
-    WireSchemaField, ZeroMqIngestMode,
+    DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink,
+    EmitterPublishingMode, ErrorPolicies, Expression, FieldPath, FieldReference, FieldScope,
+    GeneralErrorPolicy, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, MessageErrorCode,
+    MessageErrorOperation, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos, MqttSession,
+    OutputBranch, ParseAsType, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayBranching, RemoteAckOutcome, RemoteAckResolution, ResourceId,
+    ResourceVersion, ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField, SqsFifoGroup,
+    StructuredMessageError, Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 use nervix_nspl::window_processor::aggregate::lower_window_assignments;
 use nervix_wasm::{
@@ -58,8 +58,8 @@ use triomphe::Arc;
 use super::{
     BranchInstanceRegistry, BranchKey, BranchedProcessorOperationSpec, RelayMessage,
     RuntimeStateKind, RuntimeStatePlacement, RuntimeStateStore, STUPID_CHANNEL_CAPACITY_REMOVE_ME,
-    WindowAggregateFunction, WindowProcessorState, advance_window, evaluate_window_aggregate,
-    message_timestamp, window_output_metadata,
+    ScheduledEmitterTask, WindowAggregateFunction, WindowProcessorState, advance_window,
+    evaluate_window_aggregate, message_timestamp, window_output_metadata,
 };
 use crate::{
     metrics::RuntimeMetrics,
@@ -72,12 +72,191 @@ fn identifier(raw: &str) -> Identifier {
     Identifier::parse(raw).expect("valid identifier")
 }
 
+#[test]
+fn domain_drain_status_reports_structured_emitter_publishing_state() {
+    let runtime = super::Runtime::new();
+    let domain = domain("default");
+    let confirming = identifier("confirming");
+    let retrying = identifier("retrying");
+    let iceberg = identifier("iceberg");
+
+    for (emitter, pending_messages) in [
+        (&confirming, 3_usize),
+        (&retrying, 2_usize),
+        (&iceberg, 5_usize),
+    ] {
+        runtime.emitter_buffers.insert(
+            super::RuntimeKey::new(domain.clone(), emitter.clone()),
+            Arc::new(AtomicUsize::new(pending_messages)),
+        );
+    }
+
+    let confirmation = runtime.begin_emitter_confirmation_wait(&domain, &confirming);
+    runtime.record_emitter_transient_error_with_backoff(
+        &domain,
+        &retrying,
+        "sensitive infrastructure detail that drain status must not expose",
+        Duration::from_secs(2),
+    );
+    runtime.record_iceberg_commit_failure_with_backoff(
+        &domain,
+        &iceberg,
+        "sensitive catalog detail that drain status must not expose",
+        Duration::from_secs(3),
+    );
+
+    let status = runtime.domain_drain_status(&domain);
+
+    assert_eq!(status.emitter_publishing.len(), 3);
+    assert_eq!(
+        status.emitter_publishing[0],
+        super::EmitterPublishingDrainStatus {
+            emitter: confirming,
+            state: super::EmitterPublishingDrainState::AwaitingConfirmation,
+            pending_messages: 3,
+            retry_backoff: None,
+            retry_wait: None,
+        }
+    );
+    assert_eq!(status.emitter_publishing[1].emitter, iceberg);
+    assert_eq!(
+        status.emitter_publishing[1].state,
+        super::EmitterPublishingDrainState::RetryingIcebergCommit
+    );
+    assert_eq!(
+        status.emitter_publishing[1].retry_backoff,
+        Some(Duration::from_secs(3))
+    );
+    assert!(
+        status.emitter_publishing[1]
+            .retry_wait
+            .is_some_and(|wait| wait <= Duration::from_secs(3))
+    );
+    assert_eq!(status.emitter_publishing[2].emitter, retrying);
+    assert_eq!(
+        status.emitter_publishing[2].state,
+        super::EmitterPublishingDrainState::RetryingInfrastructure
+    );
+    assert_eq!(
+        status.emitter_publishing[2].retry_backoff,
+        Some(Duration::from_secs(2))
+    );
+    let affected_emitters = [
+        status.emitter_publishing[0].emitter.clone(),
+        status.emitter_publishing[1].emitter.clone(),
+        status.emitter_publishing[2].emitter.clone(),
+    ]
+    .into_iter()
+    .map(|identifier| crate::registry::RegistryEntity {
+        kind: ModelKind::Emitter,
+        identifier,
+    })
+    .collect::<Vec<_>>();
+    let entity_status = runtime
+        .entity_drain_status(&domain, &[], &affected_emitters)
+        .emitter_publishing;
+    assert_eq!(entity_status.len(), status.emitter_publishing.len());
+    for (entity, domain) in entity_status.iter().zip(&status.emitter_publishing) {
+        assert_eq!(entity.emitter, domain.emitter);
+        assert_eq!(entity.state, domain.state);
+        assert_eq!(entity.pending_messages, domain.pending_messages);
+        assert_eq!(entity.retry_backoff, domain.retry_backoff);
+        assert_eq!(entity.retry_wait.is_some(), domain.retry_wait.is_some());
+    }
+
+    drop(confirmation);
+    assert!(
+        runtime
+            .domain_drain_status(&domain)
+            .emitter_publishing
+            .iter()
+            .all(|status| status.emitter != identifier("confirming")),
+        "a completed confirmation must disappear from drain status"
+    );
+}
+
 fn expression(raw: &str) -> nervix_models::Expression {
     nervix_nspl::parse_expression(raw).expect("valid semantic expression")
 }
 
 fn construction(raw: &str) -> nervix_models::RouteConstruction {
     nervix_nspl::parse_route_construction(raw).expect("valid route construction")
+}
+
+#[tokio::test]
+async fn scheduled_emitter_stop_keeps_a_failed_drain_task_available_for_retry() {
+    let grace = Duration::from_millis(50);
+    let started = Instant::now();
+    let (commands, mut command_rx) = mpsc::channel(2);
+    let (stop_signal, _stop_rx) = watch::channel(None);
+    let task = tokio::spawn(async move {
+        let Some(super::EmitterTaskCommand::Stop { deadline, response }) = command_rx.recv().await
+        else {
+            panic!("expected the first emitter stop command");
+        };
+        assert!(deadline > started);
+        assert!(deadline <= started + grace + Duration::from_millis(10));
+        let _ = response.send(Err("transport drain failed".to_string()));
+
+        let Some(super::EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
+            panic!("expected the retried emitter stop command");
+        };
+        let _ = response.send(Ok(()));
+    });
+    let scheduled = ScheduledEmitterTask {
+        commands,
+        stop_signal,
+        task,
+    };
+
+    let failed = scheduled
+        .stop(grace)
+        .await
+        .expect_err("a failed transport drain must fail the emitter stop");
+    assert_eq!(failed.reason(), "transport drain failed");
+    let scheduled = failed
+        .into_task()
+        .expect("a failed drain must leave the old emitter task available");
+
+    scheduled
+        .stop(grace)
+        .await
+        .expect("the retained emitter task must accept a later successful stop");
+}
+
+#[tokio::test]
+async fn scheduled_emitter_stop_clears_signal_when_the_response_is_dropped() {
+    let (commands, mut command_rx) = mpsc::channel(1);
+    let (stop_signal, _stop_rx) = watch::channel(None);
+    let task = tokio::spawn(async move {
+        let Some(super::EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
+            panic!("expected an emitter stop command");
+        };
+        drop(response);
+    });
+    let scheduled = ScheduledEmitterTask {
+        commands,
+        stop_signal,
+        task,
+    };
+
+    let failed = scheduled
+        .stop(Duration::from_millis(50))
+        .await
+        .expect_err("a dropped drain response must retain the scheduled task");
+    assert_eq!(
+        failed.reason(),
+        "scheduled emitter task dropped its stop response"
+    );
+    assert!(
+        failed
+            .into_task()
+            .expect("the failed stop must return its task")
+            .stop_signal
+            .borrow()
+            .is_none(),
+        "a dropped response must not leave the retained emitter interrupted"
+    );
 }
 
 fn window_outputs(relay: &str, set: &str) -> ProcessorOutputs {
@@ -2946,6 +3125,12 @@ fn emitter_entity_pause_gates_every_input_relay() {
         flush_each: "IMMEDIATE".to_string(),
         max_batch_size: None,
         error_policies: ErrorPolicies::handled_by_log(),
+        publishing_mode: EmitterPublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         mode: AckMode::Attached,
         construction: nervix_models::RouteConstruction::default(),
         materialized_state: Vec::new(),
@@ -6552,6 +6737,12 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     error_policies: ErrorPolicies::handled_by_log(),
+                    publishing_mode: EmitterPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     construction: nervix_models::RouteConstruction::default(),
                     materialized_state: Vec::new(),
                 }),
@@ -9228,6 +9419,12 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
         max_batch_size: Some("1MiB".to_string()),
         mode: AckMode::Attached,
         error_policies: ErrorPolicies::handled_by_log(),
+        publishing_mode: EmitterPublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         construction: construction(
             "INHERIT tenant SET normalized = lower(input.raw) WHERE input.active INVOKE \
              write_header(lower(\"TENANT\"),
@@ -9317,6 +9514,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     let output_record = output
         .runtime_record(0)
         .expect("test may inspect the selected output row");
+    assert_eq!(plan.source_rows, vec![0]);
     assert_eq!(
         output_record.value("normalized"),
         Some(&RuntimeValue::String("fast-lane".to_string()))
@@ -9328,6 +9526,95 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
             ("route".to_string(), "fast-lane".to_string()),
             ("route".to_string(), "second".to_string()),
         ]])
+    );
+}
+
+#[tokio::test]
+async fn sqs_fifo_group_expression_evaluates_per_source_row_in_order() {
+    let input_schema = test_schema(&[
+        ("tenant", ParseAsType::String),
+        ("region", ParseAsType::String),
+    ]);
+    let emitter = CreateEmitter {
+        name: identifier("sqs_notifications"),
+        from: ProcessorInputs::single(identifier("notifications")),
+        encode_using_codec: Some(identifier("notification_codec")),
+        sink: EmitSink::Sqs {
+            client: identifier("sqs_main"),
+            queue: "notifications.fifo".to_string(),
+            fifo_group: Some(SqsFifoGroup::Expression(expression(
+                "concat(input.tenant, '-', input.region)",
+            ))),
+        },
+        flush_each: "100ms".to_string(),
+        max_batch_size: Some("1MiB".to_string()),
+        mode: AckMode::Attached,
+        error_policies: ErrorPolicies::handled_by_log(),
+        publishing_mode: EmitterPublishingMode::SqsBatch {
+            retry_policy: RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        construction: construction("INHERIT ALL"),
+        materialized_state: Vec::new(),
+    };
+    let program = super::compile_sqs_fifo_group_program(
+        &domain("default"),
+        &emitter,
+        input_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+            udfs: None,
+        },
+    )
+    .expect("SQS FIFO group expression must compile")
+    .expect("expression mode must produce a program");
+    let messages = [("acme", "us"), ("globex", "eu"), ("acme", "ap")]
+        .into_iter()
+        .map(|(tenant, region)| {
+            let (acks, _completion) = AckSet::root();
+            RelayMessage {
+                key: None,
+                record: RuntimeRecord::from_fields([
+                    (
+                        "tenant".to_string(),
+                        RuntimeValue::String(tenant.to_string()),
+                    ),
+                    (
+                        "region".to_string(),
+                        RuntimeValue::String(region.to_string()),
+                    ),
+                ]),
+                acks,
+            }
+        })
+        .collect::<Vec<_>>();
+    let batch = super::RelayRecordBatch::from_messages(input_schema, messages)
+        .expect("SQS source batch must build");
+
+    let groups = super::evaluate_sqs_fifo_group_program(
+        &emitter.name,
+        &program,
+        &batch,
+        Timestamp::from_unix_nanos(1),
+        &HashMap::default(),
+    )
+    .await
+    .expect("SQS FIFO group expression must execute");
+
+    assert_eq!(
+        groups,
+        vec![
+            Ok(Some("acme-us".to_string())),
+            Ok(Some("globex-eu".to_string())),
+            Ok(Some("acme-ap".to_string())),
+        ]
     );
 }
 

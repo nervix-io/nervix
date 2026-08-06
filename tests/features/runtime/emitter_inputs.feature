@@ -61,7 +61,7 @@ Feature: Emitter relay inputs
         FROM source_a_events WHERE input.source = 'a',
              source_b_events WHERE input.source = 'b'
         COLLECT FOR 20ms MAX BATCH SIZE 1MiB
-        TO ZEROMQ sink ENCODE USING event_codec
+        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG

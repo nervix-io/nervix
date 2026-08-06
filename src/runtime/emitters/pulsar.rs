@@ -1,19 +1,30 @@
 use ::pulsar::{
-    Pulsar, TlsOptions as PulsarTlsOptions, TokioExecutor,
-    producer::Message as PulsarProducerMessage,
+    ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
+    TlsOptions as PulsarTlsOptions, TokioExecutor,
+    producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
 };
+use futures_util::FutureExt;
 
 use super::*;
 
 pub(in crate::runtime) struct PulsarEmitter {
     producer: Option<::pulsar::Producer<TokioExecutor>>,
+    mode: BrokerPublishingMode,
+}
+
+struct PendingPulsarConfirmation {
+    position: BrokerRecordPosition,
+    acks: AckSet,
+    deadline: Instant,
+    confirmation: PulsarSendFuture,
 }
 
 impl PulsarEmitter {
-    pub(in crate::runtime) async fn new(
+    pub(super) async fn new(
         client: &CreateClientPulsar,
         resolved: Option<&ResolvedClientConfig>,
         topic: &Identifier,
+        mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
         let producer = Self::producer_from_config(
             resolved
@@ -24,6 +35,7 @@ impl PulsarEmitter {
         .await?;
         Ok(Self {
             producer: Some(producer),
+            mode,
         })
     }
 
@@ -47,7 +59,10 @@ impl PulsarEmitter {
         let addr = emitter_config_value(config, "addr", || {
             "missing Pulsar client config key 'addr'".to_string()
         })?;
-        let mut builder = Pulsar::builder(addr, TokioExecutor);
+        let (connection_retry_options, operation_retry_options) = Self::retry_options();
+        let mut builder = Pulsar::builder(addr, TokioExecutor)
+            .with_connection_retry_options(connection_retry_options)
+            .with_operation_retry_options(operation_retry_options);
         if let Some(tls_options) = Self::tls_options_from_config(config)? {
             if let Some(certificate_chain) = tls_options.certificate_chain {
                 builder = builder.with_certificate_chain(certificate_chain);
@@ -59,6 +74,19 @@ impl PulsarEmitter {
                 );
         }
         builder.build().await.map_err(emitter_init_error)
+    }
+
+    fn retry_options() -> (ConnectionRetryOptions, OperationRetryOptions) {
+        (
+            ConnectionRetryOptions {
+                max_retries: 0,
+                ..Default::default()
+            },
+            OperationRetryOptions {
+                max_retries: Some(0),
+                ..Default::default()
+            },
+        )
     }
 
     pub(in crate::runtime) fn tls_options_from_config(
@@ -108,49 +136,216 @@ impl PulsarEmitter {
         format!("persistent://{namespace}/{topic}")
     }
 
-    pub(in crate::runtime) async fn publish_chunk(
+    pub(super) async fn publish(
         &mut self,
-        keys: &[Option<BranchKey>],
-        payloads: Vec<Vec<u8>>,
-        headers: &[EmitterHeaders],
-        max_in_flight: usize,
-    ) -> EmitterRuntimeResult<()> {
+        records: Vec<EncodedBrokerRecord>,
+    ) -> PerRecordPublishOutcome {
+        let mut outcome = PerRecordPublishOutcome::empty();
         let Some(producer) = self.producer.as_mut() else {
-            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("no initialized pulsar sink client"));
+            outcome.fail(
+                Report::new(EmitterRuntimeError::SinkNotInitialized)
+                    .attach_printable("no initialized pulsar sink client"),
+            );
+            return outcome;
         };
-        if payloads.len() != keys.len() || payloads.len() != headers.len() {
-            return Err(emitter_publish_error(
-                "pulsar encoded payload, branch key, and header counts differ",
-            ));
-        }
-        let mut receipts = FuturesOrdered::new();
-        for ((payload, key), headers) in payloads.into_iter().zip(keys).zip(headers) {
+
+        outcome.delivered.reserve(records.len());
+        let mut pending: VecDeque<PendingPulsarConfirmation> = VecDeque::new();
+        for record in records {
             tokio::task::consume_budget().await;
-            let receipt = producer
-                .send_non_blocking(PulsarProducerMessage {
-                    payload,
-                    properties: headers.iter().cloned().collect(),
-                    partition_key: key.as_ref().map(|key| key.as_str().to_string()),
+            let enqueue_acks = AckSet::merged(
+                pending
+                    .iter()
+                    .map(|confirmation| confirmation.acks.clone())
+                    .chain(std::iter::once(record.acks.clone())),
+            );
+            let position = (record.batch_index, record.row_index);
+            let confirmation = match await_emitter_confirmation(
+                &enqueue_acks,
+                producer.send_non_blocking(PulsarProducerMessage {
+                    payload: record.payload,
+                    properties: record.headers.into_iter().collect(),
+                    partition_key: record.key,
                     ..Default::default()
-                })
-                .await
-                .map_err(|source| {
-                    emitter_publish_error(format!("failed to enqueue pulsar message: {source}"))
-                })?;
-            receipts.push_back(receipt);
-            if receipts.len() >= max_in_flight {
-                receipts
-                    .next()
-                    .await
-                    .expect("pulsar receipt queue must contain an in-flight publish")
-                    .map_err(emitter_publish_error)?;
+                }),
+            )
+            .await
+            {
+                Ok(confirmation) => confirmation,
+                Err(source) if Self::is_record_rejection(&source) => {
+                    outcome.reject(position, format!("pulsar rejected record: {source}"));
+                    continue;
+                }
+                Err(source) => {
+                    outcome.fail(emitter_publish_error(format!(
+                        "failed to enqueue pulsar message: {source}"
+                    )));
+                    return outcome;
+                }
+            };
+            match self.mode {
+                BrokerPublishingMode::NoAck => {
+                    drop(confirmation);
+                    outcome.deliver(position);
+                }
+                BrokerPublishingMode::Ack {
+                    max_in_flight,
+                    timeout,
+                } => {
+                    pending.push_back(PendingPulsarConfirmation {
+                        position,
+                        acks: record.acks,
+                        deadline: Instant::now() + timeout,
+                        confirmation,
+                    });
+                    if pending.len() >= max_in_flight
+                        && let Err(error) =
+                            Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
+                    {
+                        outcome.fail(error);
+                        return outcome;
+                    }
+                }
             }
         }
-        while let Some(receipt) = receipts.next().await {
+        while !pending.is_empty() {
             tokio::task::consume_budget().await;
-            receipt.map_err(emitter_publish_error)?;
+            let timeout = match self.mode {
+                BrokerPublishingMode::Ack { timeout, .. } => timeout,
+                BrokerPublishingMode::NoAck => unreachable!("NO_ACK has no confirmations"),
+            };
+            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
+                outcome.fail(error);
+                return outcome;
+            }
         }
-        Ok(())
+        outcome
+    }
+
+    async fn confirm_oldest(
+        pending: &mut VecDeque<PendingPulsarConfirmation>,
+        timeout: Duration,
+        outcome: &mut PerRecordPublishOutcome,
+    ) -> EmitterRuntimeResult<()> {
+        loop {
+            tokio::task::consume_budget().await;
+            for confirmation in pending.iter() {
+                confirmation.acks.ack_alive();
+            }
+            let Some(oldest) = pending.front_mut() else {
+                return Err(emitter_publish_error(
+                    "pulsar acknowledgment window unexpectedly became empty",
+                ));
+            };
+            let remaining = oldest
+                .deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                Self::harvest_ready_after_oldest_failure(pending, outcome);
+                return Err(emitter_publish_error(format!(
+                    "pulsar receipt exceeded ACK TIMEOUT {}",
+                    humantime::format_duration(timeout)
+                )));
+            }
+            let wait = remaining.min(REMOTE_ACK_ALIVE_INTERVAL);
+            let result = tokio::select! {
+                biased;
+                result = &mut oldest.confirmation => Some(result),
+                _ = sleep(wait) => None,
+            };
+            let Some(result) = result else {
+                continue;
+            };
+            let position = oldest.position;
+            match result {
+                Ok(_receipt) => {
+                    pending.pop_front();
+                    outcome.deliver(position);
+                    return Ok(());
+                }
+                Err(source) if Self::is_record_rejection(&source) => {
+                    pending.pop_front();
+                    outcome.reject(position, format!("pulsar rejected record: {source}"));
+                    return Ok(());
+                }
+                Err(source) => {
+                    Self::harvest_ready_after_oldest_failure(pending, outcome);
+                    return Err(emitter_publish_error(source));
+                }
+            }
+        }
+    }
+
+    fn harvest_ready_after_oldest_failure(
+        pending: &mut VecDeque<PendingPulsarConfirmation>,
+        outcome: &mut PerRecordPublishOutcome,
+    ) {
+        let mut index = 1;
+        while index < pending.len() {
+            let ready = pending
+                .get_mut(index)
+                .and_then(|confirmation| (&mut confirmation.confirmation).now_or_never());
+            let Some(result) = ready else {
+                index += 1;
+                continue;
+            };
+            let confirmation = pending
+                .remove(index)
+                .expect("ready Pulsar confirmation must remain in the window");
+            match result {
+                Ok(_receipt) => outcome.deliver(confirmation.position),
+                Err(source) if Self::is_record_rejection(&source) => outcome.reject(
+                    confirmation.position,
+                    format!("pulsar rejected record: {source}"),
+                ),
+                Err(_) => {}
+            }
+        }
+    }
+
+    fn is_record_rejection(_error: &PulsarError) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ::pulsar::{
+        error::ConnectionError as PulsarConnectionError,
+        message::proto::ServerError as PulsarServerError,
+    };
+
+    use super::*;
+
+    fn server_error(kind: PulsarServerError) -> PulsarError {
+        PulsarError::Connection(PulsarConnectionError::PulsarError(Some(kind), None))
+    }
+
+    #[test]
+    fn checksum_failure_remains_an_infrastructure_failure() {
+        assert!(!PulsarEmitter::is_record_rejection(&server_error(
+            PulsarServerError::ChecksumError
+        )));
+    }
+
+    #[test]
+    fn missing_or_incompatible_topics_remain_infrastructure_failures() {
+        for kind in [
+            PulsarServerError::TopicNotFound,
+            PulsarServerError::IncompatibleSchema,
+            PulsarServerError::ServiceNotReady,
+        ] {
+            assert!(!PulsarEmitter::is_record_rejection(&server_error(kind)));
+        }
+    }
+
+    #[test]
+    fn client_retries_are_disabled_in_favor_of_the_declared_retry_policy() {
+        let (connection, operation) = PulsarEmitter::retry_options();
+
+        assert_eq!(connection.max_retries, 0);
+        assert_eq!(operation.max_retries, Some(0));
+        assert!(!operation.allow_retry(0));
     }
 }
