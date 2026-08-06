@@ -13,11 +13,14 @@ pub fn statement_parser<'src>()
 -> impl Parser<'src, &'src [Token], Statement, extra::Err<ParseError<'src>>> + Clone {
     let domain_and_core = boxed_choice!(
         crate::domain::create_domain_parser().map(Statement::CreateDomain),
+        crate::domain::alter_domain_parser().map(Statement::AlterDomain),
         crate::create_resource::create_resource_parser().map(Statement::CreateResource),
         crate::domain::start_domain_parser().map(Statement::StartDomain),
         crate::domain::stop_domain_parser().map(Statement::StopDomain),
         crate::branch::create_branch_parser()
             .map(|create| Statement::Create(create.map_body(Model::Branch).map_body(Box::new))),
+        crate::placement::create_placement_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Placement).map_body(Box::new))),
         crate::describe_deduplicator::describe_deduplicator_parser()
             .map(Statement::DescribeDeduplicator),
         crate::describe_domain::describe_domain_parser().map(Statement::DescribeDomain),
@@ -25,6 +28,7 @@ pub fn statement_parser<'src>()
         crate::describe_ingestor::describe_ingestor_parser().map(Statement::DescribeIngestor),
         crate::describe_junction::describe_junction_parser().map(Statement::DescribeJunction),
         crate::describe_lookup::describe_lookup_parser().map(Statement::DescribeLookup),
+        crate::placement::describe_placement_parser().map(Statement::DescribePlacement),
         crate::describe_resource::describe_resource_parser().map(Statement::DescribeResource),
         crate::describe_stream::describe_stream_parser().map(Statement::DescribeRelay),
         crate::describe_window_processor::describe_window_processor_parser()
@@ -148,6 +152,7 @@ pub fn statement_parser<'src>()
         }),
     );
     let administration = boxed_choice!(
+        crate::placement::alter_placement_parser().map(Statement::AlterPlacement),
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),
         crate::schema::alter_wire_schema_parser_any(),
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
@@ -169,6 +174,7 @@ pub fn statement_parser<'src>()
             .map(Statement::ShowRelayMaterializedState),
         crate::udf::describe_udf_parser().map(Statement::DescribeUdf),
         crate::udf::show_udfs_parser().map(Statement::ShowUdfs),
+        crate::placement::show_placements_parser().map(Statement::ShowPlacements),
     );
 
     choice([domain_and_core, processing_and_io, clients, administration]).boxed()
@@ -220,6 +226,19 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
             && !normalized.contains(" VERSION ")
         {
             vec!["VERSION".to_string()]
+        } else if open
+            && normalized.starts_with("CREATE ")
+            && normalized.contains(" DOMAIN ")
+            && !normalized.contains(" PLACEMENT ")
+        {
+            vec![";".to_string(), "PLACEMENT".to_string()]
+        } else if open
+            && normalized.starts_with("CREATE ")
+            && normalized.contains(" PLACEMENT ")
+            && !normalized.contains(" DOMAIN ")
+            && !normalized.contains(" RANK ")
+        {
+            vec![";".to_string(), "RANK".to_string()]
         } else {
             Vec::new()
         };

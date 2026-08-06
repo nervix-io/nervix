@@ -38,6 +38,7 @@
   - [Runtime Nodes](./processors.md)
   - [WASM Processor Guests](./wasm-processor-guests.md)
   - [Emitters](./emitters.md)
+  - [Placement Policies](./placement.md)
   - [Capacity Planning For Branched Graphs](./capacity-planning.md)
   - [Metrics And Observability](./metrics-and-observability.md)
   - [Filter-Map Functions](./filter-map-functions.md)

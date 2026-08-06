@@ -49,6 +49,10 @@ pub enum ConsensusCommand {
         domain: Domain,
         schedule: Option<Box<DomainSchedule>>,
     },
+    PutDomainAndSchedule {
+        domain: Box<DomainState>,
+        schedule: Option<Box<DomainSchedule>>,
+    },
     PutDomain {
         domain: Box<DomainState>,
     },
@@ -104,6 +108,9 @@ impl std::fmt::Display for ConsensusCommand {
                 } else {
                     write!(f, "clear-domain-schedule:{}", domain.as_str())
                 }
+            }
+            Self::PutDomainAndSchedule { domain, .. } => {
+                write!(f, "put-domain-and-schedule:{}", domain.id.as_str())
             }
             Self::PutDomain { domain } => write!(f, "put-domain:{}", domain.id.as_str()),
             Self::StartDomain { domain_id, .. } => write!(f, "start-domain:{}", domain_id.as_str()),
@@ -239,6 +246,28 @@ struct StateMachineData {
     resources: ResourceVersionStatus,
     #[serde(default)]
     cordoned_node_ids: BTreeSet<String>,
+}
+
+impl StateMachineData {
+    fn replace_domain_schedule(&mut self, domain: &Domain, schedule: Option<&DomainSchedule>) {
+        let Some(domain_schedule) = schedule else {
+            self.schedule.domains.retain(|item| item.domain != *domain);
+            return;
+        };
+        if let Some(existing) = self
+            .schedule
+            .domains
+            .iter_mut()
+            .find(|item| item.domain == *domain)
+        {
+            *existing = domain_schedule.clone();
+        } else {
+            self.schedule.domains.push(domain_schedule.clone());
+            self.schedule
+                .domains
+                .sort_by(|left, right| left.domain.as_str().cmp(right.domain.as_str()));
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -698,6 +727,21 @@ impl ConsensusHandle {
         self.raft
             .client_write(ConsensusCommand::PutDomain {
                 domain: Box::new(domain),
+            })
+            .await
+            .map(|_| ())
+            .map_err(Self::map_write_error)
+    }
+
+    pub async fn put_domain_and_schedule(
+        &self,
+        domain: DomainState,
+        schedule: Option<DomainSchedule>,
+    ) -> Result<(), ConsensusError> {
+        self.raft
+            .client_write(ConsensusCommand::PutDomainAndSchedule {
+                domain: Box::new(domain),
+                schedule: schedule.map(Box::new),
             })
             .await
             .map(|_| ())
@@ -1610,30 +1654,14 @@ impl RaftSnapshotBuilder<TypeConfig> for StdArc<FjallStore> {
 
 fn apply_consensus_command(state: &mut StateMachineData, command: &ConsensusCommand) {
     match command {
-        ConsensusCommand::ReplaceDomainSchedule {
-            domain,
-            schedule: Some(domain_schedule),
-        } => {
-            if let Some(existing) = state
-                .schedule
-                .domains
-                .iter_mut()
-                .find(|item| item.domain == *domain)
-            {
-                *existing = (**domain_schedule).clone();
-            } else {
-                state.schedule.domains.push((**domain_schedule).clone());
-                state
-                    .schedule
-                    .domains
-                    .sort_by(|left, right| left.domain.as_str().cmp(right.domain.as_str()));
-            }
+        ConsensusCommand::ReplaceDomainSchedule { domain, schedule } => {
+            state.replace_domain_schedule(domain, schedule.as_deref());
         }
-        ConsensusCommand::ReplaceDomainSchedule {
-            domain,
-            schedule: None,
-        } => {
-            state.schedule.domains.retain(|item| item.domain != *domain);
+        ConsensusCommand::PutDomainAndSchedule { domain, schedule } => {
+            state
+                .domains
+                .insert(domain.id.clone(), domain.as_ref().clone());
+            state.replace_domain_schedule(&domain.id, schedule.as_deref());
         }
         ConsensusCommand::PutDomain { domain } => {
             state.domains.insert(domain.id.clone(), (**domain).clone());
@@ -1857,6 +1885,7 @@ mod tests {
         DomainSchedule {
             domain: domain(raw),
             nodes: Vec::new(),
+            placement_groups: Vec::new(),
         }
     }
 
@@ -1867,6 +1896,7 @@ mod tests {
                 pace: DomainPace::Unpaced,
                 period: "1s".to_string(),
                 skew: "0ms".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Running,
             start_version: 7,
@@ -2008,6 +2038,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["alpha"]
         );
+    }
+
+    #[test]
+    fn apply_consensus_command_updates_domain_and_schedule_atomically() {
+        let mut state = StateMachineData::default();
+        let mut domain_state = running_domain_state("tenant");
+        domain_state.config.placement = nervix_models::PlacementPolicy::RequireColocation;
+        let schedule = domain_schedule("tenant");
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::PutDomainAndSchedule {
+                domain: Box::new(domain_state.clone()),
+                schedule: Some(Box::new(schedule.clone())),
+            },
+        );
+
+        assert_eq!(state.domains.get(&domain("tenant")), Some(&domain_state));
+        assert_eq!(state.schedule.domain(&domain("tenant")), Some(&schedule));
     }
 
     #[test]

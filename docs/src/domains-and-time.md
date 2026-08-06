@@ -4,9 +4,9 @@ Every runtime graph in Nervix runs inside a domain.
 
 Nervix currently supports:
 
-- `CREATE PACED DOMAIN <id> WITH PERIOD <duration> SKEW <duration>;`
-- `CREATE UNPACED DOMAIN <id>;`
-- `CREATE DOMAIN <id>;`
+- `CREATE PACED DOMAIN <id> WITH PERIOD <duration> SKEW <duration> [PLACEMENT <policy>];`
+- `CREATE UNPACED DOMAIN <id> [PLACEMENT <policy>];`
+- `CREATE DOMAIN <id> [PLACEMENT <policy>];`
 
 `CREATE DOMAIN <id>` is the short spelling for `CREATE UNPACED DOMAIN <id>`.
 
@@ -34,6 +34,32 @@ including common-subexpression reuse and the rule that user code is never consta
 Unpaced domains do not produce ticks.
 
 Ingestors in an unpaced domain admit records as they arrive, and branch TTL uses wall clock time.
+
+## Placement Default
+
+Every domain has a fallback placement policy. It applies to directly connected runtime-node pairs
+that no named placement rule claims. The clause is optional on every domain-creation form, and
+omission means `NEUTRAL` so ordinary scheduler heuristics remain active:
+
+```nspl,ignore
+CREATE PACED DOMAIN production
+  WITH PERIOD 1s SKEW 100ms
+  PLACEMENT REQUIRE COLOCATION;
+
+CREATE UNPACED DOMAIN archive
+  PLACEMENT SUGGEST SEPARATION;
+```
+
+Change the default for the session's active domain with the nameless domain alteration:
+
+```nspl,ignore
+ALTER DOMAIN SET PLACEMENT PREFER COLOCATION;
+```
+
+A newly effective `REQUIRE COLOCATION` default can relocate runtime nodes during graph activation.
+Soft policies influence only future placement decisions and do not migrate existing assignments.
+See [Placement Policies](placement.md) for named overlays, path-gating, rank resolution, and
+enforcement.
 
 ## Start And Stop
 

@@ -2753,6 +2753,7 @@ impl Runtime {
                     pace: DomainPace::Paced,
                     period: "1s".to_string(),
                     skew: "0ms".to_string(),
+                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: nervix_models::DomainStatus::Running,
                 start_version: 0,
@@ -2783,6 +2784,7 @@ impl Runtime {
                     pace: DomainPace::Unpaced,
                     period: tick.duration_ms.to_string(),
                     skew: "0ms".to_string(),
+                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: nervix_models::DomainStatus::Running,
                 start_version: 0,
@@ -9157,6 +9159,7 @@ impl Runtime {
                             assigned_nodes: Vec::new(),
                         })
                         .collect(),
+                    placement_groups: Vec::new(),
                 },
                 passive_only: false,
                 start_version: self

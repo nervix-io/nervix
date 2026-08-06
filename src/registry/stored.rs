@@ -9,22 +9,22 @@ use nervix_models::{
     CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
     CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
     CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterAckWindow,
-    EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies, Expression,
-    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, Identifier,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
+    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, EmitSink,
+    EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies,
+    Expression, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestSource,
     IngestTimestampSource, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode,
     KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction,
     MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
-    OutputFlushPolicy, ParseAsType, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode,
-    RelayBranching, RetryPolicy, SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource, WebsocketsIngestMode, WindowBound,
-    WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    OutputFlushPolicy, ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
+    RedisPubSubIngestMode, RelayBranching, RetryPolicy, SchemaField, SignalingProtobufConfig,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    SqsFifoGroup, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource,
+    WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -75,6 +75,7 @@ pub enum StoredModelVersioned {
     Emitter(StoredCreateEmitter),
     Udf(StoredCreateUdf),
     EmitterPublishing(StoredCreateEmitterPublishing),
+    Placement(StoredCreatePlacement),
 }
 
 /// The exact archive shape used before emitter publishing modes were introduced.
@@ -275,6 +276,8 @@ pub enum StoredModelConversionError {
          MODE"
     )]
     EmitterPublishingModeMissing,
+    #[error("stored placement definition is invalid")]
+    InvalidPlacement,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -731,6 +734,23 @@ pub struct StoredCreateGenerator {
     pub branched_by: StoredBranchSelection,
     pub each: String,
     pub output_routes: StoredProcessorOutputs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredCreatePlacement {
+    pub name: String,
+    pub from: Vec<String>,
+    pub to: Vec<String>,
+    pub policy: StoredPlacementPolicy,
+    pub rank: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredPlacementPolicy {
+    RequireColocation,
+    PreferColocation,
+    Neutral,
+    SuggestSeparation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1552,6 +1572,7 @@ impl From<Model> for StoredModelVersioned {
             Model::Junction(v) => Self::Junction(v.into()),
             Model::WindowProcessor(v) => Self::WindowProcessor(v.into()),
             Model::Emitter(v) => Self::EmitterPublishing(v.into()),
+            Model::Placement(v) => Self::Placement(v.into()),
             Model::Udf(v) => Self::Udf(v.into()),
             Model::Materializer(_) => {
                 unreachable!("synthetic materializers must not be stored")
@@ -1653,6 +1674,7 @@ impl TryFrom<StoredModelVersioned> for Model {
                 Err(Report::new(StoredModelConversionError::RemovedIntegration))
             }
             StoredModelVersioned::EmitterPublishing(v) => Ok(Model::Emitter(convert_stored(v)?)),
+            StoredModelVersioned::Placement(v) => Ok(Model::Placement(v.try_into()?)),
         }
     }
 }
@@ -2786,6 +2808,68 @@ impl TryFrom<StoredCreateGenerator> for CreateGenerator {
             each: value.each,
             output_routes: value.output_routes.try_into()?,
         })
+    }
+}
+
+impl From<CreatePlacement> for StoredCreatePlacement {
+    fn from(value: CreatePlacement) -> Self {
+        Self {
+            name: value.name.to_string(),
+            from: value
+                .from
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect(),
+            to: value.to.into_iter().map(|name| name.to_string()).collect(),
+            policy: value.policy.into(),
+            rank: value.rank,
+        }
+    }
+}
+
+impl TryFrom<StoredCreatePlacement> for CreatePlacement {
+    type Error = Report<StoredModelConversionError>;
+
+    fn try_from(value: StoredCreatePlacement) -> Result<Self, Self::Error> {
+        let name = Identifier::parse(&value.name)
+            .change_context(StoredModelConversionError::InvalidName)?;
+        let from = value
+            .from
+            .iter()
+            .map(|raw| Identifier::parse(raw))
+            .collect::<Result<Vec<_>, _>>()
+            .change_context(StoredModelConversionError::InvalidName)?;
+        let to = value
+            .to
+            .iter()
+            .map(|raw| Identifier::parse(raw))
+            .collect::<Result<Vec<_>, _>>()
+            .change_context(StoredModelConversionError::InvalidName)?;
+        CreatePlacement::new(name, from, to, value.policy.into(), value.rank)
+            .map_err(Report::new)
+            .change_context(StoredModelConversionError::InvalidPlacement)
+    }
+}
+
+impl From<PlacementPolicy> for StoredPlacementPolicy {
+    fn from(value: PlacementPolicy) -> Self {
+        match value {
+            PlacementPolicy::RequireColocation => Self::RequireColocation,
+            PlacementPolicy::PreferColocation => Self::PreferColocation,
+            PlacementPolicy::Neutral => Self::Neutral,
+            PlacementPolicy::SuggestSeparation => Self::SuggestSeparation,
+        }
+    }
+}
+
+impl From<StoredPlacementPolicy> for PlacementPolicy {
+    fn from(value: StoredPlacementPolicy) -> Self {
+        match value {
+            StoredPlacementPolicy::RequireColocation => Self::RequireColocation,
+            StoredPlacementPolicy::PreferColocation => Self::PreferColocation,
+            StoredPlacementPolicy::Neutral => Self::Neutral,
+            StoredPlacementPolicy::SuggestSeparation => Self::SuggestSeparation,
+        }
     }
 }
 
@@ -5270,6 +5354,16 @@ mod tests {
                 construction: nervix_models::RouteConstruction::default(),
                 materialized_state: Vec::new(),
             }),
+            Model::Placement(
+                CreatePlacement::new(
+                    identifier("critical_corridor"),
+                    vec![identifier("events_ingestor"), identifier("events_junction")],
+                    vec![identifier("events_emitter")],
+                    PlacementPolicy::RequireColocation,
+                    Some(1),
+                )
+                .expect("placement fixture must be valid"),
+            ),
         ];
 
         for model in models {

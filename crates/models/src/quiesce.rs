@@ -133,6 +133,7 @@ pub enum ModelChangeAspect {
     BranchSchema,
     BranchLifecycle,
     UdfDefinition,
+    PlacementDefinition,
     EntityReplaced,
     EntityCreated,
     EntityDropped,
@@ -182,6 +183,7 @@ impl ModelChangeAspect {
             | Self::DeduplicatorMaxTime
             | Self::ReordererMaxTime
             | Self::EmitterFlushPolicy
+            | Self::PlacementDefinition
             | Self::EntityReplaced
             | Self::EntityCreated
             | Self::EntityDropped => QuiesceLevel::Dynamic,
@@ -413,6 +415,13 @@ impl Model {
                     ModelChangeAspects::replaced()
                 }
             }
+            (Self::Placement(base), Self::Placement(candidate)) => {
+                if base.name == candidate.name {
+                    definition_change_aspect(ModelChangeAspect::PlacementDefinition)
+                } else {
+                    ModelChangeAspects::replaced()
+                }
+            }
             (Self::ClientKafka(_), Self::ClientKafka(_))
             | (Self::ClientPulsar(_), Self::ClientPulsar(_))
             | (Self::ClientHttp(_), Self::ClientHttp(_))
@@ -477,6 +486,7 @@ impl Model {
             | (Self::WindowProcessor(_), _)
             | (Self::Emitter(_), _)
             | (Self::Udf(_), _)
+            | (Self::Placement(_), _)
             | (Self::Relay(_), _)
             | (Self::Junction(_), _)
             | (Self::Schema(_), _)

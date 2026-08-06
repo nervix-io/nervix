@@ -1,6 +1,13 @@
 mod stored;
 
-use std::{cmp::Reverse, path::Path, str::FromStr, sync::Arc as StdArc, time::Duration};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::VecDeque,
+    path::Path,
+    str::FromStr,
+    sync::Arc as StdArc,
+    time::Duration,
+};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::{
@@ -14,18 +21,19 @@ use nervix_dataflow_graph::{
     DataflowNodeKind, DataflowSchemaField,
 };
 use nervix_models::{
-    AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterReingestor,
-    AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema, Assignment, AssignmentTarget,
-    AvroType, BranchSelection, CborType, ClusterSchedule, CodecEncoding, CodecEncodingRule,
-    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator,
-    CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateLookup, CreateMaterializer, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
-    CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
-    Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind,
-    MqttIngestMode, OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
-    RouteConstruction, ScheduledNode, SchemaField, SignalingWireFormat, SqsFifoGroup,
-    WireSchemaDefinition,
+    AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
+    AlterReingestor, AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema, Assignment,
+    AssignmentTarget, AvroType, BranchSelection, CborType, ClusterSchedule, CodecEncoding,
+    CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec,
+    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer,
+    CreateIngestor, CreateLookup, CreateMaterializer, CreatePlacement, CreateSchema,
+    CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule,
+    DropModel, EmitSink, EndpointType, Expression, Identifier, IngestSource, IngestTimestampSource,
+    JsonType, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+    ModelChangeAspect, ModelKind, MqttIngestMode, OutputBranch, ParseAsType,
+    PlacementGroupSchedule, PlacementPolicy, PlacementRuntimeNode, ProcessorOutput,
+    ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode, SchemaField,
+    SignalingWireFormat, SqsFifoGroup, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -141,6 +149,20 @@ pub enum RegistryError {
     #[error("active configuration graph for domain '{domain}' contains a cycle")]
     ConfigurationCycle { domain: String },
     #[error(
+        "placement rules '{left_rule}' and '{right_rule}' in domain '{domain}' conflict at equal \
+         rank for runtime nodes {left_kind} '{left_identifier}' and {right_kind} \
+         '{right_identifier}'"
+    )]
+    PlacementConflict {
+        domain: String,
+        left_rule: String,
+        right_rule: String,
+        left_kind: &'static str,
+        left_identifier: String,
+        right_kind: &'static str,
+        right_identifier: String,
+    },
+    #[error(
         "model '{identifier}' in domain '{domain}' has incompatible schema relationship: {reason}"
     )]
     IncompatibleSchema {
@@ -161,6 +183,15 @@ pub enum RegistryError {
         domain: String,
         identifier: String,
         blockers: String,
+    },
+    #[error(
+        "cannot alter model '{identifier}' in domain '{domain}' into a non-placement-eligible \
+         shape because it is pinned by placements {placements}"
+    )]
+    PlacementMemberPinned {
+        domain: String,
+        identifier: String,
+        placements: String,
     },
 }
 
@@ -519,7 +550,7 @@ impl Registry {
         let current_state = self.build_domain_state(domain, &current_models)?;
         let mut candidate = current_models.clone();
 
-        for mutation in mutations {
+        for (mutation_index, mutation) in mutations.iter().enumerate() {
             match mutation {
                 RegistryMutation::Create(model) => {
                     let identifier = model.identifier().clone();
@@ -672,6 +703,7 @@ impl Registry {
                             identifier: alter.relay.as_str().to_string(),
                         }));
                     };
+                    let before = model.clone();
 
                     let Model::Relay(relay) = model else {
                         return Err(Report::new(RegistryError::InvalidModelKind {
@@ -688,6 +720,10 @@ impl Registry {
                             reason: error.to_string(),
                         })
                     })?;
+                    let after = model.clone();
+                    ensure_placement_member_shape_change_allowed(
+                        domain, &before, &after, &candidate,
+                    )?;
                 }
                 RegistryMutation::AlterJunction(alter) => {
                     let key = RegistryKey::new(ModelKind::Junction, alter.junction.clone());
@@ -828,6 +864,7 @@ impl Registry {
                             identifier: alter.ingestor.as_str().to_string(),
                         }));
                     };
+                    let before = model.clone();
                     let Model::Ingestor(ingestor) = model else {
                         return Err(Report::new(RegistryError::InvalidModelKind {
                             domain: domain.as_str().to_string(),
@@ -843,6 +880,10 @@ impl Registry {
                             reason: error.to_string(),
                         })
                     })?;
+                    let after = model.clone();
+                    ensure_placement_member_shape_change_allowed(
+                        domain, &before, &after, &candidate,
+                    )?;
                 }
                 RegistryMutation::AlterReingestor(alter) => {
                     let key = RegistryKey::new(ModelKind::Reingestor, alter.reingestor.clone());
@@ -906,6 +947,44 @@ impl Registry {
                         })
                     })?;
                 }
+                RegistryMutation::AlterPlacement(alter) => {
+                    let key = RegistryKey::new(ModelKind::Placement, alter.placement.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.placement.as_str(),
+                        kind = ModelKind::Placement.as_str(),
+                        "staging placement alter from batch"
+                    );
+                    let Some(mut model) = candidate.remove(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.placement.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Placement(placement) = &mut model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.placement.as_str().to_string(),
+                            expected_kind: ModelKind::Placement.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    placement.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.placement.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                    let next_key = RegistryKey::from_model(&model);
+                    if next_key != key && candidate.contains_key(&next_key) {
+                        return Err(Report::new(RegistryError::AlreadyExists {
+                            domain: domain.as_str().to_string(),
+                            identifier: model.identifier().as_str().to_string(),
+                        }));
+                    }
+                    candidate.insert(next_key, model);
+                }
                 RegistryMutation::Drop(drop) => {
                     let key = RegistryKey::new(drop.kind, drop.name.clone());
                     info!(
@@ -915,12 +994,27 @@ impl Registry {
                         "staging model drop from batch"
                     );
 
-                    let Some(_existing_model) = candidate.remove(&key) else {
+                    if !candidate.contains_key(&key) {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: drop.name.as_str().to_string(),
                         }));
-                    };
+                    }
+                    let recreated_later = mutations[mutation_index + 1..].iter().any(|mutation| {
+                        let RegistryMutation::Create(model) = mutation else {
+                            return false;
+                        };
+                        RegistryKey::from_model(model) == key
+                    });
+                    if !recreated_later {
+                        let candidate_state = self.build_domain_state(domain, &candidate)?;
+                        ensure_drop_targets_are_not_in_use(
+                            domain,
+                            &candidate_state.graph,
+                            &HashSet::from_iter([key.clone()]),
+                        )?;
+                    }
+                    let _ = candidate.remove(&key);
                 }
             }
         }
@@ -930,7 +1024,6 @@ impl Registry {
             .filter(|key| !candidate.contains_key(*key))
             .cloned()
             .collect::<HashSet<_>>();
-        ensure_drop_targets_are_not_in_use(domain, &current_state.graph, &drops_in_batch)?;
 
         let domain_state = match self.build_domain_state(domain, &candidate) {
             Ok(state) => state,
@@ -1139,6 +1232,18 @@ impl Registry {
         state.domains.get(domain).map(|ns| ns.graph.clone())
     }
 
+    pub fn placement_plan(
+        &self,
+        domain: &Domain,
+        default_policy: PlacementPolicy,
+    ) -> Option<PlacementPlan> {
+        let state = self.state.read();
+        state
+            .domains
+            .get(domain)
+            .map(|domain_state| domain_state.graph.placement_plan(default_policy))
+    }
+
     pub fn active_graphs(&self) -> Vec<(Domain, ActiveGraph)> {
         let state = self.state.read();
         let mut graphs = state
@@ -1259,6 +1364,7 @@ pub enum RegistryMutation {
     AlterIngestor(AlterIngestor),
     AlterReingestor(AlterReingestor),
     AlterGenerator(AlterGenerator),
+    AlterPlacement(AlterPlacement),
     Drop(DropModel),
 }
 
@@ -1551,7 +1657,7 @@ impl DomainState {
                         graph.add_edge(signaling_protocol, source, EdgeKind::RequiredBy);
                     }
                 }
-                Model::Materializer(_) => {}
+                Model::Materializer(_) | Model::Placement(_) => {}
                 Model::SignalingProtocol(protocol) => {
                     ensure_signaling_protocol_is_valid(domain, identifier, protocol)?;
                 }
@@ -2751,12 +2857,940 @@ impl DomainState {
         validate_endpoint_paths(domain, models)?;
         infer_stream_branchings(domain, models, &indices, &mut graph)?;
         validate_processing_branch_selections(domain, models, &indices, &graph)?;
-        attach_materializer_nodes(models, &indices, &mut graph);
+        attach_materializer_nodes(models, &mut indices, &mut graph);
+        let placement = PlacementAnalysis::build(domain, models, &indices, &mut graph)?;
 
         Ok(Self {
             models: models.clone(),
-            graph: ActiveGraph { graph, indices },
+            graph: ActiveGraph {
+                graph,
+                indices,
+                placement,
+            },
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementPlan {
+    pub rules: Vec<PlacementRulePlan>,
+    pub effective_pairs: Vec<PlacementEffectivePair>,
+    pub require_groups: Vec<PlacementRequireGroupPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementRulePlan {
+    pub name: Identifier,
+    pub from: Vec<Identifier>,
+    pub to: Vec<Identifier>,
+    pub policy: PlacementPolicy,
+    pub rank: Option<u64>,
+    pub endpoint_pairs: Vec<PlacementEndpointPairPlan>,
+    pub claims: Vec<PlacementRuleClaimPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementEndpointPairPlan {
+    pub source: PlacementRuntimeNode,
+    pub destination: PlacementRuntimeNode,
+    pub connected: bool,
+    pub corridor: Vec<PlacementRuntimeNode>,
+    pub witnesses: Vec<PlacementCorridorWitness>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementCorridorWitness {
+    pub captured: PlacementRuntimeNode,
+    pub path: Vec<PlacementRuntimeNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementRuleClaimPlan {
+    pub left: PlacementRuntimeNode,
+    pub right: PlacementRuntimeNode,
+    pub effective: bool,
+    pub effective_policy: PlacementPolicy,
+    pub winning_rules: Vec<Identifier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementEffectivePair {
+    pub left: PlacementRuntimeNode,
+    pub right: PlacementRuntimeNode,
+    pub policy: PlacementPolicy,
+    pub winning_rules: Vec<Identifier>,
+    pub from_domain_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementRequireGroupPlan {
+    pub members: Vec<PlacementRuntimeNode>,
+    pub bonds: Vec<PlacementEffectivePair>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PlacementPair {
+    left: RegistryKey,
+    right: RegistryKey,
+}
+
+impl PlacementPair {
+    fn new(left: RegistryKey, right: RegistryKey) -> Option<Self> {
+        if left == right {
+            return None;
+        }
+        if registry_key_cmp(&left, &right).is_le() {
+            Some(Self { left, right })
+        } else {
+            Some(Self {
+                left: right,
+                right: left,
+            })
+        }
+    }
+
+    fn runtime_nodes(&self) -> (PlacementRuntimeNode, PlacementRuntimeNode) {
+        (
+            placement_runtime_node(&self.left),
+            placement_runtime_node(&self.right),
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PlacementRuleAnalysis {
+    model: CreatePlacement,
+    endpoint_pairs: Vec<PlacementEndpointAnalysis>,
+    claimed_pairs: HashSet<PlacementPair>,
+}
+
+#[derive(Debug, Clone)]
+struct PlacementEndpointAnalysis {
+    source: RegistryKey,
+    destination: RegistryKey,
+    corridor: Vec<RegistryKey>,
+    witnesses: Vec<(RegistryKey, Vec<RegistryKey>)>,
+}
+
+#[derive(Debug, Clone)]
+struct PlacementClaim {
+    rule: Identifier,
+    policy: PlacementPolicy,
+    rank: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPlacementPair {
+    policy: PlacementPolicy,
+    winning_rules: Vec<Identifier>,
+    from_domain_default: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlacementAnalysis {
+    rules: Vec<PlacementRuleAnalysis>,
+    explicit_pairs: HashMap<PlacementPair, ResolvedPlacementPair>,
+    direct_pairs: HashSet<PlacementPair>,
+}
+
+#[derive(Debug, Clone)]
+struct EffectivePlacementPlan {
+    pairs: HashMap<PlacementPair, ResolvedPlacementPair>,
+    require_groups: Vec<Vec<RegistryKey>>,
+    group_by_member: HashMap<RegistryKey, usize>,
+}
+
+impl PlacementAnalysis {
+    fn build(
+        domain: &Domain,
+        models: &HashMap<RegistryKey, Model>,
+        indices: &HashMap<RegistryKey, NodeIndex>,
+        graph: &mut DiGraph<ActiveNode, EdgeKind>,
+    ) -> Result<Self, Report<RegistryError>> {
+        let topology = PlacementTopology::build(models, indices, graph);
+        let mut placement_models = models
+            .values()
+            .filter_map(|model| match model {
+                Model::Placement(placement) => Some(placement.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        placement_models.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+
+        let mut rules = Vec::with_capacity(placement_models.len());
+        let mut claims_by_pair = HashMap::<PlacementPair, Vec<PlacementClaim>>::new();
+        for placement in placement_models {
+            placement.validate().map_err(|error| {
+                Report::new(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: placement.name.as_str().to_string(),
+                    reason: error.to_string(),
+                })
+            })?;
+            let placement_index = indices
+                .get(&RegistryKey::new(
+                    ModelKind::Placement,
+                    placement.name.clone(),
+                ))
+                .copied()
+                .expect("placement graph node must exist");
+            let from = resolve_placement_members(domain, &placement, &placement.from, models)?;
+            let to = resolve_placement_members(domain, &placement, &placement.to, models)?;
+
+            let mut pinned = HashSet::default();
+            for member in from.iter().chain(&to) {
+                if pinned.insert(member.pin.clone()) {
+                    let pin_index = indices
+                        .get(&member.pin)
+                        .copied()
+                        .expect("resolved placement member pin must exist");
+                    graph.add_edge(pin_index, placement_index, EdgeKind::RequiredBy);
+                }
+            }
+
+            let mut endpoint_pairs = Vec::new();
+            let mut claimed_pairs = HashSet::default();
+            for source in &from {
+                for destination in &to {
+                    let endpoint = topology
+                        .endpoint_analysis(source.runtime.clone(), destination.runtime.clone());
+                    for left_index in 0..endpoint.corridor.len() {
+                        for right_index in left_index + 1..endpoint.corridor.len() {
+                            let pair = PlacementPair::new(
+                                endpoint.corridor[left_index].clone(),
+                                endpoint.corridor[right_index].clone(),
+                            )
+                            .expect("different corridor positions must form a pair");
+                            if claimed_pairs.insert(pair.clone()) {
+                                claims_by_pair
+                                    .entry(pair)
+                                    .or_default()
+                                    .push(PlacementClaim {
+                                        rule: placement.name.clone(),
+                                        policy: placement.policy,
+                                        rank: placement.rank,
+                                    });
+                            }
+                        }
+                    }
+                    endpoint_pairs.push(endpoint);
+                }
+            }
+            rules.push(PlacementRuleAnalysis {
+                model: placement,
+                endpoint_pairs,
+                claimed_pairs,
+            });
+        }
+
+        let mut explicit_pairs = HashMap::default();
+        for (pair, claims) in claims_by_pair {
+            let strongest = claims
+                .iter()
+                .map(|claim| placement_rank_key(claim.rank))
+                .min()
+                .expect("a claimed pair must have at least one claim");
+            let mut winners = claims
+                .iter()
+                .filter(|claim| placement_rank_key(claim.rank) == strongest)
+                .collect::<Vec<_>>();
+            winners.sort_by(|left, right| left.rule.as_str().cmp(right.rule.as_str()));
+            let policy = winners[0].policy;
+            if let Some(conflict) = winners.iter().find(|claim| claim.policy != policy) {
+                let first = winners
+                    .iter()
+                    .find(|claim| claim.policy == policy)
+                    .expect("first winning policy must have an owner");
+                return Err(Report::new(RegistryError::PlacementConflict {
+                    domain: domain.as_str().to_string(),
+                    left_rule: first.rule.as_str().to_string(),
+                    right_rule: conflict.rule.as_str().to_string(),
+                    left_kind: pair.left.kind.as_str(),
+                    left_identifier: pair.left.identifier.as_str().to_string(),
+                    right_kind: pair.right.kind.as_str(),
+                    right_identifier: pair.right.identifier.as_str().to_string(),
+                }));
+            }
+            let mut winning_rules = winners
+                .into_iter()
+                .map(|claim| claim.rule.clone())
+                .collect::<Vec<_>>();
+            winning_rules.dedup();
+            explicit_pairs.insert(
+                pair,
+                ResolvedPlacementPair {
+                    policy,
+                    winning_rules,
+                    from_domain_default: false,
+                },
+            );
+        }
+
+        Ok(Self {
+            rules,
+            explicit_pairs,
+            direct_pairs: topology.direct_pairs(),
+        })
+    }
+
+    fn effective(&self, default_policy: PlacementPolicy) -> EffectivePlacementPlan {
+        let mut pairs = self.explicit_pairs.clone();
+        for pair in &self.direct_pairs {
+            pairs
+                .entry(pair.clone())
+                .or_insert_with(|| ResolvedPlacementPair {
+                    policy: default_policy,
+                    winning_rules: Vec::new(),
+                    from_domain_default: true,
+                });
+        }
+
+        let require_pairs = pairs
+            .iter()
+            .filter_map(|(pair, resolved)| {
+                (resolved.policy == PlacementPolicy::RequireColocation).then_some(pair.clone())
+            })
+            .collect::<Vec<_>>();
+        let require_groups = placement_require_groups(&require_pairs);
+        let mut group_by_member = HashMap::default();
+        for (group_index, members) in require_groups.iter().enumerate() {
+            for member in members {
+                group_by_member.insert(member.clone(), group_index);
+            }
+        }
+        EffectivePlacementPlan {
+            pairs,
+            require_groups,
+            group_by_member,
+        }
+    }
+
+    fn plan(&self, default_policy: PlacementPolicy) -> PlacementPlan {
+        let effective = self.effective(default_policy);
+        let mut effective_pairs = effective
+            .pairs
+            .iter()
+            .map(|(pair, resolved)| placement_effective_pair(pair, resolved))
+            .collect::<Vec<_>>();
+        effective_pairs.sort_by(placement_effective_pair_cmp);
+
+        let mut rules = self
+            .rules
+            .iter()
+            .map(|rule| {
+                let mut claims =
+                    rule.claimed_pairs
+                        .iter()
+                        .map(|pair| {
+                            let resolved = effective.pairs.get(pair).expect(
+                                "an explicit rule claim must remain effective or overridden",
+                            );
+                            let (left, right) = pair.runtime_nodes();
+                            PlacementRuleClaimPlan {
+                                left,
+                                right,
+                                effective: resolved.winning_rules.contains(&rule.model.name),
+                                effective_policy: resolved.policy,
+                                winning_rules: resolved.winning_rules.clone(),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                claims.sort_by(placement_rule_claim_cmp);
+                PlacementRulePlan {
+                    name: rule.model.name.clone(),
+                    from: rule.model.from.clone(),
+                    to: rule.model.to.clone(),
+                    policy: rule.model.policy,
+                    rank: rule.model.rank,
+                    endpoint_pairs: rule
+                        .endpoint_pairs
+                        .iter()
+                        .map(placement_endpoint_pair_plan)
+                        .collect(),
+                    claims,
+                }
+            })
+            .collect::<Vec<_>>();
+        rules.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+
+        let require_groups = effective
+            .require_groups
+            .iter()
+            .map(|members| {
+                let member_set = members.iter().cloned().collect::<HashSet<_>>();
+                let mut bonds = effective
+                    .pairs
+                    .iter()
+                    .filter(|(pair, resolved)| {
+                        resolved.policy == PlacementPolicy::RequireColocation
+                            && member_set.contains(&pair.left)
+                            && member_set.contains(&pair.right)
+                    })
+                    .map(|(pair, resolved)| placement_effective_pair(pair, resolved))
+                    .collect::<Vec<_>>();
+                bonds.sort_by(placement_effective_pair_cmp);
+                PlacementRequireGroupPlan {
+                    members: members.iter().map(placement_runtime_node).collect(),
+                    bonds,
+                }
+            })
+            .collect();
+
+        PlacementPlan {
+            rules,
+            effective_pairs,
+            require_groups,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPlacementMember {
+    runtime: RegistryKey,
+    pin: RegistryKey,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlacementTopology {
+    adjacency: HashMap<RegistryKey, Vec<RegistryKey>>,
+    reverse: HashMap<RegistryKey, Vec<RegistryKey>>,
+}
+
+impl PlacementTopology {
+    fn build(
+        models: &HashMap<RegistryKey, Model>,
+        indices: &HashMap<RegistryKey, NodeIndex>,
+        graph: &DiGraph<ActiveNode, EdgeKind>,
+    ) -> Self {
+        let placement_indices = graph
+            .node_indices()
+            .filter(|index| {
+                graph
+                    .node_weight(*index)
+                    .is_some_and(|node| is_placement_runtime_model(node.config.as_ref()))
+            })
+            .collect::<HashSet<_>>();
+        let mut adjacency_sets = HashMap::<RegistryKey, HashSet<RegistryKey>>::new();
+
+        for source in &placement_indices {
+            let source_node = graph
+                .node_weight(*source)
+                .expect("placement source node must exist");
+            let source_key = source_node.key();
+            adjacency_sets.entry(source_key.clone()).or_default();
+            let mut pending = graph
+                .edges_directed(*source, Direction::Outgoing)
+                .filter(|edge| edge.weight().is_runtime_flow_edge())
+                .map(|edge| edge.target())
+                .collect::<Vec<_>>();
+            let mut visited = HashSet::default();
+            while let Some(index) = pending.pop() {
+                if !visited.insert(index) {
+                    continue;
+                }
+                if placement_indices.contains(&index) {
+                    let target = graph
+                        .node_weight(index)
+                        .expect("placement target node must exist")
+                        .key();
+                    adjacency_sets
+                        .entry(source_key.clone())
+                        .or_default()
+                        .insert(target);
+                    continue;
+                }
+                pending.extend(
+                    graph
+                        .edges_directed(index, Direction::Outgoing)
+                        .filter(|edge| edge.weight().is_runtime_flow_edge())
+                        .map(|edge| edge.target()),
+                );
+            }
+        }
+
+        for (key, model) in models {
+            if !is_placement_runtime_model(model) {
+                continue;
+            }
+            for relay in placement_materialized_relays(model) {
+                let materializer = RegistryKey::new(ModelKind::Materializer, relay.clone());
+                if indices.contains_key(&materializer) {
+                    adjacency_sets
+                        .entry(materializer)
+                        .or_default()
+                        .insert(key.clone());
+                }
+            }
+        }
+
+        let mut adjacency = HashMap::default();
+        for (source, targets) in adjacency_sets {
+            let mut targets = targets.into_iter().collect::<Vec<_>>();
+            targets.sort_by(registry_key_cmp);
+            adjacency.insert(source, targets);
+        }
+        let mut reverse_sets = HashMap::<RegistryKey, HashSet<RegistryKey>>::new();
+        for (source, targets) in &adjacency {
+            reverse_sets.entry(source.clone()).or_default();
+            for target in targets {
+                reverse_sets
+                    .entry(target.clone())
+                    .or_default()
+                    .insert(source.clone());
+            }
+        }
+        let mut reverse = HashMap::default();
+        for (target, sources) in reverse_sets {
+            let mut sources = sources.into_iter().collect::<Vec<_>>();
+            sources.sort_by(registry_key_cmp);
+            reverse.insert(target, sources);
+        }
+        Self { adjacency, reverse }
+    }
+
+    fn direct_pairs(&self) -> HashSet<PlacementPair> {
+        self.adjacency
+            .iter()
+            .flat_map(|(source, targets)| {
+                targets
+                    .iter()
+                    .filter_map(|target| PlacementPair::new(source.clone(), target.clone()))
+            })
+            .collect()
+    }
+
+    fn endpoint_analysis(
+        &self,
+        source: RegistryKey,
+        destination: RegistryKey,
+    ) -> PlacementEndpointAnalysis {
+        let connecting_path = if source == destination {
+            self.cycle_path(&source)
+        } else {
+            self.path(&source, &destination)
+        };
+        let Some(_connecting_path) = connecting_path else {
+            return PlacementEndpointAnalysis {
+                source,
+                destination,
+                corridor: Vec::new(),
+                witnesses: Vec::new(),
+            };
+        };
+
+        let forward = self.reachable(&source, &self.adjacency);
+        let backward = self.reachable(&destination, &self.reverse);
+        let mut corridor = forward.intersection(&backward).cloned().collect::<Vec<_>>();
+        corridor.sort_by(registry_key_cmp);
+        let mut witnesses = Vec::new();
+        for captured in corridor
+            .iter()
+            .filter(|captured| **captured != source && **captured != destination)
+        {
+            let Some(mut prefix) = self.path(&source, captured) else {
+                continue;
+            };
+            let Some(suffix) = self.path(captured, &destination) else {
+                continue;
+            };
+            prefix.extend(suffix.into_iter().skip(1));
+            witnesses.push((captured.clone(), prefix));
+        }
+        PlacementEndpointAnalysis {
+            source,
+            destination,
+            corridor,
+            witnesses,
+        }
+    }
+
+    fn reachable(
+        &self,
+        start: &RegistryKey,
+        edges: &HashMap<RegistryKey, Vec<RegistryKey>>,
+    ) -> HashSet<RegistryKey> {
+        let mut visited = HashSet::default();
+        let mut pending = vec![start.clone()];
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node.clone()) {
+                continue;
+            }
+            if let Some(targets) = edges.get(&node) {
+                pending.extend(targets.iter().rev().cloned());
+            }
+        }
+        visited
+    }
+
+    fn path(&self, start: &RegistryKey, end: &RegistryKey) -> Option<Vec<RegistryKey>> {
+        if start == end {
+            return Some(vec![start.clone()]);
+        }
+        let mut pending = VecDeque::from([start.clone()]);
+        let mut previous = HashMap::<RegistryKey, RegistryKey>::new();
+        let mut visited = HashSet::from_iter([start.clone()]);
+        while let Some(node) = pending.pop_front() {
+            for target in self.adjacency.get(&node).into_iter().flatten() {
+                if !visited.insert(target.clone()) {
+                    continue;
+                }
+                previous.insert(target.clone(), node.clone());
+                if target == end {
+                    let mut path = vec![end.clone()];
+                    let mut cursor = end;
+                    while cursor != start {
+                        cursor = previous
+                            .get(cursor)
+                            .expect("visited path node must have a predecessor");
+                        path.push(cursor.clone());
+                    }
+                    path.reverse();
+                    return Some(path);
+                }
+                pending.push_back(target.clone());
+            }
+        }
+        None
+    }
+
+    fn cycle_path(&self, start: &RegistryKey) -> Option<Vec<RegistryKey>> {
+        for target in self.adjacency.get(start).into_iter().flatten() {
+            if target == start {
+                return Some(vec![start.clone(), start.clone()]);
+            }
+            if let Some(path) = self.path(target, start) {
+                let mut cycle = vec![start.clone()];
+                cycle.extend(path);
+                return Some(cycle);
+            }
+        }
+        None
+    }
+}
+
+fn resolve_placement_members(
+    domain: &Domain,
+    placement: &CreatePlacement,
+    members: &[Identifier],
+    models: &HashMap<RegistryKey, Model>,
+) -> Result<Vec<ResolvedPlacementMember>, Report<RegistryError>> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::default();
+    for member in members {
+        let candidate = resolve_placement_member(domain, placement, member, models)?;
+        if seen.insert(candidate.runtime.clone()) {
+            resolved.push(candidate);
+        }
+    }
+    Ok(resolved)
+}
+
+fn resolve_placement_member(
+    domain: &Domain,
+    placement: &CreatePlacement,
+    member: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+) -> Result<ResolvedPlacementMember, Report<RegistryError>> {
+    let mut eligible = Vec::new();
+    let mut endpoint_ingestor = false;
+    let mut relay_without_state = false;
+    let mut ineligible_kinds = Vec::new();
+    for (key, model) in models.iter().filter(|(key, _)| key.identifier == *member) {
+        match model {
+            Model::Relay(relay) if relay.materialized_state.is_some() => {
+                eligible.push(ResolvedPlacementMember {
+                    runtime: RegistryKey::new(ModelKind::Materializer, member.clone()),
+                    pin: key.clone(),
+                });
+            }
+            Model::Relay(_) => relay_without_state = true,
+            Model::Ingestor(CreateIngestor {
+                source: IngestSource::Endpoint { .. },
+                ..
+            }) => endpoint_ingestor = true,
+            _ if is_user_placement_member_model(model) => {
+                eligible.push(ResolvedPlacementMember {
+                    runtime: key.clone(),
+                    pin: key.clone(),
+                });
+            }
+            Model::Materializer(_) => {}
+            _ => ineligible_kinds.push(key.kind),
+        }
+    }
+    eligible.sort_by(|left, right| registry_key_cmp(&left.runtime, &right.runtime));
+    eligible.dedup_by(|left, right| left.runtime == right.runtime);
+    if eligible.len() == 1 {
+        return Ok(eligible.remove(0));
+    }
+    let reason = if eligible.len() > 1 {
+        let kinds = eligible
+            .iter()
+            .map(|candidate| candidate.runtime.kind.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "placement member '{}' is ambiguous across eligible kinds {kinds}",
+            member
+        )
+    } else if endpoint_ingestor {
+        format!(
+            "placement member '{}' is not placement-eligible: endpoint-source ingestors execute \
+             on every cluster node",
+            member
+        )
+    } else if relay_without_state {
+        format!(
+            "placement member '{}' is a relay that is not materialized and is not \
+             placement-eligible",
+            member
+        )
+    } else if !ineligible_kinds.is_empty() {
+        ineligible_kinds.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        ineligible_kinds.dedup();
+        format!(
+            "placement member '{}' has non-schedulable kind {} and is not placement-eligible",
+            member,
+            ineligible_kinds
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        format!("placement member '{}' does not exist", member)
+    };
+    Err(Report::new(RegistryError::InvalidModel {
+        domain: domain.as_str().to_string(),
+        identifier: placement.name.as_str().to_string(),
+        reason,
+    }))
+}
+
+fn is_user_placement_member_model(model: &Model) -> bool {
+    matches!(
+        model,
+        Model::Generator(_)
+            | Model::Inferencer(_)
+            | Model::Ingestor(_)
+            | Model::Reingestor(_)
+            | Model::Lookup(_)
+            | Model::Junction(_)
+            | Model::Deduplicator(_)
+            | Model::Correlator(_)
+            | Model::Reorderer(_)
+            | Model::WindowProcessor(_)
+            | Model::WasmProcessor(_)
+            | Model::Emitter(_)
+    )
+}
+
+fn is_placement_eligible_member_model(model: &Model) -> bool {
+    match model {
+        Model::Relay(relay) => relay.materialized_state.is_some(),
+        Model::Ingestor(CreateIngestor {
+            source: IngestSource::Endpoint { .. },
+            ..
+        }) => false,
+        _ => is_user_placement_member_model(model),
+    }
+}
+
+fn ensure_placement_member_shape_change_allowed(
+    domain: &Domain,
+    before: &Model,
+    after: &Model,
+    candidate_models: &HashMap<RegistryKey, Model>,
+) -> Result<(), Report<RegistryError>> {
+    if !is_placement_eligible_member_model(before) || is_placement_eligible_member_model(after) {
+        return Ok(());
+    }
+
+    let member = after.identifier();
+    let mut placements = candidate_models
+        .values()
+        .filter_map(|model| {
+            let Model::Placement(placement) = model else {
+                return None;
+            };
+            placement
+                .from
+                .iter()
+                .chain(&placement.to)
+                .any(|candidate| candidate == member)
+                .then_some(placement.name.clone())
+        })
+        .collect::<Vec<_>>();
+    placements.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    placements.dedup();
+    if placements.is_empty() {
+        return Ok(());
+    }
+
+    Err(Report::new(RegistryError::PlacementMemberPinned {
+        domain: domain.as_str().to_string(),
+        identifier: member.as_str().to_string(),
+        placements: placements
+            .iter()
+            .map(Identifier::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+    }))
+}
+
+fn is_placement_runtime_model(model: &Model) -> bool {
+    match model {
+        Model::Ingestor(CreateIngestor {
+            source: IngestSource::Endpoint { .. },
+            ..
+        }) => false,
+        Model::Materializer(_) => true,
+        _ => is_user_placement_member_model(model),
+    }
+}
+
+fn placement_materialized_relays(model: &Model) -> Vec<&Identifier> {
+    let mut relays = model_materialized_state_dependencies(model)
+        .iter()
+        .map(|dependency| &dependency.relay)
+        .collect::<Vec<_>>();
+    if let Model::Generator(generator) = model {
+        relays.push(&generator.materialized_relay);
+    }
+    relays
+}
+
+fn placement_rank_key(rank: Option<u64>) -> (u8, u64) {
+    rank.map_or((1, 0), |rank| (0, rank))
+}
+
+fn registry_key_cmp(left: &RegistryKey, right: &RegistryKey) -> Ordering {
+    left.kind
+        .as_str()
+        .cmp(right.kind.as_str())
+        .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
+}
+
+fn placement_runtime_node(key: &RegistryKey) -> PlacementRuntimeNode {
+    PlacementRuntimeNode::new(key.kind, key.identifier.clone())
+}
+
+fn placement_endpoint_pair_plan(endpoint: &PlacementEndpointAnalysis) -> PlacementEndpointPairPlan {
+    PlacementEndpointPairPlan {
+        source: placement_runtime_node(&endpoint.source),
+        destination: placement_runtime_node(&endpoint.destination),
+        connected: !endpoint.corridor.is_empty(),
+        corridor: endpoint
+            .corridor
+            .iter()
+            .map(placement_runtime_node)
+            .collect(),
+        witnesses: endpoint
+            .witnesses
+            .iter()
+            .map(|(captured, path)| PlacementCorridorWitness {
+                captured: placement_runtime_node(captured),
+                path: path.iter().map(placement_runtime_node).collect(),
+            })
+            .collect(),
+    }
+}
+
+fn placement_effective_pair(
+    pair: &PlacementPair,
+    resolved: &ResolvedPlacementPair,
+) -> PlacementEffectivePair {
+    let (left, right) = pair.runtime_nodes();
+    PlacementEffectivePair {
+        left,
+        right,
+        policy: resolved.policy,
+        winning_rules: resolved.winning_rules.clone(),
+        from_domain_default: resolved.from_domain_default,
+    }
+}
+
+fn placement_runtime_node_cmp(
+    left: &PlacementRuntimeNode,
+    right: &PlacementRuntimeNode,
+) -> Ordering {
+    left.kind
+        .as_str()
+        .cmp(right.kind.as_str())
+        .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
+}
+
+fn placement_effective_pair_cmp(
+    left: &PlacementEffectivePair,
+    right: &PlacementEffectivePair,
+) -> Ordering {
+    placement_runtime_node_cmp(&left.left, &right.left)
+        .then_with(|| placement_runtime_node_cmp(&left.right, &right.right))
+}
+
+fn placement_rule_claim_cmp(
+    left: &PlacementRuleClaimPlan,
+    right: &PlacementRuleClaimPlan,
+) -> Ordering {
+    placement_runtime_node_cmp(&left.left, &right.left)
+        .then_with(|| placement_runtime_node_cmp(&left.right, &right.right))
+}
+
+fn placement_require_groups(require_pairs: &[PlacementPair]) -> Vec<Vec<RegistryKey>> {
+    let mut parent = HashMap::<RegistryKey, RegistryKey>::new();
+    for pair in require_pairs {
+        parent
+            .entry(pair.left.clone())
+            .or_insert_with(|| pair.left.clone());
+        parent
+            .entry(pair.right.clone())
+            .or_insert_with(|| pair.right.clone());
+        placement_union(&mut parent, &pair.left, &pair.right);
+    }
+    let members = parent.keys().cloned().collect::<Vec<_>>();
+    let mut groups = HashMap::<RegistryKey, Vec<RegistryKey>>::new();
+    for member in members {
+        let root = placement_find(&mut parent, &member);
+        groups.entry(root).or_default().push(member);
+    }
+    let mut groups = groups.into_values().collect::<Vec<_>>();
+    for group in &mut groups {
+        group.sort_by(registry_key_cmp);
+    }
+    groups.sort_by(|left, right| registry_key_cmp(&left[0], &right[0]));
+    groups
+}
+
+fn placement_find(
+    parent: &mut HashMap<RegistryKey, RegistryKey>,
+    member: &RegistryKey,
+) -> RegistryKey {
+    let direct = parent
+        .get(member)
+        .cloned()
+        .expect("placement disjoint-set member must exist");
+    if direct == *member {
+        return direct;
+    }
+    let root = placement_find(parent, &direct);
+    parent.insert(member.clone(), root.clone());
+    root
+}
+
+fn placement_union(
+    parent: &mut HashMap<RegistryKey, RegistryKey>,
+    left: &RegistryKey,
+    right: &RegistryKey,
+) {
+    let left_root = placement_find(parent, left);
+    let right_root = placement_find(parent, right);
+    if left_root == right_root {
+        return;
+    }
+    if registry_key_cmp(&left_root, &right_root).is_le() {
+        parent.insert(right_root, left_root);
+    } else {
+        parent.insert(left_root, right_root);
     }
 }
 
@@ -2764,6 +3798,7 @@ impl DomainState {
 pub struct ActiveGraph {
     graph: DiGraph<ActiveNode, EdgeKind>,
     indices: HashMap<RegistryKey, NodeIndex>,
+    placement: PlacementAnalysis,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2793,6 +3828,10 @@ impl ActiveGraph {
             })
             .collect::<HashMap<_, _>>();
         DomainState::build(&schedule.domain, &models).map(|state| state.graph)
+    }
+
+    pub fn placement_plan(&self, default_policy: PlacementPolicy) -> PlacementPlan {
+        self.placement.plan(default_policy)
     }
 
     pub fn node(&self, kind: ModelKind, identifier: &Identifier) -> Option<&ActiveNode> {
@@ -2957,6 +3996,7 @@ impl ActiveGraph {
         domain: &Domain,
         cluster_nodes: &[String],
         replica_count: usize,
+        default_policy: PlacementPolicy,
     ) -> DomainSchedule {
         #[cfg(feature = "testing")]
         {
@@ -2964,12 +4004,13 @@ impl ActiveGraph {
                 domain,
                 cluster_nodes,
                 replica_count,
+                default_policy,
                 SchedulerMode::Sticky,
             )
         }
         #[cfg(not(feature = "testing"))]
         {
-            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count)
+            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, default_policy)
         }
     }
 
@@ -2979,9 +4020,16 @@ impl ActiveGraph {
         domain: &Domain,
         cluster_nodes: &[String],
         replica_count: usize,
+        default_policy: PlacementPolicy,
         scheduler_mode: SchedulerMode,
     ) -> DomainSchedule {
-        self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, scheduler_mode)
+        self.schedule_for_domain_inner(
+            domain,
+            cluster_nodes,
+            replica_count,
+            default_policy,
+            scheduler_mode,
+        )
     }
 
     fn schedule_for_domain_inner(
@@ -2989,9 +4037,11 @@ impl ActiveGraph {
         domain: &Domain,
         cluster_nodes: &[String],
         replica_count: usize,
+        default_policy: PlacementPolicy,
         #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
     ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
+        let placement = self.placement.effective(default_policy);
         #[cfg(feature = "testing")]
         let random_schedule_seed = {
             let mut hasher = blake3::Hasher::new();
@@ -3003,6 +4053,7 @@ impl ActiveGraph {
         let mut next_assignment = 0usize;
         let mut node_load = HashMap::<String, usize>::new();
         let mut assigned_by_key = HashMap::<RegistryKey, Vec<String>>::new();
+        let mut group_assignments = HashMap::<usize, Vec<String>>::new();
         let mut depth_cache = HashMap::<NodeIndex, usize>::new();
         let mut nodes = self
             .graph
@@ -3031,46 +4082,96 @@ impl ActiveGraph {
                     .then_with(|| left_index.index().cmp(&right_index.index()))
             },
         );
+        let index_by_key = nodes
+            .iter()
+            .map(|(index, node, _)| (node.key(), *index))
+            .collect::<HashMap<_, _>>();
 
+        let mut scheduled_nodes = Vec::with_capacity(nodes.len());
+        for (index, node, _) in nodes {
+            let key = node.key();
+            let group_index = placement.group_by_member.get(&key).copied();
+            let assigned_nodes = if let Some(existing) =
+                group_index.and_then(|group_index| group_assignments.get(&group_index))
+            {
+                existing.clone()
+            } else {
+                let mut assignment_planner = AssignmentPlanner {
+                    graph: &self.graph,
+                    cluster_nodes: &cluster_nodes,
+                    assigned_by_key: &assigned_by_key,
+                    placement_pairs: &placement.pairs,
+                    node_load: &node_load,
+                    next_assignment: &mut next_assignment,
+                    replica_count,
+                    #[cfg(feature = "testing")]
+                    scheduler_mode,
+                    #[cfg(feature = "testing")]
+                    random_schedule_seed,
+                };
+                let assignment = if let Some(group_index) = group_index {
+                    let members = &placement.require_groups[group_index];
+                    let member_indices = members
+                        .iter()
+                        .map(|member| {
+                            index_by_key
+                                .get(member)
+                                .copied()
+                                .expect("placement group member must have a graph index")
+                        })
+                        .collect::<Vec<_>>();
+                    assignment_planner.for_group(members, &member_indices)
+                } else {
+                    assignment_for_model(&mut assignment_planner, index, &key, node.config.as_ref())
+                };
+                if let Some(group_index) = group_index {
+                    group_assignments.insert(group_index, assignment.clone());
+                }
+                assignment
+            };
+            let primary_node = assigned_nodes.first().cloned();
+            if !assigned_nodes.is_empty() {
+                assigned_by_key.insert(key, assigned_nodes.clone());
+                for assigned_node in &assigned_nodes {
+                    *node_load.entry(assigned_node.clone()).or_insert(0) += 1;
+                }
+            }
+            scheduled_nodes.push(ScheduledNode {
+                identifier: node.identifier,
+                kind: node.kind,
+                config: Box::new((*node.config).clone()),
+                effective_branching: node.effective_branching,
+                effective_branching_schema: node.effective_branching_schema,
+                schema_fingerprint: self.schema_fingerprint_for_index(index),
+                kafka_partition_schedule: None,
+                primary_node,
+                assigned_nodes,
+            });
+        }
+        let placement_groups = placement
+            .require_groups
+            .iter()
+            .map(|members| {
+                let runtime_members = members
+                    .iter()
+                    .map(placement_runtime_node)
+                    .collect::<Vec<_>>();
+                let primary_node = members.first().and_then(|first| {
+                    scheduled_nodes
+                        .iter()
+                        .find(|node| node.kind == first.kind && node.identifier == first.identifier)
+                        .and_then(|node| node.primary_node.clone())
+                });
+                PlacementGroupSchedule {
+                    members: runtime_members,
+                    primary_node,
+                }
+            })
+            .collect();
         DomainSchedule {
             domain: domain.clone(),
-            nodes: nodes
-                .into_iter()
-                .map(|(index, node, _)| {
-                    let mut assignment_planner = AssignmentPlanner {
-                        graph: &self.graph,
-                        cluster_nodes: &cluster_nodes,
-                        assigned_by_key: &assigned_by_key,
-                        node_load: &node_load,
-                        next_assignment: &mut next_assignment,
-                        replica_count,
-                        #[cfg(feature = "testing")]
-                        scheduler_mode,
-                        #[cfg(feature = "testing")]
-                        random_schedule_seed,
-                    };
-                    let assigned_nodes =
-                        assignment_for_model(&mut assignment_planner, index, node.config.as_ref());
-                    let primary_node = assigned_nodes.first().cloned();
-                    if !assigned_nodes.is_empty() {
-                        assigned_by_key.insert(node.key(), assigned_nodes.clone());
-                        for assigned_node in &assigned_nodes {
-                            *node_load.entry(assigned_node.clone()).or_insert(0) += 1;
-                        }
-                    }
-                    ScheduledNode {
-                        identifier: node.identifier,
-                        kind: node.kind,
-                        config: Box::new((*node.config).clone()),
-                        effective_branching: node.effective_branching,
-                        effective_branching_schema: node.effective_branching_schema,
-                        schema_fingerprint: self.schema_fingerprint_for_index(index),
-                        kafka_partition_schedule: None,
-                        primary_node,
-                        assigned_nodes,
-                    }
-                })
-                .collect(),
+            nodes: scheduled_nodes,
+            placement_groups,
         }
     }
 
@@ -3761,8 +4862,20 @@ fn schedulable_depth(
     index: NodeIndex,
     cache: &mut HashMap<NodeIndex, usize>,
 ) -> usize {
+    schedulable_depth_inner(graph, index, cache, &mut HashSet::new())
+}
+
+fn schedulable_depth_inner(
+    graph: &DiGraph<ActiveNode, EdgeKind>,
+    index: NodeIndex,
+    cache: &mut HashMap<NodeIndex, usize>,
+    visiting: &mut HashSet<NodeIndex>,
+) -> usize {
     if let Some(depth) = cache.get(&index) {
         return *depth;
+    }
+    if !visiting.insert(index) {
+        return 0;
     }
 
     let mut max_depth = 0usize;
@@ -3775,13 +4888,14 @@ fn schedulable_depth(
             .node_weight(source)
             .expect("incoming source node must exist");
         let candidate_depth = if is_schedulable_model(source_node.config.as_ref()) {
-            schedulable_depth(graph, source, cache) + 1
+            schedulable_depth_inner(graph, source, cache, visiting) + 1
         } else {
-            schedulable_depth(graph, source, cache)
+            schedulable_depth_inner(graph, source, cache, visiting)
         };
         max_depth = max_depth.max(candidate_depth);
     }
 
+    visiting.remove(&index);
     cache.insert(index, max_depth);
     max_depth
 }
@@ -3807,7 +4921,7 @@ fn is_schedulable_model(model: &Model) -> bool {
 
 fn attach_materializer_nodes(
     models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    indices: &mut HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
 ) {
     let materialized_streams = models
@@ -3847,6 +4961,10 @@ fn attach_materializer_nodes(
             effective_branching,
             effective_branching_schema,
         });
+        indices.insert(
+            RegistryKey::new(ModelKind::Materializer, identifier),
+            materializer_index,
+        );
         graph.add_edge(stream_index, materializer_index, EdgeKind::RequiredBy);
         graph.add_edge(stream_index, materializer_index, EdgeKind::SendsTo);
     }
@@ -4578,6 +5696,7 @@ struct AssignmentPlanner<'a> {
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
     cluster_nodes: &'a [String],
     assigned_by_key: &'a HashMap<RegistryKey, Vec<String>>,
+    placement_pairs: &'a HashMap<PlacementPair, ResolvedPlacementPair>,
     node_load: &'a HashMap<String, usize>,
     next_assignment: &'a mut usize,
     replica_count: usize,
@@ -4589,24 +5708,104 @@ struct AssignmentPlanner<'a> {
 
 impl AssignmentPlanner<'_> {
     #[cfg(feature = "testing")]
-    fn random_schedule_seed_for(&self, index: NodeIndex) -> u64 {
-        let node = self
-            .graph
-            .node_weight(index)
-            .expect("scheduled graph node must exist");
+    fn random_schedule_seed_for(&self, members: &[RegistryKey]) -> u64 {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"nervix/test-random-scheduler/model");
-        hasher.update(&[0]);
-        hasher.update(&self.random_schedule_seed);
-        hasher.update(node.kind.as_str().as_bytes());
-        hasher.update(&[0]);
-        hasher.update(node.identifier.as_str().as_bytes());
+        if let [member] = members {
+            hasher.update(b"nervix/test-random-scheduler/model");
+            hasher.update(&[0]);
+            hasher.update(&self.random_schedule_seed);
+            hasher.update(member.kind.as_str().as_bytes());
+            hasher.update(&[0]);
+            hasher.update(member.identifier.as_str().as_bytes());
+        } else {
+            let mut members = members.to_vec();
+            members.sort_by(registry_key_cmp);
+            hasher.update(b"nervix/test-random-scheduler/placement-unit");
+            hasher.update(&[0]);
+            hasher.update(&self.random_schedule_seed);
+            for member in members {
+                hasher.update(member.kind.as_str().as_bytes());
+                hasher.update(&[0]);
+                hasher.update(member.identifier.as_str().as_bytes());
+                hasher.update(&[0]);
+            }
+        }
         let mut seed = [0; 8];
         seed.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
         u64::from_le_bytes(seed)
     }
 
-    fn for_model(&mut self, index: NodeIndex, model: &Model) -> Vec<String> {
+    #[cfg(feature = "testing")]
+    fn random_assignment(&self, members: &[RegistryKey]) -> Vec<String> {
+        let mut nodes = self.cluster_nodes.to_vec();
+        fastrand::Rng::with_seed(self.random_schedule_seed_for(members)).shuffle(&mut nodes);
+        nodes.truncate(self.replica_count.saturating_add(1));
+        nodes
+    }
+
+    fn ranked_assignment(
+        &mut self,
+        preferred_order: &HashMap<String, usize>,
+        placement_order: &HashMap<String, isize>,
+    ) -> Vec<String> {
+        let mut ordered_nodes = self
+            .cluster_nodes
+            .iter()
+            .enumerate()
+            .map(|(position, node_id)| {
+                (
+                    placement_order.get(node_id).copied().unwrap_or(0),
+                    preferred_order.get(node_id).copied().unwrap_or(0),
+                    Reverse(self.node_load.get(node_id).copied().unwrap_or(0)),
+                    Reverse(
+                        (position + self.cluster_nodes.len()
+                            - (*self.next_assignment % self.cluster_nodes.len()))
+                            % self.cluster_nodes.len(),
+                    ),
+                    node_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        ordered_nodes.sort_unstable();
+        ordered_nodes.reverse();
+        *self.next_assignment += 1;
+        ordered_nodes
+            .into_iter()
+            .take(self.replica_count.saturating_add(1))
+            .map(|(_, _, _, _, node_id)| node_id)
+            .collect()
+    }
+
+    fn for_group(&mut self, members: &[RegistryKey], indices: &[NodeIndex]) -> Vec<String> {
+        if self.cluster_nodes.is_empty() {
+            return Vec::new();
+        }
+
+        #[cfg(feature = "testing")]
+        if let SchedulerMode::Random = self.scheduler_mode {
+            return self.random_assignment(members);
+        }
+
+        let mut preferred_order = HashMap::<String, usize>::new();
+        for index in indices {
+            for (node_id, score) in
+                locality_affinity_scores(self.graph, *index, self.assigned_by_key)
+            {
+                *preferred_order.entry(node_id).or_insert(0) += score;
+            }
+        }
+        let mut placement_order = HashMap::<String, isize>::new();
+        for member in members {
+            for (node_id, score) in
+                placement_affinity_scores(member, self.placement_pairs, self.assigned_by_key)
+            {
+                *placement_order.entry(node_id).or_insert(0) += score;
+            }
+        }
+        self.ranked_assignment(&preferred_order, &placement_order)
+    }
+
+    fn for_model(&mut self, index: NodeIndex, key: &RegistryKey, model: &Model) -> Vec<String> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
         }
@@ -4631,40 +5830,14 @@ impl AssignmentPlanner<'_> {
             | Model::Emitter(_) => {
                 #[cfg(feature = "testing")]
                 if let SchedulerMode::Random = self.scheduler_mode {
-                    let mut nodes = self.cluster_nodes.to_vec();
-                    fastrand::Rng::with_seed(self.random_schedule_seed_for(index))
-                        .shuffle(&mut nodes);
-                    nodes.truncate(self.replica_count.saturating_add(1));
-                    return nodes;
+                    return self.random_assignment(std::slice::from_ref(key));
                 }
 
                 let preferred_order =
                     locality_affinity_scores(self.graph, index, self.assigned_by_key);
-                let mut ordered_nodes = self
-                    .cluster_nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(position, node_id)| {
-                        (
-                            preferred_order.get(node_id).copied().unwrap_or(0),
-                            Reverse(self.node_load.get(node_id).copied().unwrap_or(0)),
-                            Reverse(
-                                (position + self.cluster_nodes.len()
-                                    - (*self.next_assignment % self.cluster_nodes.len()))
-                                    % self.cluster_nodes.len(),
-                            ),
-                            node_id.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                ordered_nodes.sort_unstable();
-                ordered_nodes.reverse();
-                *self.next_assignment += 1;
-                ordered_nodes
-                    .into_iter()
-                    .take(self.replica_count.saturating_add(1))
-                    .map(|(_, _, _, node_id)| node_id)
-                    .collect()
+                let placement_order =
+                    placement_affinity_scores(key, self.placement_pairs, self.assigned_by_key);
+                self.ranked_assignment(&preferred_order, &placement_order)
             }
             _ => Vec::new(),
         }
@@ -4674,12 +5847,40 @@ impl AssignmentPlanner<'_> {
 fn assignment_for_model(
     planner: &mut AssignmentPlanner<'_>,
     index: NodeIndex,
+    key: &RegistryKey,
     model: &Model,
 ) -> Vec<String> {
     if planner.cluster_nodes.is_empty() {
         return Vec::new();
     }
-    planner.for_model(index, model)
+    planner.for_model(index, key, model)
+}
+
+fn placement_affinity_scores(
+    subject: &RegistryKey,
+    pairs: &HashMap<PlacementPair, ResolvedPlacementPair>,
+    assigned_by_key: &HashMap<RegistryKey, Vec<String>>,
+) -> HashMap<String, isize> {
+    let mut scores = HashMap::<String, isize>::new();
+    for (pair, resolved) in pairs {
+        let other = if pair.left == *subject {
+            &pair.right
+        } else if pair.right == *subject {
+            &pair.left
+        } else {
+            continue;
+        };
+        let adjustment = match resolved.policy {
+            PlacementPolicy::PreferColocation => 1,
+            PlacementPolicy::SuggestSeparation => -1,
+            PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => continue,
+        };
+        let Some(primary) = assigned_by_key.get(other).and_then(|nodes| nodes.first()) else {
+            continue;
+        };
+        *scores.entry(primary.clone()).or_insert(0) += adjustment;
+    }
+    scores
 }
 
 fn log_registry_state(message: &str, state: &RegistryState) {
@@ -9887,11 +11088,15 @@ fn ensure_drop_targets_are_not_in_use(
         blockers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         blockers.dedup_by(|a, b| a.as_str() == b.as_str());
 
-        if let Some(blocker) = blockers.first() {
+        if !blockers.is_empty() {
             return Err(Report::new(RegistryError::DeleteInUse {
                 domain: domain.as_str().to_string(),
                 identifier: key.identifier.as_str().to_string(),
-                blockers: blocker.as_str().to_string(),
+                blockers: blockers
+                    .iter()
+                    .map(Identifier::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
             }));
         }
     }
@@ -9911,7 +11116,8 @@ mod tests {
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
     use nervix_models::{
-        AckMode, AlterEmitter, AlterEmitterOperation, AlterJunction, AlterProcessorOperation,
+        AckMode, AlterEmitter, AlterEmitterOperation, AlterIngestor, AlterIngestorOperation,
+        AlterJunction, AlterPlacement, AlterPlacementOperation, AlterProcessorOperation,
         AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
         AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope,
         BranchSelection, ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule,
@@ -9919,24 +11125,24 @@ mod tests {
         CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
         CreateClientHttp, CreateClientKafka, CreateClientSqs, CreateCodec, CreateCorrelator,
         CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
-        CreateReingestor, CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor,
-        CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink,
-        EmitterAckWindow, EmitterPublishingMode, ErrorPolicies, Expression, FieldReference,
-        FieldScope, GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource,
-        Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode,
-        KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
-        MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
-        ScheduledNode, SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect,
-        SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, WindowBound,
-        WireSchemaField,
+        CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
+        CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule,
+        DropModel, EmitSink, EmitterAckWindow, EmitterPublishingMode, ErrorPolicies, Expression,
+        FieldReference, FieldScope, GeneralErrorPolicy, Identifier, IngestSource,
+        IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
+        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
+        MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
+        MqttSession, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy, ScheduledNode, SchemaField,
+        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsFifoGroup, WindowBound, WireSchemaField,
     };
 
     #[cfg(feature = "testing")]
     use super::SchedulerMode;
     use super::{
-        CreateSignalingProtocol, DataflowGraphCounts, ModelStorage, Registry, RegistryError,
-        RegistryMutation, Report, RuntimeChange, deserialize_value,
+        CreateSignalingProtocol, DataflowGraphCounts, ModelStorage, PlacementTopology, Registry,
+        RegistryError, RegistryKey, RegistryMutation, Report, RuntimeChange, deserialize_value,
         ensure_signaling_protocol_is_valid, validate_emitter_publishing_contract,
     };
 
@@ -11048,6 +12254,25 @@ mod tests {
         ]
     }
 
+    fn placement(
+        name: &str,
+        from: &[&str],
+        to: &[&str],
+        policy: PlacementPolicy,
+        rank: Option<u64>,
+    ) -> Model {
+        Model::Placement(
+            CreatePlacement::new(
+                identifier(name),
+                from.iter().map(|member| identifier(member)).collect(),
+                to.iter().map(|member| identifier(member)).collect(),
+                policy,
+                rank,
+            )
+            .expect("placement helper must build a valid placement"),
+        )
+    }
+
     fn example_graph_models(name: &str, source: &str) -> (Domain, Vec<nervix_models::Model>) {
         let statements = nervix_nspl::client_statement::parse_client_statement_sources(source)
             .unwrap_or_else(|error| panic!("{name} example should parse: {error:?}"));
@@ -11301,7 +12526,12 @@ mod tests {
         let schedule = source
             .active_graph(&domain)
             .expect("source graph should exist")
-            .schedule_for_domain(&domain, &["node-1".to_string()], 0);
+            .schedule_for_domain(
+                &domain,
+                &["node-1".to_string()],
+                0,
+                PlacementPolicy::Neutral,
+            );
         assert!(
             schedule
                 .nodes
@@ -11610,6 +12840,54 @@ mod tests {
             &[super::RegistryEntity {
                 kind: ModelKind::Relay,
                 identifier: identifier("notifications"),
+            }]
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn referenced_codec_drop_create_same_key_is_classified_as_domain_pause() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.push(Model::WireJsonSchema(CreateWireSchema {
+            name: identifier("event_wire_v2"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: identifier("value"),
+                ty: JsonType::String,
+                optional: false,
+            }],
+        }));
+        registry
+            .apply_batch(&domain, models)
+            .expect("initial graph should succeed");
+
+        let Model::Codec(mut replacement) = codec("event_codec", "event_schema") else {
+            unreachable!("codec helper must build a codec model");
+        };
+        replacement.wire_schema = Some(identifier("event_wire_v2"));
+        let planned = registry
+            .plan_mutations(
+                &domain,
+                &[
+                    RegistryMutation::Drop(DropModel {
+                        kind: ModelKind::Codec,
+                        name: identifier("event_codec"),
+                    }),
+                    RegistryMutation::Create(Box::new(Model::Codec(replacement))),
+                ],
+            )
+            .expect("referenced codec recreation should plan");
+
+        assert_eq!(planned.quiesce().level(), QuiesceLevel::DomainPause);
+        assert_eq!(
+            planned.quiesce().affected_entities(),
+            &[super::RegistryEntity {
+                kind: ModelKind::Codec,
+                identifier: identifier("event_codec"),
             }]
         );
 
@@ -12297,6 +13575,712 @@ mod tests {
     }
 
     #[test]
+    fn placement_corridor_claims_every_runtime_pair_and_reports_witnesses() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_corridor").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.push(placement(
+            "critical_path",
+            &["ing"],
+            &["emit"],
+            PlacementPolicy::RequireColocation,
+            Some(1),
+        ));
+
+        registry
+            .apply_batch(&domain, models)
+            .expect("connected placement should validate");
+        let plan = registry
+            .active_graph(&domain)
+            .expect("graph should be installed")
+            .placement_plan(PlacementPolicy::Neutral);
+        let rule = &plan.rules[0];
+        assert_eq!(rule.name, identifier("critical_path"));
+        assert_eq!(rule.endpoint_pairs.len(), 1);
+        let endpoint = &rule.endpoint_pairs[0];
+        assert!(endpoint.connected);
+        assert_eq!(endpoint.source.identifier, identifier("ing"));
+        assert_eq!(endpoint.destination.identifier, identifier("emit"));
+        let mut corridor = endpoint
+            .corridor
+            .iter()
+            .map(|member| member.identifier.as_str())
+            .collect::<Vec<_>>();
+        corridor.sort_unstable();
+        assert_eq!(corridor, vec!["emit", "ing", "p99_proc"]);
+        assert_eq!(rule.claims.len(), 3, "a three-member corridor is a clique");
+        assert_eq!(endpoint.witnesses.len(), 1);
+        assert_eq!(
+            endpoint.witnesses[0].captured.identifier,
+            identifier("p99_proc")
+        );
+        assert_eq!(
+            endpoint.witnesses[0]
+                .path
+                .iter()
+                .map(|member| member.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ing", "p99_proc", "emit"]
+        );
+        assert_eq!(plan.require_groups.len(), 1);
+        assert_eq!(plan.require_groups[0].members.len(), 3);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_disconnected_endpoint_pair_is_valid_with_empty_coverage() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_disconnected").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.extend([
+            client_model("other_broker"),
+            relay("other_events", "event_schema"),
+            ingestor("other_ing", "other_events", "event_codec", "other_broker"),
+            placement(
+                "no_path",
+                &["emit"],
+                &["other_ing"],
+                PlacementPolicy::RequireColocation,
+                Some(1),
+            ),
+        ]);
+
+        registry
+            .apply_batch(&domain, models)
+            .expect("a disconnected placement is valid");
+        let plan = registry
+            .active_graph(&domain)
+            .expect("graph should be installed")
+            .placement_plan(PlacementPolicy::Neutral);
+        assert_eq!(plan.rules.len(), 1);
+        assert!(!plan.rules[0].endpoint_pairs[0].connected);
+        assert!(plan.rules[0].endpoint_pairs[0].corridor.is_empty());
+        assert!(plan.rules[0].claims.is_empty());
+        assert!(plan.require_groups.is_empty());
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_stronger_rank_overrides_weaker_policy_without_conflict() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_rank").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.extend([
+            placement(
+                "weak_glue",
+                &["ing"],
+                &["p99_proc"],
+                PlacementPolicy::RequireColocation,
+                Some(2),
+            ),
+            placement(
+                "strong_cut",
+                &["ing"],
+                &["p99_proc"],
+                PlacementPolicy::SuggestSeparation,
+                Some(1),
+            ),
+        ]);
+
+        registry
+            .apply_batch(&domain, models)
+            .expect("different-rank claims should resolve");
+        let plan = registry
+            .active_graph(&domain)
+            .expect("graph should be installed")
+            .placement_plan(PlacementPolicy::Neutral);
+        let effective = plan
+            .effective_pairs
+            .iter()
+            .find(|pair| {
+                let names = [
+                    pair.left.identifier.as_str(),
+                    pair.right.identifier.as_str(),
+                ];
+                names.contains(&"ing") && names.contains(&"p99_proc")
+            })
+            .expect("rule pair should be effective");
+        assert_eq!(effective.policy, PlacementPolicy::SuggestSeparation);
+        assert_eq!(effective.winning_rules, vec![identifier("strong_cut")]);
+        let weak = plan
+            .rules
+            .iter()
+            .find(|rule| rule.name == identifier("weak_glue"))
+            .expect("weak rule should remain introspectable");
+        assert!(!weak.claims[0].effective);
+        assert_eq!(weak.claims[0].winning_rules, vec![identifier("strong_cut")]);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_equal_rank_different_policies_are_an_activation_conflict() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_conflict").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.extend([
+            placement(
+                "glue",
+                &["ing"],
+                &["p99_proc"],
+                PlacementPolicy::RequireColocation,
+                Some(1),
+            ),
+            placement(
+                "cut",
+                &["ing"],
+                &["p99_proc"],
+                PlacementPolicy::Neutral,
+                Some(1),
+            ),
+        ]);
+
+        let error = registry
+            .apply_batch(&domain, models)
+            .expect_err("equal-rank conflicting claims must fail activation");
+        let RegistryError::PlacementConflict {
+            domain: error_domain,
+            left_rule,
+            right_rule,
+            left_identifier,
+            right_identifier,
+            ..
+        } = error.current_context()
+        else {
+            panic!("unexpected error: {error:#}");
+        };
+        assert_eq!(error_domain, domain.as_str());
+        assert_eq!([left_rule.as_str(), right_rule.as_str()], ["cut", "glue"]);
+        let witness = [left_identifier.as_str(), right_identifier.as_str()];
+        assert!(witness.contains(&"ing"));
+        assert!(witness.contains(&"p99_proc"));
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_materialized_relay_member_uses_state_delivery_dependency() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_materialized_state").expect("valid domain");
+        let mut models = full_graph_batch();
+        let Model::Relay(mut profiles) =
+            relay_branched_like("profiles", "event_schema", "notifications")
+        else {
+            unreachable!("relay helper must build a relay")
+        };
+        profiles.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+        models.push(Model::Relay(profiles));
+        let deduplicator = models
+            .iter_mut()
+            .find_map(|model| match model {
+                Model::Deduplicator(deduplicator)
+                    if deduplicator.name == identifier("p99_proc") =>
+                {
+                    Some(deduplicator)
+                }
+                _ => None,
+            })
+            .expect("full graph must contain p99_proc");
+        deduplicator
+            .materialized_state
+            .push(MaterializedStateDependency {
+                relay: identifier("profiles"),
+                policy: MaterializedStatePolicy::RequiredSkip,
+            });
+        models.push(placement(
+            "state_local",
+            &["profiles"],
+            &["p99_proc"],
+            PlacementPolicy::RequireColocation,
+            Some(1),
+        ));
+
+        registry
+            .apply_batch(&domain, models)
+            .expect("materialized-state placement should validate");
+        let plan = registry
+            .active_graph(&domain)
+            .expect("graph should be installed")
+            .placement_plan(PlacementPolicy::Neutral);
+        let endpoint = &plan.rules[0].endpoint_pairs[0];
+        assert!(endpoint.connected);
+        assert_eq!(endpoint.source.kind, ModelKind::Materializer);
+        assert_eq!(endpoint.source.identifier, identifier("profiles"));
+        assert_eq!(endpoint.destination.identifier, identifier("p99_proc"));
+        assert_eq!(endpoint.corridor.len(), 2);
+        assert_eq!(plan.require_groups[0].members.len(), 2);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_rejects_nonmaterialized_relay_and_endpoint_source_ingestor_members() {
+        let relay_path = temp_db_path();
+        let relay_registry = Registry::open(&relay_path).expect("registry should open");
+        let relay_domain = Domain::parse("placement_plain_relay").expect("valid domain");
+        let mut relay_models = full_graph_batch();
+        relay_models.push(placement(
+            "plain_relay",
+            &["notifications"],
+            &["p99_proc"],
+            PlacementPolicy::RequireColocation,
+            None,
+        ));
+        let relay_error = relay_registry
+            .apply_batch(&relay_domain, relay_models)
+            .expect_err("a plain relay is not a placement member");
+        assert!(
+            format!("{relay_error:#}").contains("relay that is not materialized"),
+            "unexpected relay error: {relay_error:#}"
+        );
+
+        let endpoint_path = temp_db_path();
+        let endpoint_registry = Registry::open(&endpoint_path).expect("registry should open");
+        let endpoint_domain = Domain::parse("placement_endpoint_ingestor").expect("valid domain");
+        let mut endpoint_models = full_graph_batch();
+        let ingestor = endpoint_models
+            .iter_mut()
+            .find_map(|model| match model {
+                Model::Ingestor(ingestor) if ingestor.name == identifier("ing") => Some(ingestor),
+                _ => None,
+            })
+            .expect("full graph must contain ing");
+        ingestor.source = IngestSource::Endpoint {
+            endpoint: identifier("ingest_http"),
+            mode: nervix_models::EndpointIngestMode::NoAckSequential,
+        };
+        endpoint_models.extend([
+            vhost("public", &["events.example.com"]),
+            endpoint(
+                "ingest_http",
+                "public",
+                "/ingest",
+                nervix_models::EndpointType::Http,
+            ),
+            placement(
+                "endpoint_member",
+                &["ing"],
+                &["emit"],
+                PlacementPolicy::RequireColocation,
+                None,
+            ),
+        ]);
+        let endpoint_error = endpoint_registry
+            .apply_batch(&endpoint_domain, endpoint_models)
+            .expect_err("an endpoint-source ingestor is not a placement member");
+        assert!(
+            format!("{endpoint_error:#}")
+                .contains("endpoint-source ingestors execute on every cluster node"),
+            "unexpected endpoint error: {endpoint_error:#}"
+        );
+
+        let _ = fs::remove_dir_all(relay_path);
+        let _ = fs::remove_dir_all(endpoint_path);
+    }
+
+    #[test]
+    fn placement_members_are_pinned_by_every_referencing_rule() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_pins").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.extend([
+            placement(
+                "pin_from",
+                &["p99_proc"],
+                &["emit"],
+                PlacementPolicy::PreferColocation,
+                None,
+            ),
+            placement(
+                "pin_to",
+                &["ing"],
+                &["p99_proc"],
+                PlacementPolicy::PreferColocation,
+                None,
+            ),
+        ]);
+        registry
+            .apply_batch(&domain, models)
+            .expect("placements should validate");
+
+        let error = registry
+            .plan_mutations(
+                &domain,
+                &[RegistryMutation::Drop(DropModel {
+                    kind: ModelKind::Deduplicator,
+                    name: identifier("p99_proc"),
+                })],
+            )
+            .expect_err("referenced placement member must be pinned");
+        let RegistryError::DeleteInUse { blockers, .. } = error.current_context() else {
+            panic!("unexpected error: {error:#}");
+        };
+        assert_eq!(blockers, "pin_from, pin_to");
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_alter_then_member_drop_uses_ordered_candidate_graph() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_ordered_drop").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.push(placement(
+            "pin_ing",
+            &["ing"],
+            &["emit"],
+            PlacementPolicy::PreferColocation,
+            None,
+        ));
+        registry
+            .apply_batch(&domain, models)
+            .expect("placement should validate");
+
+        let alter = RegistryMutation::AlterPlacement(AlterPlacement {
+            placement: identifier("pin_ing"),
+            operations: vec![AlterPlacementOperation::SetMembers {
+                from: vec![identifier("p99_proc")],
+                to: vec![identifier("emit")],
+            }],
+        });
+        let drop_member = RegistryMutation::Drop(DropModel {
+            kind: ModelKind::Ingestor,
+            name: identifier("ing"),
+        });
+        registry
+            .plan_mutations(&domain, &[alter.clone(), drop_member.clone()])
+            .expect("an earlier placement alter must release the later drop");
+
+        let error = registry
+            .plan_mutations(&domain, &[drop_member, alter])
+            .expect_err("dropping before releasing the placement pin must fail");
+        let RegistryError::DeleteInUse { blockers, .. } = error.current_context() else {
+            panic!("unexpected error: {error:#}");
+        };
+        assert_eq!(blockers, "pin_ing");
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_non_placeable_alter_names_every_pinning_rule() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_pinned_alter").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.extend([
+            vhost("public", &["events.example.com"]),
+            endpoint(
+                "ingest_http",
+                "public",
+                "/ingest",
+                nervix_models::EndpointType::Http,
+            ),
+            placement(
+                "pin_a",
+                &["ing"],
+                &["emit"],
+                PlacementPolicy::PreferColocation,
+                None,
+            ),
+            placement(
+                "pin_b",
+                &["ing"],
+                &["p99_proc"],
+                PlacementPolicy::RequireColocation,
+                Some(1),
+            ),
+        ]);
+        registry
+            .apply_batch(&domain, models)
+            .expect("placements should validate");
+
+        let error = registry
+            .plan_mutations(
+                &domain,
+                &[RegistryMutation::AlterIngestor(AlterIngestor {
+                    ingestor: identifier("ing"),
+                    operations: vec![AlterIngestorOperation::SetSource {
+                        source: IngestSource::Endpoint {
+                            endpoint: identifier("ingest_http"),
+                            mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                        },
+                    }],
+                })],
+            )
+            .expect_err("a pinned member cannot become non-placement-eligible");
+        let RegistryError::PlacementMemberPinned {
+            identifier,
+            placements,
+            ..
+        } = error.current_context()
+        else {
+            panic!("unexpected error: {error:#}");
+        };
+        assert_eq!(identifier, "ing");
+        assert_eq!(placements, "pin_a, pin_b");
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_default_require_forms_a_connected_component_from_per_hop_claims() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_default_require").expect("valid domain");
+        registry
+            .apply_batch(&domain, full_graph_batch())
+            .expect("graph should validate");
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let plan = graph.placement_plan(PlacementPolicy::RequireColocation);
+
+        assert_eq!(plan.effective_pairs.len(), 2, "the default is per-hop");
+        assert!(
+            plan.effective_pairs
+                .iter()
+                .all(|pair| pair.from_domain_default)
+        );
+        assert_eq!(plan.require_groups.len(), 1);
+        assert_eq!(plan.require_groups[0].members.len(), 3);
+        let schedule = graph.schedule_for_domain(
+            &domain,
+            &["node-1".to_string(), "node-2".to_string()],
+            0,
+            PlacementPolicy::RequireColocation,
+        );
+        let owner = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
+            .assigned_single_node()
+            .expect("ingestor should be assigned");
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Emitter, "emit").assigned_single_node(),
+            Some(owner)
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn placement_require_binds_the_random_test_scheduler() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_random_require").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.push(placement(
+            "critical_path",
+            &["ing"],
+            &["emit"],
+            PlacementPolicy::RequireColocation,
+            Some(1),
+        ));
+        registry
+            .apply_batch(&domain, models)
+            .expect("placement should validate");
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let schedule = graph.schedule_for_domain_with_mode(
+            &domain,
+            &[
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string(),
+            ],
+            0,
+            PlacementPolicy::Neutral,
+            SchedulerMode::Random,
+        );
+
+        let owner = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
+            .assigned_single_node()
+            .expect("ingestor should be assigned");
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Emitter, "emit").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(schedule.placement_groups.len(), 1);
+        assert_eq!(schedule.placement_groups[0].members.len(), 3);
+        assert_eq!(
+            schedule.placement_groups[0].primary_node.as_deref(),
+            Some(owner)
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_suggest_separation_outranks_upstream_locality() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_suggest").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.push(placement(
+            "spread",
+            &["ing"],
+            &["p99_proc"],
+            PlacementPolicy::SuggestSeparation,
+            Some(1),
+        ));
+        registry
+            .apply_batch(&domain, models)
+            .expect("placement should validate");
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let schedule = graph.schedule_for_domain(
+            &domain,
+            &["node-1".to_string(), "node-2".to_string()],
+            0,
+            PlacementPolicy::Neutral,
+        );
+
+        assert_ne!(
+            scheduled_node(&schedule, ModelKind::Ingestor, "ing").assigned_single_node(),
+            scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc").assigned_single_node()
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_prefer_colocation_outranks_majority_upstream_locality() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("placement_prefer").expect("valid domain");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                    client_model("broker_a"),
+                    client_model("broker_b"),
+                    client_model("broker_c"),
+                    relay("source_a", "event_schema"),
+                    relay("source_b", "event_schema"),
+                    relay("source_c", "event_schema"),
+                    relay("joined", "event_schema"),
+                    ingestor("ing_a", "source_a", "event_codec", "broker_a"),
+                    ingestor("ing_b", "source_b", "event_codec", "broker_b"),
+                    ingestor("ing_c", "source_c", "event_codec", "broker_c"),
+                    Model::Junction(CreateJunction {
+                        name: identifier("join"),
+                        from: ProcessorInputs::new(
+                            vec![
+                                identifier("source_a"),
+                                identifier("source_b"),
+                                identifier("source_c"),
+                            ],
+                            Vec::new(),
+                        ),
+                        output_routes: unbranched_transforming_outputs("joined"),
+                        branched_by: BranchSelection::unbranched(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                    placement(
+                        "follow_b",
+                        &["ing_b"],
+                        &["join"],
+                        PlacementPolicy::PreferColocation,
+                        Some(1),
+                    ),
+                ],
+            )
+            .expect("placement graph should validate");
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let schedule = graph.schedule_for_domain(
+            &domain,
+            &["node-1".to_string(), "node-2".to_string()],
+            0,
+            PlacementPolicy::Neutral,
+        );
+
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Ingestor, "ing_a").assigned_single_node(),
+            Some("node-1")
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Ingestor, "ing_b").assigned_single_node(),
+            Some("node-2")
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Ingestor, "ing_c").assigned_single_node(),
+            Some("node-1")
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Junction, "join").assigned_single_node(),
+            Some("node-2"),
+            "explicit placement preference must beat two upstream-locality votes for node-1"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_cycle_corridor_captures_the_whole_cycle_with_member_witnesses() {
+        let cycle_a = RegistryKey::new(ModelKind::Reingestor, identifier("cycle_a"));
+        let cycle_b = RegistryKey::new(ModelKind::Reingestor, identifier("cycle_b"));
+        let cycle_c = RegistryKey::new(ModelKind::Reingestor, identifier("cycle_c"));
+        let tail = RegistryKey::new(ModelKind::Emitter, identifier("tail"));
+        let topology = PlacementTopology {
+            adjacency: HashMap::from_iter([
+                (cycle_a.clone(), vec![cycle_b.clone(), tail]),
+                (cycle_b.clone(), vec![cycle_c.clone()]),
+                (cycle_c.clone(), vec![cycle_a.clone()]),
+            ]),
+            reverse: HashMap::from_iter([
+                (cycle_a.clone(), vec![cycle_c.clone()]),
+                (cycle_b.clone(), vec![cycle_a.clone()]),
+                (cycle_c.clone(), vec![cycle_b.clone()]),
+            ]),
+        };
+
+        let endpoint = topology.endpoint_analysis(cycle_a.clone(), cycle_a.clone());
+        assert_eq!(
+            endpoint.corridor,
+            vec![cycle_a, cycle_b.clone(), cycle_c.clone()]
+        );
+        assert_eq!(
+            endpoint
+                .witnesses
+                .iter()
+                .map(|(captured, _)| captured)
+                .collect::<Vec<_>>(),
+            vec![&cycle_b, &cycle_c]
+        );
+        assert!(endpoint.witnesses.iter().all(|(_, path)| {
+            path.first() == path.last()
+                && path
+                    .first()
+                    .is_some_and(|member| member.identifier == identifier("cycle_a"))
+        }));
+    }
+
+    #[test]
     fn schedule_spreads_independent_ingestors_before_locality_applies() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
@@ -12322,8 +14306,12 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let schedule =
-            graph.schedule_for_domain(&domain, &["node-1".to_string(), "node-2".to_string()], 0);
+        let schedule = graph.schedule_for_domain(
+            &domain,
+            &["node-1".to_string(), "node-2".to_string()],
+            0,
+            PlacementPolicy::Neutral,
+        );
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_a").assigned_nodes,
@@ -12358,6 +14346,7 @@ mod tests {
                 "node-3".to_string(),
             ],
             0,
+            PlacementPolicy::Neutral,
         );
 
         let ingestor_node = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
@@ -12381,6 +14370,65 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[test]
+    fn random_test_scheduler_preserves_singleton_seed_and_assignment() {
+        let domain = Domain::parse("default").expect("valid domain");
+        let mut domain_hasher = blake3::Hasher::new();
+        domain_hasher.update(b"nervix/test-random-scheduler/domain");
+        domain_hasher.update(&[0]);
+        domain_hasher.update(domain.as_str().as_bytes());
+        let domain_seed = *domain_hasher.finalize().as_bytes();
+        let member = RegistryKey::new(ModelKind::Ingestor, identifier("ing"));
+
+        let mut legacy_hasher = blake3::Hasher::new();
+        legacy_hasher.update(b"nervix/test-random-scheduler/model");
+        legacy_hasher.update(&[0]);
+        legacy_hasher.update(&domain_seed);
+        legacy_hasher.update(member.kind.as_str().as_bytes());
+        legacy_hasher.update(&[0]);
+        legacy_hasher.update(member.identifier.as_str().as_bytes());
+        let mut expected_seed = [0; 8];
+        expected_seed.copy_from_slice(&legacy_hasher.finalize().as_bytes()[..8]);
+        let expected_seed = u64::from_le_bytes(expected_seed);
+
+        let graph = petgraph::graph::DiGraph::new();
+        let cluster_nodes = [
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ];
+        let assigned_by_key = HashMap::default();
+        let placement_pairs = HashMap::default();
+        let node_load = HashMap::default();
+        let mut next_assignment = 0;
+        let planner = super::AssignmentPlanner {
+            graph: &graph,
+            cluster_nodes: &cluster_nodes,
+            assigned_by_key: &assigned_by_key,
+            placement_pairs: &placement_pairs,
+            node_load: &node_load,
+            next_assignment: &mut next_assignment,
+            replica_count: 0,
+            scheduler_mode: SchedulerMode::Random,
+            random_schedule_seed: domain_seed,
+        };
+
+        assert_eq!(
+            planner.random_schedule_seed_for(std::slice::from_ref(&member)),
+            expected_seed,
+            "a singleton must retain the pre-placement random-scheduler seed"
+        );
+        let mut expected_assignment = cluster_nodes.to_vec();
+        fastrand::Rng::with_seed(expected_seed).shuffle(&mut expected_assignment);
+        expected_assignment.truncate(1);
+        assert_eq!(
+            planner.random_assignment(std::slice::from_ref(&member)),
+            expected_assignment,
+            "a singleton must retain the pre-placement randomized assignment"
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
     fn random_test_schedule_is_stable_for_unchanged_inputs() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
@@ -12398,14 +14446,20 @@ mod tests {
             "node-2".to_string(),
             "node-3".to_string(),
         ];
-        let expected =
-            graph.schedule_for_domain_with_mode(&domain, &cluster_nodes, 0, SchedulerMode::Random);
+        let expected = graph.schedule_for_domain_with_mode(
+            &domain,
+            &cluster_nodes,
+            0,
+            PlacementPolicy::Neutral,
+            SchedulerMode::Random,
+        );
         for _ in 0..32 {
             assert_eq!(
                 graph.schedule_for_domain_with_mode(
                     &domain,
                     &cluster_nodes,
                     0,
+                    PlacementPolicy::Neutral,
                     SchedulerMode::Random,
                 ),
                 expected,
@@ -12442,6 +14496,7 @@ mod tests {
                 &scheduled_domain,
                 &cluster_nodes,
                 0,
+                PlacementPolicy::Neutral,
                 SchedulerMode::Random,
             );
             let ingestor =
@@ -12507,8 +14562,12 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let schedule =
-            graph.schedule_for_domain(&domain, &["node-1".to_string(), "node-2".to_string()], 0);
+        let schedule = graph.schedule_for_domain(
+            &domain,
+            &["node-1".to_string(), "node-2".to_string()],
+            0,
+            PlacementPolicy::Neutral,
+        );
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_a").assigned_nodes,
@@ -12581,6 +14640,7 @@ mod tests {
                 "node-3".to_string(),
             ],
             0,
+            PlacementPolicy::Neutral,
         );
 
         assert_eq!(
@@ -13036,9 +15096,14 @@ mod tests {
                 "node-3".to_string(),
             ],
             0,
+            PlacementPolicy::Neutral,
         );
-        let reduced_schedule =
-            graph.schedule_for_domain(&domain, &["node-1".to_string(), "node-3".to_string()], 0);
+        let reduced_schedule = graph.schedule_for_domain(
+            &domain,
+            &["node-1".to_string(), "node-3".to_string()],
+            0,
+            PlacementPolicy::Neutral,
+        );
 
         assert_eq!(
             scheduled_node(&initial_schedule, ModelKind::Ingestor, "ws_ing").assigned_nodes,
@@ -15307,7 +17372,12 @@ mod tests {
         let schedule = changes
             .graph
             .expect("graph should be present")
-            .schedule_for_domain(&domain, &["node-1".to_string()], 0);
+            .schedule_for_domain(
+                &domain,
+                &["node-1".to_string()],
+                0,
+                PlacementPolicy::Neutral,
+            );
         let deduped = scheduled_node(&schedule, ModelKind::Relay, "deduped");
         assert_eq!(
             deduped.effective_branching,

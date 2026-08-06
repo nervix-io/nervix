@@ -1,6 +1,6 @@
 ---
 name: nspl
-description: Design, author, explain, review, and troubleshoot Nervix configurations written in the Nervix Stream Processing Language (NSPL). Use when a user wants to configure domains, schemas, codecs, branches, relays, resources, clients, ingestors, processors, emitters, lookups, Roto UDFs, subscriptions, lifecycle commands, or complete Nervix streaming graphs. Produce current, valid NSPL and identify required external provisioning.
+description: Design, author, explain, review, and troubleshoot Nervix configurations written in the Nervix Stream Processing Language (NSPL). Use when a user wants to configure domains, schemas, codecs, branches, relays, resources, clients, ingestors, processors, emitters, placement policies, lookups, Roto UDFs, subscriptions, lifecycle commands, or complete Nervix streaming graphs. Produce current, valid NSPL and identify required external provisioning.
 license: FCL-1.0-ALv2
 ---
 
@@ -16,7 +16,7 @@ clause order or connector options from memory.
 Establish these inputs before finalizing NSPL. Ask only for missing details that materially change
 the graph; otherwise use conspicuous placeholders and state the assumptions.
 
-- Domain: paced or unpaced, clock period/skew, and start behavior.
+- Domain: paced or unpaced, clock period/skew, start behavior, and default placement policy.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
 - Source and sink: connector kinds, externally provisioned entity names, endpoints, delivery/ACK
@@ -26,6 +26,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
+- Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
+  whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
   subscriptions, and whether an existing schema must be evolved atomically with its dependents.
 
@@ -46,16 +48,17 @@ Build configuration in dependency order:
    UDFs as needed.
 5. Define relays before nodes that read or write them.
 6. Define ingestors, processors, generators, and emitters in graph order.
-7. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
+7. Define placement rules after every referenced runtime node and materialized relay exists.
+8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
 Use `BEGIN; ... COMMIT;` when sending multiple server statements in one request. Keep client-local
 commands such as `USE` and resource uploads outside transactions. Do not imply that one undivided
 request can mix those phases.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
-and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, schema, wire-schema,
-relay, junction, deduplicator, reorderer, emitter, ingestor, reingestor, or generator `ALTER`, and
-`DROP` for one domain in the same transaction;
+and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and
+`DROP` for one domain in the same transaction, including schema, wire-schema, relay, junction,
+deduplicator, reorderer, emitter, ingestor, reingestor, generator, and placement changes;
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
 changes pause the domain; structural junction, emitter sink/client/codec/collect/publishing-mode or
@@ -66,6 +69,8 @@ Deduplicator key and reorderer ordering changes also use entity pause; their `MA
 dynamic. In `ALTER INGESTOR`, use a complete transport-specific source body after `SET FROM`.
 Every reingestor and generator ALTER uses entity pause; reingestor route bodies retain their
 per-route branch selection, while generator route bodies remain set-only.
+`ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
+activation; a newly effective hard colocation requirement can relocate runtime nodes.
 
 ## Preserve NSPL semantics
 
@@ -92,8 +97,7 @@ per-route branch selection, while generator route bodies remain set-only.
 - Scope rejection to where it applies: `FAIL JAQ` on a `WAIT` step aborts during that step, and a
   `FAIL JAQ` written before `ON CONNECT` applies throughout the handshake.
 - Preserve written operation order in schema, relay, junction, deduplicator, reorderer, emitter,
-  ingestor, reingestor, and generator ALTER
-  statements.
+  ingestor, reingestor, generator, and placement ALTER statements.
   Include every dependent wire, internal, codec, and node mutation required for the candidate graph
   to validate in the same transaction.
 - Treat JSON, CBOR, and AVRO wire schemas as distinct entity kinds. Their names may coincide, so
@@ -108,6 +112,11 @@ per-route branch selection, while generator route bodies remain set-only.
   the UDF without persisting it when any test rejects.
 - Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch; use a reingestor when the graph must repartition or remove branch grouping.
+- Treat placement rules as path-gated overlays, not connectivity-independent groups. Use
+  `REQUIRE COLOCATION` only for a hard same-cluster-node constraint; `PREFER COLOCATION` and
+  `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
+  separation policy exists. Lower `RANK` values are stronger, unranked rules are the weakest rule
+  tier, and equal-rank different-policy claims conflict.
 - An emitter may list multiple `FROM <relay> [WHERE <expr>]` inputs when every relay declares the
   same payload schema. Unlike ordinary processors, those inputs may use differently named
   branches. Keep collection separate per source relay and concrete branch, and remember that one
@@ -170,6 +179,9 @@ When authoring a graph, provide:
 
 Use `DESCRIBE JUNCTION <junction>;` when the verification should include a junction's stored
 routing contract, scheduled placement, and local edge metrics.
+
+Use `SHOW PLACEMENTS;`, `DESCRIBE PLACEMENT <placement>;`, and `DESCRIBE DOMAIN;` to verify rule
+coverage, effective claims, colocation groups, and the domain default.
 
 Before returning the configuration, trace every reference to its declaration and check schema,
 branch, construction, flush, error, sensitivity, transaction, and external-provisioning contracts.

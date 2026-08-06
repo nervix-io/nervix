@@ -6,9 +6,9 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref, correlator_ref,
         deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref, ingestor_ref,
-        into_parse_error, junction_ref, kw, lex_input, node_id, reingestor_ref, relay_ref,
-        reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref, wire_avro_schema_ref,
-        wire_cbor_schema_ref, wire_json_schema_ref,
+        into_parse_error, junction_ref, kw, lex_input, node_id, placement_ref, reingestor_ref,
+        relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref,
+        wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
 
@@ -121,6 +121,12 @@ pub fn drop_parser<'src>()
             .ignore_then(emitter_ref())
             .map(|name| DropModel {
                 kind: ModelKind::Emitter,
+                name,
+            }),
+        kw(Identifier::Placement)
+            .ignore_then(placement_ref())
+            .map(|name| DropModel {
+                kind: ModelKind::Placement,
                 name,
             }),
         kw(Identifier::Udf)
@@ -244,6 +250,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_drop_placement() {
+        let parsed = parse_drop("DROP PLACEMENT critical;").expect("parse should succeed");
+        assert_eq!(parsed.kind, ModelKind::Placement);
+        assert_eq!(parsed.name.as_str(), "critical");
+    }
+
+    #[test]
     fn parses_drop_node() {
         let tokens = to_tokens("DROP NODE node-2;");
         let parsed = drop_node_parser()
@@ -269,6 +282,7 @@ mod tests {
         assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
+        assert!(suggestions.contains(&"PLACEMENT".to_string()));
         assert!(suggestions.contains(&"UDF".to_string()));
     }
 }
