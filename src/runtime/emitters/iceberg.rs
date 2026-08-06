@@ -702,15 +702,6 @@ impl IcebergEmitter {
         self.commit_if_due(true).await
     }
 
-    pub(in crate::runtime) async fn retry_pending(
-        &mut self,
-    ) -> IcebergEmitterResult<Option<PublishReport>> {
-        if self.pending_rows > 0 {
-            self.flush_to_disk().await?;
-        }
-        self.commit_if_due(false).await
-    }
-
     pub(in crate::runtime) fn pending_acks(&self) -> AckSet {
         AckSet::merged(
             self.pending_batches
@@ -727,10 +718,6 @@ impl IcebergEmitter {
                         .map(|record| record.acks.clone()),
                 ),
         )
-    }
-
-    pub(in crate::runtime) fn has_pending_work(&self) -> bool {
-        self.pending_rows > 0 || self.staged_rows > 0 || !self.rejected_records.is_empty()
     }
 
     pub(super) fn next_rejected_record_message(

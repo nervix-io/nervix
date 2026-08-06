@@ -88,7 +88,6 @@ pub(in crate::runtime) struct EmitterSinkContext {
     domain: Domain,
     emitter: Identifier,
     error_policies: ErrorPolicies,
-    buffered_messages: Arc<AtomicUsize>,
     temp_dir: Arc<PathBuf>,
     events: broadcast::Sender<RuntimeEvent>,
     udfs: Option<UdfExecutor>,
@@ -1949,14 +1948,6 @@ impl SinkEmitter {
         !matches!(self, Self::Kafka(_) | Self::Mqtt(_) | Self::Nats(_))
     }
 
-    fn has_pending_work(&self, buffer: &EmitterBatchBuffer) -> bool {
-        if let Self::Iceberg(emitter) = self {
-            emitter.has_pending_work()
-        } else {
-            !buffer.is_empty()
-        }
-    }
-
     fn pending_acks(&self, buffer: &EmitterBatchBuffer) -> AckSet {
         let sink_acks = if let Self::Iceberg(emitter) = self {
             emitter.pending_acks()
@@ -2330,17 +2321,15 @@ impl SinkEmitter {
             let _confirmation_wait = context
                 .runtime
                 .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+            let publish = Box::pin(self.publish_buffered_batches(
+                sink,
+                context,
+                codec,
+                buffer.pending.as_mut_slice(),
+            ));
             await_until_emitter_stop_deadline(
                 control.stop_rx,
-                await_emitter_confirmation(
-                    &pending_acks,
-                    self.publish_buffered_batches(
-                        sink,
-                        context,
-                        codec,
-                        buffer.pending.as_mut_slice(),
-                    ),
-                ),
+                await_emitter_confirmation(&pending_acks, publish),
             )
             .await
             .map_err(|()| emitter_stop_deadline_elapsed())??;
@@ -2356,6 +2345,24 @@ impl SinkEmitter {
         codec: Option<Arc<CompiledCodec>>,
         batches: &mut [EmitterPublishBatch],
     ) -> EmitterRuntimeResult<()> {
+        if let EmitSink::Kafka { .. }
+        | EmitSink::Pulsar { .. }
+        | EmitSink::RabbitMq { .. }
+        | EmitSink::Redis { .. }
+        | EmitSink::Mqtt { .. }
+        | EmitSink::Nats { .. }
+        | EmitSink::ZeroMq { .. }
+        | EmitSink::Sqs { .. }
+        | EmitSink::Sentry { .. } = sink
+            && codec.is_none()
+        {
+            return Err(
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "{} emitter requires an encoding codec",
+                    sink.label()
+                )),
+            );
+        }
         if let (Some(codec), EmitSink::Kafka { topic, .. }, Self::Kafka(emitter)) =
             (codec.clone(), sink, &mut *self)
         {
@@ -3221,7 +3228,6 @@ impl EmitterTask {
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
                 error_policies: task_error_policies.clone(),
-                buffered_messages: emitter_buffer_count.clone(),
                 temp_dir: runtime.temp_dir.clone(),
                 events: task_events.clone(),
                 udfs,
@@ -4751,7 +4757,6 @@ mod tests {
             domain: Domain::parse("emitter_tests").expect("valid domain"),
             emitter: Identifier::parse("output").expect("valid emitter name"),
             error_policies: ErrorPolicies::handled_by_log(),
-            buffered_messages: Arc::new(AtomicUsize::new(0)),
             temp_dir: Arc::new(PathBuf::new()),
             events,
             udfs: None,

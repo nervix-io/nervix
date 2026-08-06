@@ -12,7 +12,6 @@ use super::*;
 
 pub(in crate::runtime) struct MqttEmitter {
     client: Option<AsyncClient>,
-    topic: ValidatedTopic,
     mode: MqttPublishingMode,
     eventloop_shutdown: watch::Sender<bool>,
 }
@@ -100,10 +99,9 @@ impl MqttEmitter {
                 }
             }
         });
-        let topic = ValidatedTopic::new(topic.as_str()).map_err(emitter_config_error)?;
+        ValidatedTopic::new(topic.as_str()).map_err(emitter_config_error)?;
         Ok(Self {
             client: Some(client),
-            topic,
             mode,
             eventloop_shutdown,
         })
@@ -195,54 +193,6 @@ impl MqttEmitter {
             .port()
             .ok_or_else(|| emitter_config_error(format!("missing port in MQTT addr '{addr}'")))?;
         Ok(MqttEmitterAddr { host, port, tls })
-    }
-
-    pub(in crate::runtime) async fn publish(
-        &mut self,
-        topic: &Identifier,
-        payload: &[u8],
-    ) -> EmitterRuntimeResult<()> {
-        let Some(client) = self.client.as_mut() else {
-            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("no initialized mqtt sink client"));
-        };
-        client
-            .try_publish(
-                topic.as_str(),
-                payload.to_vec(),
-                self.mode.publish_options(),
-            )
-            .map_err(emitter_publish_error)?;
-        Ok(())
-    }
-
-    pub(in crate::runtime) async fn publish_chunk(
-        &self,
-        payloads: Vec<Vec<u8>>,
-    ) -> EmitterRuntimeResult<()> {
-        let Some(client) = self.client.as_ref() else {
-            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("no initialized mqtt sink client"));
-        };
-        for payload in payloads {
-            tokio::task::consume_budget().await;
-            let payload = bytes::Bytes::from(payload);
-            match client.try_publish(
-                self.topic.clone(),
-                payload.clone(),
-                PublishOptions::at_most_once(),
-            ) {
-                Ok(()) => {}
-                Err(MqttClientError::RequestChannelFull(_)) => {
-                    client
-                        .publish(self.topic.clone(), payload, PublishOptions::at_most_once())
-                        .await
-                        .map_err(emitter_publish_error)?;
-                }
-                Err(error) => return Err(emitter_publish_error(error)),
-            }
-        }
-        Ok(())
     }
 
     pub(super) async fn publish_records(
