@@ -70,13 +70,13 @@ use uuid::Uuid;
 
 use crate::common::{
     cluster::{
-        BrokerObserver, Cluster, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-        WebsocketExchangeAction, client_connect_options,
+        BrokerObserver, Cluster, StallableTcpProxy, TEST_AUTH_USERNAME, TestClusterConfig,
+        TestSession, WebsocketExchangeAction, client_connect_options,
     },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, MONGODB_ADDR,
-        MONGODB_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, REDIS_ADDR,
-        RUSTFS_ADDR, TestDependencies,
+        MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR,
+        PULSAR_ADDR, RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
 };
 
@@ -114,6 +114,7 @@ struct ScenarioWorld {
     postgres_tls: bool,
     mysql_table: Option<String>,
     mysql_tls: bool,
+    mysql_insert_command_baseline: Option<u64>,
     mongodb_collection: Option<String>,
     mongodb_tls: bool,
     domain: String,
@@ -135,6 +136,7 @@ struct ScenarioWorld {
     web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     dependencies: TestDependencies,
     background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
+    stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -182,6 +184,10 @@ impl fmt::Debug for ScenarioWorld {
             .field("postgres_tls", &self.postgres_tls)
             .field("mysql_table", &self.mysql_table)
             .field("mysql_tls", &self.mysql_tls)
+            .field(
+                "mysql_insert_command_baseline",
+                &self.mysql_insert_command_baseline,
+            )
             .field("mongodb_collection", &self.mongodb_collection)
             .field("mongodb_tls", &self.mongodb_tls)
             .field("placeholder_count", &self.placeholders.len())
@@ -201,6 +207,10 @@ impl fmt::Debug for ScenarioWorld {
                 &self.web_console_scenario_permit.is_some(),
             )
             .field("dependencies", &self.dependencies)
+            .field(
+                "stallable_tcp_proxy_count",
+                &self.stallable_tcp_proxies.len(),
+            )
             .finish()
     }
 }
@@ -296,6 +306,75 @@ async fn given_mqtt_is_running(world: &mut ScenarioWorld) {
         .await
         .expect("MQTT test container should start");
     refresh_dependency_configuration(world);
+}
+
+async fn configure_stallable_tcp_endpoint(
+    world: &mut ScenarioWorld,
+    name: &str,
+    endpoint_key: &str,
+    placeholder: &str,
+) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(endpoint_key)
+        .unwrap_or_else(|error| panic!("{name} endpoint is unavailable: {error}"));
+    let mut endpoint_url = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("failed to parse {name} endpoint '{endpoint}': {error}"));
+    let target_host = endpoint_url
+        .host_str()
+        .unwrap_or_else(|| panic!("{name} endpoint '{endpoint}' has no host"))
+        .to_string();
+    let target_port = endpoint_url
+        .port()
+        .unwrap_or_else(|| panic!("{name} endpoint '{endpoint}' has no explicit port"));
+    let proxy = StallableTcpProxy::start(target_host, target_port)
+        .await
+        .unwrap_or_else(|error| panic!("failed to start {name} stallable TCP endpoint: {error}"));
+    endpoint_url
+        .set_host(Some("127.0.0.1"))
+        .unwrap_or_else(|_| panic!("failed to replace host in {name} endpoint '{endpoint}'"));
+    endpoint_url
+        .set_port(Some(proxy.local_port()))
+        .unwrap_or_else(|_| panic!("failed to replace port in {name} endpoint '{endpoint}'"));
+    world
+        .placeholders
+        .insert(placeholder.to_string(), endpoint_url.to_string());
+    world.stallable_tcp_proxies.insert(name.to_string(), proxy);
+}
+
+#[given("a stallable RabbitMQ endpoint is configured")]
+async fn given_stallable_rabbitmq_endpoint(world: &mut ScenarioWorld) {
+    configure_stallable_tcp_endpoint(world, "rabbitmq", RABBITMQ_ADDR, "rabbitmq_stallable_addr")
+        .await;
+}
+
+#[given("a stallable MQTT endpoint is configured")]
+async fn given_stallable_mqtt_endpoint(world: &mut ScenarioWorld) {
+    configure_stallable_tcp_endpoint(world, "mqtt", MQTT_ADDR, "mqtt_stallable_addr").await;
+}
+
+#[given("a stallable Pulsar endpoint is configured")]
+async fn given_stallable_pulsar_endpoint(world: &mut ScenarioWorld) {
+    configure_stallable_tcp_endpoint(world, "pulsar", PULSAR_ADDR, "pulsar_stallable_addr").await;
+}
+
+#[when(expr = "the stallable endpoint {string} is paused")]
+fn when_stallable_endpoint_is_paused(world: &mut ScenarioWorld, name: String) {
+    world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
+        .set_paused(true);
+}
+
+#[when(expr = "the stallable endpoint {string} is resumed")]
+fn when_stallable_endpoint_is_resumed(world: &mut ScenarioWorld, name: String) {
+    world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
+        .set_paused(false);
 }
 
 #[given("ClickHouse is running")]
@@ -1572,6 +1651,20 @@ fn mysql_pool(dependencies: &DependencyEndpoints, tls: bool) -> Result<MySqlPool
     Ok(MySqlPool::new(opts))
 }
 
+fn mysql_root_pool(dependencies: &DependencyEndpoints) -> Result<MySqlPool, String> {
+    let addr = dependencies
+        .get(MYSQL_ADDR)
+        .map_err(|error| error.to_string())?;
+    let root_addr = addr.replacen("mysql://nervix:nervix@", "mysql://root:nervix@", 1);
+    if root_addr == addr {
+        return Err(format!(
+            "MySQL test endpoint does not use the expected nervix credentials: {addr}"
+        ));
+    }
+    let opts = MySqlOpts::from_url(&root_addr).map_err(|source| source.to_string())?;
+    Ok(MySqlPool::new(opts))
+}
+
 async fn mongodb_client(
     dependencies: &DependencyEndpoints,
     tls: bool,
@@ -2728,6 +2821,47 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .wait_for_kafka_consumer_group_members(&group, expected)
         .await
         .expect("kafka consumer group did not reach expected member count");
+}
+
+#[then(
+    expr = "within {string} Kafka consumer group {string} next offset for topic {string} \
+            partition {int} is {string}"
+)]
+async fn then_kafka_consumer_group_next_offset_is(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    topic: String,
+    partition: i32,
+    condition: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    let condition = expand_placeholders(world, &condition);
+    let (should_reach, threshold) = if let Some(threshold) = condition.strip_prefix("at least ") {
+        (true, threshold)
+    } else if let Some(threshold) = condition.strip_prefix("below ") {
+        (false, threshold)
+    } else {
+        panic!("Kafka offset condition must be 'at least <n>' or 'below <n>', got {condition:?}");
+    };
+    let threshold = threshold
+        .parse::<i64>()
+        .expect("Kafka offset threshold must be an integer");
+    world
+        .cluster()
+        .assert_kafka_consumer_group_next_offset(
+            &group,
+            &topic,
+            partition,
+            threshold,
+            should_reach,
+            duration,
+        )
+        .await
+        .expect("Kafka consumer group committed-offset assertion failed");
 }
 
 #[then(expr = "RabbitMQ queue {string} eventually has {int} consumers")]
@@ -8159,6 +8293,36 @@ async fn given_clickhouse_tls_table_exists(world: &mut ScenarioWorld, table: Str
     world.clickhouse_tls = true;
 }
 
+#[given(expr = "ClickHouse MergeTree table {string} with merges stopped exists")]
+async fn given_clickhouse_merge_tree_table_with_merges_stopped_exists(
+    world: &mut ScenarioWorld,
+    table: String,
+) {
+    let table = expand_placeholders(world, &table);
+    clickhouse_post(
+        world.dependencies.endpoints(),
+        &format!("DROP TABLE IF EXISTS {table}"),
+    )
+    .await
+    .expect("failed to drop ClickHouse table");
+    clickhouse_post(
+        world.dependencies.endpoints(),
+        &format!(
+            "CREATE TABLE {table} (clickhouse_user_id UInt32) ENGINE = MergeTree ORDER BY tuple()"
+        ),
+    )
+    .await
+    .expect("failed to create ClickHouse MergeTree table");
+    clickhouse_post(
+        world.dependencies.endpoints(),
+        &format!("SYSTEM STOP MERGES {table}"),
+    )
+    .await
+    .expect("failed to stop ClickHouse table merges");
+    world.clickhouse_table = Some(table);
+    world.clickhouse_tls = false;
+}
+
 #[given(expr = "Postgres table {string} exists")]
 async fn given_postgres_table_exists(world: &mut ScenarioWorld, table: String) {
     prepare_postgres_table(world, table, false).await;
@@ -8167,6 +8331,65 @@ async fn given_postgres_table_exists(world: &mut ScenarioWorld, table: String) {
 #[given(expr = "Postgres table {string} with primary key exists")]
 async fn given_postgres_table_with_primary_key_exists(world: &mut ScenarioWorld, table: String) {
     prepare_postgres_table_with_primary_key(world, table, false).await;
+}
+
+#[given(expr = "Postgres table {string} rejecting poison actions exists")]
+async fn given_postgres_table_rejecting_poison_actions_exists(
+    world: &mut ScenarioWorld,
+    table: String,
+) {
+    prepare_postgres_table(world, table, false).await;
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("Postgres table should be recorded after preparation");
+    let client = postgres_client(world.dependencies.endpoints(), false)
+        .await
+        .expect("failed to connect to Postgres");
+    client
+        .batch_execute(&format!(
+            "ALTER TABLE {table} ADD CONSTRAINT reject_poison_action CHECK (postgres_action <> \
+             'poison')"
+        ))
+        .await
+        .expect("failed to add Postgres poison-record constraint");
+}
+
+#[given(expr = "Postgres table {string} recording insert statement sizes exists")]
+async fn given_postgres_table_recording_insert_statement_sizes_exists(
+    world: &mut ScenarioWorld,
+    table: String,
+) {
+    prepare_postgres_table(world, table, false).await;
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("Postgres table should be recorded after preparation")
+        .clone();
+    let audit_table = format!("{table}_insert_audit");
+    let trigger_function = format!("{table}_record_insert");
+    let client = postgres_client(world.dependencies.endpoints(), false)
+        .await
+        .expect("failed to connect to Postgres");
+    client
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {audit_table};
+             DROP FUNCTION IF EXISTS {trigger_function}();
+             CREATE TABLE {audit_table} (row_count bigint NOT NULL);
+             CREATE FUNCTION {trigger_function}() RETURNS trigger AS $$
+             BEGIN
+               INSERT INTO {audit_table} (row_count)
+               SELECT count(*) FROM inserted_rows;
+               RETURN NULL;
+             END;
+             $$ LANGUAGE plpgsql;
+             CREATE TRIGGER record_insert_statement_size
+             AFTER INSERT ON {table}
+             REFERENCING NEW TABLE AS inserted_rows
+             FOR EACH STATEMENT EXECUTE FUNCTION {trigger_function}();"
+        ))
+        .await
+        .expect("failed to install Postgres insert statement recorder");
 }
 
 #[given(expr = "Postgres TLS table {string} exists")]
@@ -8231,6 +8454,46 @@ async fn given_mysql_table_with_primary_key_exists(world: &mut ScenarioWorld, ta
     prepare_mysql_table_schema(world, table, false, true).await;
 }
 
+#[given(expr = "MySQL table {string} recording insert commands exists")]
+async fn given_mysql_table_recording_insert_commands_exists(
+    world: &mut ScenarioWorld,
+    table: String,
+) {
+    prepare_mysql_table(world, table, false).await;
+    let table = world
+        .mysql_table
+        .as_ref()
+        .expect("MySQL table should be recorded after preparation")
+        .clone();
+    let pool =
+        mysql_root_pool(world.dependencies.endpoints()).expect("failed to build MySQL root pool");
+    let mut conn = pool
+        .get_conn()
+        .await
+        .expect("failed to connect to MySQL as root");
+    conn.query_drop("SET GLOBAL log_output = 'TABLE'")
+        .await
+        .expect("failed to direct the MySQL general log to its table");
+    conn.query_drop("SET GLOBAL general_log = 'ON'")
+        .await
+        .expect("failed to enable the MySQL general log");
+    let insert_prefix = format!("INSERT INTO `{table}`%");
+    world.mysql_insert_command_baseline = Some(
+        conn.exec_first::<u64, _, _>(
+            "SELECT COUNT(*) FROM mysql.general_log
+             WHERE command_type IN ('Execute', 'Query') AND argument LIKE ?",
+            (&insert_prefix,),
+        )
+        .await
+        .expect("failed to read the MySQL insert-command baseline")
+        .unwrap_or(0),
+    );
+    drop(conn);
+    pool.disconnect()
+        .await
+        .expect("failed to disconnect MySQL root pool");
+}
+
 async fn prepare_mysql_table(world: &mut ScenarioWorld, table: String, tls: bool) {
     prepare_mysql_table_schema(world, table, tls, false).await;
 }
@@ -8272,6 +8535,54 @@ async fn given_mongodb_collection_with_unique_user_id_exists(
     collection: String,
 ) {
     prepare_mongodb_collection_schema(world, collection, false, true).await;
+}
+
+#[given(expr = "MongoDB collection {string} rejecting poison actions exists")]
+async fn given_mongodb_collection_rejecting_poison_actions_exists(
+    world: &mut ScenarioWorld,
+    collection: String,
+) {
+    prepare_mongodb_collection(world, collection, false).await;
+    let collection = world
+        .mongodb_collection
+        .as_ref()
+        .expect("MongoDB collection should be recorded after preparation")
+        .clone();
+    let client = mongodb_client(world.dependencies.endpoints(), false)
+        .await
+        .expect("failed to connect to MongoDB");
+    client
+        .database("nervix")
+        .run_command(mongodb_doc! {
+            "collMod": &collection,
+            "validator": {
+                "mongodb_action": { "$ne": "poison" },
+            },
+            "validationLevel": "strict",
+            "validationAction": "error",
+        })
+        .await
+        .expect("failed to install MongoDB poison-record validator");
+}
+
+#[given(expr = "MongoDB collection {string} recording insert command sizes exists")]
+async fn given_mongodb_collection_recording_insert_command_sizes_exists(
+    world: &mut ScenarioWorld,
+    collection: String,
+) {
+    prepare_mongodb_collection(world, collection, false).await;
+    let client = mongodb_client(world.dependencies.endpoints(), false)
+        .await
+        .expect("failed to connect to MongoDB");
+    client
+        .database("nervix")
+        .run_command(mongodb_doc! {
+            "profile": 2,
+            "slowms": 0,
+            "sampleRate": 1.0,
+        })
+        .await
+        .expect("failed to enable MongoDB command profiling");
 }
 
 #[given(expr = "MongoDB TLS collection {string} exists")]
@@ -8336,6 +8647,34 @@ async fn when_mqtt_message_is_published(
         .publish_mqtt(&topic, &payload)
         .await
         .expect("failed to publish mqtt message");
+}
+
+#[when(expr = "these MQTT messages are rapidly published to topic {string}")]
+async fn when_these_mqtt_messages_are_rapidly_published(
+    world: &mut ScenarioWorld,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payloads = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        !payloads.is_empty(),
+        "at least one MQTT payload is required"
+    );
+    wait_for_mqtt_ingestors_ready(world).await;
+    for payload in payloads {
+        tokio::task::consume_budget().await;
+        world
+            .cluster()
+            .publish_mqtt(&topic, &payload)
+            .await
+            .expect("failed to publish mqtt message");
+    }
 }
 
 #[when(expr = "MQTT QoS 1 message is published to topic {string}")]
@@ -8565,6 +8904,38 @@ async fn when_nats_message_is_published(
         .publish_nats(&subject, &payload)
         .await
         .expect("failed to publish nats message");
+}
+
+#[when(expr = "NATS JetStream stream {string} is provisioned for subject {string}")]
+async fn when_nats_jetstream_stream_is_provisioned(
+    world: &mut ScenarioWorld,
+    stream: String,
+    subject: String,
+) {
+    let stream = expand_placeholders(world, &stream);
+    let subject = expand_placeholders(world, &subject);
+    world
+        .cluster()
+        .provision_nats_stream(&stream, &subject)
+        .await
+        .expect("failed to provision NATS JetStream stream");
+}
+
+#[then(expr = "NATS JetStream stream {string} eventually contains a payload on subject {string}")]
+async fn then_nats_jetstream_stream_eventually_contains_payload(
+    world: &mut ScenarioWorld,
+    stream: String,
+    subject: String,
+    #[step] step: &Step,
+) {
+    let stream = expand_placeholders(world, &stream);
+    let subject = expand_placeholders(world, &subject);
+    let expected = expand_placeholders(world, docstring(step));
+    world
+        .cluster()
+        .wait_for_nats_stream_payload(&stream, &subject, &expected)
+        .await
+        .expect("NATS JetStream stream did not receive expected payload");
 }
 
 #[when("ZeroMQ message is published")]
@@ -10279,6 +10650,44 @@ async fn then_clickhouse_table_eventually_contains_row(
     }
 }
 
+#[then(expr = "the ClickHouse table eventually contains {int} rows in at least {int} parts")]
+async fn then_clickhouse_table_eventually_contains_rows_in_parts(
+    world: &mut ScenarioWorld,
+    expected_rows: u64,
+    expected_parts: u64,
+) {
+    let table = world
+        .clickhouse_table
+        .as_ref()
+        .expect("a ClickHouse table must be prepared before assertion")
+        .clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let query = format!("SELECT count(), uniqExact(_part) FROM {table} FORMAT TabSeparatedRaw");
+        let payload = clickhouse_post_for_world(world, &query)
+            .await
+            .expect("failed to query ClickHouse table parts");
+        let mut values = payload.trim().split('\t');
+        let observed_rows = values
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        let observed_parts = values
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        if observed_rows == expected_rows && observed_parts >= expected_parts {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected_rows} ClickHouse rows in at least {expected_parts} \
+             parts; observed rows={observed_rows} parts={observed_parts}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[then("the Postgres table eventually contains a row")]
 async fn then_postgres_table_eventually_contains_row(
     world: &mut ScenarioWorld,
@@ -10328,6 +10737,89 @@ async fn then_postgres_table_eventually_contains_row(
     }
 }
 
+#[then(expr = "the Postgres table eventually contains exactly {int} rows")]
+async fn then_postgres_table_eventually_contains_exactly_rows(
+    world: &mut ScenarioWorld,
+    expected_rows: i64,
+) {
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before assertion")
+        .clone();
+    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
+        .await
+        .expect("failed to connect to Postgres");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let observed_rows: i64 = client
+            .query_one(&format!("SELECT count(*) FROM {table}"), &[])
+            .await
+            .expect("failed to count Postgres rows")
+            .get(0);
+        if observed_rows == expected_rows {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for exactly {expected_rows} Postgres rows; observed {observed_rows}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(
+    expr = "the Postgres table eventually contains {int} rows across at least {int} inserts of at \
+            most {int} rows"
+)]
+async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
+    world: &mut ScenarioWorld,
+    expected_rows: i64,
+    expected_inserts: i64,
+    maximum_rows_per_insert: i64,
+) {
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before assertion")
+        .clone();
+    let audit_table = format!("{table}_insert_audit");
+    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
+        .await
+        .expect("failed to connect to Postgres");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT (SELECT count(*) FROM {table}),
+                            (SELECT count(*) FROM {audit_table}),
+                            COALESCE((SELECT max(row_count) FROM {audit_table}), 0)"
+                ),
+                &[],
+            )
+            .await
+            .expect("failed to query Postgres insert statement recorder");
+        let observed_rows: i64 = row.get(0);
+        let observed_inserts: i64 = row.get(1);
+        let largest_insert: i64 = row.get(2);
+        if observed_rows == expected_rows
+            && observed_inserts >= expected_inserts
+            && largest_insert <= maximum_rows_per_insert
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected_rows} Postgres rows across at least \
+             {expected_inserts} inserts of at most {maximum_rows_per_insert} rows; observed \
+             rows={observed_rows} inserts={observed_inserts} largest_insert={largest_insert}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[then("the MySQL table eventually contains a row")]
 async fn then_mysql_table_eventually_contains_row(world: &mut ScenarioWorld, #[step] step: &Step) {
     let expected = expand_placeholders(world, docstring(step));
@@ -10367,6 +10859,61 @@ async fn then_mysql_table_eventually_contains_row(world: &mut ScenarioWorld, #[s
         assert!(
             Instant::now() < deadline,
             "timed out waiting for MySQL row. expected {expected}, observed {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "the MySQL table eventually contains {int} rows from at least {int} insert commands")]
+async fn then_mysql_table_eventually_contains_rows_from_insert_commands(
+    world: &mut ScenarioWorld,
+    expected_rows: u64,
+    expected_commands: u64,
+) {
+    let table = world
+        .mysql_table
+        .as_ref()
+        .expect("a MySQL table must be prepared before assertion")
+        .clone();
+    let baseline = world
+        .mysql_insert_command_baseline
+        .expect("MySQL insert command recording must be enabled before assertion");
+    let insert_prefix = format!("INSERT INTO `{table}`%");
+    let pool =
+        mysql_root_pool(world.dependencies.endpoints()).expect("failed to build MySQL root pool");
+    let mut conn = pool
+        .get_conn()
+        .await
+        .expect("failed to connect to MySQL as root");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let observed_rows = conn
+            .query_first::<u64, _>(format!("SELECT COUNT(*) FROM `{table}`"))
+            .await
+            .expect("failed to count MySQL rows")
+            .unwrap_or(0);
+        let recorded_commands = conn
+            .exec_first::<u64, _, _>(
+                "SELECT COUNT(*) FROM mysql.general_log
+                 WHERE command_type IN ('Execute', 'Query') AND argument LIKE ?",
+                (&insert_prefix,),
+            )
+            .await
+            .expect("failed to count MySQL insert commands")
+            .unwrap_or(0)
+            .saturating_sub(baseline);
+        if observed_rows == expected_rows && recorded_commands >= expected_commands {
+            drop(conn);
+            pool.disconnect()
+                .await
+                .expect("failed to disconnect MySQL root pool");
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected_rows} MySQL rows from at least {expected_commands} \
+             insert commands; observed rows={observed_rows} commands={recorded_commands}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -10425,6 +10972,108 @@ async fn then_mongodb_collection_eventually_contains_document(
         assert!(
             Instant::now() < deadline,
             "timed out waiting for MongoDB document. expected {expected}, observed {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "the MongoDB collection eventually contains exactly {int} documents")]
+async fn then_mongodb_collection_eventually_contains_exactly_documents(
+    world: &mut ScenarioWorld,
+    expected_documents: u64,
+) {
+    let collection = world
+        .mongodb_collection
+        .as_ref()
+        .expect("a MongoDB collection must be prepared before assertion")
+        .clone();
+    let client = mongodb_client(world.dependencies.endpoints(), world.mongodb_tls)
+        .await
+        .expect("failed to connect to MongoDB");
+    let collection = client
+        .database("nervix")
+        .collection::<MongoDbDocument>(&collection);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let observed_documents = collection
+            .count_documents(mongodb_doc! {})
+            .await
+            .expect("failed to count MongoDB documents");
+        if observed_documents == expected_documents {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for exactly {expected_documents} MongoDB documents; observed \
+             {observed_documents}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(
+    expr = "the MongoDB collection eventually contains {int} documents across at least {int} \
+            inserts of at most {int} documents"
+)]
+async fn then_mongodb_collection_eventually_contains_documents_across_bounded_inserts(
+    world: &mut ScenarioWorld,
+    expected_documents: u64,
+    expected_inserts: usize,
+    maximum_documents_per_insert: usize,
+) {
+    let collection_name = world
+        .mongodb_collection
+        .as_ref()
+        .expect("a MongoDB collection must be prepared before assertion")
+        .clone();
+    let client = mongodb_client(world.dependencies.endpoints(), world.mongodb_tls)
+        .await
+        .expect("failed to connect to MongoDB");
+    let database = client.database("nervix");
+    let collection = database.collection::<MongoDbDocument>(&collection_name);
+    let profile = database.collection::<MongoDbDocument>("system.profile");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let observed_documents = collection
+            .count_documents(mongodb_doc! {})
+            .await
+            .expect("failed to count MongoDB documents");
+        let profile_documents = profile
+            .find(mongodb_doc! { "command.insert": &collection_name })
+            .await
+            .expect("failed to query MongoDB insert command profiles")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("failed to read MongoDB insert command profiles");
+        let command_sizes = profile_documents
+            .iter()
+            .filter_map(|profile_document| match profile_document.get("ninserted") {
+                Some(MongoDbBson::Int32(value)) => usize::try_from(*value).ok(),
+                Some(MongoDbBson::Int64(value)) => usize::try_from(*value).ok(),
+                Some(MongoDbBson::Double(value))
+                    if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 =>
+                {
+                    usize::try_from(*value as u64).ok()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let observed_inserts = profile_documents.len();
+        let largest_insert = command_sizes.iter().copied().max().unwrap_or(0);
+        if observed_documents == expected_documents
+            && observed_inserts >= expected_inserts
+            && command_sizes.len() == observed_inserts
+            && largest_insert <= maximum_documents_per_insert
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected_documents} MongoDB documents across at least \
+             {expected_inserts} inserts of at most {maximum_documents_per_insert} documents; \
+             observed documents={observed_documents} inserts={observed_inserts} command \
+             sizes={command_sizes:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -11064,6 +11713,81 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
             }
         }
     }
+}
+
+#[then(
+    expr = "within {string} the observed broker receives JSON payloads preserving {string} group \
+            order"
+)]
+async fn then_observed_broker_receives_json_payloads_preserving_group_order(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group_field: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let expected = docstring(step)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(&expand_placeholders(world, line))
+                .unwrap_or_else(|error| panic!("invalid expected broker JSON payload: {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !expected.is_empty(),
+        "step docstring must contain at least one expected JSON payload"
+    );
+
+    let deadline = Instant::now() + duration;
+    let mut actual = Vec::with_capacity(expected.len());
+    while actual.len() < expected.len() {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for {} grouped broker payloads; observed {actual:?}",
+            expected.len()
+        );
+        let payload = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
+            .try_next_payload(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for grouped broker payloads")
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out waiting for {} grouped broker payloads; observed {actual:?}",
+                    expected.len()
+                )
+            });
+        actual.push(
+            serde_json::from_str::<serde_json::Value>(&payload)
+                .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}")),
+        );
+    }
+
+    let group_payloads = |payloads: Vec<serde_json::Value>| {
+        let mut grouped = BTreeMap::<String, Vec<serde_json::Value>>::new();
+        for payload in payloads {
+            let group = payload
+                .get(&group_field)
+                .unwrap_or_else(|| {
+                    panic!("broker payload {payload} has no group field '{group_field}'")
+                })
+                .to_string();
+            grouped.entry(group).or_default().push(payload);
+        }
+        grouped
+    };
+    assert_eq!(
+        group_payloads(actual),
+        group_payloads(expected),
+        "broker payload order changed within at least one '{group_field}' group"
+    );
 }
 
 #[then(expr = "the observed broker does not receive a payload within {string}")]

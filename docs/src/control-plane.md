@@ -71,7 +71,8 @@ that produced it. The batch uses the highest level contributed by any changed en
   tasks and hands pending materialized-state work to their replacements. Deduplicator key changes
   also purge the old keyspace before the replacement starts; reorderer ordering changes flush the
   old ordering buffers before swapping. Relay materialized-state changes update membership in
-  place. Emitter source-predicate, sink, client, codec, input-collection, and attachment changes
+  place. Emitter source-predicate, sink, publishing-mode (including any confirmation window,
+  timeout, or retry-policy variable), client, codec, input-collection, and attachment changes
   drain and replace only the affected emitter task. Every current ingestor alteration stops and
   drains only the affected ingestor instances, then starts their desired source configuration from
   the published schedule. Reingestor alterations replace their relay consumers and

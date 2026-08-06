@@ -20,7 +20,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
 - Source and sink: connector kinds, externally provisioned entity names, endpoints, delivery/ACK
-  expectations, ordering, and offsets.
+  expectations, emitter publishing mode, confirmation window and timeout where applicable, retry
+  pacing, ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
@@ -57,7 +58,8 @@ relay, junction, deduplicator, reorderer, emitter, ingestor, reingestor, or gene
 `DROP` for one domain in the same transaction;
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
-changes pause the domain; structural junction, emitter sink/client/codec/collect/mode, ingestor,
+changes pause the domain; structural junction, emitter sink/client/codec/collect/publishing-mode or
+attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
@@ -98,6 +100,16 @@ per-route branch selection, while generator route bodies remain set-only.
   branches. Keep collection separate per source relay and concrete branch, and remember that one
   node-wide materialized dependency or message-error relay must be exact-branch compatible with
   every source.
+- Give every emitter an explicit transport-supported `MODE` as the final sink subclause before
+  `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
+  <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
+  `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
+- Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, or ClickHouse,
+  put `timeout_ms` in the referenced client CONFIG when the request needs an explicit bound; the
+  emitter's declared retry policy owns pacing after that request fails.
+- Require `WITH MAX BATCH <positive_n>` for ClickHouse, Postgres, MySQL, and MongoDB emitters. For
+  SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
+  queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
   and initialize every required output field on set-only routes.
 - Add a route-local message error policy. Add the required general/global policy for the chosen

@@ -1,5 +1,6 @@
 use ::redis::{
-    AsyncCommands, Client as RedisClient, ClientTlsConfig, TlsCertificates as RedisTlsCertificates,
+    AsyncCommands, Client as RedisClient, ClientTlsConfig, ErrorKind as RedisErrorKind,
+    ServerErrorKind, TlsCertificates as RedisTlsCertificates,
 };
 
 use super::*;
@@ -87,5 +88,77 @@ impl RedisEmitter {
             .await
             .map_err(emitter_publish_error)?;
         Ok(())
+    }
+
+    pub(in crate::runtime) async fn publish_records(
+        &mut self,
+        channel: &Identifier,
+        records: Vec<EncodedBrokerRecord>,
+    ) -> PerRecordPublishOutcome {
+        let mut outcome = PerRecordPublishOutcome::empty();
+        for record in records {
+            tokio::task::consume_budget().await;
+            let Some(connection) = self.connection.as_mut() else {
+                outcome.fail(
+                    Report::new(EmitterRuntimeError::SinkNotInitialized)
+                        .attach_printable("no initialized redis sink client"),
+                );
+                break;
+            };
+            let published: ::redis::RedisResult<i64> = await_emitter_confirmation(
+                &record.acks,
+                connection.publish(channel.as_str(), record.payload.as_slice()),
+            )
+            .await;
+            match published {
+                Ok(_) => outcome.deliver((record.batch_index, record.row_index)),
+                Err(error) if Self::is_record_failure(&error) => outcome.reject(
+                    (record.batch_index, record.row_index),
+                    format!("Redis rejected emitted record: {error}"),
+                ),
+                Err(error) => {
+                    outcome.fail(emitter_publish_error(error));
+                    break;
+                }
+            }
+        }
+        outcome
+    }
+
+    fn is_record_failure(error: &::redis::RedisError) -> bool {
+        if !matches!(
+            error.kind(),
+            RedisErrorKind::Server(ServerErrorKind::ResponseError)
+        ) {
+            return false;
+        }
+        let detail = error.detail().unwrap_or_default().to_ascii_lowercase();
+        detail.contains("protocol error: invalid bulk length")
+            || detail.contains("string exceeds maximum allowed size")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_definitive_redis_command_rejections_are_record_failures() {
+        let rejected = ::redis::RedisError::from((
+            RedisErrorKind::Server(ServerErrorKind::ResponseError),
+            "record rejected",
+            "Protocol error: invalid bulk length".to_string(),
+        ));
+        let ambiguous = ::redis::RedisError::from((
+            RedisErrorKind::Server(ServerErrorKind::ResponseError),
+            "record rejected",
+            "OOM command not allowed when used memory is greater than maxmemory".to_string(),
+        ));
+        let disconnected =
+            ::redis::RedisError::from((RedisErrorKind::Io, "connection interrupted"));
+
+        assert!(RedisEmitter::is_record_failure(&rejected));
+        assert!(!RedisEmitter::is_record_failure(&ambiguous));
+        assert!(!RedisEmitter::is_record_failure(&disconnected));
     }
 }

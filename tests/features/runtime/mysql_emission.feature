@@ -46,7 +46,7 @@ Feature: MySQL emission
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
-        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } WITH MAX BATCH 2
+        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -125,7 +125,7 @@ Feature: MySQL emission
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
-        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_conflict_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } ON CONFLICT <conflict_action> WITH MAX BATCH 2
+        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_conflict_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } ON CONFLICT <conflict_action> WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -153,3 +153,57 @@ Feature: MySQL emission
       | 1            | 0             | DO NOTHING      | open            |
       | 3            | 0             | DO NOTHING      | open            |
       | 3            | 1             | DO NOTHING      | open            |
+
+  @database_emitter_modes @max_batch @mysql_max_batch
+  Scenario Outline: MySQL WITH MAX BATCH splits one oversized flush into multiple inserts
+    Given MQTT is running
+    And MySQL is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And MySQL table "batch_mysql_{{test_id}}" recording insert commands exists
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec
+      FROM WIRE JSON SCHEMA notification_wire
+      TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-mysql-batch-{{test_id}}'
+      };
+      CREATE INGESTOR mqtt_notifications
+      FROM MQTT mqtt_ingress TOPIC mysql_batch_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE CLIENT mysql_client TYPE MYSQL CONFIG {
+        'addr' = '{{mysql_addr}}'
+      };
+      CREATE EMITTER to_mysql
+      FROM notifications
+      TO MYSQL mysql_client INSERT TO TABLE batch_mysql_{{test_id}}
+      VALUES { "mysql_user_id" = input.user_id }
+      WITH MAX BATCH 2
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      FLUSH EACH 2s MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    When 5 JSON messages with user id 42 are rapidly published to "MQTT" input "mysql_batch_in_{{test_id}}"
+    Then the MySQL table eventually contains 5 rows from at least 3 insert commands
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

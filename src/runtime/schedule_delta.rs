@@ -144,10 +144,11 @@ impl ScheduleDelta {
 mod tests {
     use nervix_models::{
         AckMode, BranchSelection, CreateEmitter, CreateIngestor, CreateJunction, CreateRelay,
-        Domain, DomainSchedule, DynamicModelUpdate, EmitSink, EndpointIngestMode, ErrorPolicies,
-        Expression, GeneralErrorPolicy, Identifier, IngestSource, Literal, Model, ModelKind,
-        OutputBranch, OutputFlushPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        RelayBranching, RouteConstruction, ScheduledNode,
+        Domain, DomainSchedule, DynamicModelUpdate, EmitSink, EmitterPublishingMode,
+        EndpointIngestMode, ErrorPolicies, Expression, GeneralErrorPolicy, Identifier,
+        IngestSource, Literal, Model, ModelKind, OutputBranch, OutputFlushPolicy, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, RelayBranching, RetryPolicy, RouteConstruction,
+        ScheduledNode,
     };
 
     use super::ScheduleDelta;
@@ -350,6 +351,12 @@ mod tests {
             flush_each: "30s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             error_policies: ErrorPolicies::handled_by_log(),
+            publishing_mode: EmitterPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             mode: AckMode::Attached,
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),

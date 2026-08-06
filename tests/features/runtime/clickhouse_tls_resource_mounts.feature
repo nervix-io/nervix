@@ -59,7 +59,7 @@ Feature: ClickHouse TLS resource mounts
           'password' = 'nervix',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE clickhouse_client INSERT TO TABLE tls_notifications_out_{{test_id}} VALUES { "clickhouse_user_id" = input.user_id, "clickhouse_now" = NOW() AS STRING, "clickhouse_action" = LOWER(input.action) }
+        CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE clickhouse_client INSERT TO TABLE tls_notifications_out_{{test_id}} VALUES { "clickhouse_user_id" = input.user_id, "clickhouse_now" = NOW() AS STRING, "clickhouse_action" = LOWER(input.action) } WITH MAX BATCH 500 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

@@ -151,12 +151,18 @@ the input encodes it back to JSON:
 ```nspl
 CREATE EMITTER redis_orders
   FROM orders
-  TO REDIS PUBSUB redis_local CHANNEL orders_out ENCODE USING order_codec
+  TO REDIS PUBSUB redis_local CHANNEL orders_out
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
+
+Redis Pub/Sub exposes no delivery confirmation, so `MODE NO_ACK` names server acceptance as the
+publish boundary. The required retry policy paces connection and other infrastructure failures;
+it does not turn subscriber presence into an acknowledgment.
 
 ## Commit And Start
 
@@ -228,7 +234,9 @@ CREATE INGESTOR kafka_orders
 
 CREATE EMITTER redis_orders
   FROM orders
-  TO REDIS PUBSUB redis_local CHANNEL orders_out ENCODE USING order_codec
+  TO REDIS PUBSUB redis_local CHANNEL orders_out
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG

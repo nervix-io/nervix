@@ -74,7 +74,9 @@ An emitter consumes every concrete branch and collapses branch identity at the e
 ```nspl
 CREATE EMITTER redis_deduped
   FROM orders_deduped
-  TO REDIS PUBSUB redis_local CHANNEL orders_deduped_out ENCODE USING order_codec
+  TO REDIS PUBSUB redis_local CHANNEL orders_deduped_out
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG

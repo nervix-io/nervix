@@ -33,15 +33,18 @@ use pulsar::PulsarEmitter;
 use rabbitmq::RabbitMqEmitter;
 use redis::RedisEmitter;
 use sentry::SentryEmitter;
-use sqs::SqsEmitter;
+use sqs::{SqsEmitter, SqsPublishingMode};
 use zeromq::ZeroMqEmitter;
 
 pub(in crate::runtime) struct EmitterTask;
 
 #[derive(Clone)]
 pub(in crate::runtime) struct EmitterSinkContext {
+    runtime: Runtime,
     domain: Domain,
     emitter: Identifier,
+    error_policies: ErrorPolicies,
+    buffered_messages: Arc<AtomicUsize>,
     temp_dir: Arc<PathBuf>,
     events: broadcast::Sender<RuntimeEvent>,
     udfs: Option<UdfExecutor>,
@@ -51,7 +54,327 @@ struct EmitterPublishControl<'a> {
     runtime: &'a Runtime,
     fault_injector: &'a EmitterFaultInjector,
     shutdown_rx: &'a mut watch::Receiver<bool>,
+    stop_rx: &'a mut watch::Receiver<Option<Instant>>,
     backoff: &'a mut RuntimeReconnectBackoff,
+}
+
+async fn await_until_emitter_stop_deadline<T>(
+    stop_rx: &mut watch::Receiver<Option<Instant>>,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    tokio::pin!(future);
+    loop {
+        tokio::task::consume_budget().await;
+        let stop_deadline = *stop_rx.borrow();
+        if let Some(deadline) = stop_deadline {
+            return tokio::time::timeout_at(deadline, &mut future)
+                .await
+                .map_err(|_| ());
+        }
+        tokio::select! {
+            output = &mut future => return Ok(output),
+            changed = stop_rx.changed() => {
+                if changed.is_err() {
+                    return Ok(future.await);
+                }
+            }
+        }
+    }
+}
+
+async fn await_or_emitter_stop_request<T>(
+    stop_rx: &mut watch::Receiver<Option<Instant>>,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(future);
+    loop {
+        tokio::task::consume_budget().await;
+        if stop_rx.borrow().is_some() {
+            return None;
+        }
+        tokio::select! {
+            output = &mut future => return Some(output),
+            changed = stop_rx.changed() => {
+                if changed.is_err() {
+                    return Some(future.await);
+                }
+            }
+        }
+    }
+}
+
+fn emitter_stop_deadline_elapsed() -> Report<EmitterRuntimeError> {
+    Report::new(EmitterRuntimeError::StopDeadlineElapsed)
+        .attach_printable("emitter stop deadline elapsed while publishing or retrying")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrokerPublishingMode {
+    NoAck,
+    Ack {
+        max_in_flight: usize,
+        timeout: Duration,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MqttPublishingMode {
+    Qos0,
+    Qos1 {
+        max_in_flight: usize,
+        timeout: Duration,
+    },
+    Qos2 {
+        max_in_flight: usize,
+        timeout: Duration,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NatsPublishingMode {
+    Core,
+    JetStream {
+        max_in_flight: usize,
+        timeout: Duration,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum CompiledSqsFifoGroup {
+    FromBranch,
+    Expression(CompiledProgramWithMaterializedInterest),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EmitterPublishingSettings {
+    retry_policy: ParsedRetryPolicy,
+    broker_mode: Option<BrokerPublishingMode>,
+    mqtt_mode: Option<MqttPublishingMode>,
+    nats_mode: Option<NatsPublishingMode>,
+    sqs_mode: Option<SqsPublishingMode>,
+}
+
+impl EmitterPublishingSettings {
+    fn parse(
+        domain: &Domain,
+        emitter: &Identifier,
+        sink: &EmitSink,
+        mode: &EmitterPublishingMode,
+    ) -> Result<Self, RuntimeError> {
+        if !sink.accepts_publishing_mode(mode) {
+            return Err(Self::invalid_setting(
+                domain,
+                emitter,
+                format!(
+                    "MODE {} is not supported by the {} sink",
+                    mode.kind_label(),
+                    sink.transport_label()
+                ),
+            ));
+        }
+        let retry_policy = mode.retry_policy();
+        let retry_policy = ParsedRetryPolicy {
+            backoff: Runtime::parse_runtime_node_duration_setting(
+                domain,
+                "emitter",
+                emitter,
+                "retry backoff",
+                &retry_policy.backoff,
+            )?,
+            max_backoff: Runtime::parse_runtime_node_duration_setting(
+                domain,
+                "emitter",
+                emitter,
+                "retry max backoff",
+                &retry_policy.max_backoff,
+            )?,
+        };
+        if retry_policy.backoff.is_zero() {
+            return Err(Self::invalid_setting(
+                domain,
+                emitter,
+                "retry backoff must be greater than zero",
+            ));
+        }
+        if retry_policy.max_backoff < retry_policy.backoff {
+            return Err(Self::invalid_setting(
+                domain,
+                emitter,
+                "retry max backoff must be greater than or equal to retry backoff",
+            ));
+        }
+
+        let broker_mode = match mode {
+            EmitterPublishingMode::NoAck { .. } => Some(BrokerPublishingMode::NoAck),
+            EmitterPublishingMode::BrokerAck {
+                window,
+                ack_timeout,
+                ..
+            } => {
+                let (max_in_flight, timeout) =
+                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
+                Some(BrokerPublishingMode::Ack {
+                    max_in_flight,
+                    timeout,
+                })
+            }
+            EmitterPublishingMode::MqttQos0 { .. }
+            | EmitterPublishingMode::SqsSingle { .. }
+            | EmitterPublishingMode::SqsBatch { .. }
+            | EmitterPublishingMode::RequestAck { .. } => None,
+            EmitterPublishingMode::MqttQos1 {
+                window,
+                ack_timeout,
+                ..
+            }
+            | EmitterPublishingMode::MqttQos2 {
+                window,
+                ack_timeout,
+                ..
+            }
+            | EmitterPublishingMode::NatsJetStream {
+                window,
+                ack_timeout,
+                ..
+            } => {
+                Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
+                None
+            }
+        };
+        let mqtt_mode = match mode {
+            EmitterPublishingMode::MqttQos0 { .. } => Some(MqttPublishingMode::Qos0),
+            EmitterPublishingMode::MqttQos1 {
+                window,
+                ack_timeout,
+                ..
+            } => {
+                let (max_in_flight, timeout) =
+                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
+                Some(MqttPublishingMode::Qos1 {
+                    max_in_flight,
+                    timeout,
+                })
+            }
+            EmitterPublishingMode::MqttQos2 {
+                window,
+                ack_timeout,
+                ..
+            } => {
+                let (max_in_flight, timeout) =
+                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
+                Some(MqttPublishingMode::Qos2 {
+                    max_in_flight,
+                    timeout,
+                })
+            }
+            _ => None,
+        };
+        let nats_mode = match mode {
+            EmitterPublishingMode::NoAck { .. } if matches!(sink, EmitSink::Nats { .. }) => {
+                Some(NatsPublishingMode::Core)
+            }
+            EmitterPublishingMode::NatsJetStream {
+                window,
+                ack_timeout,
+                ..
+            } => {
+                let (max_in_flight, timeout) =
+                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
+                Some(NatsPublishingMode::JetStream {
+                    max_in_flight,
+                    timeout,
+                })
+            }
+            _ => None,
+        };
+        let sqs_mode = match mode {
+            EmitterPublishingMode::SqsSingle { .. } => Some(SqsPublishingMode::Single),
+            EmitterPublishingMode::SqsBatch { .. } => Some(SqsPublishingMode::Batch),
+            _ => None,
+        };
+        Ok(Self {
+            retry_policy,
+            broker_mode,
+            mqtt_mode,
+            nats_mode,
+            sqs_mode,
+        })
+    }
+
+    fn invalid_setting(
+        domain: &Domain,
+        emitter: &Identifier,
+        reason: impl Into<String>,
+    ) -> RuntimeError {
+        RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!(
+                "invalid publishing mode for emitter '{}': {}",
+                emitter.as_str(),
+                reason.into()
+            ),
+        }
+    }
+
+    fn parse_confirmation(
+        domain: &Domain,
+        emitter: &Identifier,
+        window: &EmitterAckWindow,
+        ack_timeout: &str,
+    ) -> Result<(usize, Duration), RuntimeError> {
+        let timeout = Runtime::parse_runtime_node_duration_setting(
+            domain,
+            "emitter",
+            emitter,
+            "ack timeout",
+            ack_timeout,
+        )?;
+        if timeout.is_zero() {
+            return Err(Self::invalid_setting(
+                domain,
+                emitter,
+                "ack timeout must be greater than zero",
+            ));
+        }
+        let max_in_flight = match window {
+            EmitterAckWindow::Sequential => 1,
+            EmitterAckWindow::Parallel { max } => usize::try_from(*max).map_err(|_| {
+                Self::invalid_setting(
+                    domain,
+                    emitter,
+                    "parallel acknowledgment window exceeds this node's capacity",
+                )
+            })?,
+        };
+        if max_in_flight == 0 {
+            return Err(Self::invalid_setting(
+                domain,
+                emitter,
+                "parallel acknowledgment window must be at least one",
+            ));
+        }
+        Ok((max_in_flight, timeout))
+    }
+
+    fn broker_mode(self) -> EmitterRuntimeResult<BrokerPublishingMode> {
+        self.broker_mode
+            .ok_or_else(|| emitter_config_error("emitter sink requires a broker publishing mode"))
+    }
+
+    fn mqtt_mode(self) -> EmitterRuntimeResult<MqttPublishingMode> {
+        self.mqtt_mode
+            .ok_or_else(|| emitter_config_error("MQTT sink requires an MQTT publishing mode"))
+    }
+
+    fn nats_mode(self) -> EmitterRuntimeResult<NatsPublishingMode> {
+        self.nats_mode
+            .ok_or_else(|| emitter_config_error("NATS sink requires a NATS publishing mode"))
+    }
+
+    fn sqs_mode(self) -> EmitterRuntimeResult<SqsPublishingMode> {
+        self.sqs_mode
+            .ok_or_else(|| emitter_config_error("SQS sink requires an SQS publishing mode"))
+    }
 }
 
 struct EmitterBatchContext<'a> {
@@ -62,6 +385,7 @@ struct EmitterBatchContext<'a> {
     error_policies: &'a ErrorPolicies,
     source_filters: &'a HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
+    sqs_fifo_group: Option<&'a CompiledSqsFifoGroup>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
     materialized_stream_owner_nodes: &'a HashMap<Identifier, Option<String>>,
     schema: Arc<CompiledSchema>,
@@ -71,6 +395,8 @@ struct EmitterBatchContext<'a> {
 struct EmitterPublishBatch {
     batch: RelayRecordBatch,
     headers: Vec<EmitterHeaders>,
+    sqs_message_groups: Vec<Result<Option<String>, String>>,
+    delivered: Vec<bool>,
 }
 
 impl EmitterPublishBatch {
@@ -79,6 +405,8 @@ impl EmitterPublishBatch {
         Self {
             batch,
             headers: vec![Vec::new(); header_count],
+            sqs_message_groups: vec![Ok(None); header_count],
+            delivered: vec![false; header_count],
         }
     }
 
@@ -91,21 +419,54 @@ impl EmitterPublishBatch {
                 row_count
             ));
         }
-        Ok(Self { batch, headers })
+        Ok(Self {
+            batch,
+            headers,
+            sqs_message_groups: vec![Ok(None); row_count],
+            delivered: vec![false; row_count],
+        })
+    }
+
+    fn with_sqs_message_groups(
+        mut self,
+        groups: Vec<Result<Option<String>, String>>,
+    ) -> Result<Self, String> {
+        let row_count = self.batch.batch.batch().num_rows();
+        if groups.len() != row_count {
+            return Err(format!(
+                "SQS FIFO group count {} does not match emitter row count {row_count}",
+                groups.len()
+            ));
+        }
+        self.sqs_message_groups = groups;
+        Ok(self)
     }
 
     fn estimated_bytes(&self) -> u64 {
-        self.batch.estimated_bytes().saturating_add(
-            self.headers
-                .iter()
-                .flatten()
-                .map(|(name, value)| {
-                    u64::try_from(name.len())
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX))
-                })
-                .fold(0_u64, u64::saturating_add),
-        )
+        self.batch
+            .estimated_bytes()
+            .saturating_add(
+                self.headers
+                    .iter()
+                    .flatten()
+                    .map(|(name, value)| {
+                        u64::try_from(name.len())
+                            .unwrap_or(u64::MAX)
+                            .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX))
+                    })
+                    .fold(0_u64, u64::saturating_add),
+            )
+            .saturating_add(
+                self.sqs_message_groups
+                    .iter()
+                    .map(|group| match group {
+                        Ok(Some(group)) | Err(group) => {
+                            u64::try_from(group.len()).unwrap_or(u64::MAX)
+                        }
+                        Ok(None) => 0,
+                    })
+                    .fold(0_u64, u64::saturating_add),
+            )
     }
 
     fn message_count(&self) -> u64 {
@@ -120,8 +481,160 @@ impl EmitterPublishBatch {
         self.batch.merged_acks()
     }
 
-    fn ack_success(&self) {
-        self.batch.ack_success();
+    fn is_delivered(&self, row: usize) -> bool {
+        self.delivered.get(row).copied().unwrap_or(false)
+    }
+
+    fn mark_delivered(&mut self, row: usize) -> Result<(), String> {
+        let delivered_rows = self.delivered.len();
+        let delivered = self.delivered.get_mut(row).ok_or_else(|| {
+            format!(
+                "emitter delivered row {row} is outside batch with {} rows",
+                delivered_rows
+            )
+        })?;
+        if !*delivered {
+            let acks = self.batch.acks.get(row).ok_or_else(|| {
+                format!(
+                    "emitter delivered row {row} is outside ack set with {} rows",
+                    self.batch.acks.len()
+                )
+            })?;
+            acks.ack_success();
+            *delivered = true;
+        }
+        Ok(())
+    }
+
+    fn mark_rejected(&mut self, row: usize) -> Result<(), String> {
+        let delivered_rows = self.delivered.len();
+        let delivered = self.delivered.get_mut(row).ok_or_else(|| {
+            format!("emitter rejected row {row} is outside batch with {delivered_rows} rows")
+        })?;
+        *delivered = true;
+        Ok(())
+    }
+
+    async fn mark_rejected_after_delivery(
+        &mut self,
+        row: usize,
+        delivery: impl std::future::Future<Output = ()>,
+    ) -> EmitterRuntimeResult<()> {
+        delivery.await;
+        self.mark_rejected(row).map_err(|reason| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
+        })
+    }
+
+    fn pending_record_chunks(&self, max_batch: u64) -> EmitterRuntimeResult<Vec<Vec<usize>>> {
+        let max_batch = usize::try_from(max_batch).map_err(|_| {
+            emitter_config_error("emitter maximum record batch exceeds this node's capacity")
+        })?;
+        if max_batch == 0 {
+            return Err(emitter_config_error(
+                "emitter maximum record batch must be at least one",
+            ));
+        }
+        let row_count = self.batch.batch.batch().num_rows();
+        let pending = (0..row_count)
+            .filter(|row| !self.delivered.get(*row).copied().unwrap_or(false))
+            .collect::<Vec<_>>();
+        Ok(pending.chunks(max_batch).map(<[usize]>::to_vec).collect())
+    }
+}
+
+#[derive(Debug)]
+struct EncodedBrokerRecord {
+    batch_index: usize,
+    row_index: usize,
+    key: Option<String>,
+    payload: Vec<u8>,
+    headers: EmitterHeaders,
+    sqs_message_group: Result<Option<String>, String>,
+    acks: AckSet,
+}
+
+pub(super) type BrokerRecordPosition = (usize, usize);
+
+pub(super) struct RejectedEmitterRecord {
+    pub(super) position: BrokerRecordPosition,
+    pub(super) reason: String,
+    pub(super) structured_error: Option<StructuredMessageError>,
+}
+
+pub(super) struct PerRecordPublishOutcome {
+    pub(super) delivered: Vec<BrokerRecordPosition>,
+    pub(super) rejected: Vec<RejectedEmitterRecord>,
+    pub(super) infrastructure_error: Option<Report<EmitterRuntimeError>>,
+}
+
+impl PerRecordPublishOutcome {
+    pub(super) fn empty() -> Self {
+        Self {
+            delivered: Vec::new(),
+            rejected: Vec::new(),
+            infrastructure_error: None,
+        }
+    }
+
+    pub(super) fn fail(&mut self, error: Report<EmitterRuntimeError>) {
+        self.infrastructure_error = Some(error);
+    }
+
+    pub(super) fn deliver(&mut self, position: BrokerRecordPosition) {
+        self.delivered.push(position);
+    }
+
+    pub(super) fn reject(&mut self, position: BrokerRecordPosition, reason: impl Into<String>) {
+        self.rejected.push(RejectedEmitterRecord {
+            position,
+            reason: reason.into(),
+            structured_error: None,
+        });
+    }
+
+    pub(super) fn reject_structured(
+        &mut self,
+        position: BrokerRecordPosition,
+        error: StructuredMessageError,
+    ) {
+        self.rejected.push(RejectedEmitterRecord {
+            position,
+            reason: String::new(),
+            structured_error: Some(error),
+        });
+    }
+
+    pub(super) fn filter_mapped_chunks<T>(
+        &mut self,
+        batch_index: usize,
+        rows: &[Result<T, StructuredMessageError>],
+        pending_chunks: &[Vec<usize>],
+        sink: &str,
+    ) -> EmitterRuntimeResult<Vec<Vec<usize>>> {
+        let mut filtered = Vec::with_capacity(pending_chunks.len());
+        for chunk in pending_chunks {
+            let mut filtered_chunk = Vec::with_capacity(chunk.len());
+            for row in chunk {
+                match rows.get(*row) {
+                    Some(Ok(_)) => filtered_chunk.push(*row),
+                    Some(Err(error)) => {
+                        self.reject_structured((batch_index, *row), error.clone());
+                    }
+                    None => {
+                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                            .attach_printable(format!(
+                                "{sink} pending row {row} is outside mapped batch with {} rows",
+                                rows.len()
+                            )));
+                    }
+                }
+            }
+            if !filtered_chunk.is_empty() {
+                filtered.push(filtered_chunk);
+            }
+        }
+        Ok(filtered)
     }
 }
 
@@ -296,6 +809,22 @@ pub(in crate::runtime) struct PublishReport {
 pub(in crate::runtime) struct CompiledSqlValuesProgram {
     program: Arc<VmCompiledProgram>,
     label: &'static str,
+    error_sites: Vec<CompiledMessageErrorSite>,
+}
+
+impl CompiledSqlValuesProgram {
+    fn structured_side_error(&self, reason: String, span: VmSpan) -> StructuredMessageError {
+        let site = self.error_sites.iter().find(|site| site.span == span);
+        structured_message_error(
+            MessageErrorCode::Evaluation,
+            reason,
+            site.map_or(MessageErrorOperation::Values, |site| site.operation),
+            site.and_then(|site| site.operation_index),
+            site.map(|site| site.fields.iter().cloned())
+                .into_iter()
+                .flatten(),
+        )
+    }
 }
 
 pub(in crate::runtime) type EmitterRuntimeResult<T> = Result<T, Report<EmitterRuntimeError>>;
@@ -314,6 +843,8 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     FaultInjected,
     #[error("emitter shutdown while stalled")]
     ShutdownWhileStalled,
+    #[error("emitter stop deadline elapsed")]
+    StopDeadlineElapsed,
     #[error("failed to encode emitter batch")]
     EncodeBatch,
     #[error("failed to publish emitter batch")]
@@ -329,6 +860,7 @@ impl EmitterRuntimeError {
             | Self::InitializeSink
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
+            | Self::StopDeadlineElapsed
             | Self::EncodeBatch => false,
         }
     }
@@ -433,12 +965,6 @@ impl EmitterBatchBuffer {
 
     fn pending_acks(&self) -> AckSet {
         AckSet::merged(self.pending.iter().map(EmitterPublishBatch::merged_acks))
-    }
-
-    fn ack_pending_success(&self) {
-        for batch in &self.pending {
-            batch.ack_success();
-        }
     }
 
     fn drain_pending(&mut self) -> Vec<EmitterPublishBatch> {
@@ -567,6 +1093,34 @@ fn compile_sql_values_program(
         VmCompileBinding::readonly("input", input_schema.clone()),
         VmCompileBinding::readonly("message", input_schema),
     ];
+    let mut error_sites = compiled_message_error_sites(
+        &parsed,
+        &vec![MessageErrorOperation::Values; parsed.inner.set.len()],
+        None,
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "{label} VALUES message-error metadata for '{}' is invalid: {reason}",
+            emitter.as_str()
+        ),
+    })?;
+    for (index, (site, mapping)) in error_sites.iter_mut().zip(values).enumerate() {
+        let internal_target = format!("{namespace}.c{index}");
+        let external_target = format!("{namespace}.{}", mapping.column);
+        site.fields = SortedSet::from_unsorted(
+            site.fields
+                .iter()
+                .map(|field| {
+                    if field.as_str() == internal_target {
+                        FieldPath::new(external_target.clone())
+                    } else {
+                        field.clone()
+                    }
+                })
+                .collect(),
+        );
+    }
     let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_schema.clone(),
@@ -592,6 +1146,7 @@ fn compile_sql_values_program(
     Ok(CompiledSqlValuesProgram {
         program: Arc::new(compiled),
         label,
+        error_sites,
     })
 }
 
@@ -690,7 +1245,7 @@ async fn sql_mapped_batch_values(
     mappings: &[ClickHouseValueMapping],
     batch: &RelayRecordBatch,
     execution_now: Timestamp,
-) -> EmitterRuntimeResult<Vec<Vec<serde_json::Value>>> {
+) -> EmitterRuntimeResult<Vec<Result<Vec<serde_json::Value>, StructuredMessageError>>> {
     let side_inputs = HashMap::default();
     let lookup_columns = HashMap::default();
     let input = project_vm_input_batch(
@@ -730,36 +1285,49 @@ async fn sql_mapped_batch_values(
             )),
         );
     }
-    if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-        return Err(
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "{} VALUES side error {}: {} at {}",
-                program.label,
-                side_error.code.as_str(),
-                side_error.message,
-                side_error.span
-            )),
-        );
-    }
     let mut rows = Vec::with_capacity(row_count);
     for row in 0..row_count {
-        let output = vm_output_row_to_decoded_record(&result.batch, row).map_err(|error| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error)
-        })?;
-        rows.push(
-            mappings
-                .iter()
-                .enumerate()
-                .map(|(index, _mapping)| {
-                    let field = format!("c{index}");
-                    if let Some(value) = output.value(&field) {
-                        runtime_value_to_json(value)
-                    } else {
-                        serde_json::Value::Null
-                    }
-                })
-                .collect(),
-        );
+        if let Some(side_error) = result.batch.errors()[row].first() {
+            rows.push(Err(program.structured_side_error(
+                format!(
+                    "{} VALUES side error {}: {} at {}",
+                    program.label,
+                    side_error.code.as_str(),
+                    side_error.message,
+                    side_error.span
+                ),
+                side_error.span,
+            )));
+            continue;
+        }
+        let output = match vm_output_row_to_decoded_record(&result.batch, row) {
+            Ok(output) => output,
+            Err(error) => {
+                rows.push(Err(structured_message_error(
+                    MessageErrorCode::Validation,
+                    format!(
+                        "{} VALUES failed to decode output row: {error}",
+                        program.label
+                    ),
+                    MessageErrorOperation::Values,
+                    None,
+                    std::iter::empty(),
+                )));
+                continue;
+            }
+        };
+        rows.push(Ok(mappings
+            .iter()
+            .enumerate()
+            .map(|(index, _mapping)| {
+                let field = format!("c{index}");
+                if let Some(value) = output.value(&field) {
+                    runtime_value_to_json(value)
+                } else {
+                    serde_json::Value::Null
+                }
+            })
+            .collect()));
     }
     Ok(rows)
 }
@@ -802,6 +1370,37 @@ fn emitter_init_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeErr
 
 fn emitter_publish_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeError> {
     emitter_report(EmitterRuntimeError::PublishBatch, error)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EmitterMinimumRetryDelay(Duration);
+
+fn emitter_publish_error_with_minimum_retry_delay(
+    error: impl std::fmt::Display,
+    delay: Duration,
+) -> Report<EmitterRuntimeError> {
+    emitter_publish_error(error).attach(EmitterMinimumRetryDelay(delay))
+}
+
+fn emitter_minimum_retry_delay(error: &Report<EmitterRuntimeError>) -> Duration {
+    error
+        .downcast_ref::<EmitterMinimumRetryDelay>()
+        .map_or(Duration::ZERO, |attachment| attachment.0)
+}
+
+async fn await_emitter_confirmation<F>(acks: &AckSet, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::pin!(future);
+    loop {
+        tokio::task::consume_budget().await;
+        acks.ack_alive();
+        tokio::select! {
+            result = &mut future => return result,
+            _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
+        }
+    }
 }
 
 fn emitter_config_value(
@@ -925,6 +1524,7 @@ enum SinkEmitter {
 impl SinkEmitter {
     async fn new(
         sink: &EmitSink,
+        publishing: EmitterPublishingSettings,
         client: Option<&Model>,
         resolved: Option<&ResolvedClientConfig>,
         catalog_client: Option<&Model>,
@@ -933,18 +1533,34 @@ impl SinkEmitter {
         input_schema: Arc<CompiledSchema>,
     ) -> Self {
         match (sink, client, catalog_client) {
-            (EmitSink::Kafka { .. }, Some(Model::ClientKafka(client)), _) => {
-                Self::from_result("kafka", context, KafkaEmitter::new(client, resolved))
-                    .map(Self::Kafka)
-            }
+            (EmitSink::Kafka { .. }, Some(Model::ClientKafka(client)), _) => Self::from_result(
+                "kafka",
+                context,
+                publishing
+                    .broker_mode()
+                    .and_then(|mode| KafkaEmitter::new(client, resolved, mode)),
+            )
+            .map(Self::Kafka),
             (EmitSink::Pulsar { topic, .. }, Some(Model::ClientPulsar(client)), _) => {
-                match PulsarEmitter::new(client, resolved, topic).await {
+                let mode = match publishing.broker_mode() {
+                    Ok(mode) => mode,
+                    Err(error) => {
+                        return Self::missing_after_emitter_init_error("pulsar", context, &error);
+                    }
+                };
+                match PulsarEmitter::new(client, resolved, topic, mode).await {
                     Ok(emitter) => Self::Pulsar(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("pulsar", context, &error),
                 }
             }
-            (EmitSink::RabbitMq { .. }, Some(Model::ClientRabbitMq(client)), _) => {
-                match RabbitMqEmitter::new(client, resolved).await {
+            (EmitSink::RabbitMq { queue, .. }, Some(Model::ClientRabbitMq(client)), _) => {
+                let mode = match publishing.broker_mode() {
+                    Ok(mode) => mode,
+                    Err(error) => {
+                        return Self::missing_after_emitter_init_error("rabbitmq", context, &error);
+                    }
+                };
+                match RabbitMqEmitter::new(client, resolved, queue, mode).await {
                     Ok(emitter) => Self::RabbitMq(emitter),
                     Err(error) => {
                         Self::missing_after_emitter_init_error("rabbitmq", context, &error)
@@ -957,12 +1573,22 @@ impl SinkEmitter {
                     Err(error) => Self::missing_after_emitter_init_error("redis", context, &error),
                 }
             }
-            (EmitSink::Mqtt { .. }, Some(Model::ClientMqtt(client)), _) => {
-                Self::from_result("mqtt", context, MqttEmitter::new(client, resolved, context))
-                    .map(Self::Mqtt)
-            }
+            (EmitSink::Mqtt { .. }, Some(Model::ClientMqtt(client)), _) => Self::from_result(
+                "mqtt",
+                context,
+                publishing.mqtt_mode().and_then(|mode| {
+                    MqttEmitter::new(client, resolved, context, mode, publishing.retry_policy)
+                }),
+            )
+            .map(Self::Mqtt),
             (EmitSink::Nats { .. }, Some(Model::ClientNats(client)), _) => {
-                match NatsEmitter::new(client, resolved).await {
+                let mode = match publishing.nats_mode() {
+                    Ok(mode) => mode,
+                    Err(error) => {
+                        return Self::missing_after_emitter_init_error("nats", context, &error);
+                    }
+                };
+                match NatsEmitter::new(client, resolved, mode, publishing.retry_policy).await {
                     Ok(emitter) => Self::Nats(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("nats", context, &error),
                 }
@@ -973,8 +1599,14 @@ impl SinkEmitter {
                     Err(error) => Self::missing_after_emitter_init_error("zeromq", context, &error),
                 }
             }
-            (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client)), _) => {
-                match SqsEmitter::new(client, resolved).await {
+            (EmitSink::Sqs { queue, .. }, Some(Model::ClientSqs(client)), _) => {
+                let mode = match publishing.sqs_mode() {
+                    Ok(mode) => mode,
+                    Err(error) => {
+                        return Self::missing_after_emitter_init_error("sqs", context, &error);
+                    }
+                };
+                match SqsEmitter::new(client, resolved, queue, mode).await {
                     Ok(emitter) => Self::Sqs(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("sqs", context, &error),
                 }
@@ -1191,6 +1823,46 @@ impl SinkEmitter {
         }
     }
 
+    fn requires_publish_failure_reinitialization(&self) -> bool {
+        !matches!(self, Self::Kafka(_) | Self::Mqtt(_) | Self::Nats(_))
+    }
+
+    fn has_pending_work(&self, buffer: &EmitterBatchBuffer) -> bool {
+        if let Self::Iceberg(emitter) = self {
+            emitter.has_pending_work()
+        } else {
+            !buffer.is_empty()
+        }
+    }
+
+    fn pending_acks(&self, buffer: &EmitterBatchBuffer) -> AckSet {
+        if let Self::Iceberg(emitter) = self {
+            emitter.pending_acks()
+        } else {
+            buffer.pending_acks()
+        }
+    }
+
+    async fn finish_transport(&self, deadline: Instant) -> EmitterRuntimeResult<()> {
+        match self {
+            Self::Kafka(emitter) => emitter.flush_local_queue(deadline).await,
+            Self::Pulsar(_)
+            | Self::RabbitMq(_)
+            | Self::Redis(_)
+            | Self::Mqtt(_)
+            | Self::Nats(_)
+            | Self::ZeroMq(_)
+            | Self::Sqs(_)
+            | Self::Sentry(_)
+            | Self::ClickHouse(_)
+            | Self::Postgres(_)
+            | Self::MySql(_)
+            | Self::MongoDb(_)
+            | Self::Iceberg(_)
+            | Self::Missing { .. } => Ok(()),
+        }
+    }
+
     fn reconfigure_flush_policy(
         &mut self,
         context: &EmitterSinkContext,
@@ -1216,14 +1888,58 @@ impl SinkEmitter {
         if let Self::Iceberg(emitter) = self
             && let EmitSink::Iceberg { .. } = sink
         {
-            return match emitter.flush_due().await {
-                Ok(published) => Ok(published),
-                Err(error) => {
-                    let message = iceberg_error_message(&error);
-                    context.report_flush_error(sink.label(), &message);
-                    Err(Report::new(EmitterRuntimeError::PublishBatch).attach_printable(message))
-                }
+            let mut result = {
+                let _confirmation_wait = context
+                    .runtime
+                    .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+                await_until_emitter_stop_deadline(control.stop_rx, emitter.flush_due())
+                    .await
+                    .map_err(|()| emitter_stop_deadline_elapsed())?
             };
+            loop {
+                tokio::task::consume_budget().await;
+                Self::finish_iceberg_rejected_records(context, emitter, control.stop_rx).await?;
+                match result {
+                    Ok(published) => {
+                        control.backoff.reset();
+                        context
+                            .runtime
+                            .clear_emitter_transient_error(&context.domain, &context.emitter);
+                        return Ok(published);
+                    }
+                    Err(error) if error.current_context().is_retryable_publish_failure() => {
+                        let acks = emitter.pending_acks();
+                        if !Self::wait_for_iceberg_retry(
+                            sink.label(),
+                            context,
+                            control,
+                            &acks,
+                            &error,
+                        )
+                        .await?
+                        {
+                            return Ok(None);
+                        }
+                        result = {
+                            let _confirmation_wait = context
+                                .runtime
+                                .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+                            await_until_emitter_stop_deadline(
+                                control.stop_rx,
+                                emitter.retry_pending(),
+                            )
+                            .await
+                            .map_err(|()| emitter_stop_deadline_elapsed())?
+                        };
+                    }
+                    Err(error) => {
+                        let message = iceberg_error_message(&error);
+                        context.report_flush_error(sink.label(), &message);
+                        return Err(Report::new(EmitterRuntimeError::InvalidSinkConfig)
+                            .attach_printable(message));
+                    }
+                }
+            }
         }
         if !buffer.is_due() {
             return Ok(None);
@@ -1239,30 +1955,115 @@ impl SinkEmitter {
         control: &mut EmitterPublishControl<'_>,
         codec: Option<Arc<CompiledCodec>>,
         buffer: &mut EmitterBatchBuffer,
-    ) -> Option<PublishReport> {
+    ) -> EmitterRuntimeResult<Option<PublishReport>> {
         if let EmitSink::Iceberg { .. } = sink
             && let Self::Iceberg(emitter) = self
         {
-            return match emitter.finish().await {
-                Ok(published) => published,
-                Err(error) => {
-                    let message = iceberg_error_message(&error);
-                    context.report_flush_error(sink.label(), &message);
-                    None
-                }
+            let mut result = {
+                let _confirmation_wait = context
+                    .runtime
+                    .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+                await_until_emitter_stop_deadline(control.stop_rx, emitter.finish())
+                    .await
+                    .map_err(|()| emitter_stop_deadline_elapsed())?
             };
+            loop {
+                tokio::task::consume_budget().await;
+                Self::finish_iceberg_rejected_records(context, emitter, control.stop_rx).await?;
+                match result {
+                    Ok(published) => {
+                        control.backoff.reset();
+                        context
+                            .runtime
+                            .clear_emitter_transient_error(&context.domain, &context.emitter);
+                        return Ok(published);
+                    }
+                    Err(error) if error.current_context().is_retryable_publish_failure() => {
+                        let acks = emitter.pending_acks();
+                        if !Self::wait_for_iceberg_retry(
+                            sink.label(),
+                            context,
+                            control,
+                            &acks,
+                            &error,
+                        )
+                        .await?
+                        {
+                            return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled)
+                                .attach_printable(
+                                    "emitter drain stopped while Iceberg work remained pending",
+                                ));
+                        }
+                        result = {
+                            let _confirmation_wait = context
+                                .runtime
+                                .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+                            await_until_emitter_stop_deadline(control.stop_rx, emitter.finish())
+                                .await
+                                .map_err(|()| emitter_stop_deadline_elapsed())?
+                        };
+                    }
+                    Err(error) => {
+                        let message = iceberg_error_message(&error);
+                        context.report_flush_error(sink.label(), &message);
+                        return Err(Report::new(EmitterRuntimeError::InvalidSinkConfig)
+                            .attach_printable(message));
+                    }
+                }
+            }
         } else {
-            return match self
-                .flush_buffer(sink, context, control, codec, buffer)
-                .await
-            {
-                Ok(published) => published,
-                Err(error) => {
-                    let message = emitter_error_message(&error);
-                    context.report_flush_error(sink.label(), &message);
-                    None
+            loop {
+                tokio::task::consume_budget().await;
+                match self
+                    .flush_buffer(sink, context, control, codec.clone(), buffer)
+                    .await
+                {
+                    Ok(report) => {
+                        control.backoff.reset();
+                        context
+                            .runtime
+                            .clear_emitter_transient_error(&context.domain, &context.emitter);
+                        return Ok(report);
+                    }
+                    Err(error)
+                        if error.current_context() == &EmitterRuntimeError::StopDeadlineElapsed =>
+                    {
+                        return Err(error);
+                    }
+                    Err(error) if emitter_publish_error_is_retryable(&error) => {
+                        let reason = emitter_error_message(&error);
+                        let wait = control
+                            .backoff
+                            .take_delay()
+                            .max(emitter_minimum_retry_delay(&error));
+                        buffer.defer_retry(wait);
+                        context.runtime.record_emitter_transient_error_with_backoff(
+                            &context.domain,
+                            &context.emitter,
+                            reason.clone(),
+                            wait,
+                        );
+                        context.report_flush_error(sink.label(), &reason);
+                        let waited = await_until_emitter_stop_deadline(
+                            control.stop_rx,
+                            RuntimeReconnectBackoff::wait_duration_with_ack_alive(
+                                wait,
+                                control.shutdown_rx,
+                                &buffer.pending_acks(),
+                            ),
+                        )
+                        .await
+                        .map_err(|()| emitter_stop_deadline_elapsed())?;
+                        if !waited {
+                            return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled));
+                        }
+                    }
+                    Err(error) => {
+                        context.report_flush_error(sink.label(), &emitter_error_message(&error));
+                        return Err(error);
+                    }
                 }
-            };
+            }
         }
     }
 
@@ -1275,21 +2076,68 @@ impl SinkEmitter {
         buffer: &mut EmitterBatchBuffer,
         batch: EmitterPublishBatch,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
-        self.wait_for_fault_injector(context, control, &batch.merged_acks())
-            .await?;
-        if let (Self::Iceberg(emitter), EmitSink::Iceberg { .. }) = (&mut *self, sink) {
-            return match emitter.publish_batch(batch.batch).await {
-                Ok(report) => Ok(report),
-                Err(error) if error.current_context().is_retryable_publish_failure() => {
-                    Err(Report::new(EmitterRuntimeError::PublishBatch)
-                        .attach_printable(iceberg_error_message(&error)))
-                }
-                Err(error) => {
-                    let message = iceberg_error_message(&error);
-                    context.report_flush_error("iceberg", &message);
-                    Ok(None)
-                }
+        if let EmitSink::Iceberg { .. } = sink {
+            self.wait_for_fault_injector(context, control, &batch.merged_acks())
+                .await?;
+            let Self::Iceberg(emitter) = self else {
+                return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
+                    .attach_printable("Iceberg emitter client is not initialized"));
             };
+            let mut result = {
+                let _confirmation_wait = context
+                    .runtime
+                    .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+                await_until_emitter_stop_deadline(
+                    control.stop_rx,
+                    emitter.publish_batch(batch.batch),
+                )
+                .await
+                .map_err(|()| emitter_stop_deadline_elapsed())?
+            };
+            loop {
+                tokio::task::consume_budget().await;
+                Self::finish_iceberg_rejected_records(context, emitter, control.stop_rx).await?;
+                match result {
+                    Ok(report) => {
+                        control.backoff.reset();
+                        context
+                            .runtime
+                            .clear_emitter_transient_error(&context.domain, &context.emitter);
+                        return Ok(report);
+                    }
+                    Err(error) if error.current_context().is_retryable_publish_failure() => {
+                        let acks = emitter.pending_acks();
+                        if !Self::wait_for_iceberg_retry(
+                            sink.label(),
+                            context,
+                            control,
+                            &acks,
+                            &error,
+                        )
+                        .await?
+                        {
+                            return Ok(None);
+                        }
+                        result = {
+                            let _confirmation_wait = context
+                                .runtime
+                                .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+                            await_until_emitter_stop_deadline(
+                                control.stop_rx,
+                                emitter.retry_pending(),
+                            )
+                            .await
+                            .map_err(|()| emitter_stop_deadline_elapsed())?
+                        };
+                    }
+                    Err(error) => {
+                        let message = iceberg_error_message(&error);
+                        context.report_flush_error("iceberg", &message);
+                        return Err(Report::new(EmitterRuntimeError::InvalidSinkConfig)
+                            .attach_printable(message));
+                    }
+                }
+            }
         }
 
         if buffer.push(batch)? {
@@ -1314,9 +2162,26 @@ impl SinkEmitter {
         self.wait_for_fault_injector(context, control, &buffer.pending_acks())
             .await?;
         let report = buffer.report();
-        self.publish_buffered_batches(sink, context, codec, buffer.pending.as_slice())
-            .await?;
-        buffer.ack_pending_success();
+        let pending_acks = buffer.pending_acks();
+        {
+            let _confirmation_wait = context
+                .runtime
+                .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+            await_until_emitter_stop_deadline(
+                control.stop_rx,
+                await_emitter_confirmation(
+                    &pending_acks,
+                    self.publish_buffered_batches(
+                        sink,
+                        context,
+                        codec,
+                        buffer.pending.as_mut_slice(),
+                    ),
+                ),
+            )
+            .await
+            .map_err(|()| emitter_stop_deadline_elapsed())??;
+        }
         buffer.clear();
         Ok(report)
     }
@@ -1326,12 +2191,98 @@ impl SinkEmitter {
         sink: &EmitSink,
         context: &EmitterSinkContext,
         codec: Option<Arc<CompiledCodec>>,
-        batches: &[EmitterPublishBatch],
+        batches: &mut [EmitterPublishBatch],
     ) -> EmitterRuntimeResult<()> {
+        if let (Some(codec), EmitSink::Kafka { topic, .. }, Self::Kafka(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish(topic, records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::Pulsar { .. }, Self::Pulsar(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish(records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::RabbitMq { queue, .. }, Self::RabbitMq(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish_records(queue, records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::Mqtt { topic, .. }, Self::Mqtt(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish_records(topic, records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::Nats { subject, .. }, Self::Nats(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish_records(subject, records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::Redis { channel, .. }, Self::Redis(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish_records(channel, records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::ZeroMq { .. }, Self::ZeroMq(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish_records(records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::Sqs { .. }, Self::Sqs(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish(records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::Sentry { .. }, Self::Sentry(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish(records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+
         match (&mut *self, sink) {
-            (Self::ClickHouse(emitter), EmitSink::ClickHouse { table, values, .. }) => {
-                for batch in batches {
-                    emitter.publish_batch(table, values, &batch.batch).await?;
+            (
+                Self::ClickHouse(emitter),
+                EmitSink::ClickHouse {
+                    table,
+                    values,
+                    max_batch,
+                    ..
+                },
+            ) => {
+                for batch_index in 0..batches.len() {
+                    tokio::task::consume_budget().await;
+                    let outcome = {
+                        let batch = &batches[batch_index];
+                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        emitter
+                            .publish_pending_chunks(
+                                batch_index,
+                                table,
+                                values,
+                                &batch.batch,
+                                &pending_chunks,
+                            )
+                            .await
+                    };
+                    finish_per_record_publish(context, batches, outcome).await?;
                 }
                 return Ok(());
             }
@@ -1341,13 +2292,27 @@ impl SinkEmitter {
                     table,
                     values,
                     conflict_action,
+                    max_batch,
                     ..
                 },
             ) => {
-                for batch in batches {
-                    emitter
-                        .publish_batch(table, values, conflict_action, &batch.batch)
-                        .await?;
+                for batch_index in 0..batches.len() {
+                    tokio::task::consume_budget().await;
+                    let outcome = {
+                        let batch = &batches[batch_index];
+                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        emitter
+                            .publish_pending_chunks(
+                                batch_index,
+                                table,
+                                values,
+                                conflict_action,
+                                &batch.batch,
+                                &pending_chunks,
+                            )
+                            .await
+                    };
+                    finish_per_record_publish(context, batches, outcome).await?;
                 }
                 return Ok(());
             }
@@ -1357,13 +2322,27 @@ impl SinkEmitter {
                     table,
                     values,
                     conflict_action,
+                    max_batch,
                     ..
                 },
             ) => {
-                for batch in batches {
-                    emitter
-                        .publish_batch(table, values, conflict_action, &batch.batch)
-                        .await?;
+                for batch_index in 0..batches.len() {
+                    tokio::task::consume_budget().await;
+                    let outcome = {
+                        let batch = &batches[batch_index];
+                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        emitter
+                            .publish_pending_chunks(
+                                batch_index,
+                                table,
+                                values,
+                                conflict_action,
+                                &batch.batch,
+                                &pending_chunks,
+                            )
+                            .await
+                    };
+                    finish_per_record_publish(context, batches, outcome).await?;
                 }
                 return Ok(());
             }
@@ -1373,13 +2352,27 @@ impl SinkEmitter {
                     collection,
                     values,
                     conflict_action,
+                    max_batch,
                     ..
                 },
             ) => {
-                for batch in batches {
-                    emitter
-                        .publish_batch(collection, values, conflict_action, &batch.batch)
-                        .await?;
+                for batch_index in 0..batches.len() {
+                    tokio::task::consume_budget().await;
+                    let outcome = {
+                        let batch = &batches[batch_index];
+                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        emitter
+                            .publish_pending_chunks(
+                                batch_index,
+                                collection,
+                                values,
+                                conflict_action,
+                                &batch.batch,
+                                &pending_chunks,
+                            )
+                            .await
+                    };
+                    finish_per_record_publish(context, batches, outcome).await?;
                 }
                 return Ok(());
             }
@@ -1415,8 +2408,6 @@ impl SinkEmitter {
                 trace!(
                     domain = context.domain.as_str(),
                     emitter = context.emitter.as_str(),
-                    key = branch_key_display(key),
-                    payload = String::from_utf8_lossy(&payload).to_string(),
                     "emitter published message"
                 );
             }
@@ -1427,28 +2418,12 @@ impl SinkEmitter {
     async fn publish_encoded_payload(
         &mut self,
         sink: &EmitSink,
-        key: &Option<BranchKey>,
-        record: &RuntimeRecord,
+        _key: &Option<BranchKey>,
+        _record: &RuntimeRecord,
         payload: &[u8],
         headers: &EmitterHeaders,
     ) -> EmitterRuntimeResult<()> {
         match (self, sink) {
-            (Self::Kafka(emitter), EmitSink::Kafka { topic, .. }) => {
-                let message = RelayMessage {
-                    key: key.clone(),
-                    record: record.clone(),
-                    acks: AckSet::empty(),
-                };
-                emitter.publish(topic, &message, payload, headers).await
-            }
-            (Self::Pulsar(emitter), EmitSink::Pulsar { .. }) => {
-                let message = RelayMessage {
-                    key: key.clone(),
-                    record: record.clone(),
-                    acks: AckSet::empty(),
-                };
-                emitter.publish(&message, payload, headers).await
-            }
             (Self::RabbitMq(emitter), EmitSink::RabbitMq { queue, .. }) => {
                 emitter.publish(queue, payload, headers).await
             }
@@ -1462,10 +2437,6 @@ impl SinkEmitter {
                 emitter.publish(subject, payload, headers).await
             }
             (Self::ZeroMq(emitter), EmitSink::ZeroMq { .. }) => emitter.publish(payload).await,
-            (Self::Sqs(emitter), EmitSink::Sqs { queue, .. }) => {
-                emitter.publish(queue, payload, headers).await
-            }
-            (Self::Sentry(emitter), EmitSink::Sentry { .. }) => emitter.publish(payload).await,
             _ => Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
                 .attach_printable("emitter has no initialized sink client")),
         }
@@ -1520,11 +2491,19 @@ impl SinkEmitter {
                         reconnect_backoff = %humantime::format_duration(wait),
                         "fault injector stalled emitter publish"
                     );
-                    if !control
-                        .backoff
-                        .wait_with_ack_alive(control.shutdown_rx, acks)
-                        .await
-                    {
+                    let Some(waited) = await_or_emitter_stop_request(
+                        control.stop_rx,
+                        control
+                            .backoff
+                            .wait_with_ack_alive(control.shutdown_rx, acks),
+                    )
+                    .await
+                    else {
+                        // A stop drains this batch through the normal publish path under the
+                        // caller's deadline; fault injection must not prevent that drain.
+                        return Ok(());
+                    };
+                    if !waited {
                         return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled));
                     }
                 }
@@ -1534,6 +2513,91 @@ impl SinkEmitter {
                 }
             }
         }
+    }
+
+    async fn wait_for_iceberg_retry(
+        sink: &str,
+        context: &EmitterSinkContext,
+        control: &mut EmitterPublishControl<'_>,
+        acks: &AckSet,
+        error: &Report<IcebergEmitterError>,
+    ) -> EmitterRuntimeResult<bool> {
+        let reason = iceberg_error_message(error);
+        let wait = control.backoff.next_delay();
+        if error.current_context() == &IcebergEmitterError::Commit {
+            context.runtime.record_iceberg_commit_failure_with_backoff(
+                &context.domain,
+                &context.emitter,
+                reason.clone(),
+                wait,
+            );
+        } else {
+            context.runtime.record_emitter_transient_error_with_backoff(
+                &context.domain,
+                &context.emitter,
+                reason.clone(),
+                wait,
+            );
+        }
+        context.report_flush_error(sink, &reason);
+        await_until_emitter_stop_deadline(
+            control.stop_rx,
+            control
+                .backoff
+                .wait_with_ack_alive(control.shutdown_rx, acks),
+        )
+        .await
+        .map_err(|()| emitter_stop_deadline_elapsed())
+    }
+
+    async fn finish_iceberg_rejected_records(
+        context: &EmitterSinkContext,
+        emitter: &mut IcebergEmitter,
+        stop_rx: &mut watch::Receiver<Option<Instant>>,
+    ) -> EmitterRuntimeResult<()> {
+        while let Some(rejected) = emitter.next_rejected_record_message() {
+            tokio::task::consume_budget().await;
+            let (message, error) = match rejected {
+                Ok(rejected) => rejected,
+                Err((reason, acks)) => {
+                    context.runtime.handle_general_error_for_acks(
+                        &context.domain,
+                        "emitter",
+                        &context.emitter,
+                        &context.error_policies,
+                        std::iter::once(&acks),
+                        format!(
+                            "Iceberg emitter '{}' failed to materialize rejected VALUES row: \
+                             {reason}",
+                            context.emitter.as_str()
+                        ),
+                    );
+                    emitter.finish_rejected_record();
+                    continue;
+                }
+            };
+            await_until_emitter_stop_deadline(
+                stop_rx,
+                context
+                    .runtime
+                    .handle_structured_message_error(MessageErrorHandling {
+                        domain: &context.domain,
+                        node_kind: "emitter",
+                        node: &context.emitter,
+                        source_route: None,
+                        policy: &context.error_policies.message,
+                        message,
+                        error,
+                        partial_output: None,
+                        materialized_state: HashMap::default(),
+                        ingest_metadata: None,
+                    }),
+            )
+            .await
+            .map_err(|()| emitter_stop_deadline_elapsed())?;
+            emitter.finish_rejected_record();
+        }
+        Ok(())
     }
 }
 
@@ -1556,6 +2620,175 @@ fn emitter_error_message(error: &Report<EmitterRuntimeError>) -> String {
 enum SinkEmitterResult<T> {
     Ready(T),
     Missing { reason: String },
+}
+
+async fn encode_broker_records(
+    codec: Arc<CompiledCodec>,
+    context: &EmitterSinkContext,
+    batches: &mut [EmitterPublishBatch],
+) -> EmitterRuntimeResult<Vec<EncodedBrokerRecord>> {
+    let mut encoded = Vec::new();
+    let mut rejected = Vec::new();
+    for (batch_index, batch) in batches.iter().enumerate() {
+        tokio::task::consume_budget().await;
+        let records = batch.batch.runtime_records().map_err(|error| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "emitter '{}' failed to materialize codec input rows: {error}",
+                context.emitter.as_str()
+            ))
+        })?;
+        for (row_index, record) in records.into_iter().enumerate() {
+            tokio::task::consume_budget().await;
+            if batch.is_delivered(row_index) {
+                continue;
+            }
+            let key = batch
+                .batch
+                .keys
+                .get(row_index)
+                .ok_or_else(|| {
+                    Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                        "emitter batch row {row_index} has no branch key entry"
+                    ))
+                })?
+                .as_ref()
+                .map(|key| key.as_str().to_string());
+            let headers = batch.headers.get(row_index).cloned().ok_or_else(|| {
+                Report::new(EmitterRuntimeError::EncodeBatch)
+                    .attach_printable(format!("emitter batch row {row_index} has no header entry"))
+            })?;
+            let sqs_message_group = batch
+                .sqs_message_groups
+                .get(row_index)
+                .cloned()
+                .ok_or_else(|| {
+                    Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                        "emitter batch row {row_index} has no SQS FIFO group entry"
+                    ))
+                })?;
+            let acks = batch.batch.acks.get(row_index).cloned().ok_or_else(|| {
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "emitter batch row {row_index} has no acknowledgment entry"
+                ))
+            })?;
+            let payload = match await_emitter_confirmation(
+                &acks,
+                encode_emitted_payload(codec.clone(), record),
+            )
+            .await
+            {
+                Ok(payload) => payload,
+                Err(error) => {
+                    rejected.push(RejectedEmitterRecord {
+                        position: (batch_index, row_index),
+                        reason: format!(
+                            "emitter '{}' failed to encode record: {error}",
+                            context.emitter.as_str()
+                        ),
+                        structured_error: None,
+                    });
+                    continue;
+                }
+            };
+            encoded.push(EncodedBrokerRecord {
+                batch_index,
+                row_index,
+                key,
+                payload,
+                headers,
+                sqs_message_group,
+                acks,
+            });
+        }
+    }
+    finish_rejected_records(context, batches, rejected, MessageErrorOperation::Encode).await?;
+    Ok(encoded)
+}
+
+async fn finish_per_record_publish(
+    context: &EmitterSinkContext,
+    batches: &mut [EmitterPublishBatch],
+    outcome: PerRecordPublishOutcome,
+) -> EmitterRuntimeResult<()> {
+    let PerRecordPublishOutcome {
+        delivered,
+        rejected,
+        infrastructure_error,
+    } = outcome;
+    for (batch_index, row_index) in delivered {
+        let batch = batches.get_mut(batch_index).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "broker confirmation references missing emitter batch {batch_index}"
+            ))
+        })?;
+        batch.mark_delivered(row_index).map_err(|reason| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
+        })?;
+    }
+    finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
+    match infrastructure_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+async fn finish_rejected_records(
+    context: &EmitterSinkContext,
+    batches: &mut [EmitterPublishBatch],
+    rejected: Vec<RejectedEmitterRecord>,
+    operation: MessageErrorOperation,
+) -> EmitterRuntimeResult<()> {
+    for rejected in rejected {
+        tokio::task::consume_budget().await;
+        let (batch_index, row_index) = rejected.position;
+        let error = rejected.structured_error.unwrap_or_else(|| {
+            structured_message_error(
+                MessageErrorCode::External,
+                rejected.reason,
+                operation,
+                None,
+                std::iter::empty(),
+            )
+        });
+        let batch = batches.get_mut(batch_index).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "record rejection references missing emitter batch {batch_index}"
+            ))
+        })?;
+        let record = batch.batch.runtime_record(row_index).map_err(|reason| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
+        })?;
+        let key = batch.batch.keys.get(row_index).cloned().ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "record rejection row {row_index} has no branch key"
+            ))
+        })?;
+        let acks = batch.batch.acks.get(row_index).cloned().ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "record rejection row {row_index} has no acknowledgment set"
+            ))
+        })?;
+        batch
+            .mark_rejected_after_delivery(
+                row_index,
+                context
+                    .runtime
+                    .handle_structured_message_error(MessageErrorHandling {
+                        domain: &context.domain,
+                        node_kind: "emitter",
+                        node: &context.emitter,
+                        source_route: None,
+                        policy: &context.error_policies.message,
+                        message: RelayMessage { key, record, acks },
+                        error,
+                        partial_output: None,
+                        materialized_state: HashMap::default(),
+                        ingest_metadata: None,
+                    }),
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 impl<T> SinkEmitterResult<T> {
@@ -1659,6 +2892,31 @@ impl EmitterTask {
                 udfs: udfs.as_ref(),
             },
         )?;
+        let sqs_fifo_group = match &emitter.sink {
+            EmitSink::Sqs {
+                fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
+                ..
+            } => Some(CompiledSqsFifoGroup::FromBranch),
+            EmitSink::Sqs {
+                fifo_group: Some(nervix_models::SqsFifoGroup::Expression(_)),
+                ..
+            } => compile_sqs_fifo_group_program(
+                domain,
+                &emitter,
+                input_schema.arrow_schema(),
+                input_schema.vm_sensitivity(),
+                RuntimeVmCompileContext {
+                    available_materialized_streams: &materialized_stream_specs,
+                    available_lookups: &lookups,
+                    current_branching: &input_branching,
+                    current_branch_schema: None,
+                    current_branch_sensitivity: None,
+                    udfs: udfs.as_ref(),
+                },
+            )?
+            .map(CompiledSqsFifoGroup::Expression),
+            _ => None,
+        };
         let mut source_filters = HashMap::default();
         for source_filter in emitter.from.where_clauses() {
             let program = compile_scoped_filter_program(
@@ -1703,6 +2961,12 @@ impl EmitterTask {
             None
         };
         let task_sink = emitter.sink.clone();
+        let task_publishing = EmitterPublishingSettings::parse(
+            domain,
+            &emitter.name,
+            &emitter.sink,
+            &emitter.publishing_mode,
+        )?;
         let task_flush_each = emitter.flush_each.clone();
         let task_max_batch_size = emitter.max_batch_size.clone();
         let task_error_policies = emitter.error_policies.clone();
@@ -1710,6 +2974,7 @@ impl EmitterTask {
         let task_events = runtime.events.clone();
         let fault_injector = runtime.emitter_faults.clone();
         let runtime = runtime.clone();
+        let task_drain_timeout = runtime.domain_drain_timeout();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut force_flush_rx = runtime.force_flush_receiver(domain);
         let emitter_buffer_count = runtime
@@ -1733,6 +2998,8 @@ impl EmitterTask {
         )?;
         let quiesce_counters = runtime.node_quiesce_counters(domain, &emitter.name);
         let (commands, mut command_rx) = mpsc::channel(4);
+        let (stop_signal, mut stop_rx) = watch::channel(None);
+        let task_stop_signal = stop_signal.clone();
 
         let task = tokio::spawn(async move {
             let _client_mounts = resolved_client
@@ -1741,29 +3008,68 @@ impl EmitterTask {
             let mut inputs =
                 EmitterTaskInputs::new(inputs, input_collect_policy, quiesce_counters.clone());
             let context = EmitterSinkContext {
+                runtime: runtime.clone(),
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
+                error_policies: task_error_policies.clone(),
+                buffered_messages: emitter_buffer_count.clone(),
                 temp_dir: runtime.temp_dir.clone(),
                 events: task_events.clone(),
                 udfs,
             };
-            let mut publish_backoff = RuntimeReconnectBackoff::default();
+            let mut publish_backoff =
+                RuntimeReconnectBackoff::from_policy(task_publishing.retry_policy);
+            let batch_buffer_count = if let EmitSink::Iceberg { .. } = &task_sink {
+                Arc::new(AtomicUsize::new(0))
+            } else {
+                emitter_buffer_count
+            };
             let mut emitter_buffer = EmitterBatchBuffer::new(
                 &context,
                 &task_flush_each,
                 task_max_batch_size.as_deref(),
-                emitter_buffer_count,
+                batch_buffer_count,
             );
-            let mut sink = SinkEmitter::new(
-                &task_sink,
-                client.as_deref(),
-                resolved_client.as_ref(),
-                catalog_client.as_deref(),
-                resolved_catalog_client.as_ref(),
-                &context,
-                input_schema.clone(),
-            )
-            .await;
+            let mut sink = loop {
+                let initializing = SinkEmitter::new(
+                    &task_sink,
+                    task_publishing,
+                    client.as_deref(),
+                    resolved_client.as_ref(),
+                    catalog_client.as_deref(),
+                    resolved_catalog_client.as_ref(),
+                    &context,
+                    input_schema.clone(),
+                );
+                match await_until_emitter_stop_deadline(&mut stop_rx, initializing).await {
+                    Ok(sink) => break sink,
+                    Err(()) => {
+                        let Some(command) = command_rx.recv().await else {
+                            return;
+                        };
+                        match command {
+                            EmitterTaskCommand::Stop { deadline, response } => {
+                                let reason = format!(
+                                    "emitter '{}' did not initialize and drain before its \
+                                     configured deadline",
+                                    task_emitter.as_str()
+                                );
+                                context.report_flush_error(task_sink.label(), &reason);
+                                clear_emitter_stop_signal(&task_stop_signal, deadline);
+                                let _ = response.send(Err(reason));
+                            }
+                            EmitterTaskCommand::Reconfigure { config, response } => {
+                                emitter_buffer.reconfigure(
+                                    &context,
+                                    &config.flush_each,
+                                    config.max_batch_size.as_deref(),
+                                );
+                                let _ = response.send(());
+                            }
+                        }
+                    }
+                }
+            };
             if let Some(reason) = sink.missing_reason() {
                 runtime.record_emitter_transient_error_with_backoff(
                     &task_domain,
@@ -1782,13 +3088,14 @@ impl EmitterTask {
                 error_policies: &task_error_policies,
                 source_filters: &source_filters,
                 filter_map: filter_map.as_ref(),
+                sqs_fifo_group: sqs_fifo_group.as_ref(),
                 materialized_state: &task_materialized_state,
                 materialized_stream_owner_nodes: &materialized_stream_owner_nodes,
                 schema: output_compiled_schema.clone(),
             };
             let mut force_flush_pending = false;
 
-            loop {
+            'emitter_task: loop {
                 tokio::task::consume_budget().await;
                 let input_event = if force_flush_pending {
                     match inputs.take_any() {
@@ -1821,24 +3128,67 @@ impl EmitterTask {
                                     let _ = response.send(());
                                     continue;
                                 }
-                                Some(EmitterTaskCommand::Stop { response }) => {
+                                Some(EmitterTaskCommand::Stop { deadline, response }) => {
+                                    if response.is_closed() {
+                                        clear_emitter_stop_signal(&task_stop_signal, deadline);
+                                        continue;
+                                    }
+                                    let (_drain_shutdown_tx, mut drain_shutdown_rx) =
+                                        watch::channel(false);
+                                    let (_drain_stop_tx, mut drain_stop_rx) = watch::channel(None);
                                     let mut control = EmitterPublishControl {
                                         runtime: &runtime,
                                         fault_injector: &fault_injector,
-                                        shutdown_rx: &mut shutdown_rx,
+                                        shutdown_rx: &mut drain_shutdown_rx,
+                                        stop_rx: &mut drain_stop_rx,
                                         backoff: &mut publish_backoff,
                                     };
-                                    let _ = sink
-                                        .flush_all(
-                                            &task_sink,
-                                            &context,
-                                            &mut control,
-                                            codec.clone(),
-                                            &mut emitter_buffer,
-                                        )
-                                        .await;
-                                    let _ = response.send(());
-                                    break;
+                                    let drained = tokio::time::timeout_at(deadline, async {
+                                        let report = sink
+                                            .flush_all(
+                                                &task_sink,
+                                                &context,
+                                                &mut control,
+                                                codec.clone(),
+                                                &mut emitter_buffer,
+                                            )
+                                            .await?;
+                                        sink.finish_transport(deadline).await?;
+                                        Ok::<_, Report<EmitterRuntimeError>>(report)
+                                    })
+                                    .await;
+                                    let result = match drained {
+                                        Ok(Ok(report)) => {
+                                            if let Some(report) = report.as_ref() {
+                                                batch_context.observe_sent(report);
+                                            }
+                                            Ok(())
+                                        }
+                                        Ok(Err(error)) => {
+                                            let reason = emitter_error_message(&error);
+                                            context.report_flush_error(task_sink.label(), &reason);
+                                            Err(reason)
+                                        }
+                                        Err(_) => {
+                                            let reason = format!(
+                                                "emitter '{}' did not drain before its configured deadline",
+                                                task_emitter.as_str()
+                                            );
+                                            context.report_flush_error(task_sink.label(), &reason);
+                                            Err(reason)
+                                        }
+                                    };
+                                    let should_stop = result.is_ok();
+                                    if !should_stop {
+                                        clear_emitter_stop_signal(&task_stop_signal, deadline);
+                                    }
+                                    if response.send(result).is_ok() && should_stop {
+                                        break;
+                                    }
+                                    if should_stop {
+                                        clear_emitter_stop_signal(&task_stop_signal, deadline);
+                                    }
+                                    continue;
                                 }
                                 None => break,
                             }
@@ -1862,6 +3212,7 @@ impl EmitterTask {
                         runtime: &runtime,
                         fault_injector: &fault_injector,
                         shutdown_rx: &mut shutdown_rx,
+                        stop_rx: &mut stop_rx,
                         backoff: &mut publish_backoff,
                     };
                     let _ = sink
@@ -1878,21 +3229,45 @@ impl EmitterTask {
                 let _work = NodeQuiesceWorkGuard::begin(quiesce_counters.clone());
                 match input_event {
                     EmitterInputEvent::Shutdown | EmitterInputEvent::Closed => {
+                        let deadline = Instant::now() + task_drain_timeout;
+                        let (_drain_shutdown_tx, mut drain_shutdown_rx) = watch::channel(false);
+                        let (_drain_stop_tx, mut drain_stop_rx) = watch::channel(None);
                         let mut control = EmitterPublishControl {
                             runtime: &runtime,
                             fault_injector: &fault_injector,
-                            shutdown_rx: &mut shutdown_rx,
+                            shutdown_rx: &mut drain_shutdown_rx,
+                            stop_rx: &mut drain_stop_rx,
                             backoff: &mut publish_backoff,
                         };
-                        let _ = sink
-                            .flush_all(
-                                &task_sink,
-                                &context,
-                                &mut control,
-                                codec.clone(),
-                                &mut emitter_buffer,
-                            )
-                            .await;
+                        let drained = tokio::time::timeout_at(deadline, async {
+                            let report = sink
+                                .flush_all(
+                                    &task_sink,
+                                    &context,
+                                    &mut control,
+                                    codec.clone(),
+                                    &mut emitter_buffer,
+                                )
+                                .await?;
+                            sink.finish_transport(deadline).await?;
+                            Ok::<_, Report<EmitterRuntimeError>>(report)
+                        })
+                        .await;
+                        match drained {
+                            Ok(Ok(Some(report))) => batch_context.observe_sent(&report),
+                            Ok(Ok(None)) => {}
+                            Ok(Err(error)) => context.report_flush_error(
+                                task_sink.label(),
+                                &emitter_error_message(&error),
+                            ),
+                            Err(_) => context.report_flush_error(
+                                task_sink.label(),
+                                &format!(
+                                    "emitter '{}' did not drain before its configured deadline",
+                                    task_emitter.as_str()
+                                ),
+                            ),
+                        }
                         break;
                     }
                     EmitterInputEvent::Wake => {
@@ -1900,6 +3275,7 @@ impl EmitterTask {
                             runtime: &runtime,
                             fault_injector: &fault_injector,
                             shutdown_rx: &mut shutdown_rx,
+                            stop_rx: &mut stop_rx,
                             backoff: &mut publish_backoff,
                         };
                         match sink
@@ -1918,9 +3294,17 @@ impl EmitterTask {
                                 batch_context.observe_sent(&report);
                             }
                             Ok(None) => {}
+                            Err(error)
+                                if error.current_context()
+                                    == &EmitterRuntimeError::StopDeadlineElapsed =>
+                            {
+                                continue 'emitter_task;
+                            }
                             Err(error) if emitter_publish_error_is_retryable(&error) => {
                                 let reason = emitter_error_message(&error);
-                                let wait = publish_backoff.next_delay();
+                                let wait = publish_backoff
+                                    .take_delay()
+                                    .max(emitter_minimum_retry_delay(&error));
                                 emitter_buffer.defer_retry(wait);
                                 runtime.record_emitter_transient_error_with_backoff(
                                     &task_domain,
@@ -1929,6 +3313,45 @@ impl EmitterTask {
                                     wait,
                                 );
                                 context.report_flush_error(task_sink.label(), &reason);
+                                let pending_acks = emitter_buffer.pending_acks();
+                                let waited = await_until_emitter_stop_deadline(
+                                    &mut stop_rx,
+                                    RuntimeReconnectBackoff::wait_duration_with_ack_alive(
+                                        wait,
+                                        &mut shutdown_rx,
+                                        &pending_acks,
+                                    ),
+                                )
+                                .await;
+                                let waited = match waited {
+                                    Ok(waited) => waited,
+                                    Err(()) => continue 'emitter_task,
+                                };
+                                if waited {
+                                    if sink.requires_publish_failure_reinitialization() {
+                                        sink = match await_until_emitter_stop_deadline(
+                                            &mut stop_rx,
+                                            await_emitter_confirmation(
+                                                &pending_acks,
+                                                SinkEmitter::new(
+                                                    &task_sink,
+                                                    task_publishing,
+                                                    client.as_deref(),
+                                                    resolved_client.as_ref(),
+                                                    catalog_client.as_deref(),
+                                                    resolved_catalog_client.as_ref(),
+                                                    &context,
+                                                    input_schema.clone(),
+                                                ),
+                                            ),
+                                        )
+                                        .await
+                                        {
+                                            Ok(sink) => sink,
+                                            Err(()) => continue 'emitter_task,
+                                        };
+                                    }
+                                }
                             }
                             Err(error) => {
                                 let reason = emitter_error_message(&error);
@@ -2002,11 +3425,19 @@ impl EmitterTask {
                             let mut pending_batch = Some(publish_batch);
                             loop {
                                 tokio::task::consume_budget().await;
-                                let batch = pending_batch
-                                    .as_ref()
-                                    .or_else(|| emitter_buffer.pending.first())
-                                    .expect("pending emitter batch must exist");
-                                let batch_acks = batch.merged_acks();
+                                let batch_acks = if let Some(batch) = pending_batch.as_ref() {
+                                    AckSet::merged(
+                                        std::iter::once(batch.merged_acks()).chain(
+                                            emitter_buffer
+                                                .pending
+                                                .iter()
+                                                .map(EmitterPublishBatch::merged_acks),
+                                        ),
+                                    )
+                                } else {
+                                    debug_assert!(sink.has_pending_work(&emitter_buffer));
+                                    sink.pending_acks(&emitter_buffer)
+                                };
                                 while let Some(reason) = sink.missing_reason().map(str::to_owned) {
                                     tokio::task::consume_budget().await;
                                     let wait = publish_backoff.next_delay();
@@ -2016,22 +3447,118 @@ impl EmitterTask {
                                         &reason,
                                         wait,
                                     );
-                                    if !publish_backoff
-                                        .wait_with_ack_alive(&mut shutdown_rx, &batch_acks)
-                                        .await
-                                    {
-                                        break;
-                                    }
-                                    sink = SinkEmitter::new(
-                                        &task_sink,
-                                        client.as_deref(),
-                                        resolved_client.as_ref(),
-                                        catalog_client.as_deref(),
-                                        resolved_catalog_client.as_ref(),
-                                        &context,
-                                        input_schema.clone(),
+                                    let waited = await_until_emitter_stop_deadline(
+                                        &mut stop_rx,
+                                        publish_backoff
+                                            .wait_with_ack_alive(&mut shutdown_rx, &batch_acks),
                                     )
                                     .await;
+                                    let waited = match waited {
+                                        Ok(waited) => waited,
+                                        Err(()) => {
+                                            let Some(command) = command_rx.recv().await else {
+                                                break;
+                                            };
+                                            match command {
+                                                EmitterTaskCommand::Stop { deadline, response } => {
+                                                    let stop_reason = format!(
+                                                        "emitter '{}' did not drain before its \
+                                                         configured deadline: {reason}",
+                                                        task_emitter.as_str()
+                                                    );
+                                                    context.report_flush_error(
+                                                        task_sink.label(),
+                                                        &stop_reason,
+                                                    );
+                                                    clear_emitter_stop_signal(
+                                                        &task_stop_signal,
+                                                        deadline,
+                                                    );
+                                                    let _ = response.send(Err(stop_reason));
+                                                }
+                                                EmitterTaskCommand::Reconfigure {
+                                                    config,
+                                                    response,
+                                                } => {
+                                                    emitter_buffer.reconfigure(
+                                                        &context,
+                                                        &config.flush_each,
+                                                        config.max_batch_size.as_deref(),
+                                                    );
+                                                    sink.reconfigure_flush_policy(
+                                                        &context,
+                                                        &config.flush_each,
+                                                        config.max_batch_size.as_deref(),
+                                                    );
+                                                    let _ = response.send(());
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                    };
+                                    if !waited {
+                                        break;
+                                    }
+                                    sink = match await_until_emitter_stop_deadline(
+                                        &mut stop_rx,
+                                        await_emitter_confirmation(
+                                            &batch_acks,
+                                            SinkEmitter::new(
+                                                &task_sink,
+                                                task_publishing,
+                                                client.as_deref(),
+                                                resolved_client.as_ref(),
+                                                catalog_client.as_deref(),
+                                                resolved_catalog_client.as_ref(),
+                                                &context,
+                                                input_schema.clone(),
+                                            ),
+                                        ),
+                                    )
+                                    .await
+                                    {
+                                        Ok(sink) => sink,
+                                        Err(()) => {
+                                            let Some(command) = command_rx.recv().await else {
+                                                break;
+                                            };
+                                            match command {
+                                                EmitterTaskCommand::Stop { deadline, response } => {
+                                                    let stop_reason = format!(
+                                                        "emitter '{}' did not drain before its \
+                                                         configured deadline: {reason}",
+                                                        task_emitter.as_str()
+                                                    );
+                                                    context.report_flush_error(
+                                                        task_sink.label(),
+                                                        &stop_reason,
+                                                    );
+                                                    clear_emitter_stop_signal(
+                                                        &task_stop_signal,
+                                                        deadline,
+                                                    );
+                                                    let _ = response.send(Err(stop_reason));
+                                                }
+                                                EmitterTaskCommand::Reconfigure {
+                                                    config,
+                                                    response,
+                                                } => {
+                                                    emitter_buffer.reconfigure(
+                                                        &context,
+                                                        &config.flush_each,
+                                                        config.max_batch_size.as_deref(),
+                                                    );
+                                                    sink.reconfigure_flush_policy(
+                                                        &context,
+                                                        &config.flush_each,
+                                                        config.max_batch_size.as_deref(),
+                                                    );
+                                                    let _ = response.send(());
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                    };
                                     if sink.missing_reason().is_none() {
                                         publish_backoff.reset();
                                         runtime.clear_emitter_transient_error(
@@ -2047,6 +3574,7 @@ impl EmitterTask {
                                     runtime: &runtime,
                                     fault_injector: &fault_injector,
                                     shutdown_rx: &mut shutdown_rx,
+                                    stop_rx: &mut stop_rx,
                                     backoff: &mut publish_backoff,
                                 };
                                 let publish_result = if let Some(batch) = pending_batch.as_ref() {
@@ -2084,12 +3612,58 @@ impl EmitterTask {
                                         pending_batch.take();
                                         break;
                                     }
+                                    Err(error)
+                                        if error.current_context()
+                                            == &EmitterRuntimeError::StopDeadlineElapsed =>
+                                    {
+                                        if sink.has_pending_work(&emitter_buffer) {
+                                            pending_batch.take();
+                                            continue 'emitter_task;
+                                        }
+                                        let Some(command) = command_rx.recv().await else {
+                                            break;
+                                        };
+                                        match command {
+                                            EmitterTaskCommand::Stop { deadline, response } => {
+                                                let reason = format!(
+                                                    "emitter '{}' did not drain before its \
+                                                     configured deadline",
+                                                    task_emitter.as_str()
+                                                );
+                                                context
+                                                    .report_flush_error(task_sink.label(), &reason);
+                                                clear_emitter_stop_signal(
+                                                    &task_stop_signal,
+                                                    deadline,
+                                                );
+                                                let _ = response.send(Err(reason));
+                                            }
+                                            EmitterTaskCommand::Reconfigure {
+                                                config,
+                                                response,
+                                            } => {
+                                                emitter_buffer.reconfigure(
+                                                    &context,
+                                                    &config.flush_each,
+                                                    config.max_batch_size.as_deref(),
+                                                );
+                                                sink.reconfigure_flush_policy(
+                                                    &context,
+                                                    &config.flush_each,
+                                                    config.max_batch_size.as_deref(),
+                                                );
+                                                let _ = response.send(());
+                                            }
+                                        }
+                                    }
                                     Err(error) if emitter_publish_error_is_retryable(&error) => {
-                                        if !emitter_buffer.is_empty() {
+                                        if sink.has_pending_work(&emitter_buffer) {
                                             pending_batch.take();
                                         }
                                         let reason = emitter_error_message(&error);
-                                        let wait = publish_backoff.next_delay();
+                                        let wait = publish_backoff
+                                            .take_delay()
+                                            .max(emitter_minimum_retry_delay(&error));
                                         runtime.record_emitter_transient_error_with_backoff(
                                             &task_domain,
                                             &task_emitter,
@@ -2097,10 +3671,20 @@ impl EmitterTask {
                                             wait,
                                         );
                                         context.report_publish_error(task_sink.label(), &reason);
-                                        if !publish_backoff
-                                            .wait_with_ack_alive(&mut shutdown_rx, &batch_acks)
-                                            .await
-                                        {
+                                        let waited = await_until_emitter_stop_deadline(
+                                            &mut stop_rx,
+                                            RuntimeReconnectBackoff::wait_duration_with_ack_alive(
+                                                wait,
+                                                &mut shutdown_rx,
+                                                &batch_acks,
+                                            ),
+                                        )
+                                        .await;
+                                        let waited = match waited {
+                                            Ok(waited) => waited,
+                                            Err(()) => continue 'emitter_task,
+                                        };
+                                        if !waited {
                                             if let Some(batch) = pending_batch.take() {
                                                 runtime.handle_general_error_for_acks(
                                                     &task_domain,
@@ -2130,16 +3714,29 @@ impl EmitterTask {
                                             }
                                             break;
                                         }
-                                        sink = SinkEmitter::new(
-                                            &task_sink,
-                                            client.as_deref(),
-                                            resolved_client.as_ref(),
-                                            catalog_client.as_deref(),
-                                            resolved_catalog_client.as_ref(),
-                                            &context,
-                                            input_schema.clone(),
-                                        )
-                                        .await;
+                                        if sink.requires_publish_failure_reinitialization() {
+                                            sink = match await_until_emitter_stop_deadline(
+                                                &mut stop_rx,
+                                                await_emitter_confirmation(
+                                                    &batch_acks,
+                                                    SinkEmitter::new(
+                                                        &task_sink,
+                                                        task_publishing,
+                                                        client.as_deref(),
+                                                        resolved_client.as_ref(),
+                                                        catalog_client.as_deref(),
+                                                        resolved_catalog_client.as_ref(),
+                                                        &context,
+                                                        input_schema.clone(),
+                                                    ),
+                                                ),
+                                            )
+                                            .await
+                                            {
+                                                Ok(sink) => sink,
+                                                Err(()) => continue 'emitter_task,
+                                            };
+                                        }
                                     }
                                     Err(error) => {
                                         let reason = emitter_error_message(&error);
@@ -2180,7 +3777,11 @@ impl EmitterTask {
                 }
             }
         });
-        Ok(ScheduledEmitterTask { commands, task })
+        Ok(ScheduledEmitterTask {
+            commands,
+            stop_signal,
+            task,
+        })
     }
 }
 
@@ -2349,6 +3950,7 @@ impl EmitterBatchContext<'_> {
         reason: String,
         operation: MessageErrorOperation,
     ) {
+        let delivered = batch.delivered.clone();
         let messages = match batch.batch.try_into_messages() {
             Ok(messages) => messages,
             Err(error) => {
@@ -2364,7 +3966,10 @@ impl EmitterBatchContext<'_> {
                 return;
             }
         };
-        for message in messages {
+        for (row, message) in messages.into_iter().enumerate() {
+            if delivered.get(row).copied().unwrap_or(false) {
+                continue;
+            }
             self.runtime
                 .handle_structured_message_error(MessageErrorHandling {
                     domain: self.domain,
@@ -2424,8 +4029,96 @@ impl EmitterBatchContext<'_> {
             }
         };
         let batch = self.filter_source_batch(input_relay, batch).await?;
+        let execution_now = self
+            .runtime
+            .current_stream_expiration_time(self.domain)
+            .ok()
+            .flatten()
+            .unwrap_or_else(current_timestamp);
+        let sqs_message_groups = match self.sqs_fifo_group {
+            None => vec![Ok(None); batch.batch.batch().num_rows()],
+            Some(CompiledSqsFifoGroup::FromBranch) => batch
+                .keys
+                .iter()
+                .map(|key| {
+                    key.as_ref()
+                        .map(|key| Some(key.as_str().to_string()))
+                        .ok_or_else(|| {
+                            "SQS FIFO GROUP FROM BRANCH received an unbranched record".to_string()
+                        })
+                })
+                .collect(),
+            Some(CompiledSqsFifoGroup::Expression(program)) => {
+                let side_inputs = match self
+                    .runtime
+                    .load_materialized_side_inputs(
+                        self.domain,
+                        &batch.key,
+                        &program.materialized_interest,
+                        self.materialized_stream_owner_nodes,
+                    )
+                    .await
+                {
+                    Ok(values) => values,
+                    Err(error) => {
+                        self.runtime.handle_general_error_for_acks(
+                            self.domain,
+                            "emitter",
+                            self.emitter,
+                            self.error_policies,
+                            batch.acks.iter(),
+                            format!(
+                                "emitter '{}' failed to load SQS FIFO GROUP side inputs: {error}",
+                                self.emitter.as_str()
+                            ),
+                        );
+                        return None;
+                    }
+                };
+                match evaluate_sqs_fifo_group_program(
+                    self.emitter,
+                    program,
+                    &batch,
+                    execution_now,
+                    &side_inputs,
+                )
+                .await
+                {
+                    Ok(groups) => groups,
+                    Err(error) => {
+                        self.runtime.handle_general_error_for_acks(
+                            self.domain,
+                            "emitter",
+                            self.emitter,
+                            self.error_policies,
+                            error.acks.iter(),
+                            error.reason,
+                        );
+                        return None;
+                    }
+                }
+            }
+        };
         let Some(filter_map) = self.filter_map else {
-            return Some(EmitterPublishBatch::from_batch(batch));
+            return match EmitterPublishBatch::from_batch(batch)
+                .with_sqs_message_groups(sqs_message_groups)
+            {
+                Ok(batch) => Some(batch),
+                Err(error) => {
+                    self.runtime.handle_general_error_for_acks(
+                        self.domain,
+                        "emitter",
+                        self.emitter,
+                        self.error_policies,
+                        std::iter::empty::<&AckSet>(),
+                        format!(
+                            "emitter '{}' failed to build SQS FIFO group batch: {error}",
+                            self.emitter.as_str()
+                        ),
+                    );
+                    None
+                }
+            };
         };
         let side_inputs = match self
             .runtime
@@ -2458,16 +4151,23 @@ impl EmitterBatchContext<'_> {
             self.emitter,
             filter_map,
             batch,
-            self.runtime
-                .current_stream_expiration_time(self.domain)
-                .ok()
-                .flatten()
-                .unwrap_or_else(current_timestamp),
+            execution_now,
             &side_inputs,
         )
         .await
         {
             Ok(plan) => {
+                let selected_sqs_message_groups = plan
+                    .source_rows
+                    .iter()
+                    .map(|row| {
+                        sqs_message_groups.get(*row).cloned().unwrap_or_else(|| {
+                            Err(format!(
+                                "SQS FIFO group source row {row} is outside the source batch"
+                            ))
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 self.runtime
                     .handle_planned_message_errors(
                         self.domain,
@@ -2481,24 +4181,28 @@ impl EmitterBatchContext<'_> {
                     return None;
                 }
                 match RelayRecordBatch::from_messages(self.schema.clone(), plan.messages) {
-                    Ok(batch) => match EmitterPublishBatch::new(batch, plan.headers) {
-                        Ok(batch) => Some(batch),
-                        Err(error) => {
-                            self.runtime.handle_general_error_for_acks(
-                                self.domain,
-                                "emitter",
-                                self.emitter,
-                                self.error_policies,
-                                std::iter::empty::<&AckSet>(),
-                                format!(
-                                    "emitter '{}' failed to build filtered header batch: {}",
-                                    self.emitter.as_str(),
-                                    error
-                                ),
-                            );
-                            None
+                    Ok(batch) => {
+                        match EmitterPublishBatch::new(batch, plan.headers).and_then(|batch| {
+                            batch.with_sqs_message_groups(selected_sqs_message_groups)
+                        }) {
+                            Ok(batch) => Some(batch),
+                            Err(error) => {
+                                self.runtime.handle_general_error_for_acks(
+                                    self.domain,
+                                    "emitter",
+                                    self.emitter,
+                                    self.error_policies,
+                                    std::iter::empty::<&AckSet>(),
+                                    format!(
+                                        "emitter '{}' failed to build filtered header batch: {}",
+                                        self.emitter.as_str(),
+                                        error
+                                    ),
+                                );
+                                None
+                            }
                         }
-                    },
+                    }
                     Err(error) => {
                         self.runtime.handle_general_error_for_acks(
                             self.domain,
@@ -2604,5 +4308,315 @@ impl EmitterBatchContext<'_> {
             )
             .await;
         plan.batch
+    }
+}
+
+#[cfg(test)]
+mod publishing_mode_tests {
+    use super::*;
+
+    fn identifier(value: &str) -> Identifier {
+        Identifier::try_from(value).expect("valid identifier")
+    }
+
+    fn retry(backoff: &str, max_backoff: &str) -> RetryPolicy {
+        RetryPolicy {
+            backoff: backoff.to_string(),
+            max_backoff: max_backoff.to_string(),
+        }
+    }
+
+    fn kafka_sink() -> EmitSink {
+        EmitSink::Kafka {
+            client: identifier("kafka_client"),
+            topic: identifier("events"),
+        }
+    }
+
+    #[test]
+    fn parses_declared_emitter_retry_confirmation_window_and_timeout() {
+        let domain = Domain::try_from("test").expect("valid domain");
+        let emitter = identifier("out");
+        let settings = EmitterPublishingSettings::parse(
+            &domain,
+            &emitter,
+            &kafka_sink(),
+            &EmitterPublishingMode::BrokerAck {
+                window: EmitterAckWindow::Parallel { max: 17 },
+                ack_timeout: "3s".to_string(),
+                retry_policy: retry("25ms", "2s"),
+            },
+        )
+        .expect("valid publishing settings");
+
+        assert_eq!(settings.retry_policy.backoff, Duration::from_millis(25));
+        assert_eq!(settings.retry_policy.max_backoff, Duration::from_secs(2));
+        assert_eq!(
+            settings.broker_mode,
+            Some(BrokerPublishingMode::Ack {
+                max_in_flight: 17,
+                timeout: Duration::from_secs(3),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_transport_specific_mqtt_and_jetstream_confirmation_modes() {
+        let domain = Domain::try_from("test").expect("valid domain");
+        let emitter = identifier("out");
+        let mqtt = EmitterPublishingSettings::parse(
+            &domain,
+            &emitter,
+            &EmitSink::Mqtt {
+                client: identifier("mqtt_client"),
+                topic: identifier("events"),
+            },
+            &EmitterPublishingMode::MqttQos2 {
+                window: EmitterAckWindow::Sequential,
+                ack_timeout: "7s".to_string(),
+                retry_policy: retry("10ms", "1s"),
+            },
+        )
+        .expect("valid MQTT mode");
+        assert_eq!(
+            mqtt.mqtt_mode,
+            Some(MqttPublishingMode::Qos2 {
+                max_in_flight: 1,
+                timeout: Duration::from_secs(7),
+            })
+        );
+
+        let nats = EmitterPublishingSettings::parse(
+            &domain,
+            &emitter,
+            &EmitSink::Nats {
+                client: identifier("nats_client"),
+                subject: identifier("events"),
+            },
+            &EmitterPublishingMode::NatsJetStream {
+                window: EmitterAckWindow::Parallel { max: 23 },
+                ack_timeout: "11s".to_string(),
+                retry_policy: retry("10ms", "1s"),
+            },
+        )
+        .expect("valid JetStream mode");
+        assert_eq!(
+            nats.nats_mode,
+            Some(NatsPublishingMode::JetStream {
+                max_in_flight: 23,
+                timeout: Duration::from_secs(11),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_zero_window_foreign_mode_and_inverted_retry_bounds() {
+        let domain = Domain::try_from("test").expect("valid domain");
+        let emitter = identifier("out");
+        let zero_window = EmitterPublishingSettings::parse(
+            &domain,
+            &emitter,
+            &kafka_sink(),
+            &EmitterPublishingMode::BrokerAck {
+                window: EmitterAckWindow::Parallel { max: 0 },
+                ack_timeout: "3s".to_string(),
+                retry_policy: retry("25ms", "2s"),
+            },
+        )
+        .expect_err("zero window must fail");
+        assert!(zero_window.to_string().contains("must be at least one"));
+
+        let foreign = EmitterPublishingSettings::parse(
+            &domain,
+            &emitter,
+            &kafka_sink(),
+            &EmitterPublishingMode::MqttQos0 {
+                retry_policy: retry("25ms", "2s"),
+            },
+        )
+        .expect_err("foreign mode must fail");
+        assert!(
+            foreign
+                .to_string()
+                .contains("not supported by the KAFKA sink")
+        );
+
+        let inverted = EmitterPublishingSettings::parse(
+            &domain,
+            &emitter,
+            &kafka_sink(),
+            &EmitterPublishingMode::NoAck {
+                retry_policy: retry("2s", "25ms"),
+            },
+        )
+        .expect_err("inverted retry bounds must fail");
+        assert!(inverted.to_string().contains("greater than or equal"));
+    }
+
+    #[tokio::test]
+    async fn emitter_backoff_resets_to_the_declared_initial_delay() {
+        let policy = ParsedRetryPolicy {
+            backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(4),
+        };
+        let mut backoff = RuntimeReconnectBackoff::from_policy(policy);
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+        assert_eq!(backoff.next_delay(), Duration::from_millis(1));
+        assert!(backoff.wait(&mut shutdown_rx).await);
+        assert_eq!(backoff.next_delay(), Duration::from_millis(2));
+        assert!(backoff.wait(&mut shutdown_rx).await);
+        assert_eq!(backoff.next_delay(), Duration::from_millis(4));
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_millis(1));
+    }
+
+    #[tokio::test]
+    async fn queued_stop_bounds_an_active_infrastructure_retry() {
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let (stop_signal, mut stop_rx) = watch::channel(None);
+        let task_stop_signal = stop_signal.clone();
+        let retry_started = Arc::new(Notify::new());
+        let task_retry_started = retry_started.clone();
+        let task = tokio::spawn(async move {
+            let mut backoff = RuntimeReconnectBackoff::from_policy(ParsedRetryPolicy {
+                backoff: Duration::from_secs(30),
+                max_backoff: Duration::from_secs(30),
+            });
+            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+            let (acks, _completion) = AckSet::root();
+            task_retry_started.notify_one();
+            let retry = backoff.wait_with_ack_alive(&mut shutdown_rx, &acks);
+            assert!(
+                await_until_emitter_stop_deadline(&mut stop_rx, retry)
+                    .await
+                    .is_err(),
+                "the queued stop deadline must interrupt the active retry wait"
+            );
+
+            let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
+                panic!("the stop command must remain queued while retrying");
+            };
+            task_stop_signal.send_replace(None);
+            let _ = response.send(Err(
+                "infrastructure retry exceeded drain deadline".to_string()
+            ));
+        });
+        let scheduled = ScheduledEmitterTask {
+            commands,
+            stop_signal,
+            task,
+        };
+        retry_started.notified().await;
+
+        let started = Instant::now();
+        let failed = scheduled
+            .stop(Duration::from_millis(40))
+            .await
+            .expect_err("the active infrastructure retry must fail the bounded drain");
+        assert_eq!(
+            failed.reason(),
+            "infrastructure retry exceeded drain deadline"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a 30 second retry backoff must not hide a 40 millisecond drain deadline"
+        );
+        assert!(
+            failed
+                .into_task()
+                .expect("the failed drain must retain the old task")
+                .stop_signal
+                .borrow()
+                .is_none(),
+            "a recoverable stop failure must clear its stop signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_message_error_delivery_keeps_the_record_pending() {
+        let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
+            name: identifier("events"),
+            fields: vec![nervix_models::SchemaField {
+                name: identifier("value"),
+                ty: nervix_models::ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }));
+        let (acks, _completion) = AckSet::root();
+        let batch = RelayRecordBatch::single(
+            schema,
+            None,
+            RuntimeRecord::from_fields([(
+                "value".to_string(),
+                RuntimeValue::String("poison".to_string()),
+            )]),
+            acks,
+        )
+        .expect("test emitter batch must build");
+        let mut batch = EmitterPublishBatch::from_batch(batch);
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                batch.mark_rejected_after_delivery(0, std::future::pending()),
+            )
+            .await
+            .is_err(),
+            "the simulated message-error delivery must remain pending"
+        );
+        assert!(
+            !batch.delivered[0],
+            "cancelling message-error delivery must leave the poison record retryable"
+        );
+
+        batch
+            .mark_rejected_after_delivery(0, std::future::ready(()))
+            .await
+            .expect("completed message-error delivery must account for the record");
+        assert!(batch.delivered[0]);
+    }
+
+    #[tokio::test]
+    async fn rejected_record_ack_remains_held_for_message_error_delivery() {
+        let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
+            name: identifier("events"),
+            fields: vec![nervix_models::SchemaField {
+                name: identifier("value"),
+                ty: nervix_models::ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }));
+        let (acks, mut completion) = AckSet::root();
+        let message_error_acks = acks.clone();
+        let batch = RelayRecordBatch::single(
+            schema,
+            None,
+            RuntimeRecord::from_fields([(
+                "value".to_string(),
+                RuntimeValue::String("poison".to_string()),
+            )]),
+            acks,
+        )
+        .expect("test emitter batch must build");
+        let mut batch = EmitterPublishBatch::from_batch(batch);
+        batch
+            .mark_rejected(0)
+            .expect("test record must be marked rejected");
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.pending.push(batch);
+
+        buffer.clear();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), completion.wait_for_progress(),)
+                .await
+                .is_err(),
+            "clearing an accounted poison record must not release its source ACK"
+        );
+        message_error_acks.ack_success();
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
     }
 }

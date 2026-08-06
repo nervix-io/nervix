@@ -18,13 +18,13 @@ use nervix_models::{
     AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema, Assignment, AssignmentTarget,
     AvroType, BranchSelection, CborType, ClusterSchedule, CodecEncoding, CodecEncodingRule,
     CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator,
-    CreateDeduplicator, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
-    CreateMaterializer, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
+    CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor,
+    CreateLookup, CreateMaterializer, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
     CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
     Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
     MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, OutputBranch,
     ParseAsType, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode,
-    SchemaField, WireSchemaDefinition,
+    SchemaField, SqsFifoGroup, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -88,6 +88,11 @@ pub enum RegistryError {
     ReadValue,
     #[error("failed to deserialize model")]
     DeserializeValue,
+    #[error(
+        "stored emitter definition has no publishing MODE; recreate the emitter with an explicit \
+         MODE"
+    )]
+    EmitterPublishingModeMissing,
     #[error("failed to convert stored model")]
     ModelConversion,
     #[error("failed to decode key")]
@@ -2569,6 +2574,7 @@ impl DomainState {
                     )?;
                 }
                 Model::Emitter(emitter) => {
+                    validate_emitter_publishing_contract(domain, identifier, models, emitter)?;
                     let input_schemas = processor_input_schemas(
                         ModelValidationContext {
                             domain,
@@ -2600,6 +2606,13 @@ impl DomainState {
                             }));
                         }
                     }
+                    validate_sqs_fifo_group_expression(
+                        domain,
+                        identifier,
+                        models,
+                        emitter,
+                        producer_schema,
+                    )?;
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -3440,6 +3453,263 @@ fn validate_ingestor_source(
             }));
         }
     }
+    Ok(())
+}
+
+fn validate_emitter_publishing_contract(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    emitter: &CreateEmitter,
+) -> Result<(), Report<RegistryError>> {
+    let invalid = |reason: String| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason,
+        })
+    };
+
+    if !emitter
+        .sink
+        .accepts_publishing_mode(&emitter.publishing_mode)
+    {
+        return Err(invalid(format!(
+            "{} emitter does not support MODE {}",
+            emitter.sink.transport_label(),
+            emitter.publishing_mode.kind_label()
+        )));
+    }
+
+    let requires_codec = matches!(
+        emitter.sink,
+        EmitSink::Kafka { .. }
+            | EmitSink::Pulsar { .. }
+            | EmitSink::RabbitMq { .. }
+            | EmitSink::Redis { .. }
+            | EmitSink::Mqtt { .. }
+            | EmitSink::Nats { .. }
+            | EmitSink::ZeroMq { .. }
+            | EmitSink::Sqs { .. }
+            | EmitSink::Sentry { .. }
+    );
+    if requires_codec && emitter.encode_using_codec.is_none() {
+        return Err(invalid(format!(
+            "{} emitter requires ENCODE USING",
+            emitter.sink.transport_label()
+        )));
+    }
+    if !requires_codec && emitter.encode_using_codec.is_some() {
+        return Err(invalid(format!(
+            "{} emitter does not support ENCODE USING",
+            emitter.sink.transport_label()
+        )));
+    }
+
+    let retry = emitter.publishing_mode.retry_policy();
+    let backoff = humantime::parse_duration(&retry.backoff).map_err(|error| {
+        invalid(format!(
+            "invalid MODE RETRY POLICY BACKOFF '{}': {error}",
+            retry.backoff
+        ))
+    })?;
+    let max_backoff = humantime::parse_duration(&retry.max_backoff).map_err(|error| {
+        invalid(format!(
+            "invalid MODE RETRY POLICY MAX '{}': {error}",
+            retry.max_backoff
+        ))
+    })?;
+    if backoff.is_zero() {
+        return Err(invalid(
+            "MODE RETRY POLICY BACKOFF must be greater than zero".to_string(),
+        ));
+    }
+    if max_backoff < backoff {
+        return Err(invalid(format!(
+            "MODE RETRY POLICY MAX '{}' must be at least BACKOFF '{}'",
+            retry.max_backoff, retry.backoff
+        )));
+    }
+
+    if let Some(window) = emitter.publishing_mode.ack_window()
+        && window.max_in_flight() == 0
+    {
+        return Err(invalid(
+            "MODE ACK PARALLEL MAX must be greater than zero".to_string(),
+        ));
+    }
+    if let Some(timeout) = emitter.publishing_mode.ack_timeout() {
+        let timeout = humantime::parse_duration(timeout).map_err(|error| {
+            invalid(format!(
+                "invalid MODE ACK TIMEOUT '{}': {error}",
+                emitter
+                    .publishing_mode
+                    .ack_timeout()
+                    .expect("confirmation mode must retain its timeout")
+            ))
+        })?;
+        if timeout.is_zero() {
+            return Err(invalid(
+                "MODE ACK TIMEOUT must be greater than zero".to_string(),
+            ));
+        }
+    }
+
+    match &emitter.sink {
+        EmitSink::ClickHouse { max_batch, .. }
+        | EmitSink::Postgres { max_batch, .. }
+        | EmitSink::MySql { max_batch, .. }
+        | EmitSink::MongoDb { max_batch, .. }
+            if *max_batch == 0 =>
+        {
+            return Err(invalid(format!(
+                "{} WITH MAX BATCH must be greater than zero",
+                emitter.sink.transport_label()
+            )));
+        }
+        EmitSink::Sqs {
+            queue, fifo_group, ..
+        } => {
+            let fifo_queue = queue.ends_with(".fifo");
+            if fifo_queue && fifo_group.is_none() {
+                return Err(invalid(format!(
+                    "SQS FIFO queue '{queue}' requires FIFO GROUP"
+                )));
+            }
+            if !fifo_queue && fifo_group.is_some() {
+                return Err(invalid(format!(
+                    "SQS FIFO GROUP requires a queue name ending in .fifo, found '{queue}'"
+                )));
+            }
+            if let Some(SqsFifoGroup::FromBranch) = fifo_group {
+                processor_first_input_relay(
+                    domain,
+                    identifier,
+                    &emitter.from,
+                    "SQS FIFO emitter input",
+                )?;
+                for input_relay in emitter.from.relays() {
+                    if relay_declared_branch(domain, identifier, models, input_relay)?.is_none() {
+                        return Err(invalid(format!(
+                            "SQS FIFO GROUP FROM BRANCH requires branched input; relay '{}' is \
+                             unbranched",
+                            input_relay.as_str()
+                        )));
+                    }
+                }
+            }
+        }
+        EmitSink::Kafka { .. }
+        | EmitSink::Pulsar { .. }
+        | EmitSink::RabbitMq { .. }
+        | EmitSink::Redis { .. }
+        | EmitSink::Mqtt { .. }
+        | EmitSink::Nats { .. }
+        | EmitSink::ZeroMq { .. }
+        | EmitSink::Sentry { .. }
+        | EmitSink::Iceberg { .. }
+        | EmitSink::ClickHouse { .. }
+        | EmitSink::Postgres { .. }
+        | EmitSink::MySql { .. }
+        | EmitSink::MongoDb { .. } => {}
+    }
+
+    Ok(())
+}
+
+fn validate_sqs_fifo_group_expression(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    emitter: &CreateEmitter,
+    input_schema: &CreateSchema,
+) -> Result<(), Report<RegistryError>> {
+    let EmitSink::Sqs {
+        fifo_group: Some(SqsFifoGroup::Expression(expression)),
+        ..
+    } = &emitter.sink
+    else {
+        return Ok(());
+    };
+
+    let target = Identifier::parse("fifo_group").map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("invalid internal SQS FIFO group target: {error}"),
+        })
+    })?;
+    let output_schema = CreateSchema {
+        name: target.clone(),
+        fields: vec![SchemaField {
+            name: target.clone(),
+            ty: ParseAsType::String,
+            optional: false,
+            sensitive: false,
+        }],
+    };
+    let input_arrow_schema = arrow_schema_for_internal_schema(input_schema);
+    let output_arrow_schema = arrow_schema_for_internal_schema(&output_schema);
+    let parsed = lower_transforming_route(
+        &RouteConstruction {
+            assignments: vec![Assignment {
+                target: AssignmentTarget::bare(target),
+                value: expression.clone(),
+            }],
+            ..RouteConstruction::default()
+        },
+        input_arrow_schema.as_ref(),
+        output_arrow_schema.as_ref(),
+    )
+    .map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("SQS FIFO GROUP expression is invalid: {reason}"),
+        })
+    })?;
+    let original_parsed = parsed.clone();
+    let (parsed, lookup_fields) =
+        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let mut bindings = vec![
+        readonly_binding_for_internal_schema("input", input_schema),
+        writable_binding_for_internal_schema("output", &output_schema),
+    ];
+    let local_namespaces = HashSet::from_iter(["input".to_string(), "output".to_string()]);
+    bindings.extend(referenced_materialized_stream_bindings(
+        domain,
+        identifier,
+        models,
+        &original_parsed,
+        &local_namespaces,
+        "SQS FIFO GROUP expression",
+    )?);
+    bindings.extend(lookup_hash_map_bindings(lookup_fields));
+    compile_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        output_arrow_schema,
+        schema_sensitivity_for_internal_schema(&output_schema),
+        bindings,
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                allow_sensitive_output: false,
+                ..CompileOptions::default()
+            },
+        ),
+    )
+    .map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "SQS FIFO GROUP expression requires an exact non-sensitive STRING value: {}",
+                error.message
+            ),
+        })
+    })?;
+
     Ok(())
 }
 
@@ -4575,8 +4845,16 @@ fn serialize_value(model: &Model) -> Result<Vec<u8>, Report<RegistryError>> {
 }
 
 fn deserialize_value(bytes: &[u8]) -> Result<StoredModelVersioned, Report<RegistryError>> {
-    rkyv::from_bytes::<StoredModelVersioned, rkyv::rancor::Error>(bytes)
-        .change_context(RegistryError::DeserializeValue)
+    match rkyv::from_bytes::<StoredModelVersioned, rkyv::rancor::Error>(bytes) {
+        Ok(stored) => Ok(stored),
+        Err(current_error) => match stored::decode_pre_publishing_mode_model(bytes) {
+            Some(stored::PrePublishingModeStoredDecode::Model(stored)) => Ok(stored),
+            Some(stored::PrePublishingModeStoredDecode::EmitterWithoutMode) => {
+                Err(Report::new(RegistryError::EmitterPublishingModeMissing))
+            }
+            None => Err(current_error).change_context(RegistryError::DeserializeValue),
+        },
+    }
 }
 
 fn expect_kind(
@@ -9566,28 +9844,30 @@ mod tests {
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
     use nervix_models::{
-        AckMode, AlterEmitter, AlterJunction, AlterProcessorOperation, AlterRelay,
-        AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+        AckMode, AlterEmitter, AlterEmitterOperation, AlterJunction, AlterProcessorOperation,
+        AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
         AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope,
         BranchSelection, ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule,
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
         CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
-        CreateClientHttp, CreateClientKafka, CreateCodec, CreateCorrelator, CreateDeduplicator,
-        CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction, CreateReingestor,
-        CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-        CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink, ErrorPolicies, Expression,
-        FieldReference, FieldScope, GeneralErrorPolicy, Identifier, IngestSource,
-        IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model,
-        ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
-        ScheduledNode, SchemaField, WindowBound, WireSchemaField,
+        CreateClientHttp, CreateClientKafka, CreateClientSqs, CreateCodec, CreateCorrelator,
+        CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
+        CreateReingestor, CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor,
+        CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink,
+        EmitterAckWindow, EmitterPublishingMode, ErrorPolicies, Expression, FieldReference,
+        FieldScope, GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource,
+        Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
+        MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
+        ScheduledNode, SchemaField, SqsFifoGroup, WindowBound, WireSchemaField,
     };
 
     #[cfg(feature = "testing")]
     use super::SchedulerMode;
     use super::{
-        DataflowGraphCounts, ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange,
+        DataflowGraphCounts, ModelStorage, Registry, RegistryError, RegistryMutation,
+        RuntimeChange, deserialize_value, validate_emitter_publishing_contract,
     };
 
     fn temp_db_path() -> PathBuf {
@@ -10204,6 +10484,12 @@ mod tests {
                 client: Identifier::parse(client).expect("valid identifier"),
                 topic: Identifier::parse("topic").expect("valid topic identifier"),
             },
+            publishing_mode: EmitterPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
@@ -10215,6 +10501,253 @@ mod tests {
             },
             materialized_state: Vec::new(),
         })
+    }
+
+    #[test]
+    fn emitter_publishing_contract_rejects_model_level_bypasses() {
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        let models = HashMap::default();
+
+        emitter.publishing_mode = EmitterPublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "0s".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect_err("zero retry backoff must be rejected");
+        assert!(format!("{error:#}").contains("BACKOFF must be greater than zero"));
+
+        emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
+            window: EmitterAckWindow::Sequential,
+            ack_timeout: "0s".to_string(),
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect_err("zero confirmation timeout must be rejected");
+        assert!(format!("{error:#}").contains("ACK TIMEOUT must be greater than zero"));
+
+        emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
+            window: EmitterAckWindow::Parallel { max: 0 },
+            ack_timeout: "1s".to_string(),
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect_err("zero confirmation windows must be rejected");
+        assert!(format!("{error:#}").contains("PARALLEL MAX must be greater than zero"));
+
+        emitter.publishing_mode = EmitterPublishingMode::MqttQos0 {
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect_err("foreign publishing modes must be rejected");
+        assert!(format!("{error:#}").contains("KAFKA emitter does not support MODE QOS 0"));
+
+        emitter.sink = EmitSink::Sqs {
+            client: identifier("sqs_main"),
+            queue: "events".to_string(),
+            fifo_group: Some(SqsFifoGroup::Expression(Expression::Literal(
+                nervix_models::Literal::String("group".to_string()),
+            ))),
+        };
+        emitter.publishing_mode = EmitterPublishingMode::SqsSingle {
+            retry_policy: RetryPolicy {
+                backoff: "1s".to_string(),
+                max_backoff: "100ms".to_string(),
+            },
+        };
+        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect_err("retry maxima below their initial backoff must be rejected");
+        assert!(format!("{error:#}").contains("must be at least BACKOFF"));
+
+        if let EmitterPublishingMode::SqsSingle { retry_policy } = &mut emitter.publishing_mode {
+            retry_policy.max_backoff = "1s".to_string();
+        }
+        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect_err("FIFO GROUP on a standard queue must be rejected");
+        assert!(format!("{error:#}").contains("requires a queue name ending in .fifo"));
+
+        emitter.sink = EmitSink::ClickHouse {
+            client: identifier("clickhouse_main"),
+            table: identifier("events"),
+            values: Vec::new(),
+            max_batch: 0,
+            flush_each: "IMMEDIATE".to_string(),
+        };
+        emitter.encode_using_codec = None;
+        emitter.publishing_mode = EmitterPublishingMode::RequestAck {
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect_err("zero database batch limits must be rejected");
+        assert!(
+            format!("{error:#}").contains("CLICKHOUSE WITH MAX BATCH must be greater than zero"),
+            "unexpected validation error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn archived_pre_publishing_mode_emitter_requires_recreation() {
+        let fixture =
+            include_bytes!("../../tests/fixtures/registry/emitter-before-publishing-modes.rkyv");
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(fixture.len());
+        aligned.extend_from_slice(fixture);
+
+        let error = deserialize_value(&aligned)
+            .expect_err("an authentic archived emitter without MODE must not load");
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::EmitterPublishingModeMissing
+        );
+        assert!(format!("{error:#}").contains("recreate the emitter with an explicit MODE"));
+    }
+
+    #[test]
+    fn archived_pre_publishing_mode_non_emitter_remains_readable() {
+        let fixture =
+            include_bytes!("../../tests/fixtures/registry/schema-before-publishing-modes.rkyv");
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(fixture.len());
+        aligned.extend_from_slice(fixture);
+
+        let stored = deserialize_value(&aligned)
+            .expect("an unchanged model from the prior outer archive must remain readable");
+        let model = Model::try_from(stored).expect("the archived schema must remain valid");
+        assert!(matches!(
+            model,
+            Model::Schema(CreateSchema { ref name, ref fields })
+                if name.as_str() == "events"
+                    && fields.len() == 1
+                    && fields[0].name.as_str() == "seq"
+                    && fields[0].ty == ParseAsType::I64
+        ));
+    }
+
+    #[test]
+    fn sqs_fifo_group_is_validated_at_emitter_creation() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                    explicitly_unbranched_relay("events", "event_schema"),
+                    branch_schema_with_types(
+                        "tenant_branch_schema",
+                        &[("tenant", ParseAsType::String)],
+                    ),
+                    branch("tenant_branch", "tenant_branch_schema"),
+                    relay_branched_by("tenant_events", "event_schema", "tenant_branch"),
+                    Model::ClientSqs(CreateClientSqs {
+                        name: identifier("sqs_main"),
+                        mount: None,
+                        config: vec![ClientConfigEntry {
+                            key: "region".to_string(),
+                            value: "us-east-1".to_string(),
+                        }],
+                    }),
+                ],
+            )
+            .expect("SQS FIFO validation fixtures should install");
+
+        let Model::Emitter(mut valid) = emitter("valid_fifo", "events", "event_codec", "sqs_main")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        valid.sink = EmitSink::Sqs {
+            client: identifier("sqs_main"),
+            queue: "events.fifo".to_string(),
+            fifo_group: Some(SqsFifoGroup::Expression(
+                nervix_nspl::parse_expression("input.value").expect("valid FIFO group expression"),
+            )),
+        };
+        valid.publishing_mode = EmitterPublishingMode::SqsSingle {
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        registry
+            .apply_batch(&domain, vec![Model::Emitter(valid.clone())])
+            .expect("non-sensitive STRING FIFO expressions should be accepted");
+
+        let mut wrong_type = valid.clone();
+        wrong_type.name = identifier("wrong_fifo_type");
+        if let EmitSink::Sqs { fifo_group, .. } = &mut wrong_type.sink {
+            *fifo_group = Some(SqsFifoGroup::Expression(Expression::Literal(
+                nervix_models::Literal::I64(42),
+            )));
+        }
+        let error = registry
+            .apply_batch(&domain, vec![Model::Emitter(wrong_type)])
+            .expect_err("non-STRING FIFO expressions must be rejected");
+        assert!(format!("{error:#}").contains("requires an exact non-sensitive STRING value"));
+
+        let mut branch_fifo = valid.clone();
+        branch_fifo.name = identifier("branch_fifo");
+        branch_fifo.from = ProcessorInputs::single(identifier("tenant_events"));
+        if let EmitSink::Sqs { fifo_group, .. } = &mut branch_fifo.sink {
+            *fifo_group = Some(SqsFifoGroup::FromBranch);
+        }
+        registry
+            .apply_batch(&domain, vec![Model::Emitter(branch_fifo)])
+            .expect("FIFO GROUP FROM BRANCH should accept a wholly branched input set");
+
+        let mut mixed_inputs = valid.clone();
+        mixed_inputs.name = identifier("mixed_fifo_inputs");
+        mixed_inputs.from.from = vec![identifier("tenant_events"), identifier("events")];
+        if let EmitSink::Sqs { fifo_group, .. } = &mut mixed_inputs.sink {
+            *fifo_group = Some(SqsFifoGroup::FromBranch);
+        }
+        let error = registry
+            .apply_batch(&domain, vec![Model::Emitter(mixed_inputs)])
+            .expect_err("every FIFO FROM BRANCH input must be branched");
+        assert!(format!("{error:#}").contains("FROM BRANCH requires branched input"));
+
+        let error = registry
+            .apply_mutation_batch(
+                &domain,
+                vec![RegistryMutation::AlterEmitter(AlterEmitter {
+                    emitter: identifier("branch_fifo"),
+                    operations: vec![AlterEmitterOperation::AddFrom {
+                        relay: identifier("events"),
+                        where_clause: None,
+                    }],
+                })],
+            )
+            .expect_err("ALTER ADD FROM must not add an unbranched FIFO input");
+        assert!(format!("{error:#}").contains("FROM BRANCH requires branched input"));
+
+        let mut from_branch = valid;
+        from_branch.name = identifier("unbranched_fifo");
+        if let EmitSink::Sqs { fifo_group, .. } = &mut from_branch.sink {
+            *fifo_group = Some(SqsFifoGroup::FromBranch);
+        }
+        let error = registry
+            .apply_batch(&domain, vec![Model::Emitter(from_branch)])
+            .expect_err("FROM BRANCH on unbranched input must be rejected");
+        assert!(format!("{error:#}").contains("FROM BRANCH requires branched input"));
+
+        let _ = fs::remove_dir_all(path);
     }
 
     #[test]
@@ -10235,6 +10768,12 @@ mod tests {
             encode_using_codec: Some(identifier("events_codec")),
             sink: EmitSink::ZeroMq {
                 client: identifier("zeromq_main"),
+            },
+            publishing_mode: EmitterPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
             },
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
@@ -12672,6 +13211,12 @@ mod tests {
         };
         sentry_emitter.sink = EmitSink::Sentry {
             client: identifier("sentry_main"),
+        };
+        sentry_emitter.publishing_mode = EmitterPublishingMode::RequestAck {
+            retry_policy: RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
         };
 
         let error = registry

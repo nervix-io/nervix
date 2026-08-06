@@ -288,6 +288,33 @@ pub struct DomainDrainStatusEnvelope {
     pub active_generators: u64,
     pub outstanding_acks: u64,
     pub buffered_emitter_messages: u64,
+    pub emitter_publishing: Vec<EmitterPublishingDrainStatusEnvelope>,
+}
+
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EmitterPublishingDrainStateEnvelope {
+    AwaitingConfirmation,
+    RetryingInfrastructure,
+    RetryingIcebergCommit,
+}
+
+impl EmitterPublishingDrainStateEnvelope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingConfirmation => "awaiting_confirmation",
+            Self::RetryingInfrastructure => "retrying_infrastructure",
+            Self::RetryingIcebergCommit => "retrying_iceberg_commit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmitterPublishingDrainStatusEnvelope {
+    pub emitter: Identifier,
+    pub state: EmitterPublishingDrainStateEnvelope,
+    pub pending_messages: u64,
+    pub retry_backoff_millis: Option<u64>,
+    pub retry_wait_millis: Option<u64>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,6 +356,7 @@ pub struct EntityGateResponse {
 pub struct EntityDrainStatusEnvelope {
     pub buffered_relay_batches: u64,
     pub node_work_items: u64,
+    pub emitter_publishing: Vec<EmitterPublishingDrainStatusEnvelope>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

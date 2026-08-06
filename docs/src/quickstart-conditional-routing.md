@@ -83,7 +83,9 @@ CREATE JUNCTION route_orders
 ```nspl
 CREATE EMITTER redis_high_value
   FROM high_value_orders
-  TO REDIS PUBSUB redis_local CHANNEL high_value_out ENCODE USING order_tiered_codec
+  TO REDIS PUBSUB redis_local CHANNEL high_value_out
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING order_tiered_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG

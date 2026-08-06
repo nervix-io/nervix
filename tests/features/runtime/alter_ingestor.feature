@@ -154,7 +154,7 @@ Feature: Altering ingestors
 
       CREATE EMITTER paced_out
         FROM paced_events
-        TO ZEROMQ paced_sink ENCODE USING paced_event_codec
+        TO ZEROMQ paced_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING paced_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

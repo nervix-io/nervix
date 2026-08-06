@@ -158,28 +158,36 @@ CREATE REINGESTOR site_alert_repartition
 
 CREATE EMITTER redis_site_critical_alerts
   FROM site_critical_alerts
-  TO REDIS PUBSUB redis_alerts CHANNEL iot_site_critical_alerts ENCODE USING iot_telemetry_codec
+  TO REDIS PUBSUB redis_alerts CHANNEL iot_site_critical_alerts
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE EMITTER redis_battery_alerts
   FROM battery_alerts
-  TO REDIS PUBSUB redis_alerts CHANNEL iot_battery_alerts ENCODE USING iot_telemetry_codec
+  TO REDIS PUBSUB redis_alerts CHANNEL iot_battery_alerts
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE EMITTER redis_thermal_alerts
   FROM thermal_alerts
-  TO REDIS PUBSUB redis_alerts CHANNEL iot_thermal_alerts ENCODE USING iot_telemetry_codec
+  TO REDIS PUBSUB redis_alerts CHANNEL iot_thermal_alerts
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE EMITTER redis_maintenance_alerts
   FROM maintenance_alerts
-  TO REDIS PUBSUB redis_alerts CHANNEL iot_maintenance_alerts ENCODE USING iot_telemetry_codec
+  TO REDIS PUBSUB redis_alerts CHANNEL iot_maintenance_alerts
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

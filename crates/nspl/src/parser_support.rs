@@ -5,11 +5,11 @@ use chumsky::{
     prelude::*,
 };
 use nervix_models::{
-    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchSelection, Domain, Expression,
-    GeneralErrorPolicy, Identifier as ModelIdentifier, InputCollectPolicy,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, OutputBranch,
-    OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-    RouteConstruction,
+    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchSelection, Domain,
+    EmitterAckWindow, Expression, GeneralErrorPolicy, Identifier as ModelIdentifier,
+    InputCollectPolicy, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy,
+    OutputBranch, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RetryPolicy, RouteConstruction,
 };
 use sorted_vec::SortedSet;
 
@@ -189,6 +189,61 @@ pub fn ack_mode<'src>()
         kw(Identifier::Detached).to(AckMode::Detached),
     ))
     .boxed()
+}
+
+/// The `SEQUENTIAL` confirmation window shared by ingestor and emitter modes.
+pub fn sequential_ack_window<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Sequential).boxed()
+}
+
+/// The positive bound in `PARALLEL MAX <n>`, shared by ingestor and emitter modes.
+pub fn parallel_ack_window<'src>()
+-> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Parallel)
+        .ignore_then(kw(Identifier::Max))
+        .ignore_then(u64_value().labelled("max_in_flight"))
+        .try_map(|max, span| {
+            if max == 0 {
+                Err(Rich::custom(
+                    span,
+                    "parallel max in-flight must be greater than zero",
+                ))
+            } else {
+                Ok(max)
+            }
+        })
+        .boxed()
+}
+
+pub fn emitter_ack_window<'src>()
+-> impl Parser<'src, &'src [Token], EmitterAckWindow, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        sequential_ack_window().to(EmitterAckWindow::Sequential),
+        parallel_ack_window().map(|max| EmitterAckWindow::Parallel { max }),
+    ))
+    .boxed()
+}
+
+pub fn ack_timeout<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Ack, Identifier::Timeout)
+        .ignore_then(duration_lit())
+        .boxed()
+}
+
+pub fn retry_policy<'src>()
+-> impl Parser<'src, &'src [Token], RetryPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Retry, Identifier::Policy)
+        .ignore_then(kw(Identifier::Backoff))
+        .ignore_then(duration_lit())
+        .then_ignore(kw(Identifier::Max))
+        .then(duration_lit())
+        .map(|(backoff, max_backoff)| RetryPolicy {
+            backoff,
+            max_backoff,
+        })
+        .boxed()
 }
 
 pub fn word_raw<'src>()
@@ -1159,10 +1214,17 @@ pub fn set_or_where_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
         route_construction_clause(Identifier::Set, route_construction_body("set_assignments")),
-        route_construction_clause(
-            Identifier::Where,
-            route_construction_body("where_expression")
-        ),
+        where_only_route_construction(),
+    )
+}
+
+/// A construction limited to `WHERE`, for direct emitter sinks whose output is already fully
+/// described by their `VALUES` mapping.
+pub fn where_only_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    route_construction_clause(
+        Identifier::Where,
+        route_construction_body("where_expression"),
     )
 }
 

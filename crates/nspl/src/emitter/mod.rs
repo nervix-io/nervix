@@ -3,21 +3,159 @@ use std::borrow::Cow;
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use nervix_models::{
     AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CreateEmitter,
-    CreateStatement, EmitSink, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    MongoDbConflictAction, MySqlConflictAction, PostgresConflictAction,
+    CreateStatement, EmitSink, EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend,
+    IcebergValueMapping, MongoDbConflictAction, MySqlConflictAction, PostgresConflictAction,
+    SqsFifoGroup,
 };
 
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, alter_op_separator, boxed_choice,
-        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, duration_lit, emitter_name,
-        emitter_ref, flush_each, from_relay_clauses, general_error_policy, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, materialized_state_dependencies,
-        message_error_policy, queue_ref, relay_ref, render_vm_program_tokens, route_construction,
-        string_lit, suggest_from, table_ref, tok, topic_ref, where_expression,
+        ParseError, ParseFromSourceError, ack_mode, ack_timeout, alter_op_separator, boxed_choice,
+        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, duration_lit,
+        emitter_ack_window, emitter_name, emitter_ref, flush_each, from_relay_clauses,
+        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
+        lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
+        render_vm_program_tokens, retry_policy, route_construction, string_lit, suggest_from,
+        table_ref, tok, topic_ref, where_expression, where_only_route_construction, word_raw,
     },
 };
+
+fn no_ack_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::NoAck)
+        .ignore_then(retry_policy())
+        .map(|retry_policy| EmitterPublishingMode::NoAck { retry_policy })
+        .boxed()
+}
+
+fn broker_ack_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Ack)
+        .ignore_then(emitter_ack_window())
+        .then(ack_timeout())
+        .then(retry_policy())
+        .map(
+            |((window, ack_timeout), retry_policy)| EmitterPublishingMode::BrokerAck {
+                window,
+                ack_timeout,
+                retry_policy,
+            },
+        )
+        .boxed()
+}
+
+fn broker_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    choice((no_ack_publishing_mode(), broker_ack_publishing_mode())).boxed()
+}
+
+fn mqtt_qos_level<'src>(
+    expected: &'static str,
+) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Qos)
+        .ignore_then(
+            select! { Token::NumberLiteral(raw) => raw }
+                .try_map(move |raw, span| {
+                    if raw == expected {
+                        Ok(())
+                    } else {
+                        Err(Rich::custom(span, "MQTT emitter QOS must be 0, 1, or 2"))
+                    }
+                })
+                .labelled("mqtt_qos"),
+        )
+        .boxed()
+}
+
+fn mqtt_confirming_publishing_mode<'src>(
+    qos: &'static str,
+) -> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    mqtt_qos_level(qos)
+        .ignore_then(kw(Identifier::Ack))
+        .ignore_then(emitter_ack_window())
+        .then(ack_timeout())
+        .then(retry_policy())
+        .map(move |((window, ack_timeout), retry_policy)| match qos {
+            "1" => EmitterPublishingMode::MqttQos1 {
+                window,
+                ack_timeout,
+                retry_policy,
+            },
+            "2" => EmitterPublishingMode::MqttQos2 {
+                window,
+                ack_timeout,
+                retry_policy,
+            },
+            _ => unreachable!("confirming MQTT publishing mode must use QOS 1 or 2"),
+        })
+        .boxed()
+}
+
+fn mqtt_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    boxed_choice!(
+        mqtt_qos_level("0")
+            .ignore_then(retry_policy())
+            .map(|retry_policy| EmitterPublishingMode::MqttQos0 { retry_policy }),
+        mqtt_confirming_publishing_mode("1"),
+        mqtt_confirming_publishing_mode("2"),
+    )
+}
+
+fn nats_jetstream_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Jetstream, Identifier::Ack)
+        .ignore_then(emitter_ack_window())
+        .then(ack_timeout())
+        .then(retry_policy())
+        .map(
+            |((window, ack_timeout), retry_policy)| EmitterPublishingMode::NatsJetStream {
+                window,
+                ack_timeout,
+                retry_policy,
+            },
+        )
+        .boxed()
+}
+
+fn nats_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    choice((no_ack_publishing_mode(), nats_jetstream_publishing_mode())).boxed()
+}
+
+fn sqs_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw(Identifier::Single)
+            .ignore_then(retry_policy())
+            .map(|retry_policy| EmitterPublishingMode::SqsSingle { retry_policy }),
+        kw(Identifier::Batch)
+            .ignore_then(retry_policy())
+            .map(|retry_policy| EmitterPublishingMode::SqsBatch { retry_policy }),
+    ))
+    .boxed()
+}
+
+fn request_ack_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Ack)
+        .ignore_then(retry_policy())
+        .map(|retry_policy| EmitterPublishingMode::RequestAck { retry_policy })
+        .boxed()
+}
+
+fn any_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    boxed_choice!(
+        no_ack_publishing_mode(),
+        broker_ack_publishing_mode(),
+        mqtt_publishing_mode(),
+        nats_jetstream_publishing_mode(),
+        sqs_publishing_mode(),
+        request_ack_publishing_mode(),
+    )
+}
 
 fn kafka_emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
@@ -81,13 +219,78 @@ fn zeromq_emit_sink_parser<'src>()
         .map(|client| EmitSink::ZeroMq { client })
 }
 
+fn sqs_fifo_group_expression<'src>()
+-> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
+{
+    any()
+        .and_is(kw(Identifier::Mode).not())
+        .filter(|token: &Token| !matches!(token, Token::Semicolon))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .labelled("fifo_group_expression")
+        .try_map(|tokens, span| {
+            let source = render_vm_program_tokens(&tokens);
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, crate::parser_support::vm_program_error_message(error))
+            })
+        })
+        .boxed()
+}
+
+fn sqs_fifo_group_clause<'src>()
+-> impl Parser<'src, &'src [Token], SqsFifoGroup, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Fifo, Identifier::Group)
+        .ignore_then(choice((
+            kw_phrase2(Identifier::From, Identifier::Branch).to(SqsFifoGroup::FromBranch),
+            sqs_fifo_group_expression().map(SqsFifoGroup::Expression),
+        )))
+        .boxed()
+}
+
+fn sqs_queue_name<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    let atom = choice((select! { Token::NumberLiteral(value) => value }, word_raw()));
+    let first = atom.clone().labelled("queue_name");
+    let continuation = atom.labelled("queue_name");
+    let base = first
+        .then(
+            tok(Token::Hyphen)
+                .ignore_then(continuation)
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .map(|(first, rest)| {
+            let mut queue = first;
+            for part in rest {
+                queue.push('-');
+                queue.push_str(&part);
+            }
+            queue
+        });
+
+    base.then(tok(Token::Dot).ignore_then(kw(Identifier::Fifo)).or_not())
+        .map(|(mut queue, fifo)| {
+            if fifo.is_some() {
+                queue.push_str(".fifo");
+            }
+            queue
+        })
+        .boxed()
+}
+
 fn sqs_emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Sqs)
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Queue))
-        .then(queue_ref())
-        .map(|(client, queue)| EmitSink::Sqs { client, queue })
+        .then(sqs_queue_name())
+        .then(sqs_fifo_group_clause().or_not())
+        .map(|((client, queue), fifo_group)| EmitSink::Sqs {
+            client,
+            queue,
+            fifo_group,
+        })
 }
 
 fn sentry_emit_sink_parser<'src>()
@@ -172,19 +375,21 @@ fn clickhouse_emit_sink_parser<'src>()
         .then(table_ref())
         .then_ignore(kw(Identifier::Values))
         .then(clickhouse_values())
-        .map(|((client, table), values)| EmitSink::ClickHouse {
-            client,
-            table,
-            values,
-            flush_each: String::new(),
-        })
+        .then(max_batch())
+        .map(
+            |(((client, table), values), max_batch)| EmitSink::ClickHouse {
+                client,
+                table,
+                values,
+                max_batch,
+                flush_each: String::new(),
+            },
+        )
 }
 
 fn max_batch<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone
 {
-    kw(Identifier::With)
-        .ignore_then(kw(Identifier::Max))
-        .ignore_then(kw(Identifier::Batch))
+    kw_phrase3(Identifier::With, Identifier::Max, Identifier::Batch)
         .ignore_then(select! { Token::NumberLiteral(value) => value }.labelled("batch_size"))
         .try_map(|value, span| {
             value
@@ -460,10 +665,7 @@ fn iceberg_catalog_parser<'src>()
         .map(|client| IcebergCatalog::Rest { client })
 }
 
-/// The Iceberg sink without its commit cadence.
-///
-/// `ALTER EMITTER ... SET TO ICEBERG ...` keeps the cadence the emitter already has, so it parses
-/// this shape; a `CREATE` requires the cadence and parses `iceberg_emit_sink_parser`.
+/// The Iceberg sink before its required commit cadence is attached.
 fn iceberg_sink_shape<'src>()
 -> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Iceberg)
@@ -557,72 +759,133 @@ fn encode_using_clause<'src>()
         .boxed()
 }
 
-/// A sink that writes an encoded payload, and so requires a codec.
-fn encoded_sink<'src>(
+type SinkWithPublishingMode = (EmitSink, EmitterPublishingMode);
+
+fn sink_with_publishing_mode<'src>(
     sink: impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone + 'src,
-) -> impl Parser<'src, &'src [Token], SinkWithCodec, extra::Err<ParseError<'src>>> + Clone {
+    mode: impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>>
+    + Clone
+    + 'src,
+) -> impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    sink.then_ignore(kw(Identifier::Mode)).then(mode).boxed()
+}
+
+/// A sink that writes an encoded payload, and so requires a codec and supports transforming route
+/// construction.
+fn encoded_sink<'src>(
+    sink: impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>>
+    + Clone
+    + 'src,
+) -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
     sink.then(encode_using_clause())
-        .map(|(sink, codec)| (sink, Some(codec)))
+        .then(route_construction().or_not())
+        .map(|(((sink, mode), codec), construction)| (sink, mode, Some(codec), construction))
         .boxed()
 }
 
-/// A sink that writes typed records, where a codec changes what the route may construct but is not
-/// required.
-fn typed_sink<'src>(
-    sink: impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone + 'src,
-) -> impl Parser<'src, &'src [Token], SinkWithCodec, extra::Err<ParseError<'src>>> + Clone {
-    sink.then(encode_using_clause().or_not()).boxed()
-}
-
-/// A sink that takes no codec at all.
+/// A direct sink takes no codec and its `VALUES` mapping owns output construction, leaving only a
+/// route-local `WHERE` clause available here.
 fn codec_free_sink<'src>(
-    sink: impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone + 'src,
-) -> impl Parser<'src, &'src [Token], SinkWithCodec, extra::Err<ParseError<'src>>> + Clone {
-    sink.map(|sink| (sink, None)).boxed()
+    sink: impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>>
+    + Clone
+    + 'src,
+) -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
+    sink.then(where_only_route_construction().or_not())
+        .map(|((sink, mode), construction)| (sink, mode, None, construction))
+        .boxed()
 }
 
-/// A sink together with the codec it is encoded with, if it takes one.
-type SinkWithCodec = (EmitSink, Option<nervix_models::Identifier>);
+/// A parsed sink together with the route surface that sink supports.
+type ParsedSink = (
+    EmitSink,
+    EmitterPublishingMode,
+    Option<nervix_models::Identifier>,
+    Option<nervix_models::RouteConstruction>,
+);
 
 fn emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], SinkWithCodec, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        typed_sink(clickhouse_emit_sink_parser()),
-        typed_sink(postgres_emit_sink_parser()),
-        typed_sink(mysql_emit_sink_parser()),
-        typed_sink(mongodb_emit_sink_parser()),
-        codec_free_sink(iceberg_emit_sink_parser()),
-        encoded_sink(kafka_emit_sink_parser()),
-        encoded_sink(pulsar_emit_sink_parser()),
-        encoded_sink(rabbitmq_emit_sink_parser()),
-        encoded_sink(redis_emit_sink_parser()),
-        encoded_sink(mqtt_emit_sink_parser()),
-        encoded_sink(nats_emit_sink_parser()),
-        encoded_sink(zeromq_emit_sink_parser()),
-        encoded_sink(sqs_emit_sink_parser()),
-        encoded_sink(sentry_emit_sink_parser()),
+        codec_free_sink(sink_with_publishing_mode(
+            clickhouse_emit_sink_parser(),
+            request_ack_publishing_mode(),
+        )),
+        codec_free_sink(sink_with_publishing_mode(
+            postgres_emit_sink_parser(),
+            request_ack_publishing_mode(),
+        )),
+        codec_free_sink(sink_with_publishing_mode(
+            mysql_emit_sink_parser(),
+            request_ack_publishing_mode(),
+        )),
+        codec_free_sink(sink_with_publishing_mode(
+            mongodb_emit_sink_parser(),
+            request_ack_publishing_mode(),
+        )),
+        codec_free_sink(sink_with_publishing_mode(
+            iceberg_emit_sink_parser(),
+            request_ack_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
+            kafka_emit_sink_parser(),
+            broker_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
+            pulsar_emit_sink_parser(),
+            broker_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
+            rabbitmq_emit_sink_parser(),
+            broker_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
+            redis_emit_sink_parser(),
+            no_ack_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
+            mqtt_emit_sink_parser(),
+            mqtt_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
+            nats_emit_sink_parser(),
+            nats_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
+            zeromq_emit_sink_parser(),
+            no_ack_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
+            sqs_emit_sink_parser(),
+            sqs_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
+            sentry_emit_sink_parser(),
+            request_ack_publishing_mode(),
+        )),
     )
 }
 
-/// The sink alone, for `ALTER EMITTER ... SET TO <sink>`, which replaces the destination and leaves
-/// the codec and commit cadence the emitter already has.
+/// The complete sink and publishing mode for `ALTER EMITTER ... SET TO <sink>`, which replaces the
+/// destination and its complete publishing contract while leaving the route codec and flush policy
+/// in place.
 fn alter_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        clickhouse_emit_sink_parser(),
-        postgres_emit_sink_parser(),
-        mysql_emit_sink_parser(),
-        mongodb_emit_sink_parser(),
-        iceberg_sink_shape(),
-        kafka_emit_sink_parser(),
-        pulsar_emit_sink_parser(),
-        rabbitmq_emit_sink_parser(),
-        redis_emit_sink_parser(),
-        mqtt_emit_sink_parser(),
-        nats_emit_sink_parser(),
-        zeromq_emit_sink_parser(),
-        sqs_emit_sink_parser(),
-        sentry_emit_sink_parser(),
+        sink_with_publishing_mode(clickhouse_emit_sink_parser(), request_ack_publishing_mode()),
+        sink_with_publishing_mode(postgres_emit_sink_parser(), request_ack_publishing_mode()),
+        sink_with_publishing_mode(mysql_emit_sink_parser(), request_ack_publishing_mode()),
+        sink_with_publishing_mode(mongodb_emit_sink_parser(), request_ack_publishing_mode()),
+        sink_with_publishing_mode(iceberg_emit_sink_parser(), request_ack_publishing_mode()),
+        sink_with_publishing_mode(kafka_emit_sink_parser(), broker_publishing_mode()),
+        sink_with_publishing_mode(pulsar_emit_sink_parser(), broker_publishing_mode()),
+        sink_with_publishing_mode(rabbitmq_emit_sink_parser(), broker_publishing_mode()),
+        sink_with_publishing_mode(redis_emit_sink_parser(), no_ack_publishing_mode()),
+        sink_with_publishing_mode(mqtt_emit_sink_parser(), mqtt_publishing_mode()),
+        sink_with_publishing_mode(nats_emit_sink_parser(), nats_publishing_mode()),
+        sink_with_publishing_mode(zeromq_emit_sink_parser(), no_ack_publishing_mode()),
+        sink_with_publishing_mode(sqs_emit_sink_parser(), sqs_publishing_mode()),
+        sink_with_publishing_mode(sentry_emit_sink_parser(), request_ack_publishing_mode()),
     )
 }
 
@@ -661,7 +924,10 @@ pub fn alter_emitter_parser<'src>()
     let set_sink = kw(Identifier::Set)
         .ignore_then(kw(Identifier::To))
         .ignore_then(alter_emit_sink_parser())
-        .map(|sink| AlterEmitterOperation::SetSink { sink });
+        .map(|(sink, publishing_mode)| AlterEmitterOperation::SetSink {
+            sink,
+            publishing_mode,
+        });
     let set_client = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Client))
         .ignore_then(client_ref())
@@ -679,9 +945,12 @@ pub fn alter_emitter_parser<'src>()
     let drop_collect = kw(Identifier::Drop)
         .ignore_then(kw(Identifier::Collect))
         .to(AlterEmitterOperation::DropCollect);
-    let set_mode = kw(Identifier::Set)
+    let set_attachment = kw(Identifier::Set)
         .ignore_then(ack_mode())
-        .map(|mode| AlterEmitterOperation::SetMode { mode });
+        .map(|mode| AlterEmitterOperation::SetAttachment { mode });
+    let set_publishing_mode = kw_phrase2(Identifier::Set, Identifier::Mode)
+        .ignore_then(any_publishing_mode())
+        .map(|mode| AlterEmitterOperation::SetPublishingMode { mode });
     let set_flush =
         kw(Identifier::Set)
             .ignore_then(flush_each())
@@ -707,7 +976,8 @@ pub fn alter_emitter_parser<'src>()
         drop_encode,
         set_collect,
         drop_collect,
-        set_mode,
+        set_attachment,
+        set_publishing_mode,
         set_flush,
         set_commit,
     ))
@@ -744,41 +1014,37 @@ pub fn create_emitter_parser<'src>()
         .then(materialized_state_dependencies())
         .then_ignore(kw(Identifier::To))
         .then(emit_sink_parser())
-        .map(|((head, state), (sink, codec))| (((head, codec), state), sink))
+        .map(
+            |((head, state), (sink, publishing_mode, codec, construction))| {
+                (
+                    ((((head, codec), publishing_mode), state), sink),
+                    construction,
+                )
+            },
+        )
         .boxed()
-        .then(route_construction().or_not())
         .then(flush_each())
         .boxed()
         .then(message_error_policy())
         .then(general_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .try_map(|(parsed, general_error_policy), span| {
+        .map(|(parsed, general_error_policy)| {
             let (parsed, message_error_policy) = parsed;
             let (parsed, sink_flush_each) = parsed;
             let (parsed, construction) = parsed;
             let (parsed, sink) = parsed;
             let (parsed, materialized_state) = parsed;
+            let (parsed, publishing_mode) = parsed;
             let (parsed, encode_using_codec) = parsed;
             let (((if_not_exists, mode), name), from) = parsed;
-            // Whether a codec is required or forbidden, and whether a commit cadence applies, are
-            // now decided by the sink clause itself, so there is nothing left to check here.
             let construction = construction.unwrap_or_default();
-            if encode_using_codec.is_none()
-                && (construction.inherit.is_some()
-                    || !construction.assignments.is_empty()
-                    || !construction.invocations.is_empty())
-            {
-                return Err(Rich::custom(
-                    span,
-                    "direct emitter routes support VALUES and WHERE only",
-                ));
-            }
             let sink = match (sink, sink_flush_each.clone()) {
                 (
                     EmitSink::ClickHouse {
                         client,
                         table,
                         values,
+                        max_batch,
                         ..
                     },
                     (flush_each, _max_batch_size),
@@ -786,6 +1052,7 @@ pub fn create_emitter_parser<'src>()
                     client,
                     table,
                     values,
+                    max_batch,
                     flush_each,
                 },
                 (
@@ -871,7 +1138,7 @@ pub fn create_emitter_parser<'src>()
                 (sink, _) => sink,
             };
             let (flush_each, max_batch_size) = sink_flush_each;
-            Ok(CreateStatement::new(
+            CreateStatement::new(
                 CreateEmitter {
                     name,
                     from,
@@ -883,12 +1150,13 @@ pub fn create_emitter_parser<'src>()
                         message: message_error_policy,
                         general: general_error_policy,
                     },
+                    publishing_mode,
                     mode: mode.unwrap_or(AckMode::Attached),
                     construction,
                     materialized_state,
                 },
                 if_not_exists,
-            ))
+            )
         })
         .boxed()
 }
@@ -957,9 +1225,9 @@ mod tests {
         let parsed = parse_alter_emitter(
             "ALTER EMITTER event_sink ADD FROM backup WHERE input.kind = 'backup', ALTER FROM \
              backup SET WHERE input.kind = 'current', ALTER FROM backup DROP WHERE, DROP FROM \
-             backup, SET TO ZEROMQ sink_b, SET CLIENT sink_c, SET ENCODE USING event_codec, DROP \
-             ENCODE, SET COLLECT FOR 10ms MAX BATCH SIZE 1MiB, DROP COLLECT, SET DETACHED, SET \
-             FLUSH IMMEDIATE;",
+             backup, SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s, SET \
+             CLIENT sink_c, SET ENCODE USING event_codec, DROP ENCODE, SET COLLECT FOR 10ms MAX \
+             BATCH SIZE 1MiB, DROP COLLECT, SET DETACHED, SET FLUSH IMMEDIATE;",
         )
         .expect("ALTER EMITTER should parse");
 
@@ -983,7 +1251,8 @@ mod tests {
         assert!(matches!(
             parsed.operations[4],
             AlterEmitterOperation::SetSink {
-                sink: EmitSink::ZeroMq { .. }
+                sink: EmitSink::ZeroMq { .. },
+                ..
             }
         ));
         assert!(matches!(
@@ -1002,7 +1271,7 @@ mod tests {
         assert_eq!(parsed.operations[9], AlterEmitterOperation::DropCollect);
         assert_eq!(
             parsed.operations[10],
-            AlterEmitterOperation::SetMode {
+            AlterEmitterOperation::SetAttachment {
                 mode: AckMode::Detached
             }
         );
@@ -1019,8 +1288,8 @@ mod tests {
     fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
         let direct = parse_alter_emitter(
             "ALTER EMITTER event_sink SET TO POSTGRES postgres_main INSERT TO TABLE events VALUES \
-             { 'seq' = concat(input.kind, ','), 'value' = input.value } WITH MAX BATCH 100, SET \
-             FLUSH EACH 1s MAX BATCH SIZE 1MiB;",
+             { 'seq' = concat(input.kind, ','), 'value' = input.value } WITH MAX BATCH 100 MODE \
+             ACK RETRY POLICY BACKOFF 250ms MAX 30s, SET FLUSH EACH 1s MAX BATCH SIZE 1MiB;",
         )
         .expect("direct sink expressions should preserve internal commas");
         assert_eq!(direct.operations.len(), 2);
@@ -1035,6 +1304,24 @@ mod tests {
                 max_commit_size: "64MiB".to_string(),
             }]
         );
+
+        let replace_iceberg = parse_alter_emitter(
+            "ALTER EMITTER event_sink SET TO ICEBERG ON S3 s3_main TABLE events VALUES { 'value' \
+             = input.value } LOCATION 's3://warehouse/events' CATALOG iceberg_catalog COMMIT EACH \
+             1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s;",
+        )
+        .expect("SET TO Iceberg should require and retain its complete commit contract");
+        assert!(matches!(
+            replace_iceberg.operations.as_slice(),
+            [AlterEmitterOperation::SetSink {
+                sink: EmitSink::Iceberg {
+                    commit_each,
+                    max_commit_size,
+                    ..
+                },
+                ..
+            }] if commit_each == "1m" && max_commit_size == "512MiB"
+        ));
     }
 
     #[test]
@@ -1059,12 +1346,265 @@ mod tests {
         crate::parse_expression(source).expect("valid structured expression")
     }
 
+    fn complete_codec_emitter(sink: &str) -> String {
+        format!(
+            "CREATE EMITTER emit FROM p99 TO {sink} ENCODE USING my_codec FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        )
+    }
+
+    fn assert_canonical_emitter_roundtrip(source: &str, mode: &str) {
+        let parsed = parse_create_emitter(source)
+            .unwrap_or_else(|error| panic!("publishing mode must parse for `{mode}`: {error:?}"));
+        let canonical = parsed
+            .to_canonical_nspl()
+            .unwrap_or_else(|error| panic!("publishing mode must render for `{mode}`: {error:?}"));
+        let reparsed = parse_create_emitter(&canonical).unwrap_or_else(|error| {
+            panic!("canonical publishing mode must reparse for `{mode}`: {error:?}\n{canonical}")
+        });
+        assert_eq!(reparsed, parsed, "canonical round-trip changed `{mode}`");
+    }
+
+    #[test]
+    fn every_publishing_mode_body_parses_and_canonical_round_trips() {
+        for sink in [
+            "KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "KAFKA broker TOPIC events MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF \
+             250ms MAX 30s",
+            "PULSAR broker TOPIC events MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY \
+             BACKOFF 250ms MAX 30s",
+            "RABBITMQ broker QUEUE events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "MQTT broker TOPIC events MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s",
+            "MQTT broker TOPIC events MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY \
+             BACKOFF 250ms MAX 30s",
+            "MQTT broker TOPIC events MODE QOS 2 ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY \
+             BACKOFF 250ms MAX 30s",
+            "NATS broker SUBJECT events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "NATS broker SUBJECT events MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 30s RETRY \
+             POLICY BACKOFF 250ms MAX 30s",
+            "REDIS PUBSUB broker CHANNEL events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "ZEROMQ broker MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "SQS broker QUEUE events MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s",
+            "SQS broker QUEUE events MODE BATCH RETRY POLICY BACKOFF 250ms MAX 30s",
+            "SENTRY broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+        ] {
+            assert_canonical_emitter_roundtrip(&complete_codec_emitter(sink), sink);
+        }
+
+        for sink in [
+            "CLICKHOUSE db INSERT TO TABLE events VALUES { 'id' = input.id } WITH MAX BATCH 100 \
+             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "POSTGRES db INSERT TO TABLE events VALUES { 'id' = input.id } WITH MAX BATCH 100 \
+             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "MYSQL db INSERT TO TABLE events VALUES { 'id' = input.id } WITH MAX BATCH 100 MODE \
+             ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "MONGODB db INSERT TO COLLECTION events VALUES { 'id' = input.id } WITH MAX BATCH 100 \
+             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "ICEBERG ON S3 store TABLE events VALUES { 'id' = input.id } LOCATION \
+             's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY \
+             POLICY BACKOFF 250ms MAX 30s",
+        ] {
+            let source = format!(
+                "CREATE EMITTER emit FROM p99 TO {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+                 GENERAL ERROR LOG;"
+            );
+            assert_canonical_emitter_roundtrip(&source, sink);
+        }
+    }
+
+    #[test]
+    fn rejects_missing_incomplete_or_foreign_publishing_modes() {
+        for source in [
+            complete_codec_emitter("KAFKA broker TOPIC events"),
+            complete_codec_emitter("KAFKA broker TOPIC events MODE NO_ACK"),
+            complete_codec_emitter(
+                "KAFKA broker TOPIC events MODE ACK SEQUENTIAL RETRY POLICY BACKOFF 250ms MAX 30s",
+            ),
+            complete_codec_emitter(
+                "KAFKA broker TOPIC events MODE ACK PARALLEL MAX 0 ACK TIMEOUT 30s RETRY POLICY \
+                 BACKOFF 250ms MAX 30s",
+            ),
+            complete_codec_emitter(
+                "KAFKA broker TOPIC events MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY \
+                 BACKOFF 250ms MAX 30s",
+            ),
+            "CREATE EMITTER emit FROM p99 TO CLICKHOUSE db INSERT TO TABLE events VALUES { 'id' = \
+             input.id } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG ON GENERAL ERROR LOG;"
+                .to_string(),
+        ] {
+            assert!(
+                parse_create_emitter(&source).is_err(),
+                "invalid emitter unexpectedly parsed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn publishing_mode_completion_stays_within_the_selected_sink() {
+        let before_mode = "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events ";
+        let suggestions = suggest_create_emitter(before_mode, before_mode.len());
+        assert_eq!(suggestions, vec!["MODE".to_string()]);
+
+        let kafka_mode = format!("{before_mode}MODE ");
+        let suggestions = suggest_create_emitter(&kafka_mode, kafka_mode.len());
+        assert!(suggestions.contains(&"ACK".to_string()));
+        assert!(suggestions.contains(&"NO_ACK".to_string()));
+        assert!(!suggestions.contains(&"QOS".to_string()));
+        assert!(!suggestions.contains(&"JETSTREAM".to_string()));
+        assert!(!suggestions.contains(&"SINGLE".to_string()));
+    }
+
+    #[test]
+    fn nats_jetstream_completion_uses_the_complete_mode_phrase() {
+        let input = "CREATE EMITTER emit FROM p99 TO NATS broker SUBJECT events MODE ";
+        let suggestions = suggest_create_emitter(input, input.len());
+
+        assert!(suggestions.contains(&"NO_ACK".to_string()));
+        assert!(suggestions.contains(&"JETSTREAM ACK".to_string()));
+        assert!(!suggestions.contains(&"JETSTREAM".to_string()));
+        assert!(!suggestions.contains(&"QOS".to_string()));
+        assert!(!suggestions.contains(&"SINGLE".to_string()));
+    }
+
+    #[test]
+    fn mqtt_mode_completion_requires_qos_before_the_level() {
+        let input = "CREATE EMITTER emit FROM p99 TO MQTT broker TOPIC events MODE ";
+        let suggestions = suggest_create_emitter(input, input.len());
+
+        assert!(suggestions.contains(&"QOS".to_string()));
+        assert!(!suggestions.contains(&"mqtt_qos".to_string()));
+
+        let input = "CREATE EMITTER emit FROM p99 TO MQTT broker TOPIC events MODE QOS ";
+        let suggestions = suggest_create_emitter(input, input.len());
+        assert_eq!(suggestions, vec!["mqtt_qos".to_string()]);
+    }
+
+    #[test]
+    fn sqs_fifo_queue_suffix_has_a_completable_keyword() {
+        let input = "ALTER EMITTER emit SET TO SQS broker QUEUE events . ";
+        let suggestions = suggest_alter_emitter(input, input.len());
+
+        assert_eq!(suggestions, vec!["FIFO".to_string()]);
+    }
+
+    #[test]
+    fn direct_emitter_completion_only_offers_where_construction() {
+        let input = "CREATE EMITTER emit FROM p99 TO CLICKHOUSE db INSERT TO TABLE events VALUES \
+                     { 'id' = input.id } WITH MAX BATCH 10 MODE ACK RETRY POLICY BACKOFF 250ms \
+                     MAX 30s ";
+        let suggestions = suggest_create_emitter(input, input.len());
+
+        assert!(suggestions.contains(&"WHERE".to_string()));
+        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(suggestions.contains(&"FLUSH IMMEDIATE".to_string()));
+        assert!(!suggestions.contains(&"INHERIT".to_string()));
+        assert!(!suggestions.contains(&"SET".to_string()));
+        assert!(!suggestions.contains(&"INVOKE".to_string()));
+    }
+
+    #[test]
+    fn parses_sqs_fifo_group_forms() {
+        let from_branch = parse_create_emitter(&complete_codec_emitter(
+            "SQS broker QUEUE events.fifo FIFO GROUP FROM BRANCH MODE SINGLE RETRY POLICY BACKOFF \
+             250ms MAX 30s",
+        ))
+        .expect("SQS FIFO FROM BRANCH mode should parse");
+        assert!(matches!(
+            from_branch.sink,
+            EmitSink::Sqs {
+                ref queue,
+                fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
+                ..
+            } if queue == "events.fifo"
+        ));
+        let canonical = from_branch
+            .to_canonical_nspl()
+            .expect("SQS FIFO emitter should render canonically");
+        let round_tripped = parse_create_emitter(&canonical)
+            .expect("canonical SQS FIFO emitter should parse again");
+        assert_eq!(round_tripped, from_branch);
+
+        let expression = parse_create_emitter(&complete_codec_emitter(
+            "SQS broker QUEUE events.fifo FIFO GROUP concat(input.tenant, '-', input.region) MODE \
+             BATCH RETRY POLICY BACKOFF 250ms MAX 30s",
+        ))
+        .expect("SQS FIFO expression mode should parse");
+        assert!(matches!(
+            expression.sink,
+            EmitSink::Sqs {
+                fifo_group: Some(nervix_models::SqsFifoGroup::Expression(_)),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_fifo_group_on_non_sqs_sink() {
+        let source = complete_codec_emitter(
+            "KAFKA broker TOPIC events FIFO GROUP FROM BRANCH MODE NO_ACK RETRY POLICY BACKOFF \
+             250ms MAX 30s",
+        );
+        assert!(parse_create_emitter(&source).is_err());
+    }
+
+    #[test]
+    fn parses_alter_emitter_publishing_and_attachment_modes() {
+        let parsed = parse_alter_emitter(
+            "ALTER EMITTER event_sink SET MODE ACK PARALLEL MAX 32 ACK TIMEOUT 10s RETRY POLICY \
+             BACKOFF 250ms MAX 30s, SET DETACHED, SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY \
+             BACKOFF 1s MAX 1m;",
+        )
+        .expect("ALTER EMITTER mode operations should parse");
+
+        assert!(matches!(
+            parsed.operations[0],
+            AlterEmitterOperation::SetPublishingMode {
+                mode: nervix_models::EmitterPublishingMode::BrokerAck { .. }
+            }
+        ));
+        assert!(matches!(
+            parsed.operations[1],
+            AlterEmitterOperation::SetAttachment {
+                mode: AckMode::Detached
+            }
+        ));
+        assert!(matches!(
+            parsed.operations[2],
+            AlterEmitterOperation::SetSink {
+                publishing_mode: nervix_models::EmitterPublishingMode::NoAck { .. },
+                ..
+            }
+        ));
+
+        let request_ack = parse_alter_emitter(
+            "ALTER EMITTER database_sink SET MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s;",
+        )
+        .expect("request/response ACK mode should parse without a confirmation window");
+        assert!(matches!(
+            request_ack.operations.as_slice(),
+            [AlterEmitterOperation::SetPublishingMode {
+                mode: nervix_models::EmitterPublishingMode::RequestAck { .. }
+            }]
+        ));
+    }
+
+    #[test]
+    fn direct_database_emitters_reject_codecs() {
+        let source = complete_codec_emitter(
+            "POSTGRES database INSERT TO TABLE events VALUES { 'value' = input.value } WITH MAX \
+             BATCH 100 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+        );
+        assert!(parse_create_emitter(&source).is_err());
+    }
+
     #[test]
     fn parses_create_emitter_kafka() {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                TO KAFKA broker1 TOPIC topic ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1102,8 +1642,8 @@ mod tests {
     fn parses_emitter_input_collection() {
         let parsed = parse_create_emitter(
             "CREATE EMITTER emit FROM p99 COLLECT FOR 1s MAX BATCH SIZE 10MiB TO KAFKA broker1 \
-             TOPIC topic ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
-             ERROR LOG;",
+             TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         )
         .expect("emitter input collection must parse");
         let policy = parsed
@@ -1126,8 +1666,9 @@ mod tests {
     fn parses_multiple_emitter_inputs_with_source_where() {
         let parsed = parse_create_emitter(
             "CREATE EMITTER emit FROM source_a WHERE input.kind = 'a', source_b WHERE input.kind \
-             = 'b' COLLECT FOR 10ms MAX BATCH SIZE 1MiB TO ZEROMQ sink ENCODE USING my_codec \
-             FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             = 'b' COLLECT FOR 10ms MAX BATCH SIZE 1MiB TO ZEROMQ sink MODE NO_ACK RETRY POLICY \
+             BACKOFF 250ms MAX 30s ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+             GENERAL ERROR LOG;",
         )
         .expect("multiple emitter inputs should parse");
 
@@ -1175,7 +1716,8 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM errors
-                TO SENTRY sentry_main ENCODE USING error_event_codec
+                TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING error_event_codec
                 INHERIT ALL
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG
@@ -1193,7 +1735,7 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM errors
-                TO SENTRY sentry_main
+                TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 INHERIT ALL
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG
@@ -1223,6 +1765,8 @@ mod tests {
                     "clickhouse_now" = NOW(),
                     "clickhouse_action" = LOWER(input.action)
                 }
+                WITH MAX BATCH 100
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -1251,6 +1795,7 @@ mod tests {
                         expression: expression("LOWER ( input.action )"),
                     },
                 ],
+                max_batch: 100,
                 flush_each: "10s".to_string(),
             }
         );
@@ -1263,6 +1808,8 @@ mod tests {
             CREATE EMITTER to_ch FROM notifications
             TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
+            WITH MAX BATCH 100
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -1285,7 +1832,9 @@ mod tests {
                     "action" = input.action
                 }
                 LOCATION 's3://nervix-iceberg/tables/notifications'
-                CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB FLUSH EACH 10s MAX BATCH SIZE 64MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                FLUSH EACH 10s MAX BATCH SIZE 64MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1335,7 +1884,9 @@ mod tests {
                     "action" = input.action
                 }
                 LOCATION 'gs://nervix-iceberg/tables/notifications'
-                CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1383,7 +1934,9 @@ mod tests {
                     "action" = input.action
                 }
                 LOCATION 'wasb://nervix-iceberg@devstoreaccount1.blob.core.windows.net/tables/notifications'
-                CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1527,6 +2080,8 @@ mod tests {
             CREATE EMITTER to_ch FROM notifications
             TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
+            WITH MAX BATCH 100
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             FLUSH EACH 100ms MAX BATCH SIZE 1MiB COMMIT EACH 1m MAX SIZE 512MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -1636,6 +2191,7 @@ mod tests {
                     "postgres_action" = LOWER(input.action)
                 }
                 WITH MAX BATCH 25
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -1683,6 +2239,7 @@ mod tests {
                 }
                 ON CONFLICT ("postgres_user_id") DO UPDATE
                 WITH MAX BATCH 25
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -1713,6 +2270,7 @@ mod tests {
                 }
                 ON CONFLICT DO NOTHING
                 WITH MAX BATCH 25
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -1767,7 +2325,8 @@ mod tests {
         // The whole phrase, not a bare `ON`: `ON` alone cannot be continued from here.
         assert!(suggestions.contains(&"ON CONFLICT".to_string()));
         assert!(!suggestions.contains(&"ON".to_string()));
-        assert!(suggestions.contains(&"WITH".to_string()));
+        assert!(suggestions.contains(&"WITH MAX BATCH".to_string()));
+        assert!(!suggestions.contains(&"WITH".to_string()));
     }
 
     #[test]
@@ -1807,6 +2366,7 @@ mod tests {
             TO POSTGRES postgres_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 25
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -1850,6 +2410,7 @@ mod tests {
                     "mysql_action" = LOWER(input.action)
                 }
                 WITH MAX BATCH 25
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -1897,6 +2458,7 @@ mod tests {
                 }
                 ON CONFLICT DO UPDATE
                 WITH MAX BATCH 25
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -1922,6 +2484,7 @@ mod tests {
                 }
                 ON CONFLICT DO NOTHING
                 WITH MAX BATCH 25
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -1959,7 +2522,8 @@ mod tests {
         // The whole phrase, not a bare `ON`: `ON` alone cannot be continued from here.
         assert!(suggestions.contains(&"ON CONFLICT".to_string()));
         assert!(!suggestions.contains(&"ON".to_string()));
-        assert!(suggestions.contains(&"WITH".to_string()));
+        assert!(suggestions.contains(&"WITH MAX BATCH".to_string()));
+        assert!(!suggestions.contains(&"WITH".to_string()));
     }
 
     #[test]
@@ -1998,6 +2562,7 @@ mod tests {
             TO MYSQL mysql_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 25
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -2021,6 +2586,7 @@ mod tests {
                     "mongodb_action" = LOWER(input.action)
                 }
                 WITH MAX BATCH 25
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2068,6 +2634,7 @@ mod tests {
                 }
                 ON CONFLICT ("mongodb_user_id") DO UPDATE
                 WITH MAX BATCH 25
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2098,6 +2665,7 @@ mod tests {
                 }
                 ON CONFLICT ("mongodb_user_id") DO NOTHING
                 WITH MAX BATCH 25
+                MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2172,7 +2740,8 @@ mod tests {
         // The whole phrase, not a bare `ON`: `ON` alone cannot be continued from here.
         assert!(suggestions.contains(&"ON CONFLICT".to_string()));
         assert!(!suggestions.contains(&"ON".to_string()));
-        assert!(suggestions.contains(&"WITH".to_string()));
+        assert!(suggestions.contains(&"WITH MAX BATCH".to_string()));
+        assert!(!suggestions.contains(&"WITH".to_string()));
     }
 
     #[test]
@@ -2195,6 +2764,7 @@ mod tests {
             TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
             VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 25
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -2265,7 +2835,8 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                TO PULSAR pulsar1 TOPIC topic ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                TO PULSAR pulsar1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2287,7 +2858,8 @@ mod tests {
         let input = r#"
             CREATE DETACHED EMITTER emit
                 FROM p99
-                TO KAFKA broker1 TOPIC topic ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2317,6 +2889,7 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 TO KAFKA broker1 TOPIC topic
+                MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -2340,7 +2913,8 @@ mod tests {
     #[test]
     fn suggests_encode_using_as_compound_keyword() {
         // The codec follows the sink it encodes for, so it is offered once the sink is named.
-        let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic ";
+        let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic MODE \
+                     NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ";
         let suggestions = suggest_create_emitter(input, input.len());
         assert!(suggestions.contains(&"ENCODE USING".to_string()));
 
@@ -2376,8 +2950,8 @@ mod tests {
         assert!(!client_suggestions.contains(&"TOPIC".to_string()));
         assert!(!client_suggestions.contains(&"QUEUE".to_string()));
 
-        let route_input =
-            "CREATE EMITTER emit FROM errors TO SENTRY sentry_main ENCODE USING error_event_codec ";
+        let route_input = "CREATE EMITTER emit FROM errors TO SENTRY sentry_main MODE ACK RETRY \
+                           POLICY BACKOFF 250ms MAX 30s ENCODE USING error_event_codec ";
         let route_suggestions = suggest_create_emitter(route_input, route_input.len());
         assert!(route_suggestions.contains(&"INHERIT".to_string()));
         assert!(route_suggestions.contains(&"FLUSH EACH".to_string()));
@@ -2388,8 +2962,9 @@ mod tests {
 
     #[test]
     fn suggests_flush_after_emitter_error_policies() {
-        let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic ENCODE \
-                     USING my_codec ON MESSAGE ERROR LOG ON GENERAL ERROR LOG ";
+        let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic MODE \
+                     NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ON MESSAGE \
+                     ERROR LOG ON GENERAL ERROR LOG ";
         let suggestions = suggest_create_emitter(input, input.len());
 
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
@@ -2402,7 +2977,8 @@ mod tests {
         let input = r#"
             CREATE ATTACHED EMITTER emit
                 FROM p99
-                TO MQTT broker1 TOPIC topic ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                TO MQTT broker1 TOPIC topic MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2424,7 +3000,8 @@ mod tests {
         let input = r#"
             CREATE ATTACHED EMITTER emit
                 FROM p99
-                TO NATS nats_main SUBJECT notifications ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                TO NATS nats_main SUBJECT notifications MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2446,7 +3023,8 @@ mod tests {
         let input = r#"
             CREATE ATTACHED EMITTER emit
                 FROM p99
-                TO RABBITMQ broker1 QUEUE queue1 ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                TO RABBITMQ broker1 QUEUE queue1 MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2468,7 +3046,8 @@ mod tests {
         let input = r#"
             CREATE ATTACHED EMITTER emit
                 FROM p99
-                TO REDIS PUBSUB broker1 CHANNEL out ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                TO REDIS PUBSUB broker1 CHANNEL out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2514,7 +3093,8 @@ mod tests {
         let input = r#"
             CREATE ATTACHED EMITTER emit
                 FROM p99
-                TO ZEROMQ zmq_out ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                TO ZEROMQ zmq_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2534,7 +3114,8 @@ mod tests {
         let input = r#"
             CREATE ATTACHED EMITTER emit
                 FROM p99
-                TO SQS sqs_main QUEUE queue1 ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+                TO SQS sqs_main QUEUE queue1 MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2545,8 +3126,8 @@ mod tests {
             EmitSink::Sqs {
                 client: nervix_models::Identifier::try_from("sqs_main")
                     .expect("valid client identifier"),
-                queue: nervix_models::Identifier::try_from("queue1")
-                    .expect("valid queue identifier"),
+                queue: "queue1".to_string(),
+                fifo_group: None,
             }
         );
     }
@@ -2556,7 +3137,8 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                TO KAFKA broker1 TOPIC topic ENCODE USING my_codec
+                TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec
                 INHERIT ALL EXCEPT raw
                 SET normalized = lower(input.name), score = input.score AS FLOAT64
                 WHERE output.active
@@ -2579,7 +3161,8 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                TO KAFKA broker1 TOPIC topic ENCODE USING my_codec
+                TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec
                 INVOKE write_header("route", input.route)
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -2593,7 +3176,8 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                TO KAFKA broker1 TOPIC topic ENCODE USING my_codec
+                TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec
                 SET normalized = FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2608,8 +3192,8 @@ mod tests {
 
     #[test]
     fn does_not_leak_sink_suggestions_inside_filter_map_program() {
-        let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic ENCODE \
-                     USING my_codec WHERE ";
+        let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic MODE \
+                     NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec WHERE ";
         let suggestions = suggest_create_emitter(input, input.len());
         assert!(!suggestions.contains(&"MQTT".to_string()));
         assert!(!suggestions.contains(&"NATS".to_string()));
@@ -2617,8 +3201,8 @@ mod tests {
 
     #[test]
     fn emitter_filter_map_context_suggests_invoke_without_sink_leakage() {
-        let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic ENCODE \
-                     USING my_codec ";
+        let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic MODE \
+                     NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ";
         let suggestions = suggest_create_emitter(input, input.len());
 
         assert!(suggestions.contains(&"INVOKE".to_string()));

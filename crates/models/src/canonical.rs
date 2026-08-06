@@ -17,20 +17,21 @@ use crate::{
     CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
     CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
     CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
-    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
-    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
-    NatsConfigEntry, NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
-    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
-    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RetryPolicy,
-    RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry, SqsConfigEntry,
-    SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WireSchemaDefinition, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    CreateWireSchema, EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode,
+    EndpointType, Expression, FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
+    IcebergCatalog, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
+    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+    MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos,
+    MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry, NatsIngestMode,
+    OutputBranch, ParseAsType, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
+    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
+    RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
+    SqsConfigEntry, SqsFifoGroup, SqsIngestMode, UnaryOperator, WebsocketsConfigEntry,
+    WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqConfigEntry,
+    ZeroMqIngestMode,
 };
 
 pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
@@ -1495,13 +1496,14 @@ impl CreateEmitter {
         // The codec and the commit cadence are written with the sink they belong to: whether either
         // is legal is a property of the sink, so they follow it rather than precede it.
         Ok(format!(
-            "CREATE {} EMITTER {} FROM {}{} TO {}{}{}{}{} {} {};",
+            "CREATE {} EMITTER {} FROM {}{} TO {}{} MODE {}{}{}{} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             processor_inputs_to_nspl(&self.from)?,
             materialized_state_dependencies_suffix(&self.materialized_state)?,
             emit_sink_to_nspl(&self.sink)?,
             commit_policy,
+            self.publishing_mode.to_canonical_nspl(),
             self.encode_using_codec
                 .as_ref()
                 .map(|codec| format!(" ENCODE USING {}", codec.as_str()))
@@ -1905,9 +1907,17 @@ fn alter_emitter_operation_to_nspl(
         AlterEmitterOperation::AlterFromDropWhere { relay } => {
             Ok(format!("ALTER FROM {} DROP WHERE", relay.as_str()))
         }
-        AlterEmitterOperation::SetSink { sink } => {
-            Ok(format!("SET TO {}", emit_sink_to_nspl(sink)?))
-        }
+        AlterEmitterOperation::SetSink {
+            sink,
+            publishing_mode,
+        } => Ok(format!(
+            "SET TO {}{} MODE {}",
+            emit_sink_to_nspl(sink)?,
+            sink.commit_policy()
+                .map(|(policy, max_size)| format!(" {}", commit_policy_to_nspl(policy, max_size)))
+                .unwrap_or_default(),
+            publishing_mode.to_canonical_nspl()
+        )),
         AlterEmitterOperation::SetClient { client } => {
             Ok(format!("SET CLIENT {}", client.as_str()))
         }
@@ -1919,7 +1929,10 @@ fn alter_emitter_operation_to_nspl(
             Ok(format!("SET {}", collect_policy_to_nspl(policy)))
         }
         AlterEmitterOperation::DropCollect => Ok("DROP COLLECT".to_string()),
-        AlterEmitterOperation::SetMode { mode } => Ok(format!("SET {}", mode.as_ref())),
+        AlterEmitterOperation::SetAttachment { mode } => Ok(format!("SET {}", mode.as_ref())),
+        AlterEmitterOperation::SetPublishingMode { mode } => {
+            Ok(format!("SET MODE {}", mode.to_canonical_nspl()))
+        }
         AlterEmitterOperation::SetFlush {
             flush_each,
             max_batch_size,
@@ -2413,6 +2426,64 @@ fn retry_policy_to_nspl(policy: &RetryPolicy) -> String {
     format!("BACKOFF {} MAX {}", policy.backoff, policy.max_backoff)
 }
 
+fn emitter_ack_window_to_nspl(window: &EmitterAckWindow) -> String {
+    match window {
+        EmitterAckWindow::Sequential => "SEQUENTIAL".to_string(),
+        EmitterAckWindow::Parallel { max } => format!("PARALLEL MAX {max}"),
+    }
+}
+
+impl EmitterPublishingMode {
+    pub fn to_canonical_nspl(&self) -> String {
+        let retry = |policy: &RetryPolicy| format!("RETRY POLICY {}", retry_policy_to_nspl(policy));
+        let confirmed =
+            |prefix: &str, window: &EmitterAckWindow, ack_timeout: &str, policy: &RetryPolicy| {
+                format!(
+                    "{prefix} {} ACK TIMEOUT {ack_timeout} {}",
+                    emitter_ack_window_to_nspl(window),
+                    retry(policy)
+                )
+            };
+        match self {
+            EmitterPublishingMode::NoAck { retry_policy } => {
+                format!("NO_ACK {}", retry(retry_policy))
+            }
+            EmitterPublishingMode::BrokerAck {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => confirmed("ACK", window, ack_timeout, retry_policy),
+            EmitterPublishingMode::MqttQos0 { retry_policy } => {
+                format!("QOS 0 {}", retry(retry_policy))
+            }
+            EmitterPublishingMode::MqttQos1 {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => confirmed("QOS 1 ACK", window, ack_timeout, retry_policy),
+            EmitterPublishingMode::MqttQos2 {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => confirmed("QOS 2 ACK", window, ack_timeout, retry_policy),
+            EmitterPublishingMode::NatsJetStream {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => confirmed("JETSTREAM ACK", window, ack_timeout, retry_policy),
+            EmitterPublishingMode::SqsSingle { retry_policy } => {
+                format!("SINGLE {}", retry(retry_policy))
+            }
+            EmitterPublishingMode::SqsBatch { retry_policy } => {
+                format!("BATCH {}", retry(retry_policy))
+            }
+            EmitterPublishingMode::RequestAck { retry_policy } => {
+                format!("ACK {}", retry(retry_policy))
+            }
+        }
+    }
+}
+
 fn endpoint_type_to_nspl(endpoint_type: EndpointType) -> &'static str {
     match endpoint_type {
         EndpointType::Websockets => "WEBSOCKETS",
@@ -2511,22 +2582,48 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             subject.as_str()
         )),
         EmitSink::ZeroMq { client } => Ok(format!("ZEROMQ {}", client.as_str())),
-        EmitSink::Sqs { client, queue } => {
-            Ok(format!("SQS {} QUEUE {}", client.as_str(), queue.as_str()))
+        EmitSink::Sqs {
+            client,
+            queue,
+            fifo_group,
+        } => {
+            let queue = if Identifier::try_from(queue.as_str()).is_ok() {
+                queue.clone()
+            } else {
+                string_literal(queue)?
+            };
+            let fifo_group = fifo_group
+                .as_ref()
+                .map(|group| match group {
+                    SqsFifoGroup::FromBranch => Ok(" FIFO GROUP FROM BRANCH".to_string()),
+                    SqsFifoGroup::Expression(expression) => {
+                        Ok(format!(" FIFO GROUP {}", expression_to_nspl(expression)?))
+                    }
+                })
+                .transpose()?
+                .unwrap_or_default();
+            Ok(format!(
+                "SQS {} QUEUE {}{}",
+                client.as_str(),
+                queue,
+                fifo_group
+            ))
         }
         EmitSink::Sentry { client } => Ok(format!("SENTRY {}", client.as_str())),
         EmitSink::ClickHouse {
             client,
             table,
             values,
+            max_batch,
             ..
         } => {
             let mappings = value_mappings_to_nspl(values)?;
             Ok(format!(
-                "CLICKHOUSE {} INSERT TO TABLE {} VALUES {{{}}}",
+                "CLICKHOUSE {} INSERT TO TABLE {} VALUES {{{}}} WITH MAX BATCH {}",
                 client.as_str(),
                 table.as_str(),
-                mappings
+                mappings,
+                max_batch
             ))
         }
         EmitSink::Postgres {
@@ -2775,20 +2872,34 @@ mod tests {
         CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
         CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
         CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf,
-        CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink, EndpointIngestMode,
-        EndpointType, ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry,
-        Identifier, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-        Literal, MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping,
-        MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
-        NatsIngestMode, OutputBranch, ParseAsType, PostgresConflictAction, PostgresValueMapping,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
-        RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction,
-        SchemaField, SentryConfigEntry, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
-        WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
+        CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterPublishingMode,
+        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope,
+        GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource, JsonType, KafkaConfigEntry,
+        KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy, Model,
+        MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
+        PostgresConflictAction, PostgresValueMapping, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode,
+        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry,
+        SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound,
+        WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
         Identifier::try_from(raw).expect("valid identifier")
+    }
+
+    fn retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            backoff: "250ms".to_string(),
+            max_backoff: "30s".to_string(),
+        }
+    }
+
+    fn request_ack_mode() -> EmitterPublishingMode {
+        EmitterPublishingMode::RequestAck {
+            retry_policy: retry_policy(),
+        }
     }
 
     fn flushed_output(relay: &str, construction: Option<RouteConstruction>) -> ProcessorOutput {
@@ -3618,7 +3729,8 @@ mod tests {
             (
                 EmitSink::Sqs {
                     client: identifier("sqs_main"),
-                    queue: identifier("orders_queue"),
+                    queue: "orders_queue".to_string(),
+                    fifo_group: None,
                 },
                 "SQS sqs_main QUEUE orders_queue",
             ),
@@ -3631,6 +3743,19 @@ mod tests {
         ];
 
         for (sink, rendered_sink) in sinks {
+            let publishing_mode = match &sink {
+                EmitSink::Mqtt { .. } => EmitterPublishingMode::MqttQos0 {
+                    retry_policy: retry_policy(),
+                },
+                EmitSink::Sqs { .. } => EmitterPublishingMode::SqsSingle {
+                    retry_policy: retry_policy(),
+                },
+                EmitSink::Sentry { .. } => request_ack_mode(),
+                _ => EmitterPublishingMode::NoAck {
+                    retry_policy: retry_policy(),
+                },
+            };
+            let rendered_mode = publishing_mode.to_canonical_nspl();
             let emitter = CreateEmitter {
                 name: identifier("emit_orders"),
                 from: ProcessorInputs::single(identifier("orders_stream"))
@@ -3639,6 +3764,7 @@ mod tests {
                 sink,
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
+                publishing_mode,
                 mode: AckMode::Attached,
                 error_policies: ErrorPolicies::handled_by_log(),
 
@@ -3649,8 +3775,9 @@ mod tests {
                 emitter.to_canonical_nspl().expect("must render"),
                 format!(
                     "CREATE ATTACHED EMITTER emit_orders FROM orders_stream COLLECT FOR 50ms MAX \
-                     BATCH SIZE 4MiB TO {rendered_sink} ENCODE USING orders_codec FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+                     BATCH SIZE 4MiB TO {rendered_sink} MODE {rendered_mode} ENCODE USING \
+                     orders_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
+                     GENERAL ERROR LOG;"
                 )
             );
         }
@@ -3683,6 +3810,7 @@ mod tests {
             },
             flush_each: "10s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
+            publishing_mode: request_ack_mode(),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
@@ -3695,8 +3823,9 @@ mod tests {
             "CREATE ATTACHED EMITTER emit_notifications FROM notifications TO POSTGRES \
              postgres_main INSERT TO TABLE notification_rows VALUES {'postgres_user_id' = \
              input.user_id, 'postgres_action' = lower(input.action)} ON CONFLICT \
-             ('postgres_user_id') DO UPDATE WITH MAX BATCH 500 FLUSH EACH 10s MAX BATCH SIZE 1MiB \
-             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+             ('postgres_user_id') DO UPDATE WITH MAX BATCH 500 MODE ACK RETRY POLICY BACKOFF \
+             250ms MAX 30s FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
+             ERROR LOG;"
         );
     }
 
@@ -3725,6 +3854,7 @@ mod tests {
             },
             flush_each: "10s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
+            publishing_mode: request_ack_mode(),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
@@ -3736,8 +3866,9 @@ mod tests {
             emitter.to_canonical_nspl().expect("must render"),
             "CREATE ATTACHED EMITTER emit_notifications FROM notifications TO MYSQL mysql_main \
              INSERT TO TABLE notification_rows VALUES {'mysql_user_id' = input.user_id, \
-             'mysql_action' = lower(input.action)} ON CONFLICT DO NOTHING WITH MAX BATCH 500 \
-             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+             'mysql_action' = lower(input.action)} ON CONFLICT DO NOTHING WITH MAX BATCH 500 MODE \
+             ACK RETRY POLICY BACKOFF 250ms MAX 30s FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE \
+             ERROR LOG ON GENERAL ERROR LOG;"
         );
     }
 
@@ -3768,6 +3899,7 @@ mod tests {
             },
             flush_each: "10s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
+            publishing_mode: request_ack_mode(),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
@@ -3780,8 +3912,8 @@ mod tests {
             "CREATE ATTACHED EMITTER emit_notifications FROM notifications TO MONGODB \
              mongodb_main INSERT TO COLLECTION notification_rows VALUES {'mongodb_user_id' = \
              input.user_id, 'mongodb_action' = lower(input.action)} ON CONFLICT \
-             ('mongodb_user_id') DO UPDATE WITH MAX BATCH 500 FLUSH EACH 10s MAX BATCH SIZE 1MiB \
-             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+             ('mongodb_user_id') DO UPDATE WITH MAX BATCH 500 MODE ACK RETRY POLICY BACKOFF 250ms \
+             MAX 30s FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         );
     }
 

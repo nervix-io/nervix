@@ -77,7 +77,7 @@ Feature: Kafka emission
 
       CREATE EMITTER kafka_notifications
         FROM notifications
-        TO KAFKA kafka_main TOPIC notifications_headers_out_{{test_id}} ENCODE USING emitted_notification_codec
+        TO KAFKA kafka_main TOPIC notifications_headers_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING emitted_notification_codec
         INHERIT ALL EXCEPT raw, active
         SET amount = amount + 1,
             normalized = lower(input.raw)
@@ -155,7 +155,7 @@ Feature: Kafka emission
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-        CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
+        CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -187,3 +187,134 @@ Feature: Kafka emission
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  @kafka_emitter_ack_boundary
+  Scenario Outline: Kafka emitter mode controls when the input offset is committed
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "mode_boundary_in_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE SCHEMA user_id_branch ( user_id I64 );
+      CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}'
+      };
+      CREATE CLIENT unavailable_kafka_sink TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '127.0.0.1:1',
+        'message.timeout.ms' = '100',
+        'socket.timeout.ms' = '100'
+      };
+      CREATE INGESTOR kafka_notifications
+        FROM KAFKA kafka_ingress TOPIC mode_boundary_in_{{test_id}}
+          OFFSET BY CONSUMER GROUP mode_boundary_group_{{test_id}}
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+        DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          BRANCHED BY by_kafka_notifications
+          SET user_id = message.user_id
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE ATTACHED EMITTER kafka_mode_boundary FROM notifications
+        TO KAFKA unavailable_kafka_sink TOPIC unavailable_mode_boundary
+          MODE <publishing_mode>
+          ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And Kafka message is published to topic "mode_boundary_in_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then within "3s" Kafka consumer group "mode_boundary_group_{{test_id}}" next offset for topic "mode_boundary_in_{{test_id}}" partition 0 is "<offset_condition>"
+
+    Examples:
+      | cluster_size | publishing_mode                                                       | offset_condition |
+      | 1            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |
+      | 3            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |
+      | 3            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |
+
+  @detached_confirming_mode
+  Scenario Outline: A DETACHED confirming emitter commits upstream while retaining publish retries
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "detached_confirming_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "detached_confirming_out_{{test_id}}" exists with 1 partitions
+    And Kafka topic "detached_confirming_out_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec
+      FROM WIRE JSON SCHEMA notification_wire
+      TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}'
+      };
+      CREATE INGESTOR kafka_notifications
+      FROM KAFKA kafka_main TOPIC detached_confirming_in_{{test_id}}
+        OFFSET BY CONSUMER GROUP detached_confirming_group_{{test_id}}
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+      DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH IMMEDIATE
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE DETACHED EMITTER kafka_detached_confirming
+      FROM notifications
+      TO KAFKA kafka_main TOPIC detached_confirming_out_{{test_id}}
+        MODE ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        ENCODE USING notification_codec
+      INHERIT ALL
+      FLUSH IMMEDIATE
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    And emitter "kafka_detached_confirming" enters stall mode
+    And Kafka message is published to topic "detached_confirming_in_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then within "3s" Kafka consumer group "detached_confirming_group_{{test_id}}" next offset for topic "detached_confirming_in_{{test_id}}" partition 0 is "at least 1"
+    And the observed broker does not receive a payload within "500ms"
+    And within "5s" DESCRIBE EMITTER "kafka_detached_confirming" on the leader node contains
+      """
+      transient error: fault injector stalled emitter publish
+      """
+    And emitter "kafka_detached_confirming" leaves fault mode
+    Then the observed broker receives a payload
+      """
+      {"user_id":42}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -125,7 +125,7 @@ Feature: Reingestor repartitioning
           'bind' = 'false'
         };
 
-      CREATE EMITTER source_notifications_out FROM notifications TO ZEROMQ zeromq_main ENCODE USING notification_codec
+      CREATE EMITTER source_notifications_out FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -218,7 +218,7 @@ Feature: Reingestor repartitioning
           'bind' = 'false'
         };
 
-      CREATE EMITTER source_notifications_out FROM notifications TO ZEROMQ zeromq_main ENCODE USING notification_codec
+      CREATE EMITTER source_notifications_out FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -294,7 +294,7 @@ Feature: Reingestor repartitioning
         SET tenant = message.tenant
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM tenant_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
+        CREATE EMITTER kafka_forward FROM tenant_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -371,7 +371,7 @@ Feature: Reingestor repartitioning
         SET tenant = message.tenant
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM tenant_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
+        CREATE EMITTER kafka_forward FROM tenant_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

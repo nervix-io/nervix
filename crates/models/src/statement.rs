@@ -818,6 +818,7 @@ pub struct CreateEmitter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_size: Option<String>,
     pub error_policies: ErrorPolicies,
+    pub publishing_mode: EmitterPublishingMode,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default)]
@@ -907,26 +908,20 @@ impl CreateEmitter {
                 };
                 self.from.r#where.remove(index);
             }
-            AlterEmitterOperation::SetSink { sink } => {
+            AlterEmitterOperation::SetSink {
+                sink,
+                publishing_mode,
+            } => {
+                if !sink.accepts_publishing_mode(publishing_mode) {
+                    return Err(AlterEmitterError::PublishingModeUnsupported {
+                        sink: sink.transport_label().to_string(),
+                        mode: publishing_mode.kind_label().to_string(),
+                    });
+                }
                 let mut sink = sink.clone();
                 sink.copy_flush_policy_from(self);
-                if let (
-                    EmitSink::Iceberg {
-                        commit_each,
-                        max_commit_size,
-                        ..
-                    },
-                    EmitSink::Iceberg {
-                        commit_each: existing_commit_each,
-                        max_commit_size: existing_max_commit_size,
-                        ..
-                    },
-                ) = (&mut sink, &self.sink)
-                {
-                    *commit_each = existing_commit_each.clone();
-                    *max_commit_size = existing_max_commit_size.clone();
-                }
                 self.sink = sink;
+                self.publishing_mode = publishing_mode.clone();
             }
             AlterEmitterOperation::SetClient { client } => {
                 *self.sink.client_mut() = client.clone();
@@ -945,8 +940,17 @@ impl CreateEmitter {
             AlterEmitterOperation::DropCollect => {
                 self.from.collect_policy = None;
             }
-            AlterEmitterOperation::SetMode { mode } => {
+            AlterEmitterOperation::SetAttachment { mode } => {
                 self.mode = *mode;
+            }
+            AlterEmitterOperation::SetPublishingMode { mode } => {
+                if !self.sink.accepts_publishing_mode(mode) {
+                    return Err(AlterEmitterError::PublishingModeUnsupported {
+                        sink: self.sink.transport_label().to_string(),
+                        mode: mode.kind_label().to_string(),
+                    });
+                }
+                self.publishing_mode = mode.clone();
             }
             AlterEmitterOperation::SetFlush {
                 flush_each,
@@ -1022,6 +1026,7 @@ pub enum AlterEmitterOperation {
     },
     SetSink {
         sink: EmitSink,
+        publishing_mode: EmitterPublishingMode,
     },
     SetClient {
         client: Identifier,
@@ -1034,8 +1039,11 @@ pub enum AlterEmitterOperation {
         policy: InputCollectPolicy,
     },
     DropCollect,
-    SetMode {
+    SetAttachment {
         mode: AckMode,
+    },
+    SetPublishingMode {
+        mode: EmitterPublishingMode,
     },
     SetFlush {
         flush_each: String,
@@ -1066,6 +1074,8 @@ pub enum AlterEmitterError {
     EncodeNotConfigured,
     #[error("COMMIT policy is only supported by Iceberg emitters")]
     CommitPolicyUnsupported,
+    #[error("{sink} emitters do not support publishing mode {mode}")]
+    PublishingModeUnsupported { sink: String, mode: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1201,6 +1211,12 @@ pub enum GeneralErrorPolicy {
     Log,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SqsFifoGroup {
+    FromBranch,
+    Expression(crate::Expression),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EmitSink {
@@ -1235,15 +1251,18 @@ pub enum EmitSink {
     },
     Sqs {
         client: Identifier,
-        queue: Identifier,
+        queue: String,
+        fifo_group: Option<SqsFifoGroup>,
     },
     Sentry {
         client: Identifier,
     },
+    #[strum(serialize = "CLICKHOUSE")]
     ClickHouse {
         client: Identifier,
         table: Identifier,
         values: Vec<ClickHouseValueMapping>,
+        max_batch: u64,
         flush_each: String,
     },
     Postgres {
@@ -1254,6 +1273,7 @@ pub enum EmitSink {
         max_batch: u64,
         flush_each: String,
     },
+    #[strum(serialize = "MYSQL")]
     MySql {
         client: Identifier,
         table: Identifier,
@@ -1262,6 +1282,7 @@ pub enum EmitSink {
         max_batch: u64,
         flush_each: String,
     },
+    #[strum(serialize = "MONGODB")]
     MongoDb {
         client: Identifier,
         collection: Identifier,
@@ -1305,6 +1326,42 @@ impl EmitSink {
             | Self::MySql { client, .. }
             | Self::MongoDb { client, .. }
             | Self::Iceberg { client, .. } => client,
+        }
+    }
+
+    pub fn accepts_publishing_mode(&self, mode: &EmitterPublishingMode) -> bool {
+        match self {
+            Self::Kafka { .. } | Self::Pulsar { .. } | Self::RabbitMq { .. } => {
+                matches!(
+                    mode,
+                    EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::BrokerAck { .. }
+                )
+            }
+            Self::Mqtt { .. } => matches!(
+                mode,
+                EmitterPublishingMode::MqttQos0 { .. }
+                    | EmitterPublishingMode::MqttQos1 { .. }
+                    | EmitterPublishingMode::MqttQos2 { .. }
+            ),
+            Self::Nats { .. } => matches!(
+                mode,
+                EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::NatsJetStream { .. }
+            ),
+            Self::Redis { .. } | Self::ZeroMq { .. } => {
+                matches!(mode, EmitterPublishingMode::NoAck { .. })
+            }
+            Self::Sqs { .. } => matches!(
+                mode,
+                EmitterPublishingMode::SqsSingle { .. } | EmitterPublishingMode::SqsBatch { .. }
+            ),
+            Self::Sentry { .. }
+            | Self::ClickHouse { .. }
+            | Self::Postgres { .. }
+            | Self::MySql { .. }
+            | Self::MongoDb { .. }
+            | Self::Iceberg { .. } => {
+                matches!(mode, EmitterPublishingMode::RequestAck { .. })
+            }
         }
     }
 
@@ -2501,6 +2558,118 @@ pub struct RetryPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EmitterAckWindow {
+    Sequential,
+    Parallel { max: u64 },
+}
+
+impl EmitterAckWindow {
+    pub fn max_in_flight(&self) -> u64 {
+        match self {
+            Self::Sequential => 1,
+            Self::Parallel { max } => *max,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EmitterPublishingMode {
+    NoAck {
+        retry_policy: RetryPolicy,
+    },
+    BrokerAck {
+        window: EmitterAckWindow,
+        ack_timeout: String,
+        retry_policy: RetryPolicy,
+    },
+    MqttQos0 {
+        retry_policy: RetryPolicy,
+    },
+    MqttQos1 {
+        window: EmitterAckWindow,
+        ack_timeout: String,
+        retry_policy: RetryPolicy,
+    },
+    MqttQos2 {
+        window: EmitterAckWindow,
+        ack_timeout: String,
+        retry_policy: RetryPolicy,
+    },
+    NatsJetStream {
+        window: EmitterAckWindow,
+        ack_timeout: String,
+        retry_policy: RetryPolicy,
+    },
+    SqsSingle {
+        retry_policy: RetryPolicy,
+    },
+    SqsBatch {
+        retry_policy: RetryPolicy,
+    },
+    RequestAck {
+        retry_policy: RetryPolicy,
+    },
+}
+
+impl EmitterPublishingMode {
+    pub fn retry_policy(&self) -> &RetryPolicy {
+        match self {
+            Self::NoAck { retry_policy }
+            | Self::BrokerAck { retry_policy, .. }
+            | Self::MqttQos0 { retry_policy }
+            | Self::MqttQos1 { retry_policy, .. }
+            | Self::MqttQos2 { retry_policy, .. }
+            | Self::NatsJetStream { retry_policy, .. }
+            | Self::SqsSingle { retry_policy }
+            | Self::SqsBatch { retry_policy }
+            | Self::RequestAck { retry_policy } => retry_policy,
+        }
+    }
+
+    pub fn ack_window(&self) -> Option<&EmitterAckWindow> {
+        match self {
+            Self::BrokerAck { window, .. }
+            | Self::MqttQos1 { window, .. }
+            | Self::MqttQos2 { window, .. }
+            | Self::NatsJetStream { window, .. } => Some(window),
+            Self::NoAck { .. }
+            | Self::MqttQos0 { .. }
+            | Self::SqsSingle { .. }
+            | Self::SqsBatch { .. }
+            | Self::RequestAck { .. } => None,
+        }
+    }
+
+    pub fn ack_timeout(&self) -> Option<&str> {
+        match self {
+            Self::BrokerAck { ack_timeout, .. }
+            | Self::MqttQos1 { ack_timeout, .. }
+            | Self::MqttQos2 { ack_timeout, .. }
+            | Self::NatsJetStream { ack_timeout, .. } => Some(ack_timeout),
+            Self::NoAck { .. }
+            | Self::MqttQos0 { .. }
+            | Self::SqsSingle { .. }
+            | Self::SqsBatch { .. }
+            | Self::RequestAck { .. } => None,
+        }
+    }
+
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::NoAck { .. } => "NO_ACK",
+            Self::BrokerAck { .. } => "ACK",
+            Self::MqttQos0 { .. } => "QOS 0",
+            Self::MqttQos1 { .. } => "QOS 1 ACK",
+            Self::MqttQos2 { .. } => "QOS 2 ACK",
+            Self::NatsJetStream { .. } => "JETSTREAM ACK",
+            Self::SqsSingle { .. } => "SINGLE",
+            Self::SqsBatch { .. } => "BATCH",
+            Self::RequestAck { .. } => "ACK",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KafkaIngestMode {
     AckParallel {
         max: u64,
@@ -3494,10 +3663,11 @@ mod tests {
         AlterRelayError, AlterRelayOperation, AlterReorderer, AlterReordererError,
         AlterReordererOperation, BranchSelection, ClusterSchedule, CreateDeduplicator,
         CreateEmitter, CreateGenerator, CreateReingestor, CreateRelay, CreateReorderer,
-        CreateSchema, DomainSchedule, EmitSink, ErrorPolicies, GeneralErrorPolicy,
-        InferencerTensorDimension, InferencerTensorElementType, InferencerTensorRepresentation,
-        InferencerTensorSchema, KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind,
-        OutputFlushPolicy, RelayBranching, ScheduledNode,
+        CreateSchema, DomainSchedule, EmitSink, EmitterPublishingMode, ErrorPolicies,
+        GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
+        InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule,
+        MaterializedRelayState, Model, ModelKind, OutputFlushPolicy, RelayBranching, RetryPolicy,
+        ScheduledNode,
     };
     use crate::{
         CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Expression, Identifier,
@@ -4180,6 +4350,12 @@ mod tests {
             flush_each: "1s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             error_policies: ErrorPolicies::handled_by_log(),
+            publishing_mode: EmitterPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             mode: AckMode::Attached,
             construction: crate::RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -4206,7 +4382,7 @@ mod tests {
                         flush_each: "IMMEDIATE".to_string(),
                         max_batch_size: None,
                     },
-                    AlterEmitterOperation::SetMode {
+                    AlterEmitterOperation::SetAttachment {
                         mode: AckMode::Detached,
                     },
                 ],
@@ -4250,6 +4426,12 @@ mod tests {
             flush_each: "IMMEDIATE".to_string(),
             max_batch_size: None,
             error_policies: ErrorPolicies::handled_by_log(),
+            publishing_mode: EmitterPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             mode: AckMode::Attached,
             construction: crate::RouteConstruction::default(),
             materialized_state: Vec::new(),

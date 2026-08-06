@@ -44,7 +44,7 @@ Feature: ZeroMQ emission
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER zeromq_notifications FROM notifications TO ZEROMQ zeromq_main ENCODE USING notification_codec
+        CREATE EMITTER zeromq_notifications FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -140,7 +140,7 @@ Feature: ZeroMQ emission
         };
         CREATE EMITTER zeromq_notifications
         FROM notifications
-        USING MATERIALIZED STATE state_notifications REQUIRED WAIT TO ZEROMQ zeromq_main ENCODE USING notification_codec
+        USING MATERIALIZED STATE state_notifications REQUIRED WAIT TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL EXCEPT source
         SET source = relay_state.state_notifications.source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

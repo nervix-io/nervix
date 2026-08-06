@@ -73,6 +73,7 @@ use nervix_interconnect::{
     DescribeRelayResponse as RemoteDescribeRelayResponse, DomainClockStart, DomainClockStop,
     DomainDrainStatusEnvelope, DomainDrainStatusRequest as RemoteDomainDrainStatusRequest,
     DomainDrainStatusResponse as RemoteDomainDrainStatusResponse, DomainTickEnvelope,
+    EmitterPublishingDrainStateEnvelope, EmitterPublishingDrainStatusEnvelope,
     EntityDrainStatusEnvelope, EntityDrainStatusRequest as RemoteEntityDrainStatusRequest,
     EntityDrainStatusResponse as RemoteEntityDrainStatusResponse,
     EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
@@ -194,7 +195,73 @@ struct DrainOutstanding {
     active_generators: u64,
     outstanding_acks: u64,
     buffered_emitter_messages: u64,
+    emitter_publishing: Vec<EmitterPublishingDrainStatusEnvelope>,
     status_error: Option<String>,
+}
+
+impl DrainOutstanding {
+    fn write_emitter_publishing(
+        &self,
+        formatter: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        if self.emitter_publishing.is_empty() {
+            return Ok(());
+        }
+        formatter.write_str(&emitter_publishing_drain_summary(&self.emitter_publishing))
+    }
+}
+
+fn emitter_publishing_drain_summary(statuses: &[EmitterPublishingDrainStatusEnvelope]) -> String {
+    if statuses.is_empty() {
+        return String::new();
+    }
+    let statuses = statuses
+        .iter()
+        .map(|status| {
+            let mut detail = format!(
+                "{}:{}(pending={}",
+                status.emitter.as_str(),
+                status.state.as_str(),
+                status.pending_messages,
+            );
+            if let Some(backoff) = status.retry_backoff_millis {
+                detail.push_str(&format!(", retry_backoff_ms={backoff}"));
+            }
+            if let Some(wait) = status.retry_wait_millis {
+                detail.push_str(&format!(", retry_wait_ms={wait}"));
+            }
+            detail.push(')');
+            detail
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(", publishing=[{statuses}]")
+}
+
+fn emitter_publishing_drain_status_envelope(
+    status: crate::runtime::EmitterPublishingDrainStatus,
+) -> EmitterPublishingDrainStatusEnvelope {
+    EmitterPublishingDrainStatusEnvelope {
+        emitter: status.emitter,
+        state: match status.state {
+            crate::runtime::EmitterPublishingDrainState::AwaitingConfirmation => {
+                EmitterPublishingDrainStateEnvelope::AwaitingConfirmation
+            }
+            crate::runtime::EmitterPublishingDrainState::RetryingInfrastructure => {
+                EmitterPublishingDrainStateEnvelope::RetryingInfrastructure
+            }
+            crate::runtime::EmitterPublishingDrainState::RetryingIcebergCommit => {
+                EmitterPublishingDrainStateEnvelope::RetryingIcebergCommit
+            }
+        },
+        pending_messages: u64::try_from(status.pending_messages).unwrap_or(u64::MAX),
+        retry_backoff_millis: status
+            .retry_backoff
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
+        retry_wait_millis: status
+            .retry_wait
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
+    }
 }
 
 impl std::fmt::Display for DrainOutstanding {
@@ -208,7 +275,7 @@ impl std::fmt::Display for DrainOutstanding {
             write!(
                 formatter,
                 "timed out draining domain '{}' on node '{}': {} outstanding work item(s) \
-                 (ingestors={}, generators={}, acknowledgements={}, emitter_buffers={})",
+                 (ingestors={}, generators={}, acknowledgements={}, emitter_buffers={}",
                 self.domain.as_str(),
                 node,
                 total,
@@ -216,7 +283,9 @@ impl std::fmt::Display for DrainOutstanding {
                 self.active_generators,
                 self.outstanding_acks,
                 self.buffered_emitter_messages,
-            )
+            )?;
+            self.write_emitter_publishing(formatter)?;
+            formatter.write_str(")")
         } else if let Some(status_error) = &self.status_error {
             write!(
                 formatter,
@@ -241,12 +310,14 @@ enum DomainAlterError {
     QuiesceTimeout { outstanding: DrainOutstanding },
     #[error(
         "timed out draining domain '{domain}' for entity alteration: \
-         relay_buffers={buffered_relay_batches}, node_work_items={node_work_items}"
+         relay_buffers={buffered_relay_batches}, \
+         node_work_items={node_work_items}{emitter_publishing}"
     )]
     EntityQuiesceTimeout {
         domain: Domain,
         buffered_relay_batches: usize,
         node_work_items: usize,
+        emitter_publishing: String,
     },
     #[error("failed to pause domain '{domain}' for model alteration: {reason}")]
     PauseDomain { domain: Domain, reason: String },
@@ -5337,12 +5408,18 @@ impl SessionServiceImpl {
 
     fn local_domain_drain_status(&self, domain: &Domain) -> DomainDrainStatusEnvelope {
         let status = self.runtime.domain_drain_status(domain);
+        let emitter_publishing = status
+            .emitter_publishing
+            .into_iter()
+            .map(emitter_publishing_drain_status_envelope)
+            .collect();
         DomainDrainStatusEnvelope {
             active_ingestors: u64::try_from(status.active_ingestors).unwrap_or(u64::MAX),
             active_generators: u64::try_from(status.active_generators).unwrap_or(u64::MAX),
             outstanding_acks: u64::try_from(status.outstanding_acks).unwrap_or(u64::MAX),
             buffered_emitter_messages: u64::try_from(status.buffered_emitter_messages)
                 .unwrap_or(u64::MAX),
+            emitter_publishing,
         }
     }
 
@@ -5406,10 +5483,16 @@ impl SessionServiceImpl {
         let status = self
             .runtime
             .entity_drain_status(domain, relays, affected_entities);
+        let emitter_publishing = status
+            .emitter_publishing
+            .into_iter()
+            .map(emitter_publishing_drain_status_envelope)
+            .collect();
         EntityDrainStatusEnvelope {
             buffered_relay_batches: u64::try_from(status.buffered_relay_batches)
                 .unwrap_or(u64::MAX),
             node_work_items: u64::try_from(status.node_work_items).unwrap_or(u64::MAX),
+            emitter_publishing,
         }
     }
 
@@ -5660,6 +5743,7 @@ impl SessionServiceImpl {
         let mut last_status = EntityDrainStatusEnvelope {
             buffered_relay_batches: 0,
             node_work_items: 0,
+            emitter_publishing: Vec::new(),
         };
         loop {
             tokio::task::consume_budget().await;
@@ -5698,6 +5782,9 @@ impl SessionServiceImpl {
                         .unwrap_or(usize::MAX),
                     node_work_items: usize::try_from(last_status.node_work_items)
                         .unwrap_or(usize::MAX),
+                    emitter_publishing: emitter_publishing_drain_summary(
+                        &last_status.emitter_publishing,
+                    ),
                 }));
             }
         }
@@ -5817,6 +5904,7 @@ impl SessionServiceImpl {
                     active_generators: status.active_generators,
                     outstanding_acks: status.outstanding_acks,
                     buffered_emitter_messages: status.buffered_emitter_messages,
+                    emitter_publishing: status.emitter_publishing,
                     status_error: last_status_error,
                 }
             } else {
@@ -5827,6 +5915,7 @@ impl SessionServiceImpl {
                     active_generators: 0,
                     outstanding_acks: 0,
                     buffered_emitter_messages: 0,
+                    emitter_publishing: Vec::new(),
                     status_error: last_status_error,
                 }
             };
@@ -11326,6 +11415,10 @@ fn format_emitter_describe_output(
         ),
         format!("sink: {}", format_emit_sink(&emitter.sink)),
         format!(
+            "publishing mode: {}",
+            emitter.publishing_mode.to_canonical_nspl()
+        ),
+        format!(
             "filter-map: {}",
             if !emitter.construction.is_empty() {
                 "present"
@@ -11370,19 +11463,40 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             )
         }
         EmitSink::ZeroMq { client } => format!("ZEROMQ client={}", client.as_str()),
-        EmitSink::Sqs { client, queue } => {
-            format!("SQS client={} queue={}", client.as_str(), queue.as_str())
+        EmitSink::Sqs {
+            client,
+            queue,
+            fifo_group,
+        } => {
+            let fifo = fifo_group.as_ref().map_or_else(String::new, |group| {
+                let value = match group {
+                    nervix_models::SqsFifoGroup::FromBranch => "FROM BRANCH".to_string(),
+                    nervix_models::SqsFifoGroup::Expression(expression) => {
+                        nervix_models::expression_to_nspl(expression)
+                            .unwrap_or_else(|_| "<unrenderable expression>".to_string())
+                    }
+                };
+                format!(" fifo_group={value}")
+            });
+            format!(
+                "SQS client={} queue={}{}",
+                client.as_str(),
+                queue.as_str(),
+                fifo
+            )
         }
         EmitSink::Sentry { client } => format!("SENTRY client={}", client.as_str()),
         EmitSink::ClickHouse {
             client,
             table,
+            max_batch,
             flush_each,
             ..
         } => format!(
-            "CLICKHOUSE client={} table={} flush={}",
+            "CLICKHOUSE client={} table={} max_batch={} flush={}",
             client.as_str(),
             table.as_str(),
+            max_batch,
             flush_each
         ),
         EmitSink::Postgres {
@@ -16816,8 +16930,9 @@ mod tests {
              input.user_id MAX TIME 10m UNBRANCHED TO forwarded_notifications INHERIT ALL FLUSH \
              EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE DETACHED EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC \
-             notifications_out ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX \
-             BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
+             notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
+             LOG ON GENERAL ERROR LOG;",
         ];
 
         for command in commands {

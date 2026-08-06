@@ -240,13 +240,14 @@ mod tests {
         CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter,
         CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
         CreateSignalingProtocol, CreateWireSchema, DescribeRelay, DrainNode, DropModel, DropNode,
-        EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
-        Identifier as ModelIdentifier, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
-        KafkaOffsetMode, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
-        OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SchemaField,
-        SignalingProtocolOnConnect, SqsIngestMode, Statement, SubscriptionBinding,
-        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
+        EmitSink, EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies,
+        GeneralErrorPolicy, Identifier as ModelIdentifier, IngestSource, JsonType,
+        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, MqttIngestMode,
+        MqttQos, MqttSession, NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RetryPolicy, SchemaField, SignalingProtocolOnConnect, SqsIngestMode,
+        Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode, WireSchemaField,
+        ZeroMqIngestMode,
     };
 
     use super::*;
@@ -278,6 +279,19 @@ mod tests {
         ProcessorOutputs::new(vec![
             flushed_output(relay, None).with_branch(OutputBranch::Unbranched),
         ])
+    }
+
+    fn emitter_retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            backoff: "250ms".to_string(),
+            max_backoff: "30s".to_string(),
+        }
+    }
+
+    fn emitter_publishing_mode() -> EmitterPublishingMode {
+        EmitterPublishingMode::NoAck {
+            retry_policy: emitter_retry_policy(),
+        }
     }
 
     struct ByteGen<'a> {
@@ -721,19 +735,30 @@ mod tests {
                         filter_where: None,
                     })
                 } else {
-                    let sink = match g.next_u8() % 3 {
-                        0 => EmitSink::Kafka {
-                            client: g.ident(),
-                            topic: g.ident(),
-                        },
-                        1 => EmitSink::Pulsar {
-                            client: g.ident(),
-                            topic: g.ident(),
-                        },
-                        _ => EmitSink::Mqtt {
-                            client: g.ident(),
-                            topic: g.ident(),
-                        },
+                    let (sink, publishing_mode) = match g.next_u8() % 3 {
+                        0 => (
+                            EmitSink::Kafka {
+                                client: g.ident(),
+                                topic: g.ident(),
+                            },
+                            emitter_publishing_mode(),
+                        ),
+                        1 => (
+                            EmitSink::Pulsar {
+                                client: g.ident(),
+                                topic: g.ident(),
+                            },
+                            emitter_publishing_mode(),
+                        ),
+                        _ => (
+                            EmitSink::Mqtt {
+                                client: g.ident(),
+                                topic: g.ident(),
+                            },
+                            EmitterPublishingMode::MqttQos0 {
+                                retry_policy: emitter_retry_policy(),
+                            },
+                        ),
                     };
 
                     Model::Emitter(CreateEmitter {
@@ -741,6 +766,7 @@ mod tests {
                         from: ProcessorInputs::single(g.ident()),
                         encode_using_codec: Some(g.ident()),
                         sink,
+                        publishing_mode,
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         mode: if g.bool() {
@@ -802,6 +828,7 @@ mod tests {
                 from: ProcessorInputs::single(g.ident()),
                 encode_using_codec: Some(g.ident()),
                 sink: EmitSink::ZeroMq { client: g.ident() },
+                publishing_mode: emitter_publishing_mode(),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: if g.bool() {
@@ -833,6 +860,7 @@ mod tests {
                     client: g.ident(),
                     subject: g.ident(),
                 },
+                publishing_mode: emitter_publishing_mode(),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: if g.bool() {
@@ -1186,8 +1214,8 @@ mod tests {
     #[test]
     fn a_cross_clause_constraint_is_reported_where_it_was_broken() {
         let error = parse_statement(
-            "CREATE EMITTER e FROM r TO KAFKA c TOPIC t FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
-             GENERAL ERROR LOG",
+            "CREATE EMITTER e FROM r TO KAFKA c TOPIC t MODE NO_ACK RETRY POLICY BACKOFF 250ms \
+             MAX 30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG",
         )
         .expect_err("an encoded sink needs a codec");
         assert!(
@@ -1837,8 +1865,8 @@ mod tests {
     fn parses_emitter_statement_with_implicit_attached_mode() {
         let parsed = parse_statement(
             "CREATE EMITTER emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out \
-             ENCODE USING notification_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
-             ERROR LOG ON GENERAL ERROR LOG;",
+             MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1865,8 +1893,8 @@ mod tests {
             (
                 "emitter",
                 "CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC \
-                 notifications_out ENCODE USING notification_codec FLUSH EACH 100ms MAX BATCH \
-                 SIZE 1MiB ON MESSAGE ERROR LOG",
+                 notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
+                 notification_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG",
                 " ON GENERAL ERROR LOG;",
             ),
         ];
@@ -2199,9 +2227,9 @@ mod tests {
     #[test]
     fn canonical_roundtrip_alter_emitter() {
         let parsed = parse_statement(
-            "ALTER EMITTER event_sink SET TO ZEROMQ sink_b, SET CLIENT sink_c, SET ENCODE USING \
-             event_codec, SET COLLECT FOR 10ms MAX BATCH SIZE 1MiB, SET DETACHED, SET FLUSH \
-             IMMEDIATE;",
+            "ALTER EMITTER event_sink SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms \
+             MAX 30s, SET CLIENT sink_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
+             BATCH SIZE 1MiB, SET DETACHED, SET FLUSH IMMEDIATE;",
         )
         .expect("parse should succeed");
         let Statement::AlterEmitter(alter) = parsed else {
@@ -2653,7 +2681,8 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 COLLECT FOR 50ms
-                TO KAFKA broker1 TOPIC topic ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2671,7 +2700,9 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                TO PULSAR pulsar_main TOPIC topic ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                TO PULSAR pulsar_main TOPIC topic MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s
+                RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec
+                FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2689,7 +2720,9 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                TO RABBITMQ broker1 QUEUE outbox ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                TO RABBITMQ broker1 QUEUE outbox MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+                RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec
+                FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2707,7 +2740,8 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                TO REDIS PUBSUB broker1 CHANNEL outbox ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                TO REDIS PUBSUB broker1 CHANNEL outbox MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 

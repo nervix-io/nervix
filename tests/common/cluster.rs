@@ -12,7 +12,7 @@ use std::{
 use async_nats::Client as NatsClient;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
-use aws_sdk_sqs::Client as SqsClient;
+use aws_sdk_sqs::{Client as SqsClient, types::QueueAttributeName};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fjall::Database;
 use futures_util::SinkExt;
@@ -50,6 +50,7 @@ use rdkafka::{
     error::RDKafkaErrorCode,
     message::{Header as KafkaHeader, Headers, Message, OwnedHeaders},
     producer::{FutureProducer, FutureRecord},
+    topic_partition_list::{Offset, TopicPartitionList},
 };
 use redis::AsyncCommands;
 use rumqttc::{
@@ -62,8 +63,9 @@ use rustls::{
 use rustls_pki_types::pem::PemObject;
 use tempfile::{TempDir, tempdir};
 use tokio::{
-    net::TcpStream,
-    sync::{mpsc, oneshot},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener as TokioTcpListener, TcpStream},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -109,6 +111,128 @@ static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
 static RESERVED_TEST_PORTS: LazyLock<Mutex<BTreeSet<u16>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
 static TEST_LOG_TRUNCATED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+#[derive(Debug)]
+pub(crate) struct StallableTcpProxy {
+    local_addr: std::net::SocketAddr,
+    paused: watch::Sender<bool>,
+    cancellation: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl StallableTcpProxy {
+    pub(crate) async fn start(target_host: String, target_port: u16) -> io::Result<Self> {
+        let listener = TokioTcpListener::bind((HOST, 0)).await?;
+        let local_addr = listener.local_addr()?;
+        let (paused, paused_rx) = watch::channel(false);
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::task::consume_budget().await;
+                let accepted = tokio::select! {
+                    _ = task_cancellation.cancelled() => return,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((downstream, _)) = accepted else {
+                    return;
+                };
+                let target_host = target_host.clone();
+                let paused = paused_rx.clone();
+                let connection_cancellation = task_cancellation.child_token();
+                tokio::spawn(async move {
+                    let Ok(upstream) =
+                        TcpStream::connect((target_host.as_str(), target_port)).await
+                    else {
+                        return;
+                    };
+                    let (downstream_read, downstream_write) = downstream.into_split();
+                    let (upstream_read, upstream_write) = upstream.into_split();
+                    let upstream_copy = copy_through_stall_gate(
+                        downstream_read,
+                        upstream_write,
+                        paused.clone(),
+                        connection_cancellation.clone(),
+                    );
+                    let downstream_copy = copy_through_stall_gate(
+                        upstream_read,
+                        downstream_write,
+                        paused,
+                        connection_cancellation,
+                    );
+                    let _ = tokio::join!(upstream_copy, downstream_copy);
+                });
+            }
+        });
+        Ok(Self {
+            local_addr,
+            paused,
+            cancellation,
+            task,
+        })
+    }
+
+    pub(crate) fn local_port(&self) -> u16 {
+        self.local_addr.port()
+    }
+
+    pub(crate) fn set_paused(&self, paused: bool) {
+        self.paused.send_replace(paused);
+    }
+}
+
+impl Drop for StallableTcpProxy {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        self.task.abort();
+    }
+}
+
+async fn copy_through_stall_gate<Reader, Writer>(
+    mut reader: Reader,
+    mut writer: Writer,
+    mut paused: watch::Receiver<bool>,
+    cancellation: CancellationToken,
+) -> io::Result<()>
+where
+    Reader: AsyncRead + Unpin,
+    Writer: AsyncWrite + Unpin,
+{
+    let mut buffer = vec![0_u8; 16 * 1024];
+    loop {
+        tokio::task::consume_budget().await;
+        wait_for_proxy_resume(&mut paused, &cancellation).await?;
+        let read = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Ok(()),
+            changed = paused.changed() => {
+                changed.map_err(io::Error::other)?;
+                continue;
+            }
+            read = reader.read(&mut buffer) => read?,
+        };
+        if read == 0 {
+            writer.shutdown().await?;
+            return Ok(());
+        }
+        wait_for_proxy_resume(&mut paused, &cancellation).await?;
+        writer.write_all(&buffer[..read]).await?;
+    }
+}
+
+async fn wait_for_proxy_resume(
+    paused: &mut watch::Receiver<bool>,
+    cancellation: &CancellationToken,
+) -> io::Result<()> {
+    while *paused.borrow_and_update() {
+        tokio::task::consume_budget().await;
+        tokio::select! {
+            _ = cancellation.cancelled() => return Err(io::Error::other("TCP proxy stopped")),
+            changed = paused.changed() => changed.map_err(io::Error::other)?,
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn next_port() -> io::Result<u16> {
     let mut ports = next_ports(1)?;
@@ -685,6 +809,56 @@ impl Cluster {
         }
     }
 
+    pub(crate) async fn assert_kafka_consumer_group_next_offset(
+        &self,
+        group: &str,
+        topic: &str,
+        partition: i32,
+        threshold: i64,
+        should_reach: bool,
+        duration: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + duration;
+        loop {
+            tokio::task::consume_budget().await;
+            let dependencies = self.dependencies.clone();
+            let query_group = group.to_string();
+            let query_topic = topic.to_string();
+            let actual = tokio::task::spawn_blocking(move || {
+                kafka_consumer_group_next_offset(
+                    &dependencies,
+                    &query_group,
+                    &query_topic,
+                    partition,
+                )
+            })
+            .await
+            .map_err(io::Error::other)??;
+            let reached = actual.is_some_and(|offset| offset >= threshold);
+            if should_reach && reached {
+                return Ok(());
+            }
+            if !should_reach && reached {
+                return Err(io::Error::other(format!(
+                    "Kafka consumer group '{group}' unexpectedly committed next offset {actual:?} \
+                     for topic '{topic}' partition {partition}; expected it to remain below \
+                     {threshold}"
+                )));
+            }
+            if Instant::now() >= deadline {
+                if should_reach {
+                    return Err(io::Error::other(format!(
+                        "timed out waiting for Kafka consumer group '{group}' to commit next \
+                         offset at least {threshold} for topic '{topic}' partition {partition}; \
+                         observed {actual:?}"
+                    )));
+                }
+                return Ok(());
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub(crate) async fn wait_for_rabbitmq_queue_consumers(
         &self,
         queue: &str,
@@ -903,6 +1077,23 @@ impl Cluster {
 
     pub(crate) async fn publish_nats(&self, subject: &str, payload: &str) -> io::Result<()> {
         publish_nats(&self.dependencies, subject, payload).await
+    }
+
+    pub(crate) async fn provision_nats_stream(
+        &self,
+        stream: &str,
+        subject: &str,
+    ) -> io::Result<()> {
+        provision_nats_stream(&self.dependencies, stream, subject).await
+    }
+
+    pub(crate) async fn wait_for_nats_stream_payload(
+        &self,
+        stream: &str,
+        subject: &str,
+        expected: &str,
+    ) -> io::Result<()> {
+        wait_for_nats_stream_payload(&self.dependencies, stream, subject, expected).await
     }
 
     pub(crate) async fn publish_nats_with_headers(
@@ -3323,25 +3514,55 @@ fn kafka_consumer_group_member_count(
     Ok(info.members().len())
 }
 
+fn kafka_consumer_group_next_offset(
+    dependencies: &DependencyEndpoints,
+    group: &str,
+    topic: &str,
+    partition: i32,
+) -> io::Result<Option<i64>> {
+    let mut client_config = kafka_client_config(dependencies)?;
+    let consumer: BaseConsumer = client_config
+        .set("group.id", group)
+        .set("enable.auto.commit", "false")
+        .create()
+        .map_err(io::Error::other)?;
+    let mut partitions = TopicPartitionList::new();
+    partitions.add_partition(topic, partition);
+    let committed = consumer
+        .committed_offsets(partitions, Duration::from_secs(1))
+        .map_err(io::Error::other)?;
+    let offset = committed
+        .find_partition(topic, partition)
+        .map(|element| element.offset())
+        .and_then(|offset| match offset {
+            Offset::Offset(offset) => Some(offset),
+            Offset::Beginning
+            | Offset::End
+            | Offset::Stored
+            | Offset::Invalid
+            | Offset::OffsetTail(_) => None,
+        });
+    Ok(offset)
+}
+
 async fn ensure_sqs_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
     let client = sqs_client(dependencies).await?;
-    client
-        .create_queue()
-        .queue_name(queue)
-        .send()
-        .await
-        .map_err(io::Error::other)?;
-    Ok(())
+    create_sqs_queue(&client, queue).await
 }
 
 async fn ensure_sqs_queue_tls(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
     let client = sqs_tls_client(dependencies).await?;
-    client
-        .create_queue()
-        .queue_name(queue)
-        .send()
-        .await
-        .map_err(io::Error::other)?;
+    create_sqs_queue(&client, queue).await
+}
+
+async fn create_sqs_queue(client: &SqsClient, queue: &str) -> io::Result<()> {
+    let mut request = client.create_queue().queue_name(queue);
+    if queue.ends_with(".fifo") {
+        request = request
+            .attributes(QueueAttributeName::FifoQueue, "true")
+            .attributes(QueueAttributeName::ContentBasedDeduplication, "true");
+    }
+    request.send().await.map_err(io::Error::other)?;
     Ok(())
 }
 
@@ -3757,7 +3978,7 @@ async fn observe_sqs(
     ensure_sqs_queue(dependencies, queue).await?;
     let client = sqs_client(dependencies).await?;
     let queue_url = sqs_queue_url(&client, queue).await?;
-    let (payload_tx, payload_rx) = mpsc::channel(1);
+    let (payload_tx, payload_rx) = mpsc::channel(16);
 
     let task = tokio::spawn(async move {
         while let Ok(response) = client
@@ -3781,8 +4002,13 @@ async fn observe_sqs(
                     .send()
                     .await;
             }
-            let _ = payload_tx.send(BrokerMessage::payload(payload)).await;
-            break;
+            if payload_tx
+                .send(BrokerMessage::payload(payload))
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     });
 
@@ -3850,6 +4076,58 @@ async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClien
     async_nats::connect(dependencies.get(NATS_ADDR)?)
         .await
         .map_err(io::Error::other)
+}
+
+async fn provision_nats_stream(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    subject: &str,
+) -> io::Result<()> {
+    let client = nats_client(dependencies).await?;
+    async_nats::jetstream::new(client)
+        .create_stream(async_nats::jetstream::stream::Config {
+            name: stream.to_string(),
+            subjects: vec![subject.to_string()],
+            storage: async_nats::jetstream::stream::StorageType::Memory,
+            ..Default::default()
+        })
+        .await
+        .map(|_| ())
+        .map_err(io::Error::other)
+}
+
+async fn wait_for_nats_stream_payload(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    subject: &str,
+    expected: &str,
+) -> io::Result<()> {
+    let client = nats_client(dependencies).await?;
+    let stream_handle = async_nats::jetstream::new(client)
+        .get_stream_no_info(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let deadline = Instant::now() + BROKER_TIMEOUT;
+    loop {
+        tokio::task::consume_budget().await;
+        let last_observation = match stream_handle.get_last_raw_message_by_subject(subject).await {
+            Ok(message) => {
+                let payload = String::from_utf8_lossy(&message.payload).to_string();
+                if payload.contains(expected.trim()) {
+                    return Ok(());
+                }
+                format!("payload {payload:?}")
+            }
+            Err(error) => format!("error {error}"),
+        };
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "timed out waiting for NATS JetStream stream '{stream}' subject '{subject}' to \
+                 contain {expected:?}; last observation: {last_observation}"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
+    }
 }
 
 async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {

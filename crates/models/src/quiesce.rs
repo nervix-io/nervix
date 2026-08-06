@@ -91,6 +91,7 @@ pub enum ModelChangeAspect {
     EmitterCodec,
     EmitterCollectPolicy,
     EmitterMode,
+    EmitterPublishingMode,
     EmitterFlushPolicy,
     EmitterConstruction,
     EmitterErrorPolicies,
@@ -199,6 +200,7 @@ impl ModelChangeAspect {
             | Self::EmitterInputWhere
             | Self::EmitterCollectPolicy
             | Self::EmitterMode
+            | Self::EmitterPublishingMode
             | Self::EmitterConstruction
             | Self::EmitterErrorPolicies
             | Self::EmitterMaterializedState
@@ -1278,6 +1280,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         flush_each: base_flush_each,
         max_batch_size: base_max_batch_size,
         error_policies: base_error_policies,
+        publishing_mode: base_publishing_mode,
         mode: base_mode,
         construction: base_construction,
         materialized_state: base_materialized_state,
@@ -1290,6 +1293,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         flush_each: candidate_flush_each,
         max_batch_size: candidate_max_batch_size,
         error_policies: candidate_error_policies,
+        publishing_mode: candidate_publishing_mode,
         mode: candidate_mode,
         construction: candidate_construction,
         materialized_state: candidate_materialized_state,
@@ -1320,6 +1324,9 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     }
     if base_mode != candidate_mode {
         changes.push(ModelChangeAspect::EmitterMode);
+    }
+    if base_publishing_mode != candidate_publishing_mode {
+        changes.push(ModelChangeAspect::EmitterPublishingMode);
     }
     if base_construction != candidate_construction {
         changes.push(ModelChangeAspect::EmitterConstruction);
@@ -1383,17 +1390,19 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 client: _,
                 queue: candidate_queue,
             },
-        )
-        | (
+        ) => base_queue == candidate_queue,
+        (
             EmitSink::Sqs {
                 client: _,
                 queue: base_queue,
+                fifo_group: base_fifo_group,
             },
             EmitSink::Sqs {
                 client: _,
                 queue: candidate_queue,
+                fifo_group: candidate_fifo_group,
             },
-        ) => base_queue == candidate_queue,
+        ) => base_queue == candidate_queue && base_fifo_group == candidate_fifo_group,
         (
             EmitSink::Redis {
                 client: _,
@@ -1421,15 +1430,21 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 client: _,
                 table: base_table,
                 values: base_values,
+                max_batch: base_max_batch,
                 flush_each: _,
             },
             EmitSink::ClickHouse {
                 client: _,
                 table: candidate_table,
                 values: candidate_values,
+                max_batch: candidate_max_batch,
                 flush_each: _,
             },
-        ) => base_table == candidate_table && base_values == candidate_values,
+        ) => {
+            base_table == candidate_table
+                && base_values == candidate_values
+                && base_max_batch == candidate_max_batch
+        }
         (
             EmitSink::Postgres {
                 client: _,
@@ -1572,11 +1587,11 @@ mod tests {
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, Identifier, IngestSource,
-        IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, Identifier,
+        IngestSource, IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
         MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
         ModelChangeAspect, ModelKind, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
+        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -1656,6 +1671,12 @@ mod tests {
             flush_each: "1s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             error_policies: ErrorPolicies::handled_by_log(),
+            publishing_mode: EmitterPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             mode: AckMode::Attached,
             construction: crate::RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -2058,6 +2079,20 @@ mod tests {
             Model::Emitter(base.clone()),
             Model::Emitter(mode),
             ModelChangeAspect::EmitterMode,
+            QuiesceLevel::EntityPause,
+        );
+
+        let mut publishing_mode = base.clone();
+        publishing_mode.publishing_mode = EmitterPublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "500ms".to_string(),
+                max_backoff: "45s".to_string(),
+            },
+        };
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(publishing_mode),
+            ModelChangeAspect::EmitterPublishingMode,
             QuiesceLevel::EntityPause,
         );
 

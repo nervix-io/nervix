@@ -28,6 +28,26 @@ struct PendingMessageErrorDelivery {
     flush_at: Timestamp,
 }
 
+impl PendingMessageErrorDelivery {
+    fn ack_source_alive(&self) {
+        for delivery in &self.deliveries {
+            delivery.ack_source_alive();
+        }
+    }
+}
+
+impl MessageErrorDelivery {
+    fn ack_source_alive(&self) {
+        for ack in &self.source_acks {
+            ack.ack_alive();
+        }
+    }
+
+    fn merged_source_acks(&self) -> AckSet {
+        AckSet::merged(self.source_acks.iter().cloned())
+    }
+}
+
 pub(super) struct MessageErrorRouteRuntime {
     sender: mpsc::Sender<MessageErrorDelivery>,
     shutdown: watch::Sender<bool>,
@@ -129,7 +149,23 @@ impl MessageErrorRouteTask {
         }
     }
 
+    fn ack_pending_alive(&self) {
+        for pending in self.pending.values() {
+            pending.ack_source_alive();
+        }
+    }
+
+    fn pending_acks(&self) -> AckSet {
+        AckSet::merged(
+            self.pending
+                .values()
+                .flat_map(|pending| &pending.deliveries)
+                .flat_map(|delivery| delivery.source_acks.iter().cloned()),
+        )
+    }
+
     async fn flush_key(&mut self, key: &Option<BranchKey>) {
+        let pending_acks = self.pending_acks();
         let Some(pending) = self.pending.remove(key) else {
             return;
         };
@@ -137,6 +173,7 @@ impl MessageErrorRouteTask {
         let mut source_acks = Vec::new();
         for delivery in pending.deliveries {
             tokio::task::consume_budget().await;
+            pending_acks.ack_alive();
             batches.push(delivery.batch);
             source_acks.extend(delivery.source_acks);
         }
@@ -158,17 +195,18 @@ impl MessageErrorRouteTask {
                 return;
             }
         };
-        if self
-            .runtime
-            .ingest_stream_boundary_message(
+        if await_message_error_ack_alive(
+            &pending_acks,
+            self.runtime.ingest_stream_boundary_message(
                 &self.route.domain,
                 &self.route.error_relay,
                 &self.target.registry,
                 &self.target.services,
                 &batch,
-            )
-            .await
-            .is_err()
+            ),
+        )
+        .await
+        .is_err()
         {
             self.report_failure(
                 &source_acks,
@@ -267,6 +305,9 @@ impl MessageErrorRouteTask {
                 _ = sleep(flush_wait), if next_flush.is_some() => {
                     self.flush_due(self.now()).await;
                 }
+                _ = sleep(REMOTE_ACK_ALIVE_INTERVAL), if next_flush.is_some() => {
+                    self.ack_pending_alive();
+                }
                 delivery = input.recv() => {
                     let Some(delivery) = delivery else {
                         self.flush_all().await;
@@ -275,6 +316,22 @@ impl MessageErrorRouteTask {
                     self.accept(delivery).await;
                 }
             }
+        }
+    }
+}
+
+async fn await_message_error_ack_alive<F>(acks: &AckSet, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::pin!(future);
+    loop {
+        tokio::task::consume_budget().await;
+        acks.ack_alive();
+        tokio::select! {
+            biased;
+            result = &mut future => return result,
+            _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
         }
     }
 }
@@ -297,14 +354,17 @@ impl Runtime {
                 route_runtime
             }
         };
-        route_runtime.sender.send(delivery).await.map_err(|_| {
-            format!(
-                "message-error route for {} '{}' to relay '{}' is stopped",
-                failure_route.node_kind,
-                failure_route.node.as_str(),
-                failure_route.error_relay.as_str()
-            )
-        })
+        let source_acks = delivery.merged_source_acks();
+        await_message_error_ack_alive(&source_acks, route_runtime.sender.send(delivery))
+            .await
+            .map_err(|_| {
+                format!(
+                    "message-error route for {} '{}' to relay '{}' is stopped",
+                    failure_route.node_kind,
+                    failure_route.node.as_str(),
+                    failure_route.error_relay.as_str()
+                )
+            })
     }
 
     pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &Domain) {
@@ -319,5 +379,133 @@ impl Runtime {
                 route.shutdown().await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identifier(value: &str) -> Identifier {
+        Identifier::parse(value).expect("valid identifier")
+    }
+
+    fn test_delivery() -> (MessageErrorDelivery, AckCompletion) {
+        let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
+            name: identifier("message_error"),
+            fields: Vec::new(),
+        }));
+        let batch = RelayRecordBatch::single(
+            schema,
+            None,
+            RuntimeRecord::from_fields([]),
+            AckSet::empty(),
+        )
+        .expect("message-error batch must build");
+        let (source_acks, completion) = AckSet::root();
+        (
+            MessageErrorDelivery {
+                batch,
+                source_acks: vec![source_acks],
+            },
+            completion,
+        )
+    }
+
+    fn test_task(
+        flush_policy: RuntimeFlushPolicy,
+        fanout: RelayBoundaryFanout,
+    ) -> MessageErrorRouteTask {
+        MessageErrorRouteTask {
+            runtime: Runtime::default(),
+            route: MessageErrorRouteKey {
+                domain: Domain::try_from("test").expect("valid domain"),
+                node_kind: "emitter".to_string(),
+                node: identifier("notifications"),
+                source_route: None,
+                error_relay: identifier("emitter_errors"),
+            },
+            target: MessageErrorRouteTarget {
+                registry: RelayRegistry::new(),
+                services: Arc::new(RelayBoundaryServices::new(fanout, 0, 0, Vec::new(), None)),
+            },
+            flush_policy,
+            pending: HashMap::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_message_error_refreshes_source_ack_before_flush_deadline() {
+        let interval = REMOTE_ACK_ALIVE_INTERVAL.saturating_mul(4);
+        let fanout = RelayBoundaryFanout::direct_with_capacity(
+            NonZeroUsize::new(1).expect("non-zero test capacity"),
+        );
+        let task = test_task(
+            RuntimeFlushPolicy::Each {
+                interval,
+                max_batch_size: u64::MAX,
+            },
+            fanout,
+        );
+        let (sender, input) = mpsc::channel(1);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(task.run(input, shutdown_rx));
+        let (delivery, mut completion) = test_delivery();
+
+        sender
+            .send(delivery)
+            .await
+            .expect("message-error task must accept delivery");
+
+        assert_eq!(
+            tokio::time::timeout(
+                REMOTE_ACK_ALIVE_INTERVAL.saturating_mul(2),
+                completion.wait_for_progress(),
+            )
+            .await
+            .expect("pending message error must refresh its source ACK before flushing"),
+            AckProgress::Alive
+        );
+
+        shutdown.send_replace(true);
+        task.await.expect("message-error task must stop cleanly");
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+    }
+
+    #[tokio::test]
+    async fn blocked_message_error_relay_delivery_refreshes_source_ack() {
+        let fanout = RelayBoundaryFanout::direct_with_capacity(
+            NonZeroUsize::new(1).expect("non-zero test capacity"),
+        );
+        let gate = fanout.dispatch_gate();
+        let gate_token = gate.engage(
+            Instant::now() + Duration::from_secs(2),
+            "block message-error relay delivery",
+        );
+        let task = test_task(RuntimeFlushPolicy::Immediate, fanout);
+        let (sender, input) = mpsc::channel(1);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(task.run(input, shutdown_rx));
+        let (delivery, mut completion) = test_delivery();
+
+        sender
+            .send(delivery)
+            .await
+            .expect("message-error task must accept delivery");
+
+        assert_eq!(
+            tokio::time::timeout(
+                REMOTE_ACK_ALIVE_INTERVAL.saturating_mul(2),
+                completion.wait_for_progress(),
+            )
+            .await
+            .expect("blocked message-error relay must refresh its source ACK"),
+            AckProgress::Alive
+        );
+
+        gate.release(gate_token);
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        shutdown.send_replace(true);
+        task.await.expect("message-error task must stop cleanly");
     }
 }

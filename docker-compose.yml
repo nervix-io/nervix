@@ -225,7 +225,7 @@ services:
       start_period: 5s
 
   mongodb:
-    image: mongo:7.0
+    image: mongo:8.2
     container_name: nervix-mongodb
     ports:
       - "27017:27017"
@@ -244,7 +244,7 @@ services:
       start_period: 5s
 
   mongodb-tls:
-    image: mongo:7.0
+    image: mongo:8.2
     container_name: nervix-mongodb-tls
     entrypoint: ["bash", "-c"]
     command:

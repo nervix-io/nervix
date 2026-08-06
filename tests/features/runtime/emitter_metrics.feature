@@ -40,7 +40,7 @@ Feature: Emitter metrics
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER emitter_metrics_node FROM notifications TO ZEROMQ zeromq_main ENCODE USING notification_codec
+        CREATE EMITTER emitter_metrics_node FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
