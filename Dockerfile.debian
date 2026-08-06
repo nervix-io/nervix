@@ -8,7 +8,7 @@ ARG FLATBUFFERS_SHA256=f81c3162b1046fe8b84b9a0dbdd383e24fdbcf88583b9cb6028f90d04
 
 ARG SONIC_PARALLELISM=2
 ARG SONIC_TARGET_CPUS=x86-64-v3
-ARG ONNXRUNTIME_VERSION=1.24.2
+ARG ONNXRUNTIME_VERSION=1.24.4
 
 FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS builder
 
@@ -90,7 +90,7 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
     | bash \
     && cargo binstall --no-confirm cargo-auditable \
     && cargo binstall --no-confirm trunk \
-    && cargo install cargo-sonic
+    && cargo install cargo-sonic --git https://github.com/glebpom/cargo-sonic
 
 WORKDIR /app
 
