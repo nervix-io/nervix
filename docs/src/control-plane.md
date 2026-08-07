@@ -5,7 +5,7 @@ The control plane is where Nervix applies strong consistency.
 It is responsible for:
 
 - storing NSPL models
-- validating references and compatibility
+- validating references, compatibility, and placement claims
 - computing domain schedules
 - tracking domain lifecycle
 - handling cluster coordination
@@ -19,7 +19,7 @@ In practice, the control plane covers:
 
 - domain creation and selection
 - model creation and deletion
-- scheduling decisions
+- scheduling decisions, including domain defaults and named placement rules
 - explicit node removal with `DROP NODE <node_id>`
 - node cordon and uncordon with `CORDON NODE <node_id>` and `UNCORDON NODE <node_id>`
 - node drain with `DRAIN NODE <node_id>`, which cordons the node and moves scheduled graph nodes away one at a time
@@ -38,16 +38,32 @@ of being treated as an implicit batch.
 
 Within a transaction, each consecutive run of model mutations for one domain can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
-`ALTER REORDERER`, `ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`, and
-`DROP`. Nervix applies that run as one registry mutation: all operations are evaluated in written
-order against one candidate model map, the complete domain graph is revalidated, and one atomic
-storage batch persists the result. A failure writes nothing and does not swap the active registry
-state. This supports coordinated wire-schema, internal-schema, codec, relay, processor, emitter,
-ingestor, generator, and dependent-node migrations without exposing an invalid intermediate graph.
+`ALTER REORDERER`, `ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`,
+`ALTER PLACEMENT`, and `DROP`. Nervix applies that run as one registry mutation: all operations are
+evaluated in written order against one candidate model map, the complete domain graph is
+revalidated, and one atomic storage batch persists the result. A failure writes nothing and does
+not swap the active registry state. This supports coordinated wire-schema, internal-schema, codec,
+relay, processor, emitter, ingestor, generator, placement, and dependent-node migrations without
+exposing an invalid intermediate graph.
 
 Transaction control also queues lifecycle and other server statements, but those statements are
 not folded into the registry mutation batch. Data-plane records are likewise outside this
 control-plane atomicity.
+
+## Placement Activation
+
+Placement coverage is derived from the complete candidate execution graph rather than stored as a
+fixed runtime-node list. During every graph activation, the control plane recomputes path-gated
+rule claims, applies rank resolution, rejects equal-rank policy conflicts, and forms the effective
+`REQUIRE COLOCATION` groups before publishing the schedule. A rejected candidate writes nothing
+and leaves the prior models and schedule active.
+
+Hard colocation groups constrain every scheduler. A newly effective require group is consolidated
+through the normal runtime-node handoff path, and failover or drain moves the group as one unit.
+Soft policies affect only future placement decisions and do not relocate existing assignments.
+`ALTER DOMAIN SET PLACEMENT` changes the active domain's fallback through the same schedule
+activation boundary. See [Placement Policies](placement.md) for corridor coverage, precedence,
+carve-outs, lifecycle commands, and introspection.
 
 ## ALTER Lock And Quiesce Classification
 
@@ -62,8 +78,9 @@ that produced it. The batch uses the highest level contributed by any changed en
 
 - `DYNAMIC` changes do not pause ingestion. Relay capacity; processor filters, source predicates,
   collection, route construction, route flush, and same-target message-error policies;
-  deduplicator/reorderer `MAX TIME`; and emitter flush policy are hot-applied from the published
-  schedule while retaining buffered and branch-local state.
+  deduplicator/reorderer `MAX TIME`; emitter flush policy; and placement definitions are
+  hot-applied from the published schedule while retaining buffered and branch-local state.
+  Placement changes can still hand off runtime nodes when a new hard colocation group requires it.
   `CREATE` and `DROP` retain their existing pause-free schedule-rebuild behavior.
 - `ENTITY_PAUSE` changes gate only the affected relays on every live node, force-flush affected
   work, and wait for the gated relay rings and target-node work counters to drain before commit.

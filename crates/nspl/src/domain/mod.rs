@@ -1,7 +1,7 @@
 use chumsky::prelude::*;
 use nervix_models::{
-    CreateDomain, CreateStatement, DomainConfig, DomainPace, DomainStartPoint, StartDomain,
-    StopDomain,
+    AlterDomain, CreateDomain, CreateStatement, DomainConfig, DomainPace, DomainStartPoint,
+    PlacementPolicy, StartDomain, StopDomain,
 };
 
 use crate::{
@@ -32,17 +32,22 @@ fn timestamp_lit<'src>()
 pub fn create_domain_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateDomain>, extra::Err<ParseError<'src>>> + Clone
 {
-    let default_unpaced =
-        kw(Identifier::Domain)
-            .ignore_then(domain_name())
-            .map(|id| CreateDomain {
-                id,
-                config: DomainConfig {
-                    pace: DomainPace::Unpaced,
-                    period: "0ms".to_string(),
-                    skew: "0ms".to_string(),
-                },
-            });
+    let placement = kw(Identifier::Placement)
+        .ignore_then(crate::placement::placement_policy_parser())
+        .or_not()
+        .map(|policy| policy.unwrap_or(PlacementPolicy::Neutral));
+    let default_unpaced = kw(Identifier::Domain)
+        .ignore_then(domain_name())
+        .then(placement.clone())
+        .map(|(id, placement)| CreateDomain {
+            id,
+            config: DomainConfig {
+                pace: DomainPace::Unpaced,
+                period: "0ms".to_string(),
+                skew: "0ms".to_string(),
+                placement,
+            },
+        });
     let paced = kw(Identifier::Paced)
         .ignore_then(kw(Identifier::Domain))
         .ignore_then(domain_name())
@@ -51,23 +56,27 @@ pub fn create_domain_parser<'src>()
         .then(duration_lit())
         .then_ignore(kw(Identifier::Skew))
         .then(duration_lit())
-        .map(|((id, period), skew)| CreateDomain {
+        .then(placement.clone())
+        .map(|(((id, period), skew), placement)| CreateDomain {
             id,
             config: DomainConfig {
                 pace: DomainPace::Paced,
                 period,
                 skew,
+                placement,
             },
         });
     let unpaced = kw(Identifier::Unpaced)
         .ignore_then(kw(Identifier::Domain))
         .ignore_then(domain_name())
-        .map(|id| CreateDomain {
+        .then(placement)
+        .map(|(id, placement)| CreateDomain {
             id,
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
                 period: "0ms".to_string(),
                 skew: "0ms".to_string(),
+                placement,
             },
         });
 
@@ -76,6 +85,17 @@ pub fn create_domain_parser<'src>()
         .then(choice((paced, unpaced, default_unpaced)))
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(|(if_not_exists, create)| CreateStatement::new(create, if_not_exists))
+}
+
+pub fn alter_domain_parser<'src>()
+-> impl Parser<'src, &'src [Token], AlterDomain, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Domain))
+        .ignore_then(kw(Identifier::Set))
+        .ignore_then(kw(Identifier::Placement))
+        .ignore_then(crate::placement::placement_policy_parser())
+        .map(|policy| AlterDomain { policy })
+        .then_ignore(tok(Token::Semicolon).or_not())
 }
 
 pub fn start_domain_parser<'src>()
@@ -142,6 +162,7 @@ pub fn suggest_domain_statement(input: &str, cursor: usize) -> Vec<String> {
     };
     let out = choice((
         create_domain_parser().to(()),
+        alter_domain_parser().to(()),
         start_domain_parser().to(()),
         stop_domain_parser().to(()),
     ))
@@ -155,7 +176,7 @@ pub fn suggest_domain_statement(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{DomainPace, DomainStartPoint, Statement};
+    use nervix_models::{DomainPace, DomainStartPoint, PlacementPolicy, Statement};
 
     use crate::statement::{parse_statement, suggest_statement};
 
@@ -170,6 +191,65 @@ mod tests {
         assert_eq!(domain.config.pace, DomainPace::Paced);
         assert_eq!(domain.config.period, "30s");
         assert_eq!(domain.config.skew, "1s");
+        assert_eq!(domain.config.placement, PlacementPolicy::Neutral);
+    }
+
+    #[test]
+    fn parses_domain_placement_on_every_create_form() {
+        for (source, expected) in [
+            (
+                "CREATE DOMAIN plain PLACEMENT PREFER COLOCATION;",
+                PlacementPolicy::PreferColocation,
+            ),
+            (
+                "CREATE UNPACED DOMAIN unpaced PLACEMENT SUGGEST SEPARATION;",
+                PlacementPolicy::SuggestSeparation,
+            ),
+            (
+                "CREATE PACED DOMAIN paced WITH PERIOD 30s SKEW 1s PLACEMENT REQUIRE COLOCATION;",
+                PlacementPolicy::RequireColocation,
+            ),
+        ] {
+            let Statement::CreateDomain(domain) =
+                parse_statement(source).expect("domain placement must parse")
+            else {
+                panic!("expected create domain");
+            };
+            assert_eq!(domain.config.placement, expected);
+        }
+    }
+
+    #[test]
+    fn parses_nameless_alter_domain_placement() {
+        let Statement::AlterDomain(alter) =
+            parse_statement("ALTER DOMAIN SET PLACEMENT NEUTRAL;").expect("must parse")
+        else {
+            panic!("expected alter domain");
+        };
+        assert_eq!(alter.policy, PlacementPolicy::Neutral);
+        parse_statement("ALTER DOMAIN prod SET PLACEMENT NEUTRAL;")
+            .expect_err("ALTER DOMAIN is nameless");
+    }
+
+    #[test]
+    fn domain_placement_completion_is_policy_scoped() {
+        let input = "ALTER DOMAIN SET PLACEMENT ";
+        let suggestions = suggest_statement(input, input.len());
+        for expected in [
+            "REQUIRE COLOCATION",
+            "PREFER COLOCATION",
+            "NEUTRAL",
+            "SUGGEST SEPARATION",
+        ] {
+            assert!(suggestions.contains(&expected.to_string()));
+        }
+        assert!(!suggestions.contains(&"REQUIRE SEPARATION".to_string()));
+        assert!(!suggestions.contains(&"DOMAIN".to_string()));
+
+        let input = "CREATE DOMAIN prod ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"PLACEMENT".to_string()));
+        assert!(!suggestions.contains(&"RANK".to_string()));
     }
 
     #[test]

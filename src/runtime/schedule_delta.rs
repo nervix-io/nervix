@@ -177,6 +177,7 @@ mod tests {
                 primary_node: Some("node-1".to_string()),
                 assigned_nodes: vec!["node-1".to_string()],
             }],
+            placement_groups: Vec::new(),
         }
     }
 
@@ -214,6 +215,7 @@ mod tests {
                 primary_node: Some("node-1".to_string()),
                 assigned_nodes: vec!["node-1".to_string()],
             }],
+            placement_groups: Vec::new(),
         }
     }
 
@@ -288,6 +290,7 @@ mod tests {
                 primary_node: Some("node-1".to_string()),
                 assigned_nodes: vec!["node-1".to_string()],
             }],
+            placement_groups: Vec::new(),
         };
         let mut dynamic_config = junction;
         dynamic_config.filter_where = Some(Expression::Literal(Literal::Bool(true)));
@@ -374,6 +377,7 @@ mod tests {
                 primary_node: Some("node-1".to_string()),
                 assigned_nodes: vec!["node-1".to_string()],
             }],
+            placement_groups: Vec::new(),
         };
 
         let mut dynamic_emitter = emitter.clone();

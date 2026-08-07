@@ -1152,6 +1152,7 @@ fn paced_domain_state(raw: &str) -> DomainState {
             pace: DomainPace::Paced,
             period: "1s".to_string(),
             skew: "250ms".to_string(),
+            placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Running,
         start_version: 0,
@@ -2431,6 +2432,7 @@ fn insert_failing_ingestor_restart_schedule(
             schedule: DomainSchedule {
                 domain: domain.clone(),
                 nodes: vec![client_node, ingestor_node],
+                placement_groups: Vec::new(),
             },
             passive_only: false,
             start_version: 0,
@@ -2590,6 +2592,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
             pace: DomainPace::Unpaced,
             period: "1s".to_string(),
             skew: "0s".to_string(),
+            placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Running,
         start_version: 1,
@@ -2625,6 +2628,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
                     }),
                 ),
             ],
+            placement_groups: Vec::new(),
         }],
     };
     runtime
@@ -2669,6 +2673,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
                 pace: DomainPace::Unpaced,
                 period: "1s".to_string(),
                 skew: "0s".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Running,
             start_version: 1,
@@ -2692,6 +2697,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
         domains: vec![DomainSchedule {
             domain: domain.clone(),
             nodes: vec![schema_node.clone()],
+            placement_groups: Vec::new(),
         }],
     };
     let current_schedule = ClusterSchedule {
@@ -2711,6 +2717,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
                     }),
                 ),
             ],
+            placement_groups: Vec::new(),
         }],
     };
 
@@ -2743,6 +2750,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                 pace: DomainPace::Unpaced,
                 period: "1s".to_string(),
                 skew: "0s".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Running,
             start_version: 0,
@@ -2855,6 +2863,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                             }),
                         ),
                     ],
+                    placement_groups: Vec::new(),
                 }],
             },
         )
@@ -2887,6 +2896,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                 pace: DomainPace::Unpaced,
                 period: "1s".to_string(),
                 skew: "0s".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Running,
             start_version: 0,
@@ -2996,6 +3006,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                             }),
                         ),
                     ],
+                    placement_groups: Vec::new(),
                 }],
             },
         )
@@ -3098,6 +3109,7 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
                 }),
             ),
         ],
+        placement_groups: Vec::new(),
     };
 
     runtime
@@ -3142,6 +3154,7 @@ fn emitter_entity_pause_gates_every_input_relay() {
             emitter.name.clone(),
             nervix_models::Model::Emitter(emitter.clone()),
         )],
+        placement_groups: Vec::new(),
     };
     schedule.nodes[0].primary_node = Some("node-2".to_string());
     schedule.nodes[0].assigned_nodes = vec!["node-2".to_string()];
@@ -3231,6 +3244,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
                 }),
             ),
         ],
+        placement_groups: Vec::new(),
     };
 
     runtime
@@ -3343,6 +3357,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
                 }),
             ),
         ],
+        placement_groups: Vec::new(),
     };
 
     runtime
@@ -4556,6 +4571,7 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
             primary_node: Some("node-1".to_string()),
             assigned_nodes: vec!["node-1".to_string()],
         }],
+        placement_groups: Vec::new(),
     };
 
     runtime.install_state_schema_fingerprints(&schedule([1; 32]));
@@ -4921,6 +4937,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
                         }),
                     ),
                 ],
+                placement_groups: Vec::new(),
             }),
             true,
         )
@@ -5076,6 +5093,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             schedule: DomainSchedule {
                 domain: domain.clone(),
                 nodes: Vec::new(),
+                placement_groups: Vec::new(),
             },
             passive_only: false,
             start_version: 0,
@@ -5155,6 +5173,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 schedule: DomainSchedule {
                     domain: domain.clone(),
                     nodes: Vec::new(),
+                    placement_groups: Vec::new(),
                 },
                 passive_only: false,
                 start_version: 0,
@@ -5289,6 +5308,7 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
             schedule: DomainSchedule {
                 domain: domain.clone(),
                 nodes: Vec::new(),
+                placement_groups: Vec::new(),
             },
             passive_only: false,
             start_version: 0,
@@ -5493,6 +5513,7 @@ fn sync_domains_clears_ticks_when_paced_domain_stops() {
                 pace: DomainPace::Paced,
                 period: "1s".to_string(),
                 skew: "250ms".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Stopped,
             start_version: 0,
@@ -5565,6 +5586,7 @@ fn stopped_unpaced_domain_rejects_ingestion() {
                 pace: DomainPace::Unpaced,
                 period: "1s".to_string(),
                 skew: "0ms".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Stopped,
             start_version: 0,
@@ -7900,6 +7922,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             schedule: DomainSchedule {
                 domain: domain.clone(),
                 nodes: Vec::new(),
+                placement_groups: Vec::new(),
             },
             passive_only: false,
             start_version: 0,
@@ -8117,6 +8140,7 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
             schedule: DomainSchedule {
                 domain: domain.clone(),
                 nodes: Vec::new(),
+                placement_groups: Vec::new(),
             },
             passive_only: false,
             start_version: 0,
@@ -10471,6 +10495,7 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             schedule: DomainSchedule {
                 domain: domain.clone(),
                 nodes: Vec::new(),
+                placement_groups: Vec::new(),
             },
             passive_only: false,
             start_version: 0,

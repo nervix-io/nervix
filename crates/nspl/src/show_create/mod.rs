@@ -6,9 +6,10 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref, correlator_ref,
         deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref, ingestor_ref,
-        into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref, reingestor_ref,
-        relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref,
-        window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
+        into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref, placement_ref,
+        reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref,
+        vhost_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
+        wire_json_schema_ref,
     },
 };
 
@@ -141,6 +142,12 @@ pub fn show_create_parser<'src>()
                 kind: ModelKind::Emitter,
                 name,
             }),
+        kw(Identifier::Placement)
+            .ignore_then(placement_ref())
+            .map(|name| ShowCreate {
+                kind: ModelKind::Placement,
+                name,
+            }),
         kw(Identifier::Udf)
             .ignore_then(udf_ref())
             .map(|name| ShowCreate {
@@ -260,6 +267,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_show_create_placement() {
+        let parsed =
+            parse_show_create("SHOW CREATE PLACEMENT critical;").expect("parse should succeed");
+        assert_eq!(parsed.kind, ModelKind::Placement);
+        assert_eq!(parsed.name.as_str(), "critical");
+    }
+
+    #[test]
     fn parses_show_create_lookup() {
         let tokens = to_tokens("SHOW CREATE HASH MAP zip_codes;");
         let parsed = parse_show_create_tokens(&tokens).expect("parse should succeed");
@@ -309,6 +324,7 @@ mod tests {
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
         assert!(suggestions.contains(&"WINDOW PROCESSOR".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
+        assert!(suggestions.contains(&"PLACEMENT".to_string()));
         assert!(suggestions.contains(&"UDF".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));

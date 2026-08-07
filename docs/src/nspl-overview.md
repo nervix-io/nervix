@@ -60,6 +60,12 @@ CREATE [IF NOT EXISTS] CODEC <name>
 
 CREATE [IF NOT EXISTS] RELAY <name> SCHEMA <schema> [CAPACITY <n>]
   [WITH MATERIALIZED STATE LAST BY TIMESTAMP];
+
+CREATE [IF NOT EXISTS] PLACEMENT <name>
+  FROM <runtime_node> [, <runtime_node> ...]
+  TO <runtime_node> [, <runtime_node> ...]
+  REQUIRE COLOCATION|PREFER COLOCATION|NEUTRAL|SUGGEST SEPARATION
+  [RANK <n>];
 ```
 
 JAQ-backed codecs require at least one direction. When both are present, `ON INGESTION` precedes
@@ -68,6 +74,9 @@ JAQ-backed codecs require at least one direction. When both are present, `ON ING
 Core alter statements:
 
 ```nspl,ignore
+ALTER DOMAIN SET PLACEMENT
+  REQUIRE COLOCATION|PREFER COLOCATION|NEUTRAL|SUGGEST SEPARATION;
+
 ALTER RELAY <name>
   SET CAPACITY <n> |
   SET SCHEMA <schema> |
@@ -156,6 +165,14 @@ ALTER GENERATOR <name>
   ADD|DROP|REPLACE ROUTE ...
   [, ...];
 
+ALTER PLACEMENT <placement>
+  SET POLICY REQUIRE COLOCATION|PREFER COLOCATION|NEUTRAL|SUGGEST SEPARATION |
+  SET RANK <n> |
+  DROP RANK |
+  SET FROM <runtime_node> [, ...] TO <runtime_node> [, ...] |
+  RENAME TO <name>
+  [, ...];
+
 ALTER SCHEMA <name>
   ADD FIELD <field> <type> [OPTIONAL] [SENSITIVE],
   DROP FIELD <field>,
@@ -174,14 +191,15 @@ ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
 ```
 
 Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER REORDERER`,
-`ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, or `ALTER GENERATOR` execute in written
-order. See
+`ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`, or `ALTER PLACEMENT`
+execute in written order. See
 [Streams And State](relay.md#altering-relays) for relay operations,
 [Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and
 [Ingestors](ingestors.md#altering-ingestors) for boundary-node operations. See
 [Schemas And Codecs](schemas-and-codecs.md#altering-schemas) for ordered schema changes and atomic
-migrations.
+migrations, and [Placement Policies](placement.md) for placement rank, path coverage, and
+enforcement.
 
 All `CREATE` statements may optionally insert `IF NOT EXISTS` immediately after `CREATE`.
 
@@ -201,9 +219,14 @@ The rest of the graph is built with:
 - `CREATE DEDUPLICATOR`
 - `CREATE REINGESTOR`
 - `CREATE EMITTER`
+- `CREATE PLACEMENT`
 - `CREATE HASH MAP`
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
+
+Domain creation may declare a placement default, and named placement rules may overlay paths in
+the active domain. Omission means `NEUTRAL`, which preserves ordinary scheduler heuristics. See
+[Placement Policies](placement.md) for the four policy levels and lifecycle commands.
 
 Multiple NSPL statements in one request must be wrapped in an explicit
 transaction. `BEGIN` starts a session-local transaction, `COMMIT` executes the
@@ -564,6 +587,8 @@ DESCRIBE DEDUPLICATOR <deduplicator>;
 DESCRIBE REORDERER <reorderer>;
 DESCRIBE WINDOW PROCESSOR <window_processor>;
 DESCRIBE HASH MAP <hash_map>;
+DESCRIBE PLACEMENT <placement>;
+DESCRIBE DOMAIN;
 LOOKUP <hash_map> KEY '<key>';
 ```
 
@@ -571,6 +596,7 @@ Show commands:
 
 ```nspl,ignore
 SHOW CREATE <kind> <name>;
+SHOW PLACEMENTS;
 SHOW RELAY <name> MATERIALIZED STATE;
 SHOW CLUSTER STATUS;
 DROP NODE <node_id>;

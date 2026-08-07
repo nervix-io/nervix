@@ -16,6 +16,7 @@ pub type DomainId = Domain;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Statement {
     CreateDomain(CreateStatement<CreateDomain>),
+    AlterDomain(AlterDomain),
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
     UploadResource(UploadResource),
@@ -34,6 +35,7 @@ pub enum Statement {
     AlterIngestor(AlterIngestor),
     AlterReingestor(AlterReingestor),
     AlterGenerator(AlterGenerator),
+    AlterPlacement(AlterPlacement),
     Drop(DropModel),
     DropNode(DropNode),
     CordonNode(CordonNode),
@@ -54,9 +56,11 @@ pub enum Statement {
     DescribeWindowProcessor(DescribeWindowProcessor),
     DescribeWasmProcessor(DescribeWasmProcessor),
     DescribeUdf(DescribeUdf),
+    DescribePlacement(DescribePlacement),
     LookupQuery(LookupQuery),
     ShowCreate(ShowCreate),
     ShowUdfs(ShowUdfs),
+    ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowClusterStatus(ShowClusterStatus),
 }
@@ -77,8 +81,10 @@ impl Statement {
             | Self::AlterIngestor(_)
             | Self::AlterReingestor(_)
             | Self::AlterGenerator(_)
+            | Self::AlterPlacement(_)
             | Self::Drop(_) => true,
             Self::CreateDomain(_)
+            | Self::AlterDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)
             | Self::UploadResource(_)
@@ -103,9 +109,11 @@ impl Statement {
             | Self::DescribeWindowProcessor(_)
             | Self::DescribeWasmProcessor(_)
             | Self::DescribeUdf(_)
+            | Self::DescribePlacement(_)
             | Self::LookupQuery(_)
             | Self::ShowCreate(_)
             | Self::ShowUdfs(_)
+            | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
             | Self::ShowClusterStatus(_) => false,
         }
@@ -229,6 +237,8 @@ pub enum ModelKind {
     WindowProcessor,
     #[strum(props(completion_label = "ref:emitter"))]
     Emitter,
+    #[strum(props(completion_label = "ref:placement"))]
+    Placement,
     #[strum(props(completion_label = "ref:udf"))]
     Udf,
 }
@@ -261,6 +271,9 @@ pub struct ShowClusterStatus;
 pub struct ShowUdfs;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShowPlacements;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShowRelayMaterializedState {
     pub relay: Identifier,
 }
@@ -269,6 +282,11 @@ pub struct ShowRelayMaterializedState {
 pub struct CreateDomain {
     pub id: DomainId,
     pub config: DomainConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlterDomain {
+    pub policy: PlacementPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +319,32 @@ pub struct DomainConfig {
     pub pace: DomainPace,
     pub period: String,
     pub skew: String,
+    pub placement: PlacementPolicy,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Default,
+    AsRefStr,
+    strum::Display,
+)]
+pub enum PlacementPolicy {
+    #[strum(serialize = "REQUIRE COLOCATION")]
+    RequireColocation,
+    #[strum(serialize = "PREFER COLOCATION")]
+    PreferColocation,
+    #[default]
+    #[strum(serialize = "NEUTRAL")]
+    Neutral,
+    #[strum(serialize = "SUGGEST SEPARATION")]
+    SuggestSeparation,
 }
 
 #[derive(
@@ -488,6 +532,11 @@ pub struct DescribeUdf {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribePlacement {
+    pub name: Identifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LookupQuery {
     pub name: Identifier,
     pub key: SubscriptionLiteral,
@@ -508,6 +557,132 @@ pub enum SubscriptionLiteral {
     String(String),
     Number(String),
     Bool(bool),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatePlacement {
+    pub name: Identifier,
+    pub from: Vec<Identifier>,
+    pub to: Vec<Identifier>,
+    pub policy: PlacementPolicy,
+    pub rank: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlterPlacement {
+    pub placement: Identifier,
+    pub operations: Vec<AlterPlacementOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlterPlacementOperation {
+    SetPolicy {
+        policy: PlacementPolicy,
+    },
+    SetRank {
+        rank: u64,
+    },
+    DropRank,
+    SetMembers {
+        from: Vec<Identifier>,
+        to: Vec<Identifier>,
+    },
+    RenameTo {
+        name: Identifier,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AlterPlacementError {
+    #[error("ALTER targets placement `{requested}`, but the stored placement is `{stored}`")]
+    PlacementNameMismatch {
+        stored: Identifier,
+        requested: Identifier,
+    },
+    #[error("a placement must declare at least one FROM member")]
+    EmptyFrom,
+    #[error("a placement must declare at least one TO member")]
+    EmptyTo,
+    #[error("placement RANK 0 is invalid; RANK must be greater than zero")]
+    RankZero,
+}
+
+impl CreatePlacement {
+    pub fn new(
+        name: Identifier,
+        from: Vec<Identifier>,
+        to: Vec<Identifier>,
+        policy: PlacementPolicy,
+        rank: Option<u64>,
+    ) -> Result<Self, AlterPlacementError> {
+        let mut placement = Self {
+            name,
+            from,
+            to,
+            policy,
+            rank,
+        };
+        placement.normalize_members();
+        placement.validate()?;
+        Ok(placement)
+    }
+
+    pub fn apply_alter(&mut self, alter: &AlterPlacement) -> Result<(), AlterPlacementError> {
+        if self.name != alter.placement {
+            return Err(AlterPlacementError::PlacementNameMismatch {
+                stored: self.name.clone(),
+                requested: alter.placement.clone(),
+            });
+        }
+
+        let mut candidate = self.clone();
+        for operation in &alter.operations {
+            match operation {
+                AlterPlacementOperation::SetPolicy { policy } => candidate.policy = *policy,
+                AlterPlacementOperation::SetRank { rank } => candidate.rank = Some(*rank),
+                AlterPlacementOperation::DropRank => candidate.rank = None,
+                AlterPlacementOperation::SetMembers { from, to } => {
+                    candidate.from = from.clone();
+                    candidate.to = to.clone();
+                    candidate.normalize_members();
+                }
+                AlterPlacementOperation::RenameTo { name } => candidate.name = name.clone(),
+            }
+            candidate.validate()?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), AlterPlacementError> {
+        if self.from.is_empty() {
+            return Err(AlterPlacementError::EmptyFrom);
+        }
+        if self.to.is_empty() {
+            return Err(AlterPlacementError::EmptyTo);
+        }
+        if self.rank == Some(0) {
+            return Err(AlterPlacementError::RankZero);
+        }
+        Ok(())
+    }
+
+    fn normalize_members(&mut self) {
+        deduplicate_identifiers(&mut self.from);
+        deduplicate_identifiers(&mut self.to);
+    }
+}
+
+fn deduplicate_identifiers(identifiers: &mut Vec<Identifier>) {
+    let mut seen = Vec::new();
+    identifiers.retain(|identifier| {
+        if seen.contains(identifier) {
+            false
+        } else {
+            seen.push(identifier.clone());
+            true
+        }
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,6 +730,7 @@ pub enum Model {
     Reorderer(CreateReorderer),
     WindowProcessor(CreateWindowProcessor),
     Emitter(CreateEmitter),
+    Placement(CreatePlacement),
     Udf(CreateUdf),
 }
 
@@ -604,6 +780,7 @@ impl Model {
             Self::Reorderer(_) => ModelKind::Reorderer,
             Self::WindowProcessor(_) => ModelKind::WindowProcessor,
             Self::Emitter(_) => ModelKind::Emitter,
+            Self::Placement(_) => ModelKind::Placement,
             Self::Udf(_) => ModelKind::Udf,
         }
     }
@@ -653,6 +830,7 @@ impl Model {
             Self::Reorderer(v) => &v.name,
             Self::WindowProcessor(v) => &v.name,
             Self::Emitter(v) => &v.name,
+            Self::Placement(v) => &v.name,
             Self::Udf(v) => &v.name,
         }
     }
@@ -702,6 +880,7 @@ impl Model {
             | Self::Reorderer(_)
             | Self::WindowProcessor(_)
             | Self::Emitter(_)
+            | Self::Placement(_)
             | Self::Udf(_) => None,
         }
     }
@@ -3023,6 +3202,25 @@ impl ClusterSchedule {
 pub struct DomainSchedule {
     pub domain: Domain,
     pub nodes: Vec<ScheduledNode>,
+    pub placement_groups: Vec<PlacementGroupSchedule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PlacementRuntimeNode {
+    pub kind: ModelKind,
+    pub identifier: Identifier,
+}
+
+impl PlacementRuntimeNode {
+    pub fn new(kind: ModelKind, identifier: Identifier) -> Self {
+        Self { kind, identifier }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacementGroupSchedule {
+    pub members: Vec<PlacementRuntimeNode>,
+    pub primary_node: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3737,16 +3935,16 @@ mod tests {
         AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation,
         AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator,
         AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
-        AlterIngestorOperation, AlterJunction, AlterJunctionError, AlterProcessorError,
-        AlterProcessorOperation, AlterReingestor, AlterReingestorError, AlterRelay,
-        AlterRelayError, AlterRelayOperation, AlterReorderer, AlterReordererError,
-        AlterReordererOperation, BranchSelection, ClusterSchedule, CreateDeduplicator,
-        CreateEmitter, CreateGenerator, CreateReingestor, CreateRelay, CreateReorderer,
-        CreateSchema, DomainSchedule, EmitSink, EmitterPublishingMode, ErrorPolicies,
-        GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
-        InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule,
-        MaterializedRelayState, Model, ModelKind, OutputFlushPolicy, RelayBranching, RetryPolicy,
-        ScheduledNode,
+        AlterIngestorOperation, AlterJunction, AlterJunctionError, AlterPlacement,
+        AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
+        AlterReingestor, AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation,
+        AlterReorderer, AlterReordererError, AlterReordererOperation, BranchSelection,
+        ClusterSchedule, CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement,
+        CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
+        EmitterPublishingMode, ErrorPolicies, GeneralErrorPolicy, InferencerTensorDimension,
+        InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
+        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, OutputFlushPolicy,
+        PlacementPolicy, RelayBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
         CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Expression, Identifier,
@@ -3797,6 +3995,7 @@ mod tests {
             (ModelKind::Junction, "ref:junction", "junction"),
             (ModelKind::Deduplicator, "ref:deduplicator", "deduplicator"),
             (ModelKind::Emitter, "ref:emitter", "emitter"),
+            (ModelKind::Placement, "ref:placement", "placement"),
             (ModelKind::Udf, "ref:udf", "udf"),
         ] {
             assert_eq!(kind.completion_label(), label);
@@ -3842,10 +4041,12 @@ mod tests {
         let alpha = DomainSchedule {
             domain: domain("alpha"),
             nodes: Vec::new(),
+            placement_groups: Vec::new(),
         };
         let beta = DomainSchedule {
             domain: domain("beta"),
             nodes: Vec::new(),
+            placement_groups: Vec::new(),
         };
         let schedule = ClusterSchedule {
             domains: vec![alpha.clone(), beta],
@@ -5027,5 +5228,72 @@ mod tests {
                 relay: identifier("outgoing")
             })
         );
+    }
+
+    #[test]
+    fn placement_creation_collapses_duplicate_members() {
+        let placement = CreatePlacement::new(
+            identifier("corridor"),
+            vec![identifier("ingest"), identifier("ingest")],
+            vec![identifier("emit"), identifier("emit")],
+            PlacementPolicy::PreferColocation,
+            None,
+        )
+        .expect("placement should be valid");
+
+        assert_eq!(placement.from, vec![identifier("ingest")]);
+        assert_eq!(placement.to, vec![identifier("emit")]);
+    }
+
+    #[test]
+    fn placement_alter_applies_operations_in_order_and_is_atomic() {
+        let mut placement = CreatePlacement::new(
+            identifier("corridor"),
+            vec![identifier("ingest")],
+            vec![identifier("emit")],
+            PlacementPolicy::PreferColocation,
+            None,
+        )
+        .expect("placement should be valid");
+        placement
+            .apply_alter(&AlterPlacement {
+                placement: identifier("corridor"),
+                operations: vec![
+                    AlterPlacementOperation::SetRank { rank: 3 },
+                    AlterPlacementOperation::SetRank { rank: 1 },
+                    AlterPlacementOperation::SetPolicy {
+                        policy: PlacementPolicy::RequireColocation,
+                    },
+                    AlterPlacementOperation::SetMembers {
+                        from: vec![identifier("source"), identifier("source")],
+                        to: vec![identifier("sink")],
+                    },
+                    AlterPlacementOperation::RenameTo {
+                        name: identifier("critical"),
+                    },
+                ],
+            })
+            .expect("placement alter should apply");
+
+        assert_eq!(placement.name, identifier("critical"));
+        assert_eq!(placement.rank, Some(1));
+        assert_eq!(placement.policy, PlacementPolicy::RequireColocation);
+        assert_eq!(placement.from, vec![identifier("source")]);
+        assert_eq!(placement.to, vec![identifier("sink")]);
+
+        let before = placement.clone();
+        assert_eq!(
+            placement.apply_alter(&AlterPlacement {
+                placement: identifier("critical"),
+                operations: vec![
+                    AlterPlacementOperation::SetPolicy {
+                        policy: PlacementPolicy::Neutral,
+                    },
+                    AlterPlacementOperation::SetRank { rank: 0 },
+                ],
+            }),
+            Err(AlterPlacementError::RankZero)
+        );
+        assert_eq!(placement, before, "failed ALTER must not partially apply");
     }
 }

@@ -34,6 +34,7 @@ include = [
   "wasm-processor-guests.md",
   "wasm-guest-sdk.md",
   "emitters.md",
+  "placement.md",
   "capacity-planning.md",
   "filter-map-functions.md",
   "udfs.md",

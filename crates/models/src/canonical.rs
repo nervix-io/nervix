@@ -15,23 +15,24 @@ use crate::{
     CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
     CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
-    CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
-    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode,
-    EndpointType, Expression, FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
-    IcebergCatalog, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
-    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-    MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry, NatsIngestMode,
-    OutputBranch, ParseAsType, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup,
-    SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WireSchemaDefinition, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    CreateLookup, CreateMaterializer, CreatePlacement, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterAckWindow,
+    EmitterPublishingMode, EndpointIngestMode, EndpointType, Expression, FieldScope,
+    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
+    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
+    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
+    NatsConfigEntry, NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
+    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
+    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RetryPolicy,
+    RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
+    UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaDefinition,
+    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
@@ -372,8 +373,34 @@ impl Model {
             Self::Reorderer(reorderer) => reorderer.to_canonical_nspl(),
             Self::WindowProcessor(window_processor) => window_processor.to_canonical_nspl(),
             Self::Emitter(emitter) => emitter.to_canonical_nspl(),
+            Self::Placement(placement) => placement.to_canonical_nspl(),
             Self::Udf(udf) => udf.to_canonical_nspl(),
         }
+    }
+}
+
+impl CreatePlacement {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let mut rendered = format!(
+            "CREATE PLACEMENT {} FROM {} TO {} {}",
+            self.name.as_str(),
+            self.from
+                .iter()
+                .map(Identifier::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.to
+                .iter()
+                .map(Identifier::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.policy,
+        );
+        if let Some(rank) = self.rank {
+            rendered.push_str(&format!(" RANK {rank}"));
+        }
+        rendered.push(';');
+        Ok(rendered)
     }
 }
 
@@ -2931,19 +2958,19 @@ mod tests {
         CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis, CreateClientSentry,
         CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
         CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
-        CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf,
-        CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterPublishingMode,
-        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope,
-        GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy, Model,
+        CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol,
+        CreateUdf, CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink,
+        EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies, Expression,
+        FieldScope, GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource, JsonType,
+        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy, Model,
         MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
         MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
-        PostgresConflictAction, PostgresValueMapping, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode,
-        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry,
-        SignalingProtobufConfig, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-        SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound,
-        WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
+        PlacementPolicy, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
+        SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
+        WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -4305,6 +4332,40 @@ mod tests {
         assert_eq!(
             model.to_canonical_nspl().expect("must render"),
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG {'bootstrap.servers' = 'localhost:9092'};"
+        );
+    }
+
+    #[test]
+    fn placement_canonicalization_preserves_member_order_policy_and_rank() {
+        let placement = CreatePlacement::new(
+            identifier("latency_path"),
+            vec![identifier("ingest"), identifier("enrich")],
+            vec![identifier("score")],
+            PlacementPolicy::RequireColocation,
+            Some(1),
+        )
+        .expect("placement must be valid");
+
+        assert_eq!(
+            placement.to_canonical_nspl().expect("must render"),
+            "CREATE PLACEMENT latency_path FROM ingest, enrich TO score REQUIRE COLOCATION RANK 1;"
+        );
+    }
+
+    #[test]
+    fn unranked_neutral_placement_canonicalization_omits_rank() {
+        let placement = CreatePlacement::new(
+            identifier("ordinary"),
+            vec![identifier("ingest")],
+            vec![identifier("emit")],
+            PlacementPolicy::Neutral,
+            None,
+        )
+        .expect("placement must be valid");
+
+        assert_eq!(
+            placement.to_canonical_nspl().expect("must render"),
+            "CREATE PLACEMENT ordinary FROM ingest TO emit NEUTRAL;"
         );
     }
 

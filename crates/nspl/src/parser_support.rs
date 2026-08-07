@@ -133,6 +133,7 @@ pub fn alter_op_separator<'src>()
         kw(Identifier::Alter),
         kw(Identifier::Set),
         kw(Identifier::Replace),
+        kw(Identifier::Rename),
     ));
     tok(Token::Comma)
         .and_is(tok(Token::Comma).ignore_then(operation_head))
@@ -287,6 +288,21 @@ pub fn u64_value<'src>()
 pub fn schema_ref<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
     parse_identifier("ref:schema")
+}
+
+pub fn placement_name<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("placement_name")
+}
+
+pub fn placement_ref<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("ref:placement")
+}
+
+pub fn runtime_node_ref<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("ref:runtime_node")
 }
 
 pub fn branch_definition_header<'src>()

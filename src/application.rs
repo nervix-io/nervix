@@ -89,18 +89,19 @@ use nervix_interconnect::{
     TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter,
-    CreateEndpoint, CreateInferencer, CreateIngestor, CreateJunction, CreateLookup,
+    AlterDomain, BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain,
+    CreateEmitter, CreateEndpoint, CreateInferencer, CreateIngestor, CreateJunction, CreateLookup,
     CreateReingestor, CreateReorderer, CreateResource, CreateStatement, CreateUser,
     CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
     DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
-    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf,
-    DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig, DomainPace,
+    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig, DomainPace,
     DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier,
     InferencerTensorDimension, InferencerTensorSchema, IngestSource, IngestTimestampSource,
     KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind, MongoDbConflictAction,
-    MySqlConflictAction, ParseAsType, PostgresConflictAction, ProcessorInputs, ProcessorOutputs,
-    QuiesceLevel, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
+    MySqlConflictAction, ParseAsType, PlacementGroupSchedule, PlacementPolicy,
+    PlacementRuntimeNode, PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel,
+    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
     ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
     SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp, UploadResource, VhostTlsResource,
     expression_to_nspl,
@@ -158,7 +159,10 @@ use tokio_tungstenite::{
 
 #[cfg(feature = "testing")]
 use crate::registry::SchedulerMode;
-use crate::registry::{ActiveGraph, Registry, RegistryError, RegistryMutation};
+use crate::registry::{
+    ActiveGraph, PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan,
+    PlacementRulePlan, Registry, RegistryError, RegistryMutation,
+};
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
 const REMOTE_DESCRIBE_INGESTOR_TIMEOUT: Duration = Duration::from_secs(10);
@@ -5168,6 +5172,191 @@ impl SessionServiceImpl {
             format!("status: {:?}", domain_state.status).to_ascii_lowercase(),
         ];
         lines.extend(self.runtime.describe_domain_statistics(domain));
+        lines.push("placement:".to_string());
+        lines.push(format!(
+            "  default policy: {}",
+            domain_state.config.placement.as_ref()
+        ));
+        let placement_plan = self
+            .registry
+            .placement_plan(domain, domain_state.config.placement);
+        lines.push(format!(
+            "  rule count: {}",
+            placement_plan.as_ref().map_or(0, |plan| plan.rules.len())
+        ));
+        if let Some(plan) = placement_plan {
+            let schedule = self.consensus.current_schedule().await;
+            let domain_schedule = schedule.domain(domain);
+            for (index, group) in plan.require_groups.iter().enumerate() {
+                lines.push(format!("  group {}:", index + 1));
+                lines.push(format!(
+                    "    members: {}",
+                    format_placement_runtime_nodes(&group.members)
+                ));
+                lines.push(format!(
+                    "    host: {}",
+                    placement_group_host(domain_schedule, &group.members).unwrap_or("(unassigned)")
+                ));
+                for bond in &group.bonds {
+                    lines.push(format!(
+                        "    bond: {} <-> {} ({})",
+                        format_placement_runtime_node(&bond.left, &group.members),
+                        format_placement_runtime_node(&bond.right, &group.members),
+                        placement_claim_owner(&bond.winning_rules),
+                    ));
+                }
+            }
+        }
+        command_ok(lines.join("\n"))
+    }
+
+    async fn show_placements(&self, domain: &Domain) -> CommandResult {
+        let Some(domain_state) = self.consensus.current_domain(domain).await else {
+            return command_error(format!("domain '{}' does not exist", domain.as_str()));
+        };
+        let Some(plan) = self
+            .registry
+            .placement_plan(domain, domain_state.config.placement)
+        else {
+            return command_ok("no placements".to_string());
+        };
+        if plan.rules.is_empty() {
+            return command_ok("no placements".to_string());
+        }
+        let lines = plan
+            .rules
+            .iter()
+            .map(|rule| {
+                let coverage = placement_rule_coverage_status(rule);
+                let rank = rule
+                    .rank
+                    .map_or_else(|| "unranked".to_string(), |rank| rank.to_string());
+                format!(
+                    "{} policy={} rank={} coverage={coverage}",
+                    rule.name.as_str(),
+                    rule.policy.as_ref(),
+                    rank,
+                )
+            })
+            .collect::<Vec<_>>();
+        command_ok(lines.join("\n"))
+    }
+
+    async fn describe_placement(
+        &self,
+        domain: &Domain,
+        describe: DescribePlacement,
+    ) -> CommandResult {
+        let Some(domain_state) = self.consensus.current_domain(domain).await else {
+            return command_error(format!("domain '{}' does not exist", domain.as_str()));
+        };
+        let Some(plan) = self
+            .registry
+            .placement_plan(domain, domain_state.config.placement)
+        else {
+            return command_error(format!("placement '{}' not found", describe.name.as_str()));
+        };
+        let Some(rule) = plan.rules.iter().find(|rule| rule.name == describe.name) else {
+            return command_error(format!("placement '{}' not found", describe.name.as_str()));
+        };
+        let form = match self
+            .registry
+            .get(domain, ModelKind::Placement, &describe.name)
+        {
+            Ok(Some(model)) => model.to_canonical_nspl().ok(),
+            Ok(None) => None,
+            Err(error) => return command_error(error.to_string()),
+        };
+        let mut lines = vec![format!("placement: {}", rule.name.as_str())];
+        if let Some(form) = form {
+            lines.push(format!("form: {form}"));
+        }
+        lines.push(format!("policy: {}", rule.policy.as_ref()));
+        lines.push(format!(
+            "rank: {}",
+            rule.rank
+                .map_or_else(|| "unranked".to_string(), |rank| rank.to_string())
+        ));
+        let rule_runtime_nodes = placement_rule_runtime_nodes(rule);
+        let from_runtime_nodes = placement_rule_endpoint_nodes(rule, true);
+        let to_runtime_nodes = placement_rule_endpoint_nodes(rule, false);
+        lines.push(format!(
+            "from: {}",
+            format_placement_runtime_nodes_in_context(&from_runtime_nodes, &rule_runtime_nodes)
+        ));
+        lines.push(format!(
+            "to: {}",
+            format_placement_runtime_nodes_in_context(&to_runtime_nodes, &rule_runtime_nodes)
+        ));
+        for endpoint in &rule.endpoint_pairs {
+            lines.push(format!(
+                "pair: {} -> {}",
+                format_placement_runtime_node(&endpoint.source, &rule_runtime_nodes),
+                format_placement_runtime_node(&endpoint.destination, &rule_runtime_nodes),
+            ));
+            lines.push(format!("connected: {}", endpoint.connected));
+            if endpoint.connected {
+                lines.push(format!(
+                    "covered: {}",
+                    format_placement_runtime_nodes(&ordered_placement_corridor(endpoint))
+                ));
+            } else {
+                lines.push("covered: (none)".to_string());
+            }
+            for witness in &endpoint.witnesses {
+                lines.push(format!(
+                    "witness: {}",
+                    witness
+                        .path
+                        .iter()
+                        .map(|node| format_placement_runtime_node(node, &rule_runtime_nodes))
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                ));
+            }
+        }
+        for claim in &rule.claims {
+            lines.push(format!(
+                "effective pair: {} <-> {}",
+                format_placement_runtime_node(&claim.left, &rule_runtime_nodes),
+                format_placement_runtime_node(&claim.right, &rule_runtime_nodes),
+            ));
+            lines.push(format!(
+                "effective policy: {}",
+                claim.effective_policy.as_ref()
+            ));
+            if claim.effective {
+                lines.push(format!(
+                    "winning claim: {}",
+                    placement_claim_owner(&claim.winning_rules)
+                ));
+            } else {
+                lines.push(format!(
+                    "overridden by: {}",
+                    placement_claim_owner(&claim.winning_rules)
+                ));
+            }
+        }
+        let schedule = self.consensus.current_schedule().await;
+        let domain_schedule = schedule.domain(domain);
+        for group in placement_groups_claimed_by_rule(&plan, rule) {
+            lines.push(format!(
+                "group members: {}",
+                format_placement_runtime_nodes(&group.members)
+            ));
+            lines.push(format!(
+                "group host: {}",
+                placement_group_host(domain_schedule, &group.members).unwrap_or("(unassigned)")
+            ));
+            for bond in &group.bonds {
+                lines.push(format!(
+                    "bond: {} <-> {} ({})",
+                    format_placement_runtime_node(&bond.left, &group.members),
+                    format_placement_runtime_node(&bond.right, &group.members),
+                    placement_claim_owner(&bond.winning_rules),
+                ));
+            }
+        }
         command_ok(lines.join("\n"))
     }
 
@@ -7061,6 +7250,7 @@ impl SessionServiceImpl {
         let mut semantic_kinds = Vec::new();
         let mut expects_resource_ref = false;
         let mut expects_session_subscription_ref = false;
+        let mut expects_runtime_node_ref = false;
         let requested_resource_versions = requested_resource_versions(&req.input, cursor);
         for item in &grammar {
             if let Some(kind) = ModelKind::from_completion_label(item) {
@@ -7069,6 +7259,8 @@ impl SessionServiceImpl {
                 expects_resource_ref = true;
             } else if item == "ref:session_subscription" {
                 expects_session_subscription_ref = true;
+            } else if item == "ref:runtime_node" {
+                expects_runtime_node_ref = true;
             } else if prefix.is_empty()
                 || item
                     .to_ascii_lowercase()
@@ -7089,6 +7281,17 @@ impl SessionServiceImpl {
 
         if expects_session_subscription_ref {
             suggestions.extend(subscriptions.matching_names(&prefix));
+        }
+
+        if expects_runtime_node_ref
+            && let Some(domain) = &domain
+            && self.consensus.current_domain(domain).await.is_some()
+        {
+            suggestions.extend(placement_runtime_node_ref_suggestions(
+                &self.registry,
+                domain,
+                &prefix,
+            ));
         }
 
         if expects_resource_ref {
@@ -7113,7 +7316,8 @@ impl SessionServiceImpl {
         if grammar_input.contains("DOMAIN")
             || (semantic_kinds.is_empty()
                 && !expects_resource_ref
-                && !expects_session_subscription_ref)
+                && !expects_session_subscription_ref
+                && !expects_runtime_node_ref)
         {
             let domains = self.consensus.current_domains().await;
             suggestions.extend(domains.into_keys().filter_map(|id| {
@@ -7569,6 +7773,19 @@ impl SessionServiceImpl {
                     ));
                     mutations.push(RegistryMutation::AlterGenerator(alter));
                 }
+                Statement::AlterPlacement(alter) => {
+                    let model_id = alter.placement.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered placement '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str(),
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterPlacement(alter));
+                }
                 Statement::Drop(drop) => {
                     let model_id = drop.name.clone();
                     refresh_http_tls |= drop.kind == ModelKind::Vhost;
@@ -7622,6 +7839,7 @@ impl SessionServiceImpl {
             let affected_entities = planned.quiesce().affected_entities().to_vec();
             let is_noop = planned.is_noop();
             let mut cluster_entity_gate = None;
+            let mut planned_relocations = 0usize;
 
             if is_noop {
                 info!(
@@ -7706,6 +7924,7 @@ impl SessionServiceImpl {
                 if let Err(err) = self
                     .publish_domain_schedule(&domain, runtime_changes.graph.clone())
                     .await
+                    .map(|relocations| planned_relocations = relocations)
                 {
                     if let Some(gate) = cluster_entity_gate.take() {
                         self.release_cluster_entity_gates(gate).await;
@@ -7781,6 +8000,7 @@ impl SessionServiceImpl {
             for (index, _, mut message) in applied {
                 if first_applied {
                     message.push_str(&format!("; quiesce level: {}", classified_level.as_str()));
+                    message.push_str(&format!("; planned relocations: {planned_relocations}"));
                     first_applied = false;
                 }
                 results[index] = Some(CommandResult {
@@ -7912,6 +8132,10 @@ impl SessionServiceImpl {
 
         match statement {
             Statement::CreateDomain(create) => self.create_domain(create).await,
+            Statement::AlterDomain(alter) => {
+                let domain = domain.as_ref().expect("domain required");
+                self.alter_domain(domain, alter).await
+            }
             Statement::CreateUser(create) => self.create_user(create).await,
             Statement::CreateResource(create) => self.create_resource(create).await,
             Statement::UploadResource(upload) => self.upload_resource_command(upload).await,
@@ -7936,6 +8160,7 @@ impl SessionServiceImpl {
             | Statement::AlterIngestor(_)
             | Statement::AlterReingestor(_)
             | Statement::AlterGenerator(_)
+            | Statement::AlterPlacement(_)
             | Statement::Drop(_) => {
                 unreachable!("model mutations are handled before statement dispatch")
             }
@@ -8000,6 +8225,10 @@ impl SessionServiceImpl {
             Statement::DescribeUdf(describe) => {
                 let domain = domain.as_ref().expect("domain required");
                 self.describe_udf(domain, describe)
+            }
+            Statement::DescribePlacement(describe) => {
+                let domain = domain.as_ref().expect("domain required");
+                self.describe_placement(domain, describe).await
             }
             Statement::DescribeResource(describe) => self.describe_resource(describe).await,
             Statement::LookupQuery(query) => {
@@ -8082,6 +8311,10 @@ impl SessionServiceImpl {
             Statement::ShowUdfs(_) => {
                 let domain = domain.as_ref().expect("domain required");
                 self.show_udfs(domain)
+            }
+            Statement::ShowPlacements(_) => {
+                let domain = domain.as_ref().expect("domain required");
+                self.show_placements(domain).await
             }
             Statement::ShowClusterStatus(_) => CommandResult {
                 success: true,
@@ -8403,6 +8636,114 @@ impl SessionServiceImpl {
                 create.id.as_str()
             )),
         }
+    }
+
+    async fn alter_domain(&self, domain: &Domain, alter: AlterDomain) -> CommandResult {
+        let _alter_guard = match self.runtime.try_begin_domain_alter(domain) {
+            Some(guard) => guard,
+            None => {
+                return command_error(
+                    DomainAlterError::ConcurrentAlter {
+                        domain: domain.clone(),
+                    }
+                    .to_string(),
+                );
+            }
+        };
+        let Some(previous_state) = self.consensus.current_domain(domain).await else {
+            return command_error(format!("domain '{}' does not exist", domain.as_str()));
+        };
+        if let DomainStatus::Paused = previous_state.status {
+            return command_error(format!(
+                "domain '{}' is paused by a model alteration",
+                domain.as_str()
+            ));
+        }
+        if previous_state.config.placement == alter.policy {
+            return command_ok(format!(
+                "domain '{}' placement is already {}; planned relocations: 0",
+                domain.as_str(),
+                alter.policy.as_ref(),
+            ));
+        }
+
+        let current_schedule = self.consensus.current_schedule().await;
+        let previous_schedule = current_schedule.domain(domain).cloned();
+        let live_node_ids = self.cluster.live_node_ids().await;
+        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+        let cluster_nodes = self
+            .consensus
+            .schedulable_live_voter_ids(live_node_ids)
+            .await;
+        let next_schedule = self.registry.active_graph(domain).map(|graph| {
+            #[cfg(feature = "testing")]
+            let mut schedule = graph.schedule_for_domain_with_mode(
+                domain,
+                &cluster_nodes,
+                self.replica_count,
+                alter.policy,
+                self.scheduler_mode,
+            );
+            #[cfg(not(feature = "testing"))]
+            let mut schedule =
+                graph.schedule_for_domain(domain, &cluster_nodes, self.replica_count, alter.policy);
+            Self::merge_existing_schedule_data(
+                &mut schedule,
+                previous_schedule.as_ref(),
+                &live_voters,
+            );
+            schedule
+        });
+        let relocations =
+            planned_relocation_count(previous_schedule.as_ref(), next_schedule.as_ref());
+        let mut next_state = previous_state.clone();
+        next_state.config.placement = alter.policy;
+
+        #[cfg(feature = "testing")]
+        if self.runtime.take_armed_schedule_publication_fault(domain) {
+            return command_error(format!(
+                "injected schedule publication fault for domain '{}'",
+                domain.as_str()
+            ));
+        }
+        if let Err(error) = self
+            .consensus
+            .put_domain_and_schedule(next_state, next_schedule)
+            .await
+        {
+            return command_error(format!(
+                "failed to alter placement for domain '{}': {error}",
+                domain.as_str()
+            ));
+        }
+        if let Err(error) = self.apply_current_cluster_state().await {
+            let rollback = self
+                .consensus
+                .put_domain_and_schedule(previous_state, previous_schedule)
+                .await
+                .map_err(|rollback_error| rollback_error.to_string());
+            if rollback.is_ok() {
+                let _ = self.apply_current_cluster_state().await;
+            }
+            return command_error(match rollback {
+                Ok(()) => format!(
+                    "failed to activate placement for domain '{}': {error}; the domain default \
+                     and schedule were restored",
+                    domain.as_str(),
+                ),
+                Err(rollback_error) => format!(
+                    "failed to activate placement for domain '{}': {error}; failed to restore the \
+                     prior domain default and schedule: {rollback_error}",
+                    domain.as_str(),
+                ),
+            });
+        }
+
+        command_ok(format!(
+            "set domain '{}' placement to {}; planned relocations: {relocations}",
+            domain.as_str(),
+            alter.policy.as_ref(),
+        ))
     }
 
     async fn create_user(&self, create: CreateStatement<CreateUser>) -> CommandResult {
@@ -9126,7 +9467,7 @@ impl SessionServiceImpl {
         &self,
         domain: &Domain,
         graph: Option<ActiveGraph>,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         #[cfg(feature = "testing")]
         if self.runtime.take_armed_schedule_publication_fault(domain) {
             return Err(format!(
@@ -9140,6 +9481,14 @@ impl SessionServiceImpl {
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
+        let default_policy = self
+            .consensus
+            .current_domain(domain)
+            .await
+            .ok_or_else(|| format!("domain '{}' does not exist", domain.as_str()))?
+            .config
+            .placement;
+        let current = self.consensus.current_schedule().await;
         let schedule = match graph {
             Some(graph) => {
                 #[cfg(feature = "testing")]
@@ -9147,12 +9496,16 @@ impl SessionServiceImpl {
                     domain,
                     &cluster_nodes,
                     self.replica_count,
+                    default_policy,
                     self.scheduler_mode,
                 );
                 #[cfg(not(feature = "testing"))]
-                let mut schedule =
-                    graph.schedule_for_domain(domain, &cluster_nodes, self.replica_count);
-                let current = self.consensus.current_schedule().await;
+                let mut schedule = graph.schedule_for_domain(
+                    domain,
+                    &cluster_nodes,
+                    self.replica_count,
+                    default_policy,
+                );
                 Self::merge_existing_schedule_data(
                     &mut schedule,
                     current.domain(domain),
@@ -9162,6 +9515,7 @@ impl SessionServiceImpl {
             }
             None => None,
         };
+        let relocations = planned_relocation_count(current.domain(domain), schedule.as_ref());
         self.consensus
             .replace_domain_schedule(domain.clone(), schedule)
             .await
@@ -9171,7 +9525,8 @@ impl SessionServiceImpl {
                 "failed to instantiate runtime schedule for domain '{}': {error}",
                 domain.as_str()
             )
-        })
+        })?;
+        Ok(relocations)
     }
 
     async fn drop_node(&self, node_id: String) -> CommandResult {
@@ -9209,22 +9564,36 @@ impl SessionServiceImpl {
         }
 
         let live_node_ids = self.cluster.live_node_ids().await;
-        let cluster_nodes = self.consensus.live_voter_ids(live_node_ids).await;
+        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+        let schedulable_nodes = self
+            .consensus
+            .schedulable_live_voter_ids(live_node_ids)
+            .await;
+        let (cluster_nodes, preservable_nodes) =
+            Self::drop_node_schedule_node_sets(&live_voters, &schedulable_nodes);
         for (domain, graph) in self.registry.active_graphs() {
+            let Some(domain_state) = self.consensus.current_domain(&domain).await else {
+                continue;
+            };
             #[cfg(feature = "testing")]
             let mut schedule = graph.schedule_for_domain_with_mode(
                 &domain,
-                &cluster_nodes,
+                cluster_nodes,
                 self.replica_count,
+                domain_state.config.placement,
                 self.scheduler_mode,
             );
             #[cfg(not(feature = "testing"))]
-            let mut schedule =
-                graph.schedule_for_domain(&domain, &cluster_nodes, self.replica_count);
+            let mut schedule = graph.schedule_for_domain(
+                &domain,
+                cluster_nodes,
+                self.replica_count,
+                domain_state.config.placement,
+            );
             Self::merge_existing_schedule_data(
                 &mut schedule,
                 current_schedule.domain(&domain),
-                &cluster_nodes,
+                preservable_nodes,
             );
             if let Err(error) = self
                 .consensus
@@ -9240,6 +9609,13 @@ impl SessionServiceImpl {
         }
 
         command_ok(format!("dropped node '{node_id}'"))
+    }
+
+    fn drop_node_schedule_node_sets<'nodes>(
+        live_voters: &'nodes [String],
+        schedulable_nodes: &'nodes [String],
+    ) -> (&'nodes [String], &'nodes [String]) {
+        (schedulable_nodes, live_voters)
     }
 
     fn drop_node_quorum_error(
@@ -9310,6 +9686,7 @@ impl SessionServiceImpl {
         let mut moved = 0usize;
         loop {
             let live_node_ids = self.cluster.live_node_ids().await;
+            let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
             let replacement_nodes = self
                 .consensus
                 .schedulable_live_voter_ids(live_node_ids)
@@ -9319,21 +9696,30 @@ impl SessionServiceImpl {
                     "cannot drain node '{node_id}': no live schedulable raft voters remain"
                 ));
             }
+            let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
             let replacement_node_set = replacement_nodes.iter().cloned().collect::<BTreeSet<_>>();
             let current_schedule = self.consensus.current_schedule().await;
             let mut moved_this_iteration = false;
 
             for (domain, graph) in self.registry.active_graphs() {
+                let Some(domain_state) = self.consensus.current_domain(&domain).await else {
+                    continue;
+                };
                 #[cfg(feature = "testing")]
                 let desired = graph.schedule_for_domain_with_mode(
                     &domain,
                     &replacement_nodes,
                     self.replica_count,
+                    domain_state.config.placement,
                     self.scheduler_mode,
                 );
                 #[cfg(not(feature = "testing"))]
-                let desired =
-                    graph.schedule_for_domain(&domain, &replacement_nodes, self.replica_count);
+                let desired = graph.schedule_for_domain(
+                    &domain,
+                    &replacement_nodes,
+                    self.replica_count,
+                    domain_state.config.placement,
+                );
                 let Some(current_domain) = current_schedule.domain(&domain) else {
                     if let Err(error) = self
                         .consensus
@@ -9346,6 +9732,13 @@ impl SessionServiceImpl {
                             domain.as_str()
                         ));
                     }
+                    if let Err(error) = self.apply_current_cluster_state().await {
+                        return command_error(format!(
+                            "cordoned node '{node_id}', but failed to activate the updated \
+                             schedule for domain '{}': {error}",
+                            domain.as_str()
+                        ));
+                    }
                     moved_this_iteration = true;
                     break;
                 };
@@ -9355,6 +9748,7 @@ impl SessionServiceImpl {
                     &mut next,
                     &desired,
                     &node_id,
+                    &live_voter_set,
                     &replacement_node_set,
                 ) else {
                     continue;
@@ -9390,6 +9784,13 @@ impl SessionServiceImpl {
                         domain.as_str()
                     ));
                 }
+                if let Err(error) = self.apply_current_cluster_state().await {
+                    return command_error(format!(
+                        "cordoned node '{node_id}', but failed to activate moved scheduled graph \
+                         node {moved} for domain '{}': {error}",
+                        domain.as_str()
+                    ));
+                }
                 moved_this_iteration = true;
                 break;
             }
@@ -9397,12 +9798,6 @@ impl SessionServiceImpl {
             if !moved_this_iteration {
                 break;
             }
-        }
-
-        if let Err(error) = self.apply_current_cluster_state().await {
-            return command_error(format!(
-                "drained node '{node_id}', but failed to activate the updated schedule: {error}"
-            ));
         }
 
         command_ok(format!(
@@ -9603,9 +9998,38 @@ impl SessionServiceImpl {
         schedule: &mut nervix_models::DomainSchedule,
         desired: &nervix_models::DomainSchedule,
         node_id: &str,
-        replacement_nodes: &BTreeSet<String>,
+        live_nodes: &BTreeSet<String>,
+        target_nodes: &BTreeSet<String>,
     ) -> Option<DrainMove> {
+        for group in &desired.placement_groups {
+            let needs_relocation = group.members.iter().any(|member| {
+                scheduled_node_for_placement_member(schedule, member)
+                    .is_some_and(|node| node.is_assigned_to(node_id))
+            });
+            if needs_relocation {
+                return Self::relocate_placement_group_assignment(
+                    schedule,
+                    desired,
+                    group,
+                    node_id,
+                    live_nodes,
+                    target_nodes,
+                );
+            }
+        }
+
+        let grouped_members = desired
+            .placement_groups
+            .iter()
+            .flat_map(|group| group.members.iter().cloned())
+            .collect::<HashSet<_>>();
         for node in &mut schedule.nodes {
+            if grouped_members.contains(&PlacementRuntimeNode::new(
+                node.kind,
+                node.identifier.clone(),
+            )) {
+                continue;
+            }
             if !node.is_assigned_to(node_id) {
                 continue;
             }
@@ -9628,118 +10052,325 @@ impl SessionServiceImpl {
                 node,
                 desired_node,
                 node_id,
-                replacement_nodes,
+                live_nodes,
+                target_nodes,
             );
         }
         None
+    }
+
+    fn relocate_placement_group_assignment(
+        schedule: &mut nervix_models::DomainSchedule,
+        desired: &nervix_models::DomainSchedule,
+        group: &PlacementGroupSchedule,
+        unavailable_node_id: &str,
+        live_nodes: &BTreeSet<String>,
+        target_nodes: &BTreeSet<String>,
+    ) -> Option<DrainMove> {
+        let current_nodes = group
+            .members
+            .iter()
+            .map(|member| scheduled_node_for_placement_member(schedule, member).cloned())
+            .collect::<Option<Vec<_>>>()?;
+        let desired_nodes = group
+            .members
+            .iter()
+            .map(|member| scheduled_node_for_placement_member(desired, member).cloned())
+            .collect::<Option<Vec<_>>>()?;
+        let old_primary = schedule
+            .placement_groups
+            .iter()
+            .find(|candidate| placement_group_members_equal(&candidate.members, &group.members))
+            .and_then(|candidate| candidate.primary_node.clone())
+            .or_else(|| {
+                current_nodes
+                    .first()
+                    .and_then(|node| node.primary_node.clone())
+            });
+        let preserved_primary = old_primary.as_ref().filter(|primary| {
+            primary.as_str() != unavailable_node_id
+                && live_nodes.contains(*primary)
+                && current_nodes.iter().all(|node| {
+                    node.primary_node.as_ref() == Some(*primary)
+                        && node.assigned_nodes.contains(*primary)
+                })
+        });
+        let desired_target = group
+            .primary_node
+            .as_ref()
+            .filter(|node_id| target_nodes.contains(*node_id))
+            .cloned()
+            .or_else(|| {
+                desired_nodes
+                    .first()
+                    .and_then(|node| node.primary_node.clone())
+                    .filter(|node_id| target_nodes.contains(node_id))
+            })
+            .or_else(|| {
+                desired_nodes
+                    .first()
+                    .and_then(|node| {
+                        node.assigned_nodes
+                            .iter()
+                            .find(|node_id| target_nodes.contains(*node_id))
+                    })
+                    .cloned()
+            });
+        let mut common_replicas = current_nodes
+            .first()?
+            .assigned_nodes
+            .iter()
+            .filter(|node_id| node_id.as_str() != unavailable_node_id)
+            .filter(|node_id| target_nodes.contains(*node_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        common_replicas.retain(|candidate| {
+            current_nodes
+                .iter()
+                .all(|node| node.assigned_nodes.contains(candidate))
+        });
+        let target = preserved_primary
+            .cloned()
+            .or(desired_target)
+            .or_else(|| common_replicas.first().cloned())
+            .or_else(|| target_nodes.first().cloned())?;
+        let primary_changed = old_primary.as_ref() != Some(&target);
+        let promoted_replica = (primary_changed
+            && current_nodes
+                .iter()
+                .all(|node| node.assigned_nodes.contains(&target)))
+        .then_some(target.clone());
+
+        for ((member, current_node), desired_node) in
+            group.members.iter().zip(current_nodes).zip(desired_nodes)
+        {
+            let replica_slots = current_node
+                .assigned_nodes
+                .len()
+                .max(desired_node.assigned_nodes.len())
+                .max(1);
+            let mut assigned_nodes = vec![target.clone()];
+            for assigned in desired_node
+                .assigned_nodes
+                .iter()
+                .chain(&current_node.assigned_nodes)
+                .chain(target_nodes)
+            {
+                if assigned.as_str() != unavailable_node_id
+                    && target_nodes.contains(assigned)
+                    && !assigned_nodes.contains(assigned)
+                {
+                    assigned_nodes.push(assigned.clone());
+                }
+            }
+            assigned_nodes.truncate(replica_slots);
+            let node = scheduled_node_for_placement_member_mut(schedule, member)
+                .expect("validated placement group member must remain scheduled");
+            node.primary_node = Some(target.clone());
+            node.assigned_nodes = assigned_nodes;
+        }
+        if let Some(current_group) = schedule
+            .placement_groups
+            .iter_mut()
+            .find(|candidate| placement_group_members_equal(&candidate.members, &group.members))
+        {
+            current_group.primary_node = Some(target.clone());
+        }
+        Some(DrainMove {
+            label: format!(
+                "placement group [{}]",
+                format_placement_runtime_nodes(&group.members)
+            ),
+            promoted_replica: promoted_replica.clone(),
+            fallback_node: (primary_changed && promoted_replica.is_none()).then_some(target),
+        })
     }
 
     fn relocate_scheduled_node_assignment(
         node: &mut ScheduledNode,
         desired_node: &ScheduledNode,
         unavailable_node_id: &str,
-        replacement_nodes: &BTreeSet<String>,
+        live_nodes: &BTreeSet<String>,
+        target_nodes: &BTreeSet<String>,
     ) -> Option<DrainMove> {
         if !node.is_assigned_to(unavailable_node_id) {
             return None;
         }
-        if desired_node.assigned_nodes.is_empty()
-            || desired_node
-                .assigned_nodes
-                .iter()
-                .any(|assigned| assigned == unavailable_node_id)
-        {
-            return None;
-        }
 
         let label = format!("{} {}", node.kind.as_ref(), node.identifier.as_str());
-        let live_replicas = node
-            .assigned_nodes
-            .iter()
-            .filter(|assigned| assigned.as_str() != unavailable_node_id)
-            .filter(|assigned| replacement_nodes.contains(*assigned))
+        let old_primary = node.primary_node.clone();
+        let preserved_primary = old_primary
+            .as_ref()
+            .filter(|primary| {
+                primary.as_str() != unavailable_node_id && live_nodes.contains(*primary)
+            })
+            .cloned();
+        let desired_target = desired_node
+            .primary_node
+            .as_ref()
+            .filter(|node_id| target_nodes.contains(*node_id))
             .cloned()
-            .collect::<Vec<_>>();
-
-        if let Some(replica) = live_replicas.first().cloned() {
-            let mut assigned_nodes = vec![replica.clone()];
-            for assigned in live_replicas.into_iter().skip(1) {
-                if !assigned_nodes.contains(&assigned) {
-                    assigned_nodes.push(assigned);
-                }
-            }
-            for assigned in &desired_node.assigned_nodes {
-                if assigned != unavailable_node_id
-                    && replacement_nodes.contains(assigned)
-                    && !assigned_nodes.contains(assigned)
-                {
-                    assigned_nodes.push(assigned.clone());
-                }
-            }
-            node.primary_node = Some(replica.clone());
-            node.assigned_nodes = assigned_nodes;
-            return Some(DrainMove {
-                label,
-                promoted_replica: Some(replica),
-                fallback_node: None,
+            .or_else(|| {
+                desired_node
+                    .assigned_nodes
+                    .iter()
+                    .find(|node_id| target_nodes.contains(*node_id))
+                    .cloned()
             });
-        }
-
-        let assigned_nodes = desired_node
+        let existing_replica = node
             .assigned_nodes
             .iter()
             .filter(|assigned| assigned.as_str() != unavailable_node_id)
-            .filter(|assigned| replacement_nodes.contains(*assigned))
-            .cloned()
-            .collect::<Vec<_>>();
-        let fallback_node = assigned_nodes.first().cloned()?;
-        node.primary_node = Some(fallback_node.clone());
+            .find(|assigned| target_nodes.contains(*assigned))
+            .cloned();
+        let target = preserved_primary
+            .or(desired_target)
+            .or(existing_replica)
+            .or_else(|| target_nodes.first().cloned())?;
+        let replica_slots = node
+            .assigned_nodes
+            .len()
+            .max(desired_node.assigned_nodes.len())
+            .max(1);
+        let mut assigned_nodes = vec![target.clone()];
+        for assigned in desired_node
+            .assigned_nodes
+            .iter()
+            .chain(&node.assigned_nodes)
+            .chain(target_nodes)
+        {
+            if assigned.as_str() != unavailable_node_id
+                && target_nodes.contains(assigned)
+                && !assigned_nodes.contains(assigned)
+            {
+                assigned_nodes.push(assigned.clone());
+            }
+        }
+        assigned_nodes.truncate(replica_slots);
+        let primary_changed = old_primary.as_ref() != Some(&target);
+        let promoted_replica =
+            (primary_changed && node.assigned_nodes.contains(&target)).then_some(target.clone());
+        node.primary_node = Some(target.clone());
         node.assigned_nodes = assigned_nodes;
         Some(DrainMove {
             label,
-            promoted_replica: None,
-            fallback_node: Some(fallback_node),
+            promoted_replica: promoted_replica.clone(),
+            fallback_node: (primary_changed && promoted_replica.is_none()).then_some(target),
         })
     }
 
     fn failover_unavailable_scheduled_nodes(
         schedule: &mut nervix_models::DomainSchedule,
-        replacement_nodes: &BTreeSet<String>,
+        desired: Option<&nervix_models::DomainSchedule>,
+        live_nodes: &BTreeSet<String>,
+        target_nodes: &BTreeSet<String>,
     ) -> Vec<DrainMove> {
         let mut moves = Vec::new();
-        if replacement_nodes.is_empty() {
+        if target_nodes.is_empty() {
             return moves;
         }
 
+        let generated_desired = desired.is_none().then(|| {
+            let mut generated = schedule.clone();
+            for node in &mut generated.nodes {
+                let replica_slots = node.assigned_nodes.len().max(1);
+                node.assigned_nodes = target_nodes.iter().take(replica_slots).cloned().collect();
+                node.primary_node = node.assigned_nodes.first().cloned();
+            }
+            for group in &mut generated.placement_groups {
+                group.primary_node = target_nodes.first().cloned();
+            }
+            generated
+        });
+        let desired = desired
+            .or(generated_desired.as_ref())
+            .expect("failover always has a desired schedule");
+
+        let groups = schedule.placement_groups.clone();
+        let mut grouped_members = HashSet::default();
+        for group in groups {
+            grouped_members.extend(group.members.iter().cloned());
+            let current_nodes = group
+                .members
+                .iter()
+                .map(|member| scheduled_node_for_placement_member(schedule, member).cloned())
+                .collect::<Option<Vec<_>>>();
+            let Some(current_nodes) = current_nodes else {
+                continue;
+            };
+            let has_unavailable_assignment = current_nodes.iter().any(|node| {
+                node.assigned_nodes
+                    .iter()
+                    .any(|node_id| !live_nodes.contains(node_id))
+            });
+            if !has_unavailable_assignment {
+                continue;
+            }
+            let unavailable_node_id = group
+                .primary_node
+                .as_ref()
+                .filter(|node_id| !live_nodes.contains(*node_id))
+                .cloned()
+                .or_else(|| {
+                    current_nodes
+                        .iter()
+                        .flat_map(|node| node.assigned_nodes.iter())
+                        .find(|node_id| !live_nodes.contains(*node_id))
+                        .cloned()
+                });
+            let Some(unavailable_node_id) = unavailable_node_id else {
+                continue;
+            };
+            let desired_group = desired
+                .placement_groups
+                .iter()
+                .find(|candidate| placement_group_members_equal(&candidate.members, &group.members))
+                .unwrap_or(&group);
+            if let Some(failover_move) = Self::relocate_placement_group_assignment(
+                schedule,
+                desired,
+                desired_group,
+                &unavailable_node_id,
+                live_nodes,
+                target_nodes,
+            ) {
+                moves.push(failover_move);
+            }
+        }
+
         for node in &mut schedule.nodes {
+            if grouped_members.contains(&PlacementRuntimeNode::new(
+                node.kind,
+                node.identifier.clone(),
+            )) {
+                continue;
+            }
             if node.assigned_nodes.is_empty() {
                 continue;
             }
             let unavailable_node_ids = node
                 .assigned_nodes
                 .iter()
-                .filter(|node_id| !replacement_nodes.contains(*node_id))
+                .filter(|node_id| !live_nodes.contains(*node_id))
                 .cloned()
                 .collect::<Vec<_>>();
             if unavailable_node_ids.is_empty() {
                 continue;
             }
 
-            let replica_slots = node.assigned_nodes.len().max(1);
-            let mut desired_node = node.clone();
-            desired_node.assigned_nodes = replacement_nodes
-                .iter()
-                .take(replica_slots)
-                .cloned()
-                .collect();
-            desired_node.primary_node = desired_node.assigned_nodes.first().cloned();
+            let Some(desired_node) = desired.nodes.iter().find(|candidate| {
+                candidate.kind == node.kind && candidate.identifier == node.identifier
+            }) else {
+                continue;
+            };
 
             for unavailable_node_id in unavailable_node_ids {
                 if let Some(failover_move) = Self::relocate_scheduled_node_assignment(
                     node,
-                    &desired_node,
+                    desired_node,
                     &unavailable_node_id,
-                    replacement_nodes,
+                    live_nodes,
+                    target_nodes,
                 ) {
                     moves.push(failover_move);
                 }
@@ -9758,13 +10389,78 @@ impl SessionServiceImpl {
             return;
         };
         let live_node_ids = live_node_ids.iter().cloned().collect::<BTreeSet<_>>();
+
         for node in &mut schedule.nodes {
+            if let Some(existing_node) = existing.nodes.iter().find(|candidate| {
+                candidate.kind == node.kind && candidate.identifier == node.identifier
+            }) {
+                node.kafka_partition_schedule = existing_node.kafka_partition_schedule.clone();
+            }
+        }
+
+        let mut grouped_members = HashSet::default();
+        for group_index in 0..schedule.placement_groups.len() {
+            let members = schedule.placement_groups[group_index].members.clone();
+            grouped_members.extend(members.iter().cloned());
+            let existing_nodes = members
+                .iter()
+                .map(|member| scheduled_node_for_placement_member(existing, member))
+                .collect::<Option<Vec<_>>>();
+            let common_primary = existing_nodes.as_ref().and_then(|nodes| {
+                let primary = nodes.first()?.primary_node.as_ref()?;
+                (live_node_ids.contains(primary)
+                    && nodes.iter().all(|node| {
+                        node.primary_node.as_ref() == Some(primary)
+                            && node.assigned_nodes.contains(primary)
+                    }))
+                .then(|| primary.clone())
+            });
+
+            if let (Some(existing_nodes), Some(primary)) = (existing_nodes, common_primary) {
+                for (member, existing_node) in members.iter().zip(existing_nodes) {
+                    let Some(node) = scheduled_node_for_placement_member_mut(schedule, member)
+                    else {
+                        continue;
+                    };
+                    let desired_assigned_nodes = node.assigned_nodes.clone();
+                    let replica_slots = existing_node
+                        .assigned_nodes
+                        .len()
+                        .max(desired_assigned_nodes.len())
+                        .max(1);
+                    let mut assigned_nodes = vec![primary.clone()];
+                    for assigned in existing_node
+                        .assigned_nodes
+                        .iter()
+                        .chain(&desired_assigned_nodes)
+                    {
+                        if live_node_ids.contains(assigned) && !assigned_nodes.contains(assigned) {
+                            assigned_nodes.push(assigned.clone());
+                        }
+                    }
+                    assigned_nodes.truncate(replica_slots);
+                    node.primary_node = Some(primary.clone());
+                    node.assigned_nodes = assigned_nodes;
+                }
+            }
+            schedule.placement_groups[group_index].primary_node = members
+                .first()
+                .and_then(|member| scheduled_node_for_placement_member(schedule, member))
+                .and_then(|node| node.primary_node.clone());
+        }
+
+        for node in &mut schedule.nodes {
+            if grouped_members.contains(&PlacementRuntimeNode::new(
+                node.kind,
+                node.identifier.clone(),
+            )) {
+                continue;
+            }
             let Some(existing_node) = existing.nodes.iter().find(|candidate| {
                 candidate.kind == node.kind && candidate.identifier == node.identifier
             }) else {
                 continue;
             };
-            node.kafka_partition_schedule = existing_node.kafka_partition_schedule.clone();
             if Self::scheduled_node_should_follow_desired_assignment(node) {
                 continue;
             }
@@ -9782,6 +10478,12 @@ impl SessionServiceImpl {
             }
 
             let desired_node = node.clone();
+            let target_nodes = desired_node
+                .assigned_nodes
+                .iter()
+                .filter(|node_id| live_node_ids.contains(*node_id))
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let desired_primary_node = node.primary_node.clone();
             let desired_assigned_nodes = node.assigned_nodes.clone();
             node.primary_node = existing_node.primary_node.clone();
@@ -9799,6 +10501,7 @@ impl SessionServiceImpl {
                     &desired_node,
                     &unavailable_node_id,
                     &live_node_ids,
+                    &target_nodes,
                 )
                 .is_some()
                 {
@@ -11847,6 +12550,281 @@ fn format_f64_for_describe(value: f64) -> String {
     }
 }
 
+fn format_identifiers(identifiers: &[Identifier]) -> String {
+    identifiers
+        .iter()
+        .map(Identifier::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_placement_runtime_nodes(nodes: &[PlacementRuntimeNode]) -> String {
+    format_placement_runtime_nodes_in_context(nodes, nodes)
+}
+
+fn format_placement_runtime_nodes_in_context(
+    nodes: &[PlacementRuntimeNode],
+    context: &[PlacementRuntimeNode],
+) -> String {
+    nodes
+        .iter()
+        .map(|node| format_placement_runtime_node(node, context))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_placement_runtime_node(
+    node: &PlacementRuntimeNode,
+    context: &[PlacementRuntimeNode],
+) -> String {
+    let kind_collision = context
+        .iter()
+        .any(|candidate| candidate.identifier == node.identifier && candidate.kind != node.kind);
+    if kind_collision {
+        format!("{}:{}", node.kind.as_ref(), node.identifier.as_str())
+    } else {
+        node.identifier.to_string()
+    }
+}
+
+fn placement_rule_runtime_nodes(rule: &PlacementRulePlan) -> Vec<PlacementRuntimeNode> {
+    let mut nodes = Vec::new();
+    for endpoint in &rule.endpoint_pairs {
+        for node in std::iter::once(&endpoint.source)
+            .chain(std::iter::once(&endpoint.destination))
+            .chain(endpoint.corridor.iter())
+        {
+            if !nodes.contains(node) {
+                nodes.push(node.clone());
+            }
+        }
+    }
+    nodes
+}
+
+fn placement_rule_endpoint_nodes(
+    rule: &PlacementRulePlan,
+    sources: bool,
+) -> Vec<PlacementRuntimeNode> {
+    let mut nodes = Vec::new();
+    for endpoint in &rule.endpoint_pairs {
+        let node = if sources {
+            &endpoint.source
+        } else {
+            &endpoint.destination
+        };
+        if !nodes.contains(node) {
+            nodes.push(node.clone());
+        }
+    }
+    nodes
+}
+
+fn placement_rule_coverage_status(rule: &PlacementRulePlan) -> &'static str {
+    let connected_pairs = rule
+        .endpoint_pairs
+        .iter()
+        .filter(|pair| pair.connected)
+        .count();
+    if connected_pairs == 0 {
+        return "empty";
+    }
+
+    let effective_claims = rule.claims.iter().filter(|claim| claim.effective).count();
+    if !rule.claims.is_empty() && effective_claims == 0 {
+        return "overridden";
+    }
+    if connected_pairs == rule.endpoint_pairs.len() && effective_claims == rule.claims.len() {
+        "effective"
+    } else {
+        "partial"
+    }
+}
+
+fn placement_runtime_node_ref_suggestions(
+    registry: &Registry,
+    domain: &Domain,
+    prefix: &str,
+) -> Vec<String> {
+    const ELIGIBLE_KINDS: [ModelKind; 13] = [
+        ModelKind::Generator,
+        ModelKind::Inferencer,
+        ModelKind::WasmProcessor,
+        ModelKind::Ingestor,
+        ModelKind::Reingestor,
+        ModelKind::Relay,
+        ModelKind::Lookup,
+        ModelKind::Junction,
+        ModelKind::Deduplicator,
+        ModelKind::Correlator,
+        ModelKind::Reorderer,
+        ModelKind::WindowProcessor,
+        ModelKind::Emitter,
+    ];
+
+    let mut eligible = Vec::new();
+    for kind in ELIGIBLE_KINDS {
+        let Ok(identifiers) = registry.list_identifiers(domain, kind, prefix) else {
+            continue;
+        };
+        for identifier in identifiers {
+            let Ok(Some(model)) = registry.get(domain, kind, &identifier) else {
+                continue;
+            };
+            if placement_member_model_is_eligible(&model) {
+                eligible.push(identifier);
+            }
+        }
+    }
+
+    let mut counts = HashMap::<Identifier, usize>::default();
+    for identifier in &eligible {
+        *counts.entry(identifier.clone()).or_default() += 1;
+    }
+    eligible
+        .into_iter()
+        .filter(|identifier| counts.get(identifier) == Some(&1))
+        .map(|identifier| identifier.to_string())
+        .collect()
+}
+
+fn placement_member_model_is_eligible(model: &Model) -> bool {
+    match model {
+        Model::Generator(_)
+        | Model::Inferencer(_)
+        | Model::WasmProcessor(_)
+        | Model::Reingestor(_)
+        | Model::Lookup(_)
+        | Model::Junction(_)
+        | Model::Deduplicator(_)
+        | Model::Correlator(_)
+        | Model::Reorderer(_)
+        | Model::WindowProcessor(_)
+        | Model::Emitter(_) => true,
+        Model::Ingestor(ingestor) => !matches!(&ingestor.source, IngestSource::Endpoint { .. }),
+        Model::Relay(relay) => relay.materialized_state.is_some(),
+        _ => false,
+    }
+}
+
+fn ordered_placement_corridor(endpoint: &PlacementEndpointPairPlan) -> Vec<PlacementRuntimeNode> {
+    let mut ordered = endpoint
+        .witnesses
+        .iter()
+        .max_by_key(|witness| witness.path.len())
+        .map(|witness| witness.path.clone())
+        .unwrap_or_else(|| {
+            if endpoint.source == endpoint.destination {
+                vec![endpoint.source.clone()]
+            } else {
+                vec![endpoint.source.clone(), endpoint.destination.clone()]
+            }
+        });
+    let mut unique = Vec::with_capacity(endpoint.corridor.len());
+    for node in ordered.drain(..).chain(endpoint.corridor.iter().cloned()) {
+        if !unique.contains(&node) {
+            unique.push(node);
+        }
+    }
+    unique
+}
+
+fn placement_claim_owner(rules: &[Identifier]) -> String {
+    if rules.is_empty() {
+        "domain default".to_string()
+    } else {
+        format_identifiers(rules)
+    }
+}
+
+fn scheduled_node_for_placement_member<'a>(
+    schedule: &'a nervix_models::DomainSchedule,
+    member: &PlacementRuntimeNode,
+) -> Option<&'a ScheduledNode> {
+    schedule
+        .nodes
+        .iter()
+        .find(|node| node.kind == member.kind && node.identifier == member.identifier)
+}
+
+fn scheduled_node_for_placement_member_mut<'a>(
+    schedule: &'a mut nervix_models::DomainSchedule,
+    member: &PlacementRuntimeNode,
+) -> Option<&'a mut ScheduledNode> {
+    schedule
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == member.kind && node.identifier == member.identifier)
+}
+
+fn placement_group_members_equal(
+    left: &[PlacementRuntimeNode],
+    right: &[PlacementRuntimeNode],
+) -> bool {
+    left.len() == right.len() && left.iter().all(|member| right.contains(member))
+}
+
+fn placement_group_host<'a>(
+    schedule: Option<&'a nervix_models::DomainSchedule>,
+    members: &[PlacementRuntimeNode],
+) -> Option<&'a str> {
+    schedule
+        .and_then(|schedule| {
+            schedule
+                .placement_groups
+                .iter()
+                .find(|group| placement_group_members_equal(&group.members, members))
+        })
+        .and_then(|group| group.primary_node.as_deref())
+}
+
+fn placement_groups_claimed_by_rule<'a>(
+    plan: &'a PlacementPlan,
+    rule: &PlacementRulePlan,
+) -> Vec<&'a PlacementRequireGroupPlan> {
+    let require_claims = rule
+        .claims
+        .iter()
+        .filter(|claim| {
+            claim.effective && claim.effective_policy == PlacementPolicy::RequireColocation
+        })
+        .collect::<Vec<_>>();
+    plan.require_groups
+        .iter()
+        .filter(|group| {
+            require_claims.iter().any(|claim| {
+                group.members.contains(&claim.left) && group.members.contains(&claim.right)
+            })
+        })
+        .collect()
+}
+
+fn planned_relocation_count(
+    current: Option<&nervix_models::DomainSchedule>,
+    planned: Option<&nervix_models::DomainSchedule>,
+) -> usize {
+    let (Some(current), Some(planned)) = (current, planned) else {
+        return 0;
+    };
+    planned
+        .nodes
+        .iter()
+        .filter(|planned_node| {
+            current
+                .nodes
+                .iter()
+                .find(|current_node| {
+                    current_node.kind == planned_node.kind
+                        && current_node.identifier == planned_node.identifier
+                })
+                .is_some_and(|current_node| {
+                    !current_node.assigned_nodes.is_empty()
+                        && current_node.primary_node != planned_node.primary_node
+                })
+        })
+        .count()
+}
+
 fn requires_request_domain(statement: &Statement) -> bool {
     !matches!(
         statement,
@@ -11898,9 +12876,11 @@ fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribeUdf(_)
             | Statement::DescribeWasmProcessor(_)
             | Statement::DescribeWindowProcessor(_)
+            | Statement::DescribePlacement(_)
             | Statement::LookupQuery(_)
             | Statement::ShowCreate(_)
             | Statement::ShowUdfs(_)
+            | Statement::ShowPlacements(_)
             | Statement::ShowRelayMaterializedState(_)
     )
 }
@@ -14039,11 +15019,25 @@ impl Application {
                         .await;
                     let current_schedule = consensus_for_reconcile.current_schedule().await;
                     let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
+                    let schedulable_node_set = schedulable_node_ids
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    let active_graphs = registry_for_reconcile.active_graphs();
+                    let active_domains = active_graphs
+                        .iter()
+                        .map(|(domain, _)| domain.clone())
+                        .collect::<HashSet<_>>();
                     for domain_schedule in &current_schedule.domains {
+                        if active_domains.contains(&domain_schedule.domain) {
+                            continue;
+                        }
                         let mut failover_schedule = domain_schedule.clone();
                         let failover_moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
                             &mut failover_schedule,
+                            None,
                             &live_voter_set,
+                            &schedulable_node_set,
                         );
                         if failover_moves.is_empty() {
                             continue;
@@ -14078,12 +15072,18 @@ impl Application {
                             warn!(error = %err, "failed to republish domain schedule after node failover");
                         }
                     }
-                    for (domain, graph) in registry_for_reconcile.active_graphs() {
+                    for (domain, graph) in active_graphs {
+                        let Some(domain_state) =
+                            consensus_for_reconcile.current_domain(&domain).await
+                        else {
+                            continue;
+                        };
                         #[cfg(feature = "testing")]
                         let mut schedule = graph.schedule_for_domain_with_mode(
                             &domain,
                             &schedulable_node_ids,
                             replica_count,
+                            domain_state.config.placement,
                             scheduler_mode,
                         );
                         #[cfg(not(feature = "testing"))]
@@ -14091,13 +15091,45 @@ impl Application {
                             &domain,
                             &schedulable_node_ids,
                             replica_count,
+                            domain_state.config.placement,
                         );
+                        let current_domain = current_schedule.domain(&domain);
+                        let mut failover_existing = current_domain.cloned();
+                        if let Some(existing) = &mut failover_existing {
+                            let failover_moves =
+                                SessionServiceImpl::failover_unavailable_scheduled_nodes(
+                                    existing,
+                                    Some(&schedule),
+                                    &live_voter_set,
+                                    &schedulable_node_set,
+                                );
+                            for failover_move in &failover_moves {
+                                if let Some(replica) = failover_move.promoted_replica.as_deref() {
+                                    info!(
+                                        domain = domain.as_str(),
+                                        node = failover_move.label,
+                                        promoted_replica = replica,
+                                        "failover promoted live replica to primary"
+                                    );
+                                } else if let Some(fallback_node) =
+                                    failover_move.fallback_node.as_deref()
+                                {
+                                    warn!(
+                                        domain = domain.as_str(),
+                                        node = failover_move.label,
+                                        fallback_node,
+                                        "failover found no live replica; moving scheduled node \
+                                         without local replicated state"
+                                    );
+                                }
+                            }
+                        }
                         SessionServiceImpl::merge_existing_schedule_data(
                             &mut schedule,
-                            current_schedule.domain(&domain),
+                            failover_existing.as_ref(),
                             &live_voters,
                         );
-                        if current_schedule.domain(&domain) == Some(&schedule) {
+                        if current_domain == Some(&schedule) {
                             continue;
                         }
                         if let Err(err) = consensus_for_reconcile
@@ -15167,8 +16199,8 @@ mod tests {
     use nervix_models::{
         AckMode, CreateDomain, CreateResource, CreateSchema, CreateStatement, DomainConfig,
         DomainPace, DomainSchedule, DomainState, DomainStatus, KafkaPartitionSchedule, Model,
-        ModelKind, ResourceVersion, ResourceVersionStatus, ScheduledNode, SchemaField,
-        SubscriptionLiteral,
+        ModelKind, PlacementGroupSchedule, PlacementRuntimeNode, ResourceVersion,
+        ResourceVersionStatus, ScheduledNode, SchemaField, SubscriptionLiteral,
     };
     use sorted_vec::SortedVec;
 
@@ -15468,6 +16500,20 @@ mod tests {
         }
     }
 
+    fn placement_member(identifier_raw: &str, kind: ModelKind) -> PlacementRuntimeNode {
+        PlacementRuntimeNode::new(kind, identifier(identifier_raw))
+    }
+
+    fn placement_group(
+        members: Vec<PlacementRuntimeNode>,
+        primary_node: &str,
+    ) -> PlacementGroupSchedule {
+        PlacementGroupSchedule {
+            members,
+            primary_node: Some(primary_node.to_string()),
+        }
+    }
+
     async fn create_test_domain(consensus: &ConsensusHandle, raw: &str) {
         let domain = Domain::parse(raw).expect("valid domain");
         let state = DomainState {
@@ -15476,6 +16522,7 @@ mod tests {
                 pace: DomainPace::Paced,
                 period: "30s".to_string(),
                 skew: "1s".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Stopped,
             start_version: 0,
@@ -15674,6 +16721,27 @@ mod tests {
     }
 
     #[test]
+    fn placement_runtime_node_rendering_qualifies_only_kind_collisions() {
+        let nodes = vec![
+            placement_member("shared", ModelKind::Junction),
+            placement_member("shared", ModelKind::Deduplicator),
+            placement_member("sink", ModelKind::Emitter),
+        ];
+
+        assert_eq!(
+            format_placement_runtime_nodes(&nodes),
+            "junction:shared, deduplicator:shared, sink"
+        );
+        assert_eq!(
+            format_placement_runtime_nodes(&[
+                placement_member("source", ModelKind::Junction),
+                placement_member("sink", ModelKind::Emitter),
+            ]),
+            "source, sink"
+        );
+    }
+
+    #[test]
     fn drop_node_quorum_error_allows_available_current_quorum() {
         let voters = BTreeSet::from([
             "node-1".to_string(),
@@ -15685,6 +16753,18 @@ mod tests {
         assert!(
             SessionServiceImpl::drop_node_quorum_error("node-2", &voters, &live_node_ids).is_none()
         );
+    }
+
+    #[test]
+    fn drop_node_rebuild_uses_only_schedulable_nodes_for_new_assignments() {
+        let live_voters = vec!["node-live".to_string(), "node-cordoned".to_string()];
+        let schedulable_nodes = vec!["node-live".to_string()];
+
+        let (new_assignment_candidates, preservable_nodes) =
+            SessionServiceImpl::drop_node_schedule_node_sets(&live_voters, &schedulable_nodes);
+
+        assert_eq!(new_assignment_candidates, schedulable_nodes);
+        assert_eq!(preservable_nodes, live_voters);
     }
 
     #[test]
@@ -15704,6 +16784,7 @@ mod tests {
                     ..scheduled_node("emit_notifications", ModelKind::Emitter)
                 },
             ],
+            placement_groups: Vec::new(),
         };
         let desired = DomainSchedule {
             domain,
@@ -15719,12 +16800,18 @@ mod tests {
                     ..scheduled_node("emit_notifications", ModelKind::Emitter)
                 },
             ],
+            placement_groups: Vec::new(),
         };
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
             &mut schedule,
             &desired,
             "node-2",
+            &BTreeSet::from([
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string(),
+            ]),
             &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
         );
 
@@ -15741,7 +16828,7 @@ mod tests {
     }
 
     #[test]
-    fn move_next_scheduled_node_for_drain_promotes_live_replica() {
+    fn move_next_scheduled_node_for_drain_prefers_policy_target_over_live_replica() {
         let domain = Domain::parse("payments").expect("valid domain");
         let mut schedule = DomainSchedule {
             domain: domain.clone(),
@@ -15754,6 +16841,7 @@ mod tests {
                 ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
+            placement_groups: Vec::new(),
         };
         let desired = DomainSchedule {
             domain,
@@ -15762,12 +16850,18 @@ mod tests {
                 assigned_nodes: vec!["node-1".to_string(), "node-3".to_string()],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
+            placement_groups: Vec::new(),
         };
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
             &mut schedule,
             &desired,
             "node-2",
+            &BTreeSet::from([
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string(),
+            ]),
             &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
         );
 
@@ -15775,14 +16869,86 @@ mod tests {
             moved,
             Some(DrainMove {
                 label: "deduplicator dedup_notifications".to_string(),
-                promoted_replica: Some("node-3".to_string()),
-                fallback_node: None,
+                promoted_replica: None,
+                fallback_node: Some("node-1".to_string()),
             })
         );
-        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-3"));
+        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-1"));
         assert_eq!(
             schedule.nodes[0].assigned_nodes,
-            vec!["node-3".to_string(), "node-1".to_string()]
+            vec!["node-1".to_string(), "node-3".to_string()]
+        );
+    }
+
+    #[test]
+    fn drain_require_group_prefers_policy_target_over_common_replica() {
+        let domain = Domain::parse("payments").expect("valid domain");
+        let members = vec![
+            placement_member("corridor_source", ModelKind::Junction),
+            placement_member("corridor_sink", ModelKind::Junction),
+        ];
+        let mut schedule = DomainSchedule {
+            domain: domain.clone(),
+            nodes: vec![
+                ScheduledNode {
+                    primary_node: Some("node-2".to_string()),
+                    assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+                    ..scheduled_node("corridor_source", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some("node-2".to_string()),
+                    assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+                    ..scheduled_node("corridor_sink", ModelKind::Junction)
+                },
+            ],
+            placement_groups: vec![placement_group(members.clone(), "node-2")],
+        };
+        let desired = DomainSchedule {
+            domain,
+            nodes: vec![
+                ScheduledNode {
+                    primary_node: Some("node-1".to_string()),
+                    assigned_nodes: vec!["node-1".to_string(), "node-3".to_string()],
+                    ..scheduled_node("corridor_source", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some("node-1".to_string()),
+                    assigned_nodes: vec!["node-1".to_string(), "node-3".to_string()],
+                    ..scheduled_node("corridor_sink", ModelKind::Junction)
+                },
+            ],
+            placement_groups: vec![placement_group(members, "node-1")],
+        };
+
+        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
+            &mut schedule,
+            &desired,
+            "node-2",
+            &BTreeSet::from([
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string(),
+            ]),
+            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+        );
+
+        assert_eq!(
+            moved,
+            Some(DrainMove {
+                label: "placement group [corridor_source, corridor_sink]".to_string(),
+                promoted_replica: None,
+                fallback_node: Some("node-1".to_string()),
+            })
+        );
+        assert!(
+            schedule
+                .nodes
+                .iter()
+                .all(|node| node.primary_node.as_deref() == Some("node-1"))
+        );
+        assert_eq!(
+            schedule.placement_groups[0].primary_node.as_deref(),
+            Some("node-1")
         );
     }
 
@@ -15796,6 +16962,7 @@ mod tests {
                 assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
+            placement_groups: Vec::new(),
         };
         let desired = DomainSchedule {
             domain,
@@ -15804,12 +16971,14 @@ mod tests {
                 assigned_nodes: vec!["node-1".to_string()],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
+            placement_groups: Vec::new(),
         };
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
             &mut schedule,
             &desired,
             "node-2",
+            &BTreeSet::from(["node-1".to_string(), "node-2".to_string()]),
             &BTreeSet::from(["node-1".to_string()]),
         );
 
@@ -15826,7 +16995,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_existing_schedule_data_promotes_live_replica_when_primary_dies() {
+    fn merge_existing_schedule_data_prefers_policy_target_when_primary_dies() {
         let domain = Domain::parse("payments").expect("valid domain");
         let mut next = DomainSchedule {
             domain: domain.clone(),
@@ -15835,6 +17004,7 @@ mod tests {
                 assigned_nodes: vec!["node-1".to_string(), "node-4".to_string()],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
+            placement_groups: Vec::new(),
         };
         let existing = DomainSchedule {
             domain,
@@ -15847,6 +17017,7 @@ mod tests {
                 ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
+            placement_groups: Vec::new(),
         };
 
         SessionServiceImpl::merge_existing_schedule_data(
@@ -15855,11 +17026,8 @@ mod tests {
             &["node-1".to_string(), "node-3".to_string()],
         );
 
-        assert_eq!(next.nodes[0].primary_node.as_deref(), Some("node-3"));
-        assert_eq!(
-            next.nodes[0].assigned_nodes,
-            vec!["node-3".to_string(), "node-1".to_string()]
-        );
+        assert_eq!(next.nodes[0].primary_node.as_deref(), Some("node-1"));
+        assert_eq!(next.nodes[0].assigned_nodes, vec!["node-1".to_string()]);
     }
 
     #[test]
@@ -15872,6 +17040,7 @@ mod tests {
                 assigned_nodes: vec!["node-1".to_string()],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
+            placement_groups: Vec::new(),
         };
         let existing = DomainSchedule {
             domain,
@@ -15880,6 +17049,7 @@ mod tests {
                 assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
+            placement_groups: Vec::new(),
         };
 
         SessionServiceImpl::merge_existing_schedule_data(
@@ -15902,6 +17072,7 @@ mod tests {
                 assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
                 ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
             }],
+            placement_groups: Vec::new(),
         };
         let existing = DomainSchedule {
             domain,
@@ -15911,6 +17082,7 @@ mod tests {
                 assigned_nodes: vec!["node-1".to_string()],
                 ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
             }],
+            placement_groups: Vec::new(),
         };
 
         SessionServiceImpl::merge_existing_schedule_data(
@@ -15939,6 +17111,7 @@ mod tests {
                 scheduled_node("ingest_notifications", ModelKind::Ingestor),
                 scheduled_node("kafka_main", ModelKind::Client),
             ],
+            placement_groups: Vec::new(),
         };
         let existing = DomainSchedule {
             domain,
@@ -15954,12 +17127,304 @@ mod tests {
                     ..scheduled_node("ingest_notifications", ModelKind::Client)
                 },
             ],
+            placement_groups: Vec::new(),
         };
 
         SessionServiceImpl::merge_existing_schedule_data(&mut next, Some(&existing), &[]);
 
         assert_eq!(next.nodes[0].kafka_partition_schedule, None);
         assert_eq!(next.nodes[1].kafka_partition_schedule, None);
+    }
+
+    #[test]
+    fn merge_existing_schedule_data_rejects_a_split_require_group() {
+        let domain = Domain::parse("payments").expect("valid domain");
+        let members = vec![
+            placement_member("corridor_source", ModelKind::Junction),
+            placement_member("corridor_sink", ModelKind::Junction),
+        ];
+        let mut next = DomainSchedule {
+            domain: domain.clone(),
+            nodes: vec![
+                ScheduledNode {
+                    primary_node: Some("node-1".to_string()),
+                    assigned_nodes: vec!["node-1".to_string()],
+                    ..scheduled_node("corridor_source", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some("node-1".to_string()),
+                    assigned_nodes: vec!["node-1".to_string()],
+                    ..scheduled_node("corridor_sink", ModelKind::Junction)
+                },
+            ],
+            placement_groups: vec![placement_group(members.clone(), "node-1")],
+        };
+        let existing = DomainSchedule {
+            domain,
+            nodes: vec![
+                ScheduledNode {
+                    primary_node: Some("node-2".to_string()),
+                    assigned_nodes: vec!["node-2".to_string()],
+                    ..scheduled_node("corridor_source", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some("node-3".to_string()),
+                    assigned_nodes: vec!["node-3".to_string()],
+                    ..scheduled_node("corridor_sink", ModelKind::Junction)
+                },
+            ],
+            placement_groups: vec![placement_group(members, "node-2")],
+        };
+
+        SessionServiceImpl::merge_existing_schedule_data(
+            &mut next,
+            Some(&existing),
+            &[
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string(),
+            ],
+        );
+
+        assert!(
+            next.nodes
+                .iter()
+                .all(|node| node.primary_node.as_deref() == Some("node-1"))
+        );
+        assert_eq!(
+            next.placement_groups[0].primary_node.as_deref(),
+            Some("node-1")
+        );
+    }
+
+    #[test]
+    fn merge_existing_schedule_data_preserves_an_intact_require_group() {
+        let domain = Domain::parse("payments").expect("valid domain");
+        let members = vec![
+            placement_member("corridor_source", ModelKind::Junction),
+            placement_member("corridor_sink", ModelKind::Junction),
+        ];
+        let mut next = DomainSchedule {
+            domain: domain.clone(),
+            nodes: vec![
+                ScheduledNode {
+                    primary_node: Some("node-1".to_string()),
+                    assigned_nodes: vec!["node-1".to_string()],
+                    ..scheduled_node("corridor_source", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some("node-1".to_string()),
+                    assigned_nodes: vec!["node-1".to_string()],
+                    ..scheduled_node("corridor_sink", ModelKind::Junction)
+                },
+            ],
+            placement_groups: vec![placement_group(members.clone(), "node-1")],
+        };
+        let existing = DomainSchedule {
+            domain,
+            nodes: vec![
+                ScheduledNode {
+                    primary_node: Some("node-2".to_string()),
+                    assigned_nodes: vec!["node-2".to_string()],
+                    ..scheduled_node("corridor_source", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some("node-2".to_string()),
+                    assigned_nodes: vec!["node-2".to_string()],
+                    ..scheduled_node("corridor_sink", ModelKind::Junction)
+                },
+            ],
+            placement_groups: vec![placement_group(members, "node-2")],
+        };
+
+        SessionServiceImpl::merge_existing_schedule_data(
+            &mut next,
+            Some(&existing),
+            &["node-1".to_string(), "node-2".to_string()],
+        );
+
+        assert!(
+            next.nodes
+                .iter()
+                .all(|node| node.primary_node.as_deref() == Some("node-2"))
+        );
+        assert_eq!(
+            next.placement_groups[0].primary_node.as_deref(),
+            Some("node-2")
+        );
+    }
+
+    #[test]
+    fn drain_relocates_a_require_group_as_one_unit() {
+        let domain = Domain::parse("payments").expect("valid domain");
+        let members = vec![
+            placement_member("corridor_source", ModelKind::Junction),
+            placement_member("corridor_sink", ModelKind::Junction),
+        ];
+        let mut schedule = DomainSchedule {
+            domain: domain.clone(),
+            nodes: vec![
+                ScheduledNode {
+                    primary_node: Some("node-2".to_string()),
+                    assigned_nodes: vec!["node-2".to_string()],
+                    ..scheduled_node("corridor_source", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some("node-2".to_string()),
+                    assigned_nodes: vec!["node-2".to_string()],
+                    ..scheduled_node("corridor_sink", ModelKind::Junction)
+                },
+            ],
+            placement_groups: vec![placement_group(members.clone(), "node-2")],
+        };
+        let desired = DomainSchedule {
+            domain,
+            nodes: vec![
+                ScheduledNode {
+                    primary_node: Some("node-1".to_string()),
+                    assigned_nodes: vec!["node-1".to_string()],
+                    ..scheduled_node("corridor_source", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some("node-1".to_string()),
+                    assigned_nodes: vec!["node-1".to_string()],
+                    ..scheduled_node("corridor_sink", ModelKind::Junction)
+                },
+            ],
+            placement_groups: vec![placement_group(members, "node-1")],
+        };
+
+        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
+            &mut schedule,
+            &desired,
+            "node-2",
+            &BTreeSet::from([
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string(),
+            ]),
+            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+        );
+
+        assert!(moved.is_some());
+        assert!(
+            schedule
+                .nodes
+                .iter()
+                .all(|node| node.primary_node.as_deref() == Some("node-1"))
+        );
+        assert_eq!(
+            schedule.placement_groups[0].primary_node.as_deref(),
+            Some("node-1")
+        );
+    }
+
+    #[test]
+    fn failover_relocates_a_require_group_to_one_target() {
+        let domain = Domain::parse("payments").expect("valid domain");
+        let members = vec![
+            placement_member("corridor_source", ModelKind::Junction),
+            placement_member("corridor_sink", ModelKind::Junction),
+        ];
+        let mut schedule = DomainSchedule {
+            domain,
+            nodes: vec![
+                ScheduledNode {
+                    primary_node: Some("node-2".to_string()),
+                    assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+                    ..scheduled_node("corridor_source", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some("node-2".to_string()),
+                    assigned_nodes: vec!["node-2".to_string(), "node-1".to_string()],
+                    ..scheduled_node("corridor_sink", ModelKind::Junction)
+                },
+            ],
+            placement_groups: vec![placement_group(members, "node-2")],
+        };
+
+        let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
+            &mut schedule,
+            None,
+            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+        );
+
+        assert!(!moves.is_empty());
+        let group_host = schedule.placement_groups[0]
+            .primary_node
+            .as_deref()
+            .expect("require group must retain a host");
+        assert!(
+            schedule
+                .nodes
+                .iter()
+                .all(|node| node.primary_node.as_deref() == Some(group_host))
+        );
+    }
+
+    #[test]
+    fn failover_does_not_promote_a_cordoned_live_replica() {
+        let domain = Domain::parse("payments").expect("valid domain");
+        let mut schedule = DomainSchedule {
+            domain,
+            nodes: vec![ScheduledNode {
+                primary_node: Some("node-2".to_string()),
+                assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
+            }],
+            placement_groups: Vec::new(),
+        };
+
+        let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
+            &mut schedule,
+            None,
+            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+            &BTreeSet::from(["node-1".to_string()]),
+        );
+
+        assert!(!moves.is_empty());
+        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-1"));
+    }
+
+    #[test]
+    fn failover_prefers_policy_target_over_live_replica() {
+        let domain = Domain::parse("payments").expect("valid domain");
+        let mut schedule = DomainSchedule {
+            domain: domain.clone(),
+            nodes: vec![ScheduledNode {
+                primary_node: Some("node-2".to_string()),
+                assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
+            }],
+            placement_groups: Vec::new(),
+        };
+        let desired = DomainSchedule {
+            domain,
+            nodes: vec![ScheduledNode {
+                primary_node: Some("node-1".to_string()),
+                assigned_nodes: vec!["node-1".to_string(), "node-3".to_string()],
+                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
+            }],
+            placement_groups: Vec::new(),
+        };
+
+        let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
+            &mut schedule,
+            Some(&desired),
+            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+        );
+
+        assert_eq!(
+            moves,
+            vec![DrainMove {
+                label: "deduplicator dedup_notifications".to_string(),
+                promoted_replica: None,
+                fallback_node: Some("node-1".to_string()),
+            }]
+        );
+        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-1"));
     }
 
     #[test]
@@ -16063,6 +17528,7 @@ mod tests {
             pace: DomainPace::Paced,
             period: "30s".to_string(),
             skew: "1s".to_string(),
+            placement: nervix_models::PlacementPolicy::Neutral,
         };
 
         assert!(validate_domain_config(&config).is_ok());
@@ -16074,6 +17540,7 @@ mod tests {
             pace: DomainPace::Unpaced,
             period: "not-a-duration".to_string(),
             skew: "not-a-duration".to_string(),
+            placement: nervix_models::PlacementPolicy::Neutral,
         };
 
         assert!(validate_domain_config(&config).is_ok());
@@ -16503,6 +17970,7 @@ mod tests {
                         pace: DomainPace::Unpaced,
                         period: "0ms".to_string(),
                         skew: "0ms".to_string(),
+                        placement: nervix_models::PlacementPolicy::Neutral,
                     },
                 },
                 false,
@@ -16519,6 +17987,7 @@ mod tests {
                         pace: DomainPace::Unpaced,
                         period: "0ms".to_string(),
                         skew: "0ms".to_string(),
+                        placement: nervix_models::PlacementPolicy::Neutral,
                     },
                 },
                 true,
@@ -16996,6 +18465,114 @@ mod tests {
                 .any(|suggestion| suggestion.value == "CLUSTER"),
             "expected CLUSTER suggestion, got: {:?}",
             suggest.suggestions
+        );
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn placement_member_completion_expands_only_eligible_runtime_names() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+        let configured = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN; CREATE SCHEMA placement_event ( id I64 ); CREATE RELAY \
+                            plain_input SCHEMA placement_event UNBRANCHED; CREATE RELAY \
+                            eligible_state SCHEMA placement_event UNBRANCHED WITH MATERIALIZED \
+                            STATE LAST BY TIMESTAMP; CREATE RELAY plain_output SCHEMA \
+                            placement_event UNBRANCHED; CREATE JUNCTION eligible_processor FROM \
+                            plain_input UNBRANCHED TO plain_output INHERIT ALL FLUSH IMMEDIATE ON \
+                            MESSAGE ERROR LOG; COMMIT;"
+                        .to_string(),
+                    domain: "default".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(
+            configured.success,
+            "placement completion fixture should configure: {configured:?}"
+        );
+
+        let input = "CREATE PLACEMENT policy FROM ";
+        let response = service
+            .process_suggest(
+                SuggestRequest {
+                    input: input.to_string(),
+                    cursor: u32::try_from(input.len()).expect("test input length fits u32"),
+                    domain: "default".to_string(),
+                },
+                &subscriptions,
+            )
+            .await;
+        let values = response
+            .suggestions
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+
+        assert!(
+            values.contains(&"eligible_processor".to_string()),
+            "{values:?}"
+        );
+        assert!(values.contains(&"eligible_state".to_string()), "{values:?}");
+        assert!(!values.contains(&"plain_input".to_string()), "{values:?}");
+        assert!(!values.contains(&"plain_output".to_string()), "{values:?}");
+        assert!(
+            !values.contains(&"ref:runtime_node".to_string()),
+            "{values:?}"
+        );
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn show_placements_reports_fully_overridden_effective_coverage() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+        let configured = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN; CREATE SCHEMA placement_event ( id I64 ); CREATE RELAY \
+                            placement_input SCHEMA placement_event UNBRANCHED; CREATE RELAY \
+                            placement_middle SCHEMA placement_event UNBRANCHED; CREATE RELAY \
+                            placement_output SCHEMA placement_event UNBRANCHED; CREATE JUNCTION \
+                            corridor_source FROM placement_input UNBRANCHED TO placement_middle \
+                            INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG; CREATE JUNCTION \
+                            corridor_sink FROM placement_middle UNBRANCHED TO placement_output \
+                            INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG; CREATE PLACEMENT \
+                            weak_glue FROM corridor_source TO corridor_sink REQUIRE COLOCATION \
+                            RANK 2; CREATE PLACEMENT strong_cut FROM corridor_source TO \
+                            corridor_sink NEUTRAL RANK 1; COMMIT;"
+                        .to_string(),
+                    domain: "default".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(
+            configured.success,
+            "placement coverage fixture should configure: {configured:?}"
+        );
+
+        let output = service
+            .show_placements(&Domain::parse("default").expect("valid domain"))
+            .await;
+        assert!(output.success, "SHOW PLACEMENTS should succeed: {output:?}");
+        assert!(
+            output
+                .message
+                .lines()
+                .any(|line| line.starts_with("weak_glue ") && line.ends_with("coverage=overridden")),
+            "unexpected SHOW PLACEMENTS output: {}",
+            output.message
         );
 
         subscriptions.stop_all(&service).await;
@@ -17639,6 +19216,7 @@ mod tests {
                     pace: DomainPace::Unpaced,
                     period: "0ms".to_string(),
                     skew: "0ms".to_string(),
+                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Stopped,
                 start_version: 0,

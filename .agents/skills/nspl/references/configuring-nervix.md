@@ -31,6 +31,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `NSPL Overview` and `Examples` |
 | Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
+| Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions | `Sessions` |
 | Metrics and runtime inspection | `Metrics And Observability` |
@@ -47,7 +48,7 @@ Capture these decisions before choosing syntax:
 
 | Concern | Questions to answer |
 | --- | --- |
-| Domain | Is input paced by event time or admitted on arrival? What are period, skew, and restart semantics? |
+| Domain | Is input paced by event time or admitted on arrival? What are period, skew, restart semantics, and the default placement policy? |
 | Input contract | What sample payload and wire format arrive? Which fields are optional or sensitive? |
 | Runtime record | What exact internal type and nullability does each field have? |
 | Isolation | Which fields form the branch key? How long should inactive branches live? Is an instance cap required? |
@@ -55,6 +56,7 @@ Capture these decisions before choosing syntax:
 | Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, enriched, or handled by a trusted Roto UDF? |
 | State | Which relays are materialized? Should missing state wait, skip, or use a typed default? |
 | Output | Which connector/sink, publishing mode, confirmation window/timeout, retry pacing, payload shape, codec or direct mapping, headers, and sensitivity leaks are required? |
+| Placement | Which connected corridors need hard or preferred colocation, which should spread softly, and what rule ranks express precedence? |
 | Operations | What input collection and output flush size/cadence, error behavior, TLS resources, metrics, and subscriptions are required? |
 
 If the user supplied a real payload, derive wire and internal schemas field by field and call out
@@ -65,7 +67,8 @@ keys.
 
 Use separate execution phases so transaction and active-domain rules stay clear.
 
-1. **Domain bootstrap:** create one paced or unpaced domain as its own server command.
+1. **Domain bootstrap:** create one paced or unpaced domain, including its optional placement
+   default, as its own server command.
 2. **Domain selection:** run `USE <domain>;` as a client-local command outside a transaction.
 3. **Resources:** create resource declarations, then upload local directories as separate client
    actions.
@@ -83,7 +86,8 @@ Within the graph transaction, declare dependencies before consumers:
 5. relays, including materialized relays;
 6. ingestors;
 7. branch-preserving processors, generators, and reingestors;
-8. emitters.
+8. emitters;
+9. placement rules, after every runtime-node or materialized-relay member they reference.
 
 Resource upload paths, credentials, broker addresses, and external object names are deployment
 inputs. Keep placeholders obvious and list provisioning that must happen outside Nervix.
@@ -112,6 +116,9 @@ relay. Do not use them to scan across branches.
 ## Correctness checks
 
 - Every referenced name is declared in the active domain before use.
+- Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
+  schedulable runtime nodes or materialized relays. Treat coverage as path-gated, allow a valid
+  zero-effect rule, use lower `RANK` numbers for stronger claims, and never invent hard separation.
 - Every schema and wire schema is non-empty; types and optionality match exactly. JSON, CBOR, and
   AVRO wire schemas are separate entity kinds even when their names coincide. Every wire schema
   declares `MODE STRICT|LOOSE` after its name, and a mode-only change uses `ALTER WIRE <format>
@@ -184,6 +191,9 @@ Choose checks relevant to the configured graph:
 - `DESCRIBE RESOURCE` confirms uploads and versions.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
+- `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and
+  `DESCRIBE DOMAIN` inspect placement coverage, precedence, effective colocation groups, hosts, and
+  the domain default.
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
