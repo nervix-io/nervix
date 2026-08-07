@@ -41,7 +41,7 @@ Every domain has a fallback placement policy. It applies to directly connected r
 that no named placement rule claims. The clause is optional on every domain-creation form, and
 omission means `NEUTRAL` so ordinary scheduler heuristics remain active:
 
-```nspl,ignore
+```nspl
 CREATE PACED DOMAIN production
   WITH PERIOD 1s SKEW 100ms
   PLACEMENT REQUIRE COLOCATION;
@@ -52,7 +52,7 @@ CREATE UNPACED DOMAIN archive
 
 Change the default for the session's active domain with the nameless domain alteration:
 
-```nspl,ignore
+```nspl
 ALTER DOMAIN SET PLACEMENT PREFER COLOCATION;
 ```
 

@@ -1,386 +1,391 @@
 # Placement Policies
 
-This document specifies the production behavior and NSPL surface for placement policies. Sections
-1–8 are normative product requirements.
+Placement policies control where a domain's schedulable work executes. Use them to keep a
+latency-sensitive processing corridor on one machine, prefer locality without forcing it, or bias
+expensive stages across machines.
 
-## 1. Overview and Terminology
+Nervix distinguishes two kinds of nodes throughout this chapter:
 
-Placement policies govern which cluster node executes each runtime node in a domain's execution
-graph.
-
-- A **runtime node** is a schedulable graph entity such as an ingestor, processor, or emitter.
+- A **runtime node** is a schedulable graph entity such as an ingestor, processor, materializer,
+  lookup, generator, or emitter.
 - A **cluster node** is a machine participating in the Nervix cluster.
-- A **placement member** is a runtime-node reference accepted by a placement rule. A materialized
-  relay name is also accepted and denotes that relay's materializing runtime node.
-- An **endpoint pair** is one ordered `(source, destination)` member pair selected from a rule's
-  `FROM` and `TO` sets.
-- A **corridor** is the set of runtime nodes carrying traffic between one connected endpoint pair.
-- A **claim pair** is one distinct, unordered pair of runtime nodes within a corridor. Placement
-  policies are resolved on claim pairs.
-- A **require bond** is a claim pair whose effective policy is `REQUIRE COLOCATION`.
-- A **colocation group** is a connected component of require bonds.
 
-A placement policy is one of four levels on a single axis of colocation enforcement:
+A named placement rule marks the directed paths between existing runtime nodes. For example, this
+rule keeps `feature_normalizer`, `risk_scorer`, and every runtime node on a path between them on
+one cluster node:
 
-| Policy | Meaning |
-| --- | --- |
-| `REQUIRE COLOCATION` | A hard requirement that the affected runtime nodes execute on the same cluster node. |
-| `PREFER COLOCATION` | A soft bias toward the same cluster node for new placement decisions. |
-| `NEUTRAL` | No placement-policy opinion; existing scheduler heuristics remain active. |
-| `SUGGEST SEPARATION` | A soft bias toward different cluster nodes for new placement decisions. It is never an isolation guarantee. |
+```nspl
+CREATE PLACEMENT scoring_local
+  FROM feature_normalizer
+  TO risk_scorer
+  REQUIRE COLOCATION
+  RANK 1;
+```
 
-Policy level does not resolve competing claims. `RANK` establishes precedence, and equal-rank
-claims with different policies conflict even when one policy sounds stronger than another.
+Placement changes assignments, not graph routing. Records still follow the routes declared by the
+ingestors, processors, and emitters.
 
-Policies attach in two ways:
+## Choosing A Policy
 
-- **Placement rules** are named, domain-owned entities that mark paths between a source set and a
-  destination set.
-- **The domain default** is a fallback policy for directly connected runtime-node pairs that no
-  placement rule claims.
+The policies occupy one colocation scale; `NEUTRAL` expresses no opinion on that scale. There is
+no hard-separation policy.
 
-## 2. Placement Rules
+| Policy | Scheduling effect | Existing assignments |
+| --- | --- | --- |
+| `REQUIRE COLOCATION` | Every runtime node within each captured corridor executes on the same cluster node. | A newly effective requirement can relocate runtime nodes. |
+| `PREFER COLOCATION` | New placement decisions favor the same cluster node. | The preference does not move existing assignments by itself. |
+| `NEUTRAL` | The placement rule expresses no preference, so ordinary scheduler heuristics remain active. | It does not move assignments by itself. |
+| `SUGGEST SEPARATION` | New placement decisions favor different cluster nodes. | The suggestion does not move existing assignments by itself. |
+
+Use `REQUIRE COLOCATION` when a remote hop is unacceptable, especially for a short
+latency-critical path or a materialized-state reader. Use `PREFER COLOCATION` when locality is
+valuable but the scheduler should retain freedom to distribute work. Use `SUGGEST SEPARATION` to
+reduce the chance that expensive stages share one machine, not to create an isolation boundary.
+
+For new assignments, an explicit soft policy takes precedence over the scheduler's built-in
+upstream-locality preference. It remains advisory: cluster availability and the scheduler's other
+placement inputs can still produce a different result. `NEUTRAL` means "no placement opinion";
+it does not randomize placement or disable the scheduler's normal heuristics.
+
+## Setting The Domain Default
+
+Every domain has a fallback placement policy. Declare it when creating the domain:
+
+```nspl,ignore
+CREATE [IF NOT EXISTS] UNPACED DOMAIN <domain_name>
+  [PLACEMENT <policy>];
+
+CREATE [IF NOT EXISTS] PACED DOMAIN <domain_name>
+  WITH PERIOD <duration> SKEW <duration>
+  [PLACEMENT <policy>];
+```
+
+`CREATE DOMAIN` remains the short spelling for `CREATE UNPACED DOMAIN` and accepts the same
+placement clause. Omitting `PLACEMENT` selects `NEUTRAL`.
+
+```nspl
+CREATE UNPACED DOMAIN realtime
+  PLACEMENT PREFER COLOCATION;
+```
+
+The default applies to directly connected runtime nodes when no named placement rule claims that
+relationship. It is deliberately per hop:
+
+- `REQUIRE COLOCATION` places each connected graph component on one cluster node unless a stronger
+  named rule carves out part of it.
+- `PREFER COLOCATION` adds a locality preference to each uncovered hop.
+- `SUGGEST SEPARATION` adds a spreading preference to each uncovered hop.
+- `NEUTRAL` leaves each uncovered hop to ordinary scheduler behavior.
+
+Change the default for the session's active domain with the nameless `ALTER DOMAIN` statement:
+
+```nspl
+ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+```
+
+Changing a running domain's default activates a new schedule. A newly effective
+`REQUIRE COLOCATION` default can relocate runtime nodes; changing only a soft default does not
+migrate existing assignments.
+
+## Defining A Named Corridor
+
+Create a named rule after every referenced member exists in the active domain. Placements are
+domain-owned and cannot span domains:
 
 ```nspl,ignore
 CREATE [IF NOT EXISTS] PLACEMENT <placement_name>
   FROM <runtime_node> [, <runtime_node> ...]
   TO <runtime_node> [, <runtime_node> ...]
-  <policy>
-  [RANK <n>] [;]
-
-<policy> :=
-    REQUIRE COLOCATION
-  | PREFER COLOCATION
-  | NEUTRAL
-  | SUGGEST SEPARATION
+  REQUIRE COLOCATION | PREFER COLOCATION | NEUTRAL | SUGGEST SEPARATION
+  [RANK <positive_integer>];
 ```
 
-A placement is a domain-owned entity with its own name kind. Its name and members resolve in the
-session's active domain in the same way as other domain-owned entities. Execution graphs are
-strictly per-domain, so a placement rule cannot span domains.
+Each `FROM` member is paired with each `TO` member. Nervix evaluates those directed endpoint pairs
+independently and applies the policy only where a path exists.
 
-Every member must exist when the rule is created and must be placement-eligible. The following
-user-declared, schedulable runtime-node kinds are eligible:
+The following user-declared runtime-node kinds are placement-eligible:
 
-- ingestor
-- reingestor
-- emitter
-- junction
-- deduplicator
-- correlator
-- reorderer
-- window processor
-- inferencer
-- WASM processor
-- generator
-- lookup
+- ingestors, except endpoint-source ingestors;
+- reingestors and generators;
+- junctions, deduplicators, correlators, reorderers, and window processors;
+- inferencers and WASM processors;
+- emitters and `HASH MAP` lookups; and
+- materialized relays, which refer to their materializing runtime nodes.
 
-A materialized relay name is also a legal member. It denotes the runtime node that materializes
-the relay, because that runtime node owns the placement-critical state. A non-materialized relay
-is not placement-eligible and produces a clear creation error.
+An ordinary relay is not a schedulable entity and cannot be a placement member. A materialized
+relay is the exception because its name denotes the runtime node that owns its materialized state.
+See [Materialized Relay State](processors.md#materialized-relay-state) for dependency behavior.
 
-An endpoint-source ingestor is not placement-eligible. It executes structurally on every cluster
-node and therefore cannot be placement-constrained.
+Endpoint-source ingestors execute on every cluster node and therefore cannot be constrained by a
+placement rule. Member names are unqualified; a name shared by more than one eligible entity kind
+is ambiguous and must be changed before it can be used in a placement.
 
-Duplicate members on either side collapse before validation. Each side must remain non-empty. The
-same resolved runtime node may appear on both sides; this is meaningful when a reingestor cycle
-creates a corridor back to that runtime node.
+Duplicate names on one side collapse. Both sides must contain at least one member after duplicate
+removal. The same runtime node may appear in `FROM` and `TO`, but it contributes coverage only when
+the graph contains a directed cycle back to that runtime node.
 
-`RANK <n>` is optional and requires `n >= 1`. Lower numbers are stronger, so rank 1 is the
-strongest. Every explicitly ranked rule outranks every unranked rule, regardless of the numeric
-rank. All unranked rules share one weakest rule tier, which is stronger only than the domain
-default.
+## Understanding Path-Gated Coverage
 
-### 2.1 What a Rule Covers: Path-Gating
+For each connected `FROM`/`TO` pair, the rule captures both endpoints and every runtime node that
+can carry traffic from the source to the destination. If the graph contains alternate paths, all
+runtime nodes on those paths are part of the corridor. A cycle within a corridor is captured in
+full.
 
-Placement rules are declarative overlays on the current execution graph. Coverage is recomputed
-at every graph activation.
-
-After resolving materialized relay members to their materializing runtime nodes, evaluate each
-ordered endpoint pair `(s, d)`, where `s` is in `FROM` and `d` is in `TO`, independently. If a
-directed path `s ⇝ d` exists over placement-relevant edges, the rule covers that endpoint pair's
-corridor:
+For this graph:
 
 ```text
-{s, d} ∪ {x : s ⇝ x and x ⇝ d}
+feature_normalizer -> enrich_features -> risk_scorer
+                   -> validate_features -> risk_scorer
 ```
 
-Reachability here requires a path containing at least one placement-relevant edge. Consequently,
-when `s` and `d` resolve to the same runtime node, a cycle back to that runtime node is required;
-zero-edge reflexive reachability does not create a corridor.
+a rule from `feature_normalizer` to `risk_scorer` covers all four runtime nodes. The policy applies
+across the runtime nodes captured by that corridor, not only to its two named endpoints.
 
-The corridor contains every runtime node that carries traffic from `s` to `d`. Because coverage
-is defined by reachability, a cycle inside the corridor is captured in full.
+Placement follows the relationships that can deliver messages or state:
 
-Placement-relevant edges comprise all message-delivery and state-delivery relationships:
-
-- normal routes;
-- error routes;
+- normal output routes;
+- message-error routes;
 - correlation-timeout routes;
 - generator feeds; and
-- materialized-state dependencies, directed from the materializing runtime node to every runtime
-  node declaring `USING MATERIALIZED STATE` on that relay.
+- materialized-state dependencies, directed from the materializing runtime node to each reader
+  that declares `USING MATERIALIZED STATE`.
 
-Relays are not placed and are transparent to corridor computation. A relay is a local channel
-object; a hop crosses the interconnect only when its producer runtime node and consumer runtime
-node execute on different cluster nodes.
+Relays are transparent when Nervix calculates a corridor. They are node-local channels rather
+than scheduled work; whether a relay hop uses the interconnect depends on the assignments of its
+producer and consumer runtime nodes.
 
-For each connected endpoint pair, the rule claims its policy and rank on every distinct,
-unordered pair of runtime nodes in that corridor. This is a clique over each individual corridor,
-not a clique over the union of separate corridors. Runtime nodes from two different corridors are
-not claimed against one another unless they also occur together in a corridor. All four policy
-levels use this same coverage shape.
+A disconnected endpoint pair contributes no coverage. A rule for which every endpoint pair is
+disconnected is valid and remains available for inspection with `coverage=empty`. Nervix does not
+force unconnected workloads into a group merely because their names occur in one rule.
 
-An endpoint pair with no connecting path contributes no corridor and no claims. A rule for which
-every endpoint pair is unconnected is valid and has an empty effective claim set. It remains
-visible through `DESCRIBE PLACEMENT` and `SHOW PLACEMENTS`; zero effect is not an error.
+Separate connected corridors are also evaluated independently. Runtime nodes captured by two
+different corridors in one rule are not related to each other unless they occur together in at
+least one corridor.
 
-Topology edits automatically grow and shrink corridors and claims at activation.
+Coverage is recalculated whenever the graph activates. Adding or removing a route can therefore
+grow or shrink an existing rule without altering the rule itself. Inspect placement coverage after
+topology changes, especially when a broad rule uses several `FROM` or `TO` members.
 
-### 2.2 Effective Policy, Rank Resolution, and Conflicts
+## Resolving Overlapping Rules
 
-For every claim pair, the claim at the strongest rank wins. Equal-rank claims with the same policy
-agree and are co-winners. Equal-rank claims with different policies on the same claim pair are a
-graph activation error. The error names both rules and a witness pair.
+`RANK` decides which named rule wins where rules overlap. The policy names themselves do not
+establish precedence: a stronger-ranked `NEUTRAL` rule overrides a weaker-ranked
+`REQUIRE COLOCATION` rule on the relationships they both cover.
 
-The unranked tier participates in the same conflict rule: different policies from overlapping
-unranked rules conflict. Repeated identical claims from one rule or equal-rank agreeing rules do
-not conflict.
+Precedence is:
 
-The domain default applies to every distinct runtime-node pair joined directly by a
-placement-relevant edge and claimed by no rule at any rank. The default is per edge rather than
-per path. For `REQUIRE COLOCATION`, transitive closure makes that equivalent to a per-path result;
-for soft policies, per-edge application preserves a per-hop bias.
+1. rank 1;
+2. rank 2, rank 3, and subsequent explicit ranks in ascending numeric order;
+3. the unranked tier; and
+4. the domain default.
 
-Every effective `REQUIRE COLOCATION` claim becomes a require bond. Require bonds are transitive:
-their connected components form colocation groups, and every runtime node in a colocation group
-executes on one cluster node. Placement policies add no labels, capacity constraint, or named-host
-pin, so they cannot by themselves make an otherwise schedulable graph unschedulable. If any live,
-uncordoned, schedulable cluster node is available, it can host an entire colocation group; no
-placement-policy-specific pending or unplaced state is needed.
+Every explicitly ranked rule outranks every unranked rule, regardless of the numeric value. All
+unranked rules share one tier. At the strongest rank affecting a runtime-node relationship,
+equal-rank rules with the same policy agree. Different policies at that strongest rank conflict,
+and Nervix rejects the candidate graph activation with the rule names and an affected runtime-node
+pair. Weaker overridden rules do not conflict with one another.
 
-The useful mental model for carve-outs is **glue and cuts**. Effective require bonds add glue
-between claim pairs. A stronger-ranked non-require claim replaces a weaker require bond:
-`NEUTRAL` or `SUGGEST SEPARATION` cuts it, while `PREFER COLOCATION` downgrades it to a soft
-affinity. A runtime node remains in a colocation group while any chain of uncut require bonds
-connects it to that group. Detaching it requires carve-out coverage that cuts every such bond;
-merely naming the runtime node does not bypass path-gating or transitivity.
+Effective `REQUIRE COLOCATION` relationships are transitive. If one requirement joins `a` to `b`
+and another joins `b` to `c`, all three form one colocation group. A stronger soft or neutral rule
+can remove specific hard relationships, but a runtime node remains in the group while any other
+effective `REQUIRE COLOCATION` chain still connects it.
 
-Placement introspection exposes the effective require bonds and every owning co-winner so that
-questions such as "why is `x` still colocated with `y`?" are mechanically answerable.
+For example, first declare a scheduler-managed archive corridor:
 
-## 3. Domain Default Policy
-
-Placement extends each existing valid domain-creation form:
-
-```nspl,ignore
-CREATE [IF NOT EXISTS] PACED DOMAIN <domain_name>
-  WITH PERIOD <duration> SKEW <duration>
-  [PLACEMENT <policy>] [;]
-
-CREATE [IF NOT EXISTS] UNPACED DOMAIN <domain_name>
-  [PLACEMENT <policy>] [;]
-
-CREATE [IF NOT EXISTS] DOMAIN <domain_name>
-  [PLACEMENT <policy>] [;]
-```
-
-As before, `CREATE DOMAIN` is the short spelling for `CREATE UNPACED DOMAIN`. The placement clause
-does not change the timing requirements of paced or unpaced domains.
-
-The default can be changed on the active domain:
-
-```nspl,ignore
-ALTER DOMAIN SET PLACEMENT <policy> [;]
-```
-
-`ALTER DOMAIN` is the first statement in that family. It is deliberately nameless and operates on
-the session's active domain, consistent with `START`, `STOP`, and `DESCRIBE DOMAIN`.
-
-Omitting `PLACEMENT` at creation means `NEUTRAL`, preserving current scheduler behavior.
-
-A default of `REQUIRE COLOCATION` puts each connected component of the graph formed by direct
-placement-relevant edges on one cluster node, subject to stronger explicit rule claims that cut
-require bonds. This is whole-pipeline-local mode. A default of `SUGGEST SEPARATION` supplies a
-per-hop spreading bias.
-
-Changing the default on a running domain is a normal graph activation. It may relocate runtime
-nodes when it introduces newly effective `REQUIRE COLOCATION` claims.
-
-## 4. Enforcement Semantics
-
-### Activation
-
-Coverage, effective claim pairs, conflicts, and colocation groups are recomputed transactionally
-with every graph activation. A conflict rejects the candidate activation without installing any
-part of it.
-
-Newly effective `REQUIRE COLOCATION` claims consolidate each affected colocation group onto one
-cluster node using the standard handoff machinery. The statement response reports planned
-relocations. A prior sticky assignment may be preserved only if it still satisfies every
-effective require bond; activation corrects a violating assignment.
-
-Soft policies never cause migration by themselves. `PREFER COLOCATION`, `SUGGEST SEPARATION`, and
-`NEUTRAL` influence only new placement decisions, including new runtime nodes, failover targets,
-and drain targets. Existing assignments are not moved merely to chase a preference. Removing a
-require bond or splitting a colocation group likewise does not require already colocated runtime
-nodes to spread.
-
-### Failover and Drain
-
-Failover and drain treat a colocation group as the atomic relocation unit. Failover never creates
-an execution placement that violates an effective require bond: the entire group moves to the
-chosen target together. Drain relocates one group at a time.
-
-### Scheduler Behavior
-
-`REQUIRE COLOCATION` binds every scheduler, including the production sticky scheduler and the
-deterministic random test scheduler. The production sticky scheduler applies explicit
-`PREFER COLOCATION` and `SUGGEST SEPARATION` claims ahead of its built-in upstream-locality
-heuristic. The random test scheduler may ignore soft policies. `NEUTRAL` leaves built-in
-heuristics active; it means "no policy opinion," not "randomize."
-
-### Execution Scope
-
-Claims bind primary execution placements. Replicas are warm state rather than executors; their
-placement should be biased toward cluster nodes compatible with the group so that failover is
-cheap, but that replica bias is non-normative.
-
-Branches have no placement dimension. All concrete branches of a runtime node execute within its
-single execution assignment, while their runtime state remains branch-local. A placement rule
-binds every scheduler-placed execution of an eligible member.
-
-Cordon retains its existing semantics. Cordoned cluster nodes are never placement targets for new
-decisions, including group relocations.
-
-## 5. Lifecycle and Introspection Statements
-
-```nspl,ignore
-ALTER PLACEMENT <ref:placement>
-  <operation> [, <operation> ...] [;]
-
-<operation> :=
-    SET POLICY <policy>
-  | SET RANK <n>
-  | DROP RANK
-  | SET FROM <runtime_node> [, <runtime_node> ...]
-      TO <runtime_node> [, <runtime_node> ...]
-  | RENAME TO <placement_name>
-
-DROP PLACEMENT <ref:placement> [;]
-SHOW CREATE PLACEMENT <ref:placement> [;]
-SHOW PLACEMENTS [;]
-DESCRIBE PLACEMENT <ref:placement> [;]
-```
-
-`ALTER PLACEMENT` follows the uniform ALTER shape. Comma-separated operations execute in written
-order, and each operation observes the result of the operations before it.
-
-Dropping any entity referenced as a placement member is blocked until the placement is altered or
-dropped. The error names every placement that pins the target. A mutation that would make a
-referenced member non-placeable is blocked in the same way. Examples include changing an ingestor
-source to an endpoint source and removing materialized state from a referenced relay. These pins
-apply even when the placement currently has no connected endpoint pairs.
-
-`DESCRIBE PLACEMENT` shows:
-
-- the stored `FROM`/`TO` form, policy, and rank or unranked status;
-- for each ordered endpoint pair, whether it is connected;
-- the covered corridor for each connected endpoint pair, with one witness path through every
-  captured non-member runtime node;
-- for every claim pair, the effective winning claim or co-winners, or the stronger rule or rules
-  that override this placement;
-- the effective require bonds and their owning claims; and
-- for a placement with effective require claims, every colocation group intersecting those claims
-  and the cluster node currently hosting each group.
-
-For `s = d`, a witness is a cycle. For another captured runtime node `x`, its witness demonstrates
-`s ⇝ x ⇝ d`.
-
-`SHOW PLACEMENTS` follows the `SHOW UDFS` precedent. It lists each placement's name, policy, rank
-or unranked status, and effective coverage status. The status summarizes endpoint-pair
-connectivity and whether none, some, or all resulting claims remain effective after rank
-resolution, so an unconnected rule and a fully overridden rule are distinguishable.
-
-`DESCRIBE DOMAIN` gains a placement section containing:
-
-- the domain default policy;
-- the placement-rule count; and
-- every effective colocation group, its member runtime nodes, its effective require bonds and
-  owning claims, and its current host cluster node.
-
-## 6. Errors and Diagnostics
-
-Placement creation reports semantic errors for:
-
-- an unknown member;
-- a non-placeable member, including an endpoint-source ingestor, a relay without materialized
-  state, or a non-schedulable entity kind;
-- an empty `FROM` or `TO` side after duplicate collapse; and
-- `RANK 0`.
-
-Graph activation fails when different policies make equal-rank claims on the same claim pair.
-The diagnostic names the owning domain, both placement rules, and the two runtime nodes that form
-a witness pair. It contains no payload values. Equal-rank unranked claims are subject to the same
-rule.
-
-A blocked drop or alteration names every placement pinning the target.
-
-A placement with no connected endpoint pairs is valid. `DESCRIBE PLACEMENT` and
-`SHOW PLACEMENTS` expose its zero-effect status rather than reporting an error.
-
-## 7. Non-Goals
-
-- There is no hard separation. `SUGGEST SEPARATION` is advisory, there is deliberately no
-  `REQUIRE SEPARATION`, and placement policies provide no isolation guarantee.
-- There is no connectivity-independent grouping such as a possible future `AMONG a, b, c` clique
-  for unconnected workloads. Rules act only through paths that exist in the execution graph.
-- There are no cluster-node labels, zones, capacity calculations, or pins to named cluster nodes.
-- There is no per-branch placement and no replica-count control.
-- Placement policy is not a load-balancing control. Existing scheduler load heuristics remain in
-  effect.
-
-## 8. Examples
-
-These examples assume that the intended domain is active in the session.
-
-Pin a latency-critical machine-learning corridor onto one cluster node. Here `enrich` is the name
-of a materialized relay, so the corridor includes its materializing runtime node as the state
-owner:
-
-```nspl,ignore
-CREATE PLACEMENT ml_corridor
-  FROM features_ingest, enrich
-  TO scorer
-  REQUIRE COLOCATION
-  RANK 1;
-```
-
-Suggest spreading a heavy archive corridor across cluster nodes:
-
-```nspl,ignore
-CREATE PLACEMENT spread_archive
-  FROM main_ingest
-  TO archive_emitter
-  SUGGEST SEPARATION;
-```
-
-Make each connected pipeline component local to one cluster node while leaving an archive corridor
-to ordinary scheduler heuristics through a stronger carve-out:
-
-```nspl,ignore
-ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
-
-CREATE PLACEMENT archiver_free
+```nspl
+CREATE PLACEMENT archive_scheduler_managed
   FROM archiver
   TO cold_sink
   NEUTRAL
   RANK 1;
 ```
 
-Change precedence and remove an obsolete placement:
+Then make hard colocation the domain fallback:
+
+```nspl
+ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+```
+
+The named `NEUTRAL` rule overrides the default within its connected corridor. It does not guarantee
+that the archive stages run on different cluster nodes; it returns those relationships to ordinary
+scheduler heuristics. Use `SUGGEST SEPARATION` instead when the carve-out should also express a
+soft spreading preference.
+
+## Runtime Behavior
+
+Placement coverage, rank resolution, and colocation groups are recalculated as part of graph
+activation. A conflicting candidate is rejected before it replaces the active graph.
+
+When a new `REQUIRE COLOCATION` relationship becomes effective, Nervix consolidates the complete
+colocation group onto one eligible cluster node. Existing assignments are preserved only when
+they satisfy the hard requirement. The command response reports the number of planned
+relocations.
+
+`PREFER COLOCATION` and `SUGGEST SEPARATION` affect new placement decisions, including newly
+created runtime nodes and targets selected during failover or drain. They never move an existing
+assignment merely to improve a preference. `NEUTRAL` contributes no placement score. Removing a
+hard requirement also does not spread runtime nodes that are already on the same cluster node.
+
+Failover and drain relocate a hard colocation group as one unit, so an executing assignment never
+violates `REQUIRE COLOCATION`. A cordoned cluster node is not considered for a new assignment or a
+group relocation. See [Control Plane](control-plane.md) for the surrounding drain, failover, and
+activation behavior.
+
+Placement constrains executing primary assignments. It does not control replica count or replica
+placement. Branches also have no separate placement dimension: every concrete branch of one
+runtime node executes within that runtime node's assignment.
+
+## Altering And Dropping Rules
+
+`ALTER PLACEMENT` accepts one or more comma-separated operations:
 
 ```nspl,ignore
-ALTER PLACEMENT ml_corridor SET RANK 2;
-DROP PLACEMENT spread_archive;
+ALTER PLACEMENT <placement>
+    SET POLICY <policy>
+  | SET RANK <positive_integer>
+  | DROP RANK
+  | SET FROM <runtime_node> [, ...] TO <runtime_node> [, ...]
+  | RENAME TO <placement_name>
+  [, <operation> ...];
+
+DROP PLACEMENT <placement>;
 ```
+
+Operations execute in written order, and the complete statement is applied atomically. `SET FROM
+... TO ...` replaces both member lists. This makes it possible to change policy, precedence,
+membership, and name in one statement:
+
+```nspl
+ALTER PLACEMENT scoring_local
+  SET POLICY PREFER COLOCATION,
+  SET RANK 2,
+  RENAME TO scoring_preferred;
+```
+
+A placement pins the entities named in its `FROM` and `TO` lists even when its current coverage is
+empty. Dropping a referenced runtime node is blocked until every pinning placement is altered or
+dropped. A change that would make a member ineligible, such as changing an ingestor to an endpoint
+source or removing materialized state from a referenced relay, is blocked in the same way.
+
+When a topology edit and its placement update depend on one another, put the complete set of model
+changes in one explicit transaction and order creation before reference. Nervix validates the
+resulting candidate graph before publishing it. See [Control Plane](control-plane.md) for
+transaction and quiesce behavior.
+
+## Inspecting Placement
+
+Use the placement commands in the active domain:
+
+```nspl
+SHOW CREATE PLACEMENT scoring_local;
+```
+
+```nspl
+SHOW PLACEMENTS;
+```
+
+```nspl
+DESCRIBE PLACEMENT scoring_local;
+```
+
+```nspl
+DESCRIBE DOMAIN;
+```
+
+`SHOW CREATE PLACEMENT` renders the normalized stored rule as canonical NSPL and omits the
+creation-time `IF NOT EXISTS` modifier. `SHOW PLACEMENTS` lists each rule's policy, rank, and one
+of these coverage states:
+
+| Coverage | Meaning |
+| --- | --- |
+| `empty` | No `FROM`/`TO` endpoint pair currently has a directed path. |
+| `effective` | All endpoint pairs are connected and all of the rule's resulting relationships win rank resolution. |
+| `partial` | Only some endpoint pairs are connected, or only some resulting relationships remain effective. |
+| `overridden` | Connected coverage exists, but stronger rules win every resulting relationship. |
+
+`DESCRIBE PLACEMENT` provides the stored form, policy, rank, resolved members, connectivity and
+covered runtime nodes for each endpoint pair, witness paths for captured intermediates, and the
+effective policy and winning or overriding rule for each affected relationship. For effective
+hard requirements it also reports the colocation group and its current host cluster node.
+
+`DESCRIBE DOMAIN` reports the domain default, named-rule count, and every effective colocation
+group. Each group includes its runtime-node members, host cluster node, and the effective hard
+relationships holding it together. Use those relationships to diagnose why a runtime node remains
+in a larger group after a carve-out.
+
+`SHOW CLUSTER STATUS` provides the complete scheduled-owner view when you need to compare placement
+with other runtime nodes outside hard colocation groups.
+
+## Troubleshooting
+
+| Symptom | What To Check |
+| --- | --- |
+| A rule shows `coverage=empty`. | Confirm the route direction and that a directed message or state path exists from a `FROM` member to a `TO` member. Disconnected rules are valid. |
+| A rule is `partial` or `overridden`. | Run `DESCRIBE PLACEMENT` and inspect the winning rule for each affected relationship. |
+| Activation reports a placement conflict. | Two overlapping rules have different policies at the strongest rank for an affected relationship. Change one policy or give one rule a stronger rank. A topology edit can expose a previously latent overlap. |
+| `SUGGEST SEPARATION` still leaves stages together. | The policy is advisory and never migrates existing assignments by itself. Re-evaluate it on a new placement decision; do not use it as an isolation control. |
+| A soft-policy change did not move anything. | This is expected. Use `REQUIRE COLOCATION` only when movement is justified by a hard locality requirement. |
+| A runtime node remains in a hard group after a carve-out. | Inspect the group's hard relationships in `DESCRIBE DOMAIN`; another uncut requirement still connects it to the group. |
+| Dropping or reshaping a member is blocked. | Alter or drop every placement named by the diagnostic before changing the member. |
+
+Creation also rejects an unknown or ambiguous member, a non-schedulable entity, an ordinary relay,
+an endpoint-source ingestor, an empty side, and `RANK 0`.
+
+## Common Patterns
+
+Keep a latency-critical corridor on one cluster node:
+
+```nspl
+CREATE PLACEMENT fraud_scoring_local
+  FROM normalize_transaction
+  TO fraud_scorer
+  REQUIRE COLOCATION
+  RANK 1;
+```
+
+Keep a materialized-state owner with a reader. Here `customer_state` is a materialized relay and
+`fraud_scorer` declares `USING MATERIALIZED STATE customer_state`:
+
+```nspl
+CREATE PLACEMENT state_read_local
+  FROM customer_state
+  TO fraud_scorer
+  REQUIRE COLOCATION
+  RANK 1;
+```
+
+Bias a heavy archive corridor across cluster nodes without guaranteeing isolation:
+
+```nspl
+CREATE PLACEMENT spread_archive
+  FROM archive_transform
+  TO archive_emitter
+  SUGGEST SEPARATION;
+```
+
+Prefer locality for a corridor while retaining scheduler flexibility:
+
+```nspl
+CREATE PLACEMENT prefer_enrichment_local
+  FROM decode_events
+  TO enrich_events
+  PREFER COLOCATION;
+```
+
+## Operational Boundaries
+
+Placement is not a capacity planner or a general load-balancing control. A hard colocation group
+must fit on one cluster node, and Nervix does not use placement rules to calculate CPU or memory
+capacity. Keep hard groups as narrow as the latency or state-locality requirement allows, then
+observe host resource use and inter-node delivery latency.
+
+Placement policies do not provide:
+
+- hard separation or workload isolation;
+- grouping for runtime nodes with no directed path between them;
+- cluster-node labels, availability zones, or pinning to a named cluster node;
+- per-branch placement; or
+- replica-count or replica-placement control.
+
+Use `SUGGEST SEPARATION` as a performance hint only. Security, tenant isolation, and failure-domain
+requirements need controls outside placement policies.
