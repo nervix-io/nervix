@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG RUST_VERSION=1.97
+ARG KACHE_VERSION=0.13.0
 ARG DEBIAN_VERSION=trixie
 ARG LLVM_VERSION=22
 ARG FLATBUFFERS_VERSION=25.12.19
@@ -17,12 +18,17 @@ ARG TARGETPLATFORM
 ARG BUILDARCH
 ARG TARGETARCH
 ARG RUST_VERSION
+ARG KACHE_VERSION
 ARG DEBIAN_VERSION
 ARG LLVM_VERSION
 ARG FLATBUFFERS_VERSION
 ARG FLATBUFFERS_SHA256
 ARG SONIC_PARALLELISM
 ARG SONIC_TARGET_CPUS
+ARG KACHE_S3_BUCKET
+ARG KACHE_S3_REGION=us-east-1
+ARG KACHE_S3_ACCESS_KEY
+ARG KACHE_S3_SECRET_KEY
 
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
@@ -89,6 +95,7 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
     https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh \
     | bash \
     && cargo binstall --no-confirm cargo-auditable \
+    && cargo binstall --no-confirm "kache@${KACHE_VERSION}" \
     && cargo binstall --no-confirm trunk \
     && cargo install cargo-sonic
 
@@ -103,11 +110,28 @@ COPY tests/scenarios.rs ./tests/scenarios.rs
 
 ENV CARGO_PROFILE_RELEASE_LTO=fat
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+ENV RUSTC_WRAPPER=kache
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
-    case "${TARGETARCH}" in \
+    --mount=type=cache,target=/root/.cache/kache,sharing=locked \
+    if [ -n "${KACHE_S3_ACCESS_KEY}" ] || [ -n "${KACHE_S3_SECRET_KEY}" ]; then \
+      test -n "${KACHE_S3_BUCKET}" \
+        || { echo "KACHE_S3_BUCKET is required with S3 credentials" >&2; exit 1; }; \
+      test -n "${KACHE_S3_ACCESS_KEY}" \
+        || { echo "KACHE_S3_ACCESS_KEY is required with KACHE_S3_SECRET_KEY" >&2; exit 1; }; \
+      test -n "${KACHE_S3_SECRET_KEY}" \
+        || { echo "KACHE_S3_SECRET_KEY is required with KACHE_S3_ACCESS_KEY" >&2; exit 1; }; \
+    else \
+      unset KACHE_S3_BUCKET KACHE_S3_REGION KACHE_S3_ACCESS_KEY KACHE_S3_SECRET_KEY; \
+    fi \
+    && export KACHE_DAEMON_IDLE_TIMEOUT=0 \
+    && export KACHE_MANIFEST_KEY="docker-${TARGETARCH}" \
+    && export KACHE_NAMESPACE="${KACHE_MANIFEST_KEY}" \
+    && kache daemon start \
+    && trap 'kache daemon stop >/dev/null 2>&1 || true' EXIT \
+    && case "${TARGETARCH}" in \
     amd64) export RUST_TARGET=x86_64-unknown-linux-gnu ;; \
     arm64) export RUST_TARGET=aarch64-unknown-linux-gnu ;; \
     *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
@@ -148,6 +172,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cd /app \
     && cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server \
     && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
+    && if [ -n "${KACHE_S3_ACCESS_KEY:-}" ]; then \
+      kache save-manifest --manifest-key "${KACHE_MANIFEST_KEY}" --namespace "${KACHE_NAMESPACE}" \
+        && kache sync --push; \
+    fi \
     && mkdir -p /artifacts \
     && cp "/app/target/sonic/${RUST_TARGET}/release/nervix-server" /artifacts/nervix-server \
     && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix-server.bundle" /artifacts/nervix-server.bundle \

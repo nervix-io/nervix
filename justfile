@@ -494,13 +494,27 @@ docker-build-debian debian_version="trixie" llvm_version="22" tag="nervix:debian
     if [[ -n "{{ cache_to }}" ]]; then
         cache_to_flag="--cache-to={{ cache_to }}"
     fi
+    kache_build_args=()
+    if [[ -n "${KACHE_S3_ACCESS_KEY:-}" || -n "${KACHE_S3_SECRET_KEY:-}" ]]; then
+        : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required with S3 credentials}"
+        : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required with KACHE_S3_SECRET_KEY}"
+        : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required with KACHE_S3_ACCESS_KEY}"
+        kache_build_args+=(
+            --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}"
+            --build-arg "KACHE_S3_REGION=${KACHE_S3_REGION:-us-east-1}"
+            --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY}"
+            --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY}"
+        )
+    fi
     docker buildx build \
         -f Dockerfile.debian \
         --progress=plain \
         --platform "${normalized_platform}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.13.0}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg DEBIAN_VERSION={{ debian_version }} \
         --build-arg LLVM_VERSION={{ llvm_version }} \
+        "${kache_build_args[@]}" \
         ${cache_from_flag} \
         ${cache_to_flag} \
         -t {{ tag }} \

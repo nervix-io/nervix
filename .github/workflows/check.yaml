@@ -7,6 +7,7 @@ on:
     branches: [main]
 
 env:
+  KACHE_VERSION: "0.13.0"
   TINYGO_VERSION: "0.41.1"
 
 permissions:
@@ -120,16 +121,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Blacksmith cache
-        uses: actions/cache@v4
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
         with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-region: ${{ vars.KACHE_S3_REGION || 'us-east-1' }}
+          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Validate
         run: just validate-ci
@@ -223,16 +225,17 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Blacksmith cache
-        uses: actions/cache@v4
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
         with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-region: ${{ vars.KACHE_S3_REGION || 'us-east-1' }}
+          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Tests Coverage
         run: |
