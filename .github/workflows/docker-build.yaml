@@ -203,6 +203,11 @@ jobs:
           "${NERVIX_BENCHMARK_IMAGE}"
           "${RUNNER_TEMP}/nervix-benchmarks"
 
+      - name: Kache stats
+        continue-on-error: true
+        if: always()
+        run: kache stats
+
       - name: Publish benchmark summary
         if: always()
         run: |
@@ -523,3 +528,8 @@ jobs:
                 body,
               });
             }
+
+      - name: Kache stats
+        continue-on-error: true
+        if: always()
+        run: kache stats

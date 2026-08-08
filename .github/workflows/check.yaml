@@ -138,6 +138,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Kache stats
+        continue-on-error: true
+        if: always()
+        run: kache stats
+
   tests:
     name: tests
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -258,6 +263,11 @@ jobs:
       # failures are about completion reachability rather than any one test.
       - name: NSPL completion walk
         run: just nspl-completion-walk
+
+      - name: Kache stats
+        continue-on-error: true
+        if: always()
+        run: kache stats
 
       - name: Upload test logs
         if: always()

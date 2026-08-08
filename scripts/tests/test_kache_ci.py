@@ -27,6 +27,10 @@ class KacheCiTests(unittest.TestCase):
         for job in expected_jobs:
             self.assertIn("uses: kunobi-ninja/kache-action@v1", job)
             self.assertIn("github-cache: \"false\"", job)
+            self.assertIn(
+                "continue-on-error: true\n        if: always()\n        run: kache stats",
+                job,
+            )
             self.assertIn("s3-bucket: ${{ vars.KACHE_S3_BUCKET }}", job)
             self.assertIn(
                 "s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}", job
@@ -54,6 +58,7 @@ class KacheCiTests(unittest.TestCase):
         self.assertIn('--build-arg "KACHE_S3_SECRET_KEY=', justfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
         self.assertIn("kache daemon start", dockerfile)
+        self.assertIn("kache stats", dockerfile)
         self.assertIn("kache save-manifest", dockerfile)
         self.assertIn("kache sync --push", dockerfile)
 
