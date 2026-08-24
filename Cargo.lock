@@ -8037,17 +8037,16 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "playwright-rs"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5494109d443fafc48515b6c0442c1ab48e2631a111b2b68551dcdb7ef7fb72cf"
+checksum = "bbb9639a7304dd20737039d32d72b237d2a6ddbe01cdc3ab31d9b51896bdb723"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "dirs",
  "flate2",
  "futures-util",
- "glob",
  "libc",
  "parking_lot",
  "regex",
