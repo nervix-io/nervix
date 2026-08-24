@@ -896,11 +896,11 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.17.3"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00bdb5da18dac48ca2cc7cd4a98e533e8635a58e2361d13a1a4ee3888e0d72f1"
+checksum = "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e"
 dependencies = [
- "aws-lc-sys",
+ "aws-lc-sys 0.44.0",
  "untrusted 0.7.1",
  "zeroize",
 ]
@@ -911,6 +911,19 @@ version = "0.43.0"
 source = "git+https://github.com/nervix-io/aws-lc-rs.git?rev=6332c54d1cf0535312a0e5cd73232f5d1e21f958#6332c54d1cf0535312a0e5cd73232f5d1e21f958"
 dependencies = [
  "bindgen",
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+ "pkg-config",
+]
+
+[[package]]
+name = "aws-lc-sys"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f09fae7be8bb3174e05c6afdb34199e6dc0c7c04ba9fa237b1967adfbde27483"
+dependencies = [
  "cc",
  "cmake",
  "dunce",
@@ -8019,17 +8032,16 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "playwright-rs"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5494109d443fafc48515b6c0442c1ab48e2631a111b2b68551dcdb7ef7fb72cf"
+checksum = "bbb9639a7304dd20737039d32d72b237d2a6ddbe01cdc3ab31d9b51896bdb723"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "dirs",
  "flate2",
  "futures-util",
- "glob",
  "libc",
  "parking_lot",
  "regex",
@@ -8905,7 +8917,7 @@ name = "rdkafka-sys"
 version = "4.10.0+2.12.1"
 source = "git+https://github.com/nervix-io/rust-rdkafka.git?rev=b6d96bd5381691276b1ba8b12ce2c419909f2b20#b6d96bd5381691276b1ba8b12ce2c419909f2b20"
 dependencies = [
- "aws-lc-sys",
+ "aws-lc-sys 0.43.0",
  "cmake",
  "curl-sys",
  "libc",
