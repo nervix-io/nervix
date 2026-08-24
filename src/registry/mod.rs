@@ -4588,7 +4588,7 @@ fn validate_emitter_publishing_contract(
     }
 
     let requires_codec = matches!(
-        emitter.sink,
+        emitter.sink.as_ref(),
         EmitSink::Kafka { .. }
             | EmitSink::Pulsar { .. }
             | EmitSink::RabbitMq { .. }
@@ -4661,7 +4661,7 @@ fn validate_emitter_publishing_contract(
         }
     }
 
-    match &emitter.sink {
+    match emitter.sink.as_ref() {
         EmitSink::ClickHouse { max_batch, .. }
         | EmitSink::Postgres { max_batch, .. }
         | EmitSink::MySql { max_batch, .. }
@@ -4733,7 +4733,7 @@ fn validate_sqs_fifo_group_expression(
     let EmitSink::Sqs {
         fifo_group: Some(SqsFifoGroup::Expression(expression)),
         ..
-    } = &emitter.sink
+    } = emitter.sink.as_ref()
     else {
         return Ok(());
     };
@@ -6906,7 +6906,7 @@ fn visit_model_expressions(model: &Model, visitor: &mut impl FnMut(&Expression))
                     visitor(argument);
                 }
             }
-            let values = match &model.sink {
+            let values = match model.sink.as_ref() {
                 EmitSink::ClickHouse { values, .. }
                 | EmitSink::Postgres { values, .. }
                 | EmitSink::MySql { values, .. }
@@ -11756,10 +11756,10 @@ mod tests {
             name: Identifier::parse(name).expect("valid identifier"),
             from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
             encode_using_codec: Some(Identifier::parse(codec).expect("valid identifier")),
-            sink: EmitSink::Kafka {
+            sink: Box::new(EmitSink::Kafka {
                 client: Identifier::parse(client).expect("valid identifier"),
                 topic: Identifier::parse("topic").expect("valid topic identifier"),
-            },
+            }),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -11963,7 +11963,7 @@ mod tests {
             .expect_err("foreign publishing modes must be rejected");
         assert!(format!("{error:#}").contains("KAFKA emitter does not support MODE QOS 0"));
 
-        emitter.sink = EmitSink::Sqs {
+        *emitter.sink = EmitSink::Sqs {
             client: identifier("sqs_main"),
             queue: "events".to_string(),
             fifo_group: Some(SqsFifoGroup::Expression(Expression::Literal(
@@ -11987,7 +11987,7 @@ mod tests {
             .expect_err("FIFO GROUP on a standard queue must be rejected");
         assert!(format!("{error:#}").contains("requires a queue name ending in .fifo"));
 
-        emitter.sink = EmitSink::ClickHouse {
+        *emitter.sink = EmitSink::ClickHouse {
             client: identifier("clickhouse_main"),
             table: identifier("events"),
             values: Vec::new(),
@@ -12080,13 +12080,13 @@ mod tests {
         else {
             unreachable!("emitter helper must build an emitter model")
         };
-        valid.sink = EmitSink::Sqs {
+        valid.sink = Box::new(EmitSink::Sqs {
             client: identifier("sqs_main"),
             queue: "events.fifo".to_string(),
             fifo_group: Some(SqsFifoGroup::Expression(
                 nervix_nspl::parse_expression("input.value").expect("valid FIFO group expression"),
             )),
-        };
+        });
         valid.publishing_mode = EmitterPublishingMode::SqsSingle {
             retry_policy: RetryPolicy {
                 backoff: "10ms".to_string(),
@@ -12099,7 +12099,7 @@ mod tests {
 
         let mut wrong_type = valid.clone();
         wrong_type.name = identifier("wrong_fifo_type");
-        if let EmitSink::Sqs { fifo_group, .. } = &mut wrong_type.sink {
+        if let EmitSink::Sqs { fifo_group, .. } = wrong_type.sink.as_mut() {
             *fifo_group = Some(SqsFifoGroup::Expression(Expression::Literal(
                 nervix_models::Literal::I64(42),
             )));
@@ -12112,7 +12112,7 @@ mod tests {
         let mut branch_fifo = valid.clone();
         branch_fifo.name = identifier("branch_fifo");
         branch_fifo.from = ProcessorInputs::single(identifier("tenant_events"));
-        if let EmitSink::Sqs { fifo_group, .. } = &mut branch_fifo.sink {
+        if let EmitSink::Sqs { fifo_group, .. } = branch_fifo.sink.as_mut() {
             *fifo_group = Some(SqsFifoGroup::FromBranch);
         }
         registry
@@ -12122,7 +12122,7 @@ mod tests {
         let mut mixed_inputs = valid.clone();
         mixed_inputs.name = identifier("mixed_fifo_inputs");
         mixed_inputs.from.from = vec![identifier("tenant_events"), identifier("events")];
-        if let EmitSink::Sqs { fifo_group, .. } = &mut mixed_inputs.sink {
+        if let EmitSink::Sqs { fifo_group, .. } = mixed_inputs.sink.as_mut() {
             *fifo_group = Some(SqsFifoGroup::FromBranch);
         }
         let error = registry
@@ -12146,7 +12146,7 @@ mod tests {
 
         let mut from_branch = valid;
         from_branch.name = identifier("unbranched_fifo");
-        if let EmitSink::Sqs { fifo_group, .. } = &mut from_branch.sink {
+        if let EmitSink::Sqs { fifo_group, .. } = from_branch.sink.as_mut() {
             *fifo_group = Some(SqsFifoGroup::FromBranch);
         }
         let error = registry
@@ -12173,9 +12173,9 @@ mod tests {
             name: identifier("emit"),
             from: ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("events_codec")),
-            sink: EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq {
                 client: identifier("zeromq_main"),
-            },
+            }),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -12204,7 +12204,7 @@ mod tests {
         .expect_err("ZeroMQ emitters must reject write_header");
         assert!(format!("{error:#}").contains("ZEROMQ emitters do not support write_header"));
 
-        emitter.sink = EmitSink::Kafka {
+        *emitter.sink = EmitSink::Kafka {
             client: identifier("kafka_main"),
             topic: identifier("events_out"),
         };
@@ -15487,9 +15487,9 @@ mod tests {
         else {
             unreachable!("emitter helper must build an emitter model")
         };
-        sentry_emitter.sink = EmitSink::Sentry {
+        sentry_emitter.sink = Box::new(EmitSink::Sentry {
             client: identifier("sentry_main"),
-        };
+        });
         sentry_emitter.publishing_mode = EmitterPublishingMode::RequestAck {
             retry_policy: RetryPolicy {
                 backoff: "250ms".to_string(),

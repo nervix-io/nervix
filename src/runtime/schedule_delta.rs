@@ -348,9 +348,9 @@ mod tests {
             name: identifier("event_sink"),
             from: nervix_models::ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("event_codec")),
-            sink: EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq {
                 client: identifier("sink_a"),
-            },
+            }),
             flush_each: "30s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             error_policies: ErrorPolicies::handled_by_log(),
@@ -394,9 +394,9 @@ mod tests {
         );
 
         let mut swapped_emitter = emitter;
-        swapped_emitter.sink = EmitSink::ZeroMq {
+        swapped_emitter.sink = Box::new(EmitSink::ZeroMq {
             client: identifier("sink_b"),
-        };
+        });
         let mut swapped = existing.clone();
         *swapped.nodes[0].config = Model::Emitter(swapped_emitter);
         swapped.nodes[0].schema_fingerprint = [2; 32];

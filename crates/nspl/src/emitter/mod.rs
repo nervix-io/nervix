@@ -925,7 +925,7 @@ pub fn alter_emitter_parser<'src>()
         .ignore_then(kw(Identifier::To))
         .ignore_then(alter_emit_sink_parser())
         .map(|(sink, publishing_mode)| AlterEmitterOperation::SetSink {
-            sink,
+            sink: Box::new(sink),
             publishing_mode,
         });
     let set_client = kw(Identifier::Set)
@@ -1143,7 +1143,7 @@ pub fn create_emitter_parser<'src>()
                     name,
                     from,
                     encode_using_codec,
-                    sink,
+                    sink: Box::new(sink),
                     flush_each,
                     max_batch_size,
                     error_policies: nervix_models::ErrorPolicies {
@@ -1251,9 +1251,9 @@ mod tests {
         assert!(matches!(
             parsed.operations[4],
             AlterEmitterOperation::SetSink {
-                sink: EmitSink::ZeroMq { .. },
+                ref sink,
                 ..
-            }
+            } if matches!(sink.as_ref(), EmitSink::ZeroMq { .. })
         ));
         assert!(matches!(
             parsed.operations[5],
@@ -1314,13 +1314,16 @@ mod tests {
         assert!(matches!(
             replace_iceberg.operations.as_slice(),
             [AlterEmitterOperation::SetSink {
-                sink: EmitSink::Iceberg {
+                sink,
+                ..
+            }] if matches!(
+                sink.as_ref(),
+                EmitSink::Iceberg {
                     commit_each,
                     max_commit_size,
                     ..
-                },
-                ..
-            }] if commit_each == "1m" && max_commit_size == "512MiB"
+                } if commit_each == "1m" && max_commit_size == "512MiB"
+            )
         ));
     }
 
@@ -1511,9 +1514,9 @@ mod tests {
         ))
         .expect("SQS FIFO FROM BRANCH mode should parse");
         assert!(matches!(
-            from_branch.sink,
+            from_branch.sink.as_ref(),
             EmitSink::Sqs {
-                ref queue,
+                queue,
                 fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
                 ..
             } if queue == "events.fifo"
@@ -1531,7 +1534,7 @@ mod tests {
         ))
         .expect("SQS FIFO expression mode should parse");
         assert!(matches!(
-            expression.sink,
+            expression.sink.as_ref(),
             EmitSink::Sqs {
                 fifo_group: Some(nervix_models::SqsFifoGroup::Expression(_)),
                 ..
@@ -1627,8 +1630,8 @@ mod tests {
             Some("my_codec")
         );
         assert_eq!(
-            parsed.sink,
-            EmitSink::Kafka {
+            parsed.sink.as_ref(),
+            &EmitSink::Kafka {
                 client: nervix_models::Identifier::try_from("broker1")
                     .expect("valid client identifier"),
                 topic: nervix_models::Identifier::try_from("topic")
@@ -1775,8 +1778,8 @@ mod tests {
 
         assert_eq!(parsed.encode_using_codec, None);
         assert_eq!(
-            parsed.sink,
-            EmitSink::ClickHouse {
+            parsed.sink.as_ref(),
+            &EmitSink::ClickHouse {
                 client: nervix_models::Identifier::try_from("clickhouse_client")
                     .expect("valid client identifier"),
                 table: nervix_models::Identifier::try_from("my_table")
@@ -1843,8 +1846,8 @@ mod tests {
         assert_eq!(parsed.encode_using_codec, None);
         assert_eq!(parsed.mode, AckMode::Detached);
         assert_eq!(
-            parsed.sink,
-            EmitSink::Iceberg {
+            parsed.sink.as_ref(),
+            &EmitSink::Iceberg {
                 backend: IcebergStorageBackend::S3,
                 client: nervix_models::Identifier::try_from("s3_client")
                     .expect("valid client identifier"),
@@ -1893,8 +1896,8 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.sink,
-            EmitSink::Iceberg {
+            parsed.sink.as_ref(),
+            &EmitSink::Iceberg {
                 backend: IcebergStorageBackend::Gcs,
                 client: nervix_models::Identifier::try_from("gcs_client")
                     .expect("valid client identifier"),
@@ -1943,8 +1946,8 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.sink,
-            EmitSink::Iceberg {
+            parsed.sink.as_ref(),
+            &EmitSink::Iceberg {
                 backend: IcebergStorageBackend::AzureBlob,
                 client: nervix_models::Identifier::try_from("azure_client")
                     .expect("valid client identifier"),
@@ -2200,8 +2203,8 @@ mod tests {
 
         assert_eq!(parsed.encode_using_codec, None);
         assert_eq!(
-            parsed.sink,
-            EmitSink::Postgres {
+            parsed.sink.as_ref(),
+            &EmitSink::Postgres {
                 client: nervix_models::Identifier::try_from("postgres_client")
                     .expect("valid client identifier"),
                 table: nervix_models::Identifier::try_from("my_table")
@@ -2246,7 +2249,7 @@ mod tests {
         let parsed = parse_create_emitter(input).expect("parse should succeed");
         let EmitSink::Postgres {
             conflict_action, ..
-        } = &parsed.sink
+        } = parsed.sink.as_ref()
         else {
             panic!("expected postgres emitter sink");
         };
@@ -2277,7 +2280,7 @@ mod tests {
         let parsed = parse_create_emitter(input).expect("parse should succeed");
         let EmitSink::Postgres {
             conflict_action, ..
-        } = &parsed.sink
+        } = parsed.sink.as_ref()
         else {
             panic!("expected postgres emitter sink");
         };
@@ -2419,8 +2422,8 @@ mod tests {
 
         assert_eq!(parsed.encode_using_codec, None);
         assert_eq!(
-            parsed.sink,
-            EmitSink::MySql {
+            parsed.sink.as_ref(),
+            &EmitSink::MySql {
                 client: nervix_models::Identifier::try_from("mysql_client")
                     .expect("valid client identifier"),
                 table: nervix_models::Identifier::try_from("my_table")
@@ -2465,7 +2468,7 @@ mod tests {
         let parsed = parse_create_emitter(input).expect("parse should succeed");
         let EmitSink::MySql {
             conflict_action, ..
-        } = &parsed.sink
+        } = parsed.sink.as_ref()
         else {
             panic!("expected mysql emitter sink");
         };
@@ -2491,7 +2494,7 @@ mod tests {
         let parsed = parse_create_emitter(input).expect("parse should succeed");
         let EmitSink::MySql {
             conflict_action, ..
-        } = &parsed.sink
+        } = parsed.sink.as_ref()
         else {
             panic!("expected mysql emitter sink");
         };
@@ -2595,8 +2598,8 @@ mod tests {
 
         assert_eq!(parsed.encode_using_codec, None);
         assert_eq!(
-            parsed.sink,
-            EmitSink::MongoDb {
+            parsed.sink.as_ref(),
+            &EmitSink::MongoDb {
                 client: nervix_models::Identifier::try_from("mongodb_client")
                     .expect("valid client identifier"),
                 collection: nervix_models::Identifier::try_from("my_collection")
@@ -2641,7 +2644,7 @@ mod tests {
         let parsed = parse_create_emitter(input).expect("parse should succeed");
         let EmitSink::MongoDb {
             conflict_action, ..
-        } = &parsed.sink
+        } = parsed.sink.as_ref()
         else {
             panic!("expected mongodb emitter sink");
         };
@@ -2672,7 +2675,7 @@ mod tests {
         let parsed = parse_create_emitter(input).expect("parse should succeed");
         let EmitSink::MongoDb {
             conflict_action, ..
-        } = &parsed.sink
+        } = parsed.sink.as_ref()
         else {
             panic!("expected mongodb emitter sink");
         };
@@ -2843,8 +2846,8 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.sink,
-            EmitSink::Pulsar {
+            parsed.sink.as_ref(),
+            &EmitSink::Pulsar {
                 client: nervix_models::Identifier::try_from("pulsar1")
                     .expect("valid client identifier"),
                 topic: nervix_models::Identifier::try_from("topic")
@@ -2985,8 +2988,8 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.sink,
-            EmitSink::Mqtt {
+            parsed.sink.as_ref(),
+            &EmitSink::Mqtt {
                 client: nervix_models::Identifier::try_from("broker1")
                     .expect("valid client identifier"),
                 topic: nervix_models::Identifier::try_from("topic")
@@ -3008,8 +3011,8 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.sink,
-            EmitSink::Nats {
+            parsed.sink.as_ref(),
+            &EmitSink::Nats {
                 client: nervix_models::Identifier::try_from("nats_main")
                     .expect("valid client identifier"),
                 subject: nervix_models::Identifier::try_from("notifications")
@@ -3031,8 +3034,8 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.sink,
-            EmitSink::RabbitMq {
+            parsed.sink.as_ref(),
+            &EmitSink::RabbitMq {
                 client: nervix_models::Identifier::try_from("broker1")
                     .expect("valid client identifier"),
                 queue: nervix_models::Identifier::try_from("queue1")
@@ -3054,8 +3057,8 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.sink,
-            EmitSink::Redis {
+            parsed.sink.as_ref(),
+            &EmitSink::Redis {
                 client: nervix_models::Identifier::try_from("broker1")
                     .expect("valid client identifier"),
                 channel: nervix_models::Identifier::try_from("out")
@@ -3101,8 +3104,8 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.sink,
-            EmitSink::ZeroMq {
+            parsed.sink.as_ref(),
+            &EmitSink::ZeroMq {
                 client: nervix_models::Identifier::try_from("zmq_out")
                     .expect("valid client identifier"),
             }
@@ -3122,8 +3125,8 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.sink,
-            EmitSink::Sqs {
+            parsed.sink.as_ref(),
+            &EmitSink::Sqs {
                 client: nervix_models::Identifier::try_from("sqs_main")
                     .expect("valid client identifier"),
                 queue: "queue1".to_string(),

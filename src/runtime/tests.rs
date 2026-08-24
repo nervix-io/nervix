@@ -3131,9 +3131,9 @@ fn emitter_entity_pause_gates_every_input_relay() {
             Vec::new(),
         ),
         encode_using_codec: Some(identifier("event_codec")),
-        sink: EmitSink::ZeroMq {
+        sink: Box::new(EmitSink::ZeroMq {
             client: identifier("sink"),
-        },
+        }),
         flush_each: "IMMEDIATE".to_string(),
         max_batch_size: None,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -6752,9 +6752,9 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     name: identifier("orders_emitter"),
                     from: ProcessorInputs::single(identifier("aggregated_orders")),
                     encode_using_codec: Some(identifier("orders_codec")),
-                    sink: EmitSink::ZeroMq {
+                    sink: Box::new(EmitSink::ZeroMq {
                         client: identifier("zmq_client"),
-                    },
+                    }),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
@@ -9435,10 +9435,10 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
         name: identifier("kafka_notifications"),
         from: ProcessorInputs::single(identifier("notifications")),
         encode_using_codec: Some(identifier("notification_codec")),
-        sink: EmitSink::Kafka {
+        sink: Box::new(EmitSink::Kafka {
             client: identifier("kafka_main"),
             topic: identifier("notifications_out"),
-        },
+        }),
         flush_each: "100ms".to_string(),
         max_batch_size: Some("1MiB".to_string()),
         mode: AckMode::Attached,
@@ -9476,7 +9476,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     .expect("emitter filter-map must compile")
     .expect("program must exist");
     let mut unsupported_emitter = emitter.clone();
-    unsupported_emitter.sink = EmitSink::ZeroMq {
+    *unsupported_emitter.sink = EmitSink::ZeroMq {
         client: identifier("zeromq_main"),
     };
     let error = super::compile_emitter_filter_map_program(
@@ -9563,13 +9563,13 @@ async fn sqs_fifo_group_expression_evaluates_per_source_row_in_order() {
         name: identifier("sqs_notifications"),
         from: ProcessorInputs::single(identifier("notifications")),
         encode_using_codec: Some(identifier("notification_codec")),
-        sink: EmitSink::Sqs {
+        sink: Box::new(EmitSink::Sqs {
             client: identifier("sqs_main"),
             queue: "notifications.fifo".to_string(),
             fifo_group: Some(SqsFifoGroup::Expression(expression(
                 "concat(input.tenant, '-', input.region)",
             ))),
-        },
+        }),
         flush_each: "100ms".to_string(),
         max_batch_size: Some("1MiB".to_string()),
         mode: AckMode::Attached,

@@ -18,7 +18,7 @@ permissions:
   issues: write
 
 env:
-  KACHE_VERSION: "0.13.0"
+  KACHE_VERSION: "0.15.1"
 
 jobs:
   meta:
@@ -154,7 +154,7 @@ jobs:
         run: docker logout ghcr.io
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.97
+        uses: dtolnay/rust-toolchain@1.98
         with:
           targets: wasm32-unknown-unknown
 
@@ -417,7 +417,7 @@ jobs:
             texlive-xetex
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.97
+        uses: dtolnay/rust-toolchain@1.98
         with:
           targets: wasm32-unknown-unknown
 

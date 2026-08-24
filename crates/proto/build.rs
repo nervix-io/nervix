@@ -6,6 +6,11 @@ fn main() {
         .bytes(["."])
         .build_server(build_server)
         .build_client(build_client)
+        .client_mod_attribute(
+            ".",
+            "#[expect(clippy::result_large_err, reason = \"tonic client methods must return \
+             tonic::Status\")]",
+        )
         .compile_protos(
             &["../../proto/io/nervix/api/v1/nervix.proto"],
             &["../../proto"],

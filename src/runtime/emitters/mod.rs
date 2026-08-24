@@ -3014,7 +3014,7 @@ impl EmitterTask {
                 udfs: udfs.as_ref(),
             },
         )?;
-        let sqs_fifo_group = match &emitter.sink {
+        let sqs_fifo_group = match emitter.sink.as_ref() {
             EmitSink::Sqs {
                 fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
                 ..

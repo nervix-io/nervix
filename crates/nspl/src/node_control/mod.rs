@@ -35,8 +35,6 @@ pub fn drain_node_parser<'src>()
 
 #[cfg(test)]
 mod tests {
-    use chumsky::prelude::*;
-
     use super::*;
     use crate::lexer::{Token, lex};
 

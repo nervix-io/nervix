@@ -198,6 +198,7 @@ use processors::{
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
 use relay_batch::build_stream_record_batch_preserving_acks;
+type RelayDispatchResult = Result<(), Box<RelayRecordBatch>>;
 pub(crate) use relay_channel::{
     RelayBroadcast, RelayDispatchGate, RelayDispatchGateLease,
     RelayReceiver as RelaySubscriptionReceiver,
@@ -1548,7 +1549,7 @@ impl RelayConsumerFanout {
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         let _dispatch_permit = self.dispatch_gate.acquire_dispatch().await;
         let attached_receiver_count = self
             .runtime_consumer_broadcast_for_mode(AckMode::Attached)
@@ -1559,7 +1560,7 @@ impl RelayConsumerFanout {
             for ack in batch.acks.iter() {
                 ack.no_ack("runtime consumer unavailable for attached delivery");
             }
-            return Err(batch.clone());
+            return Err(Box::new(batch.clone()));
         }
         if attached_receiver_count > 0 {
             let attached = batch.attached_for_receivers(attached_receiver_count);
@@ -1572,7 +1573,7 @@ impl RelayConsumerFanout {
                 for ack in failed.acks.iter() {
                     ack.no_ack("runtime consumer unavailable for attached delivery");
                 }
-                return Err(batch.clone());
+                return Err(Box::new(batch.clone()));
             }
         }
 
@@ -1642,7 +1643,7 @@ impl BranchCollapseNode {
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         self.fanout
             .dispatch_runtime_consumers(
                 attached_runtime_consumer_count,
@@ -1756,7 +1757,7 @@ impl RelayBoundaryFanout {
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         match self {
             Self::Direct(fanout) => {
                 fanout
@@ -2662,7 +2663,7 @@ impl RelayBoundaryServices {
     async fn dispatch_local_runtime_consumers(
         &self,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         self.fanout
             .dispatch_runtime_consumers(
                 self.attached_runtime_consumer_count.load(Ordering::Acquire),
@@ -2676,7 +2677,7 @@ impl RelayBoundaryServices {
         &self,
         domain: &Domain,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         let remote_runtime_consumers = self.remote_runtime_consumers.load_full();
         if remote_runtime_consumers.is_empty() {
             return Ok(());
@@ -2687,7 +2688,7 @@ impl RelayBoundaryServices {
                     for ack in batch.acks.iter() {
                         ack.no_ack("remote dispatcher unavailable for attached delivery");
                     }
-                    return Err(batch.clone());
+                    return Err(Box::new(batch.clone()));
                 }
                 continue;
             };
@@ -2702,7 +2703,7 @@ impl RelayBoundaryServices {
                         for ack in remote_batch.acks.iter() {
                             ack.no_ack(error.clone());
                         }
-                        return Err(batch.clone());
+                        return Err(Box::new(batch.clone()));
                     }
                     warn!(
                         error = %error,
@@ -2717,7 +2718,7 @@ impl RelayBoundaryServices {
                     for ack in remote_batch.acks.iter() {
                         ack.no_ack("local node id is unavailable for attached remote delivery");
                     }
-                    return Err(batch.clone());
+                    return Err(Box::new(batch.clone()));
                 };
                 remote_batch
                     .acks
@@ -2762,7 +2763,7 @@ impl RelayBoundaryServices {
                         }
                         ack_set.no_ack(error.clone());
                     }
-                    return Err(batch.clone());
+                    return Err(Box::new(batch.clone()));
                 }
                 (AckMode::Detached, Err(error)) => {
                     warn!(
@@ -2812,7 +2813,7 @@ impl RelayBoundaryServices {
         relay: &Identifier,
         physical_node_id: Option<&str>,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
         self.fanout_remote_subscriptions(domain, relay, batch).await;
         self.observe_local_fanout_buffer_lengths(
@@ -2831,7 +2832,7 @@ impl RelayBoundaryServices {
         domain: &Domain,
         relay: &Identifier,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         self.fanout_remote_subscriptions(domain, relay, batch).await;
         self.dispatch_remote_runtime_consumers(domain, batch).await
     }
@@ -2843,7 +2844,7 @@ impl RelayBoundaryServices {
         relay: &Identifier,
         physical_node_id: Option<&str>,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
         self.observe_local_fanout_buffer_lengths(
             metrics,
@@ -2876,10 +2877,7 @@ impl ConcreteRelayRuntime {
         }
     }
 
-    async fn dispatch_boundary(
-        &mut self,
-        batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    async fn dispatch_boundary(&mut self, batch: &RelayRecordBatch) -> RelayDispatchResult {
         debug_assert_eq!(&self.key, &batch.key);
         let now = self
             .runtime
@@ -6160,12 +6158,10 @@ impl BranchRuntime {
         graph: &'a SharedActiveGraph,
         relay: &'a Identifier,
         batch: &'a RelayRecordBatch,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), RelayRecordBatch>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RelayDispatchResult> + Send + 'a>> {
         Box::pin(async move {
             let Some(runtime_stream) = self.relays.get_mut(relay) else {
-                return Err(batch.clone());
+                return Err(Box::new(batch.clone()));
             };
             runtime_stream.dispatch_boundary(batch).await?;
             self.materialize_stream_batch(relay, batch).await;
@@ -6281,7 +6277,7 @@ impl BranchRuntime {
         source_kind: ModelKind,
         source: &Identifier,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         self.runtime
             .metrics
             .observe_global_node_sent(NodeBatchObservation {
@@ -9834,7 +9830,7 @@ pub(crate) fn compile_sqs_fifo_group_program(
     let EmitSink::Sqs {
         fifo_group: Some(SqsFifoGroup::Expression(expression)),
         ..
-    } = &emitter.sink
+    } = emitter.sink.as_ref()
     else {
         return Ok(None);
     };
@@ -10716,7 +10712,7 @@ async fn evaluate_correlator_output_message(
     combined: RuntimeRecord,
     acks: AckSet,
     execution_now: Timestamp,
-) -> Result<Option<RelayMessage>, PlannedMessageError> {
+) -> Result<Option<RelayMessage>, Box<PlannedMessageError>> {
     let combined = augment_runtime_record_with_branch_key(combined, key.as_ref());
     let source_message = RelayMessage {
         key: key.clone(),
@@ -10730,7 +10726,7 @@ async fn evaluate_correlator_output_message(
     )
     .await
     .map_err(|error| {
-        planned_structured_message_error(
+        Box::new(planned_structured_message_error(
             source_message.clone(),
             structured_message_error(
                 MessageErrorCode::Evaluation,
@@ -10745,7 +10741,7 @@ async fn evaluate_correlator_output_message(
             ),
             None,
             materialized_state_snapshot(&source_message.record),
-        )
+        ))
     })?
     .into_iter()
     .next()
@@ -10753,7 +10749,7 @@ async fn evaluate_correlator_output_message(
     let input =
         vm_typed_batch_from_runtime_record(&combined, None, &program.program.compiled.input_schema)
             .map_err(|error| {
-                planned_structured_message_error(
+                Box::new(planned_structured_message_error(
                     source_message.clone(),
                     structured_message_error(
                         MessageErrorCode::Internal,
@@ -10768,7 +10764,7 @@ async fn evaluate_correlator_output_message(
                     ),
                     None,
                     materialized_state_snapshot(&source_message.record),
-                )
+                ))
             })?;
     let result = execute_program_with_selection_in_context(
         program.program.compiled.as_ref(),
@@ -10780,7 +10776,7 @@ async fn evaluate_correlator_output_message(
     )
     .await
     .map_err(|error| {
-        planned_structured_message_error(
+        Box::new(planned_structured_message_error(
             source_message.clone(),
             structured_message_error(
                 MessageErrorCode::Internal,
@@ -10795,14 +10791,14 @@ async fn evaluate_correlator_output_message(
             ),
             None,
             materialized_state_snapshot(&source_message.record),
-        )
+        ))
     })?;
     if result.selected_rows.is_empty() {
         source_message.acks.ack_success();
         return Ok(None);
     }
     if result.selected_rows.len() != 1 || result.batch.row_count() != 1 {
-        return Err(planned_structured_message_error(
+        return Err(Box::new(planned_structured_message_error(
             source_message,
             structured_message_error(
                 MessageErrorCode::Internal,
@@ -10817,7 +10813,7 @@ async fn evaluate_correlator_output_message(
             ),
             None,
             HashMap::default(),
-        ));
+        )));
     }
     if let Some(side_error) = result.batch.errors().iter().flatten().next() {
         let partial_output = vm_partial_output_row_to_runtime_record(
@@ -10827,7 +10823,7 @@ async fn evaluate_correlator_output_message(
         )
         .ok();
         let materialized_state = materialized_state_snapshot(&source_message.record);
-        return Err(planned_structured_message_error(
+        return Err(Box::new(planned_structured_message_error(
             source_message,
             program.program.structured_side_error(
                 format!(
@@ -10842,7 +10838,7 @@ async fn evaluate_correlator_output_message(
             ),
             partial_output,
             materialized_state,
-        ));
+        )));
     }
     let record = vm_output_row_to_decoded_record(&result.batch, 0).map_err(|error| {
         let partial_output = vm_partial_output_row_to_runtime_record(
@@ -10851,7 +10847,7 @@ async fn evaluate_correlator_output_message(
             source_message.record.metadata().clone(),
         )
         .ok();
-        planned_structured_message_error(
+        Box::new(planned_structured_message_error(
             source_message.clone(),
             structured_message_error(
                 MessageErrorCode::Validation,
@@ -10866,7 +10862,7 @@ async fn evaluate_correlator_output_message(
             ),
             partial_output,
             materialized_state_snapshot(&source_message.record),
-        )
+        ))
     })?;
     let RelayMessage {
         key,

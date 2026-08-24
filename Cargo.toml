@@ -455,6 +455,9 @@ zeromq = "0.4"
 [patch.crates-io]
 # Unify all AWS-LC consumers on PR #1184 so Cargo links one aws-lc-sys native library.
 aws-lc-sys = { git = "https://github.com/nervix-io/aws-lc-rs.git", rev = "6332c54d1cf0535312a0e5cd73232f5d1e21f958" }
+# The archived 2.0.1 release triggers Rust's future-incompatibility lint; this is the focused fix
+# from https://github.com/GnomedDev/proc-macro-error-2/pull/14.
+proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
 # https://github.com/bytecodealliance/wasmtime/pull/13975 and https://github.com/glebpom/wasmtime/pull/1
 cranelift = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
 cranelift-codegen = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }

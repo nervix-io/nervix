@@ -1612,25 +1612,25 @@ async fn serve_https(
 async fn read_cbor_request_body<T: serde::de::DeserializeOwned>(
     request: &mut HyperRequest<HyperIncoming>,
     context: &str,
-) -> Result<T, HyperResponse<Full<Bytes>>> {
+) -> Result<T, Box<HyperResponse<Full<Bytes>>>> {
     let body = request
         .body_mut()
         .collect()
         .await
         .map_err(|error| {
             warn!(error = %error, context, "failed to read cluster api request body");
-            text_response(
+            Box::new(text_response(
                 StatusCode::BAD_REQUEST,
                 format!("failed to read request body: {error}"),
-            )
+            ))
         })?
         .to_bytes();
 
     decode_cbor(body.as_ref()).map_err(|error| {
-        text_response(
+        Box::new(text_response(
             StatusCode::BAD_REQUEST,
             format!("invalid {context} payload: {error}"),
-        )
+        ))
     })
 }
 
@@ -1674,7 +1674,7 @@ async fn handle_cluster_api_request(
                         format!("put_resource_replica failed: {error}"),
                     ),
                 },
-                Err(response) => response,
+                Err(response) => *response,
             }
         }
         (&Method::POST, RAFT_APPEND_ENTRIES_PATH) => {
@@ -1699,7 +1699,7 @@ async fn handle_cluster_api_request(
                         format!("append_entries failed: {error}"),
                     ),
                 },
-                Err(response) => response,
+                Err(response) => *response,
             }
         }
         (&Method::POST, RAFT_VOTE_PATH) => {
@@ -1720,7 +1720,7 @@ async fn handle_cluster_api_request(
                         format!("vote failed: {error}"),
                     ),
                 },
-                Err(response) => response,
+                Err(response) => *response,
             }
         }
         (&Method::POST, RAFT_TRANSFER_LEADER_PATH) => {
@@ -1745,7 +1745,7 @@ async fn handle_cluster_api_request(
                         format!("transfer_leader failed: {error}"),
                     ),
                 },
-                Err(response) => response,
+                Err(response) => *response,
             }
         }
         (&Method::POST, RAFT_INSTALL_SNAPSHOT_PATH) => {
@@ -2008,10 +2008,12 @@ async fn handle_web_console_request(
                                                                     break;
                                                                 }
                                                             }
-                                                            Err(response) => {
+                                                            Err(error) => {
                                                                 if !send_web_console_session_response(
                                                                     &mut websocket,
-                                                                    response,
+                                                                    web_console_server_error_response(
+                                                                        error.to_string(),
+                                                                    ),
                                                                 )
                                                                 .await
                                                                 {
@@ -3066,6 +3068,28 @@ struct BasicAuthCredentials {
     password: String,
 }
 
+#[derive(Debug, Error)]
+enum GrpcAuthenticationError {
+    #[error("authentication required")]
+    Required,
+    #[error("authentication failed")]
+    Failed,
+}
+
+impl From<GrpcAuthenticationError> for Status {
+    fn from(error: GrpcAuthenticationError) -> Self {
+        Self::unauthenticated(error.to_string())
+    }
+}
+
+#[derive(Debug, Error)]
+enum ActiveDomainError {
+    #[error("invalid active domain")]
+    Invalid,
+    #[error("domain '{domain}' does not exist")]
+    NotFound { domain: Domain },
+}
+
 #[derive(Clone)]
 struct DomainClockRuntimeState {
     wall_started_at: Timestamp,
@@ -3943,14 +3967,17 @@ impl SessionServiceImpl {
         .await
     }
 
-    async fn authenticate_grpc_metadata(&self, metadata: &MetadataMap) -> Result<(), Status> {
+    async fn authenticate_grpc_metadata(
+        &self,
+        metadata: &MetadataMap,
+    ) -> Result<(), GrpcAuthenticationError> {
         let Some(credentials) = credentials_from_metadata(metadata) else {
-            return Err(Status::unauthenticated("authentication required"));
+            return Err(GrpcAuthenticationError::Required);
         };
         if self.authenticate_basic_credentials(&credentials).await {
             Ok(())
         } else {
-            Err(Status::unauthenticated("authentication failed"))
+            Err(GrpcAuthenticationError::Failed)
         }
     }
 
@@ -8520,20 +8547,13 @@ impl SessionServiceImpl {
         &self,
         request: SetActiveDomainRequest,
         active_domain: &mut Option<Domain>,
-    ) -> Result<SessionResponse, SessionResponse> {
+    ) -> Result<SessionResponse, ActiveDomainError> {
         let domain = match Domain::parse(request.domain.trim()) {
             Ok(domain) => domain,
-            Err(_) => {
-                return Err(web_console_server_error_response(
-                    "invalid active domain".to_string(),
-                ));
-            }
+            Err(_) => return Err(ActiveDomainError::Invalid),
         };
         if self.consensus.current_domain(&domain).await.is_none() {
-            return Err(web_console_server_error_response(format!(
-                "domain '{}' does not exist",
-                domain.as_str()
-            )));
+            return Err(ActiveDomainError::NotFound { domain });
         }
         *active_domain = Some(domain.clone());
         Ok(SessionResponse {

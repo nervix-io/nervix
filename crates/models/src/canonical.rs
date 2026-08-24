@@ -3896,7 +3896,7 @@ mod tests {
                 from: ProcessorInputs::single(identifier("orders_stream"))
                     .with_collect_policy("50ms".to_string(), Some("4MiB".to_string())),
                 encode_using_codec: Some(identifier("orders_codec")),
-                sink,
+                sink: Box::new(sink),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 publishing_mode,
@@ -3924,7 +3924,7 @@ mod tests {
             name: identifier("emit_notifications"),
             from: ProcessorInputs::single(identifier("notifications")),
             encode_using_codec: None,
-            sink: EmitSink::Postgres {
+            sink: Box::new(EmitSink::Postgres {
                 client: identifier("postgres_main"),
                 table: identifier("notification_rows"),
                 values: vec![
@@ -3942,7 +3942,7 @@ mod tests {
                 },
                 max_batch: 500,
                 flush_each: "10s".to_string(),
-            },
+            }),
             flush_each: "10s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             publishing_mode: request_ack_mode(),
@@ -3970,7 +3970,7 @@ mod tests {
             name: identifier("emit_notifications"),
             from: ProcessorInputs::single(identifier("notifications")),
             encode_using_codec: None,
-            sink: EmitSink::MySql {
+            sink: Box::new(EmitSink::MySql {
                 client: identifier("mysql_main"),
                 table: identifier("notification_rows"),
                 values: vec![
@@ -3986,7 +3986,7 @@ mod tests {
                 conflict_action: MySqlConflictAction::DoNothing,
                 max_batch: 500,
                 flush_each: "10s".to_string(),
-            },
+            }),
             flush_each: "10s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             publishing_mode: request_ack_mode(),
@@ -4013,7 +4013,7 @@ mod tests {
             name: identifier("emit_notifications"),
             from: ProcessorInputs::single(identifier("notifications")),
             encode_using_codec: None,
-            sink: EmitSink::MongoDb {
+            sink: Box::new(EmitSink::MongoDb {
                 client: identifier("mongodb_main"),
                 collection: identifier("notification_rows"),
                 values: vec![
@@ -4031,7 +4031,7 @@ mod tests {
                 },
                 max_batch: 500,
                 flush_each: "10s".to_string(),
-            },
+            }),
             flush_each: "10s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             publishing_mode: request_ack_mode(),

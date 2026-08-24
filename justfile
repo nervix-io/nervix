@@ -510,7 +510,7 @@ docker-build-debian debian_version="trixie" llvm_version="22" tag="nervix:debian
         -f Dockerfile.debian \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.13.0}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.15.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg DEBIAN_VERSION={{ debian_version }} \
         --build-arg LLVM_VERSION={{ llvm_version }} \

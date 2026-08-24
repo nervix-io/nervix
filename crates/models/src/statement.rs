@@ -992,7 +992,7 @@ pub struct CreateEmitter {
     pub from: ProcessorInputs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encode_using_codec: Option<Identifier>,
-    pub sink: EmitSink,
+    pub sink: Box<EmitSink>,
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_size: Option<String>,
@@ -1149,7 +1149,7 @@ impl CreateEmitter {
                     commit_each: current_commit_each,
                     max_commit_size: current_max_commit_size,
                     ..
-                } = &mut self.sink
+                } = self.sink.as_mut()
                 else {
                     return Err(AlterEmitterError::CommitPolicyUnsupported);
                 };
@@ -1204,7 +1204,7 @@ pub enum AlterEmitterOperation {
         relay: Identifier,
     },
     SetSink {
-        sink: EmitSink,
+        sink: Box<EmitSink>,
         publishing_mode: EmitterPublishingMode,
     },
     SetClient {
@@ -4624,9 +4624,9 @@ mod tests {
             name: identifier("event_sink"),
             from: ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("event_codec")),
-            sink: EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq {
                 client: identifier("sink_a"),
-            },
+            }),
             flush_each: "1s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             error_policies: ErrorPolicies::handled_by_log(),
@@ -4700,9 +4700,9 @@ mod tests {
             name: identifier("event_sink"),
             from: ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("event_codec")),
-            sink: EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq {
                 client: identifier("sink"),
-            },
+            }),
             flush_each: "IMMEDIATE".to_string(),
             max_batch_size: None,
             error_policies: ErrorPolicies::handled_by_log(),
