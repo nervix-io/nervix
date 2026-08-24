@@ -4525,7 +4525,7 @@ impl From<CreateEmitter> for StoredCreateEmitterPublishing {
             name: value.name.to_string(),
             from: value.from.into(),
             encode_using_codec: value.encode_using_codec.map(|codec| codec.to_string()),
-            sink: value.sink.into(),
+            sink: (*value.sink).into(),
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             publishing_mode: value.publishing_mode.into(),
@@ -4548,7 +4548,7 @@ impl TryFrom<StoredCreateEmitterPublishing> for CreateEmitter {
                 .encode_using_codec
                 .map(|codec| Identifier::parse(&codec))
                 .transpose()?,
-            sink: value.sink.try_into()?,
+            sink: Box::new(value.sink.try_into()?),
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             publishing_mode: value.publishing_mode.into(),
@@ -5336,10 +5336,10 @@ mod tests {
                 from: ProcessorInputs::single(identifier("events_stream"))
                     .with_collect_policy("50ms".to_string(), None),
                 encode_using_codec: Some(identifier("events_codec")),
-                sink: EmitSink::Nats {
+                sink: Box::new(EmitSink::Nats {
                     client: identifier("nats_client"),
                     subject: identifier("events_subject"),
-                },
+                }),
                 publishing_mode: EmitterPublishingMode::NoAck {
                     retry_policy: RetryPolicy {
                         backoff: "250ms".to_string(),

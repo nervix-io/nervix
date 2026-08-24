@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  KACHE_VERSION: "0.13.0"
+  KACHE_VERSION: "0.15.1"
   TINYGO_VERSION: "0.41.1"
 
 permissions:
@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.97
+        uses: dtolnay/rust-toolchain@1.98
         with:
           targets: wasm32-unknown-unknown
 
@@ -156,7 +156,7 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.97
+        uses: dtolnay/rust-toolchain@1.98
         with:
           targets: wasm32-unknown-unknown
 

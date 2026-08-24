@@ -2641,7 +2641,7 @@ impl Runtime {
         registry: &RelayRegistry,
         services: &RelayBoundaryServices,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         let now = self
             .current_stream_expiration_time(domain)
             .ok()
@@ -2677,7 +2677,7 @@ impl Runtime {
         registry: &RelayRegistry,
         services: &RelayBoundaryServices,
         batch: &RelayRecordBatch,
-    ) -> Result<(), RelayRecordBatch> {
+    ) -> RelayDispatchResult {
         let now = self
             .current_stream_expiration_time(domain)
             .ok()

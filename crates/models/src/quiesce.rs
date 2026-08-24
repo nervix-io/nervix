@@ -1675,9 +1675,9 @@ mod tests {
             name: identifier("emit"),
             from: ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("event_codec")),
-            sink: EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq {
                 client: identifier("sink"),
-            },
+            }),
             flush_each: "1s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             error_policies: ErrorPolicies::handled_by_log(),
@@ -2028,9 +2028,9 @@ mod tests {
         assert_eq!(dynamic.dynamic_updates().len(), 1);
 
         let mut client = base.clone();
-        client.sink = EmitSink::ZeroMq {
+        client.sink = Box::new(EmitSink::ZeroMq {
             client: identifier("sink_two"),
-        };
+        });
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(client),
@@ -2039,10 +2039,10 @@ mod tests {
         );
 
         let mut sink = base.clone();
-        sink.sink = EmitSink::Nats {
+        sink.sink = Box::new(EmitSink::Nats {
             client: identifier("sink"),
             subject: identifier("events"),
-        };
+        });
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(sink),

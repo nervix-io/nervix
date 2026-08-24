@@ -12,7 +12,7 @@ cargo install --locked \
 This builds both binaries from source and installs them into Cargo's binary directory, which is
 `$HOME/.cargo/bin` by default. Ensure that directory is on your `PATH`.
 
-The build requires Rust 1.97 or newer and the native build tools required by Nervix's dependencies.
+The build requires Rust 1.98 or newer and the native build tools required by Nervix's dependencies.
 The initial build can take several minutes.
 
 Confirm that both commands are available:
