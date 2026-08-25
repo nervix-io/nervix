@@ -88,6 +88,9 @@ impl PrometheusIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled Prometheus ingestor must have quiesce control");
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -96,6 +99,7 @@ impl PrometheusIngestor {
         let task_timestamp_source = ingestor.timestamp_source.clone();
         let task_events = runtime.events.clone();
         let task_client_mounts = resolved_client.mounts.clone();
+        let task_quiesce = quiesce.clone();
         let task = tokio::spawn(async move {
             let _client_mounts = task_client_mounts;
             let logical_interval_nanos =
@@ -119,6 +123,55 @@ impl PrometheusIngestor {
                     break;
                 }
                 if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                    continue;
+                }
+                let mut buffered_collector = IngestRouteCollector::default();
+                let mut drained_buffer = false;
+                while let Some(payload) = task_quiesce.pop_buffered(0) {
+                    tokio::task::consume_budget().await;
+                    drained_buffer = true;
+                    if let Err(error) = task_runtime
+                        .dispatch_raw_ingest_payload(RawIngestDispatch {
+                            domain: &task_domain,
+                            ingestor: &task_ingestor,
+                            timestamp_source: task_timestamp_source.as_ref(),
+                            output_routes: &output_routes,
+                            filter_where: filter_where.as_ref(),
+                            branched_senders: &branched_senders,
+                            codec: codec.clone(),
+                            payload: &payload,
+                            collector: &mut buffered_collector,
+                            flush: false,
+                        })
+                        .await
+                    {
+                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                            "failed to dispatch buffered prometheus payload for ingestor '{}' in \
+                             domain '{}': {}",
+                            task_ingestor.as_str(),
+                            task_domain.as_str(),
+                            error
+                        )));
+                    }
+                }
+                if drained_buffer {
+                    if let Err(error) = task_runtime
+                        .flush_ingest_collector(
+                            &task_domain,
+                            &task_ingestor,
+                            &branched_senders,
+                            &mut buffered_collector,
+                        )
+                        .await
+                    {
+                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                            "failed to flush buffered prometheus payloads for ingestor '{}' in \
+                             domain '{}': {}",
+                            task_ingestor.as_str(),
+                            task_domain.as_str(),
+                            error
+                        )));
+                    }
                     continue;
                 }
                 let mut query_time = current_timestamp();
@@ -209,6 +262,9 @@ impl PrometheusIngestor {
                         }
                     }
                     _ = sleep(sleep_duration) => {
+                        if task_quiesce.should_skip_poll() {
+                            continue;
+                        }
                         let query_time = if let Some(domain_state) = task_runtime.domains.get(&task_domain) {
                             if let DomainPace::Paced = domain_state.config.pace {
                                 Some(query_time)
@@ -222,51 +278,16 @@ impl PrometheusIngestor {
                             Ok(samples) => {
                                 task_runtime
                                     .clear_ingestor_transient_error(&task_domain, &task_ingestor);
-                                let mut collector = IngestRouteCollector::default();
+                                let mut entries = Vec::with_capacity(samples.len());
                                 for sample in samples {
                                     tokio::task::consume_budget().await;
                                     match Self::sample_payload(&sample) {
-                                        Ok(payload) => match decode_ingested_payload(codec.clone(), &payload).await {
-                                            Ok(record) => {
-                                                if let Err(error) = task_runtime
-                                                .dispatch_ingested_records(IngestGroupDispatch {
-                                                    collector: &mut collector,
-                                                    domain: &task_domain,
-                                                    ingestor: &task_ingestor,
-                                                    timestamp_source: task_timestamp_source
-                                                        .as_ref(),
-                                                    output_routes: &output_routes,
-                                                    filter_where: filter_where.as_ref(),
-                                                    records: vec![record],
-                                                    metadata: Vec::new(),
-                                                        ingested_at: current_timestamp(),
-                                                        acks: vec![AckSet::empty()],
-                                                    })
-                                                    .await
-                                                {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                        "failed to dispatch prometheus sample for ingestor '{}' in domain '{}': {}",
-                                                        task_ingestor.as_str(),
-                                                        task_domain.as_str(),
-                                                        error
-                                                    )));
-                                                }
-                                            }
-                                            Err(error) => {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                    "failed to decode prometheus sample for ingestor '{}' in domain '{}': {}",
-                                                    task_ingestor.as_str(),
-                                                    task_domain.as_str(),
-                                                    error
-                                                )));
-                                                warn!(
-                                                    domain = task_domain.as_str(),
-                                                    ingestor = task_ingestor.as_str(),
-                                                    error = %error,
-                                                    "failed to decode prometheus sample"
-                                                );
-                                            }
-                                        },
+                                        Ok(payload) => {
+                                            entries.push((
+                                                payload,
+                                                IngestFilterMapMetadata::default(),
+                                            ));
+                                        }
                                         Err(error) => {
                                             let _ = task_events.send(RuntimeEvent::Error(format!(
                                                 "failed to materialize prometheus sample for ingestor '{}' in domain '{}': {}",
@@ -283,21 +304,36 @@ impl PrometheusIngestor {
                                         }
                                     }
                                 }
-                                if let Err(error) = task_runtime
-                                    .flush_ingest_collector(
-                                        &task_domain,
-                                        &task_ingestor,
-                                        &branched_senders,
-                                        &mut collector,
-                                    )
-                                    .await
+                                if entries.is_empty() {
+                                    continue;
+                                }
+                                let payload = BufferedIngestPayload::batch(entries);
+                                if let IngestorQuiesceIntake::Dispatch(payload) =
+                                    task_quiesce.intake(0, payload, false)
                                 {
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
-                                        "failed to flush prometheus samples for ingestor '{}' in domain '{}': {}",
-                                        task_ingestor.as_str(),
-                                        task_domain.as_str(),
-                                        error
-                                    )));
+                                    let mut collector = IngestRouteCollector::default();
+                                    if let Err(error) = task_runtime
+                                        .dispatch_raw_ingest_payload(RawIngestDispatch {
+                                            domain: &task_domain,
+                                            ingestor: &task_ingestor,
+                                            timestamp_source: task_timestamp_source.as_ref(),
+                                            output_routes: &output_routes,
+                                            filter_where: filter_where.as_ref(),
+                                            branched_senders: &branched_senders,
+                                            codec: codec.clone(),
+                                            payload: &payload,
+                                            collector: &mut collector,
+                                            flush: true,
+                                        })
+                                        .await
+                                    {
+                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            "failed to dispatch prometheus poll result for ingestor '{}' in domain '{}': {}",
+                                            task_ingestor.as_str(),
+                                            task_domain.as_str(),
+                                            error
+                                        )));
+                                    }
                                 }
                             }
                             Err(error) => {

@@ -1,21 +1,22 @@
 use chumsky::prelude::*;
 use nervix_models::{
     AlterIngestor, AlterIngestorOperation, CreateIngestor, CreateStatement, EndpointIngestMode,
-    GeneralErrorPolicy, IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode,
-    MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, PulsarIngestMode, RabbitMqIngestMode,
-    RedisPubSubIngestMode, RetryPolicy, SqsIngestMode, WebsocketsIngestMode, ZeroMqIngestMode,
+    GeneralErrorPolicy, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, MqttIngestMode, MqttQos, MqttSession,
+    NatsIngestMode, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy,
+    SqsIngestMode, WebsocketsIngestMode, ZeroMqIngestMode,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_timeout, alter_ingestor_route_body,
-        alter_op_separator, boxed_choice, channel_ref, client_ref, codec_ref, consumer_group_ref,
-        duration_lit, endpoint_ref, field_ref, filter_where_clause, flushed_ingestor_outputs,
-        general_error_policy, if_not_exists_clause, ingestor_name, into_parse_error, kw,
-        kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref, parallel_ack_window,
-        queue_ref, relay_ref, retry_policy, sequential_ack_window, string_lit, subscription_ref,
-        suggest_from, tok, topic_ref, u64_value, where_expression,
+        alter_op_separator, boxed_choice, byte_size_lit, channel_ref, client_ref, codec_ref,
+        consumer_group_ref, duration_lit, endpoint_ref, field_ref, filter_where_clause,
+        flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
+        into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
+        parallel_ack_window, queue_ref, relay_ref, retry_policy, sequential_ack_window, string_lit,
+        subscription_ref, suggest_from, tok, topic_ref, u64_value, where_expression,
     },
 };
 
@@ -293,6 +294,142 @@ fn sqs_mode_parser<'src>()
         })
 }
 
+fn positive_quiesce_buffer_size<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    byte_size_lit().try_map(|value, span| {
+        let bytes = value
+            .parse::<ubyte::ByteUnit>()
+            .expect("byte_size_lit must produce a valid byte size")
+            .as_u64();
+        if bytes == 0 {
+            Err(Rich::custom(
+                span,
+                "quiesce BUFFER MAX SIZE must be greater than 0",
+            ))
+        } else {
+            Ok(value)
+        }
+    })
+}
+
+fn quiesce_buffer_parser<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Buffer)
+        .ignore_then(kw_phrase2(Identifier::Max, Identifier::Size))
+        .ignore_then(positive_quiesce_buffer_size())
+        .then_ignore(kw_phrase2(Identifier::On, Identifier::Overflow))
+        .then(choice((
+            kw_phrase2(Identifier::Drop, Identifier::Oldest).to(IngestQuiesceOverflow::DropOldest),
+            kw_phrase2(Identifier::Drop, Identifier::Newest).to(IngestQuiesceOverflow::DropNewest),
+        )))
+        .map(|(max_size, overflow)| IngestQuiesceMode::Buffer { max_size, overflow })
+}
+
+fn endpoint_quiesce_buffer_parser<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Buffer)
+        .ignore_then(kw_phrase2(Identifier::Max, Identifier::Size))
+        .ignore_then(positive_quiesce_buffer_size())
+        .map(|max_size| IngestQuiesceMode::EndpointBuffer { max_size })
+}
+
+fn quiesce_suspend_parser<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Suspend).to(IngestQuiesceMode::Suspend)
+}
+
+fn quiesce_drop_parser<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Drop).to(IngestQuiesceMode::Drop)
+}
+
+fn quiesce_reject_parser<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Reject)
+        .ignore_then(kw_phrase2(Identifier::Retry, Identifier::After))
+        .ignore_then(duration_lit())
+        .map(|retry_after| IngestQuiesceMode::Reject { retry_after })
+}
+
+fn quiesce_clause<'src, P>(
+    body: P,
+) -> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone
+where
+    P: Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone,
+{
+    kw_phrase2(Identifier::On, Identifier::Quiesce).ignore_then(body)
+}
+
+fn suspend_only_quiesce_clause<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    quiesce_clause(quiesce_suspend_parser())
+}
+
+fn push_quiesce_clause<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    quiesce_clause(choice((quiesce_buffer_parser(), quiesce_drop_parser())))
+}
+
+fn flexible_quiesce_clause<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    quiesce_clause(choice((
+        quiesce_suspend_parser(),
+        quiesce_buffer_parser(),
+        quiesce_drop_parser(),
+    )))
+}
+
+type MqttQuiesceExtra<'src> = extra::Full<ParseError<'src>, (), MqttIngestMode>;
+
+fn with_mqtt_mode_context<'src, O, P>(
+    parser: P,
+) -> impl Parser<'src, &'src [Token], O, MqttQuiesceExtra<'src>> + Clone
+where
+    P: Parser<'src, &'src [Token], O, extra::Err<ParseError<'src>>> + Clone,
+{
+    map_ctx::<_, _, _, MqttQuiesceExtra<'src>, extra::Err<ParseError<'src>>, _>(|_| (), parser)
+}
+
+fn mqtt_quiesce_clause<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, MqttQuiesceExtra<'src>> + Clone {
+    let suspend = with_mqtt_mode_context(quiesce_suspend_parser())
+        .contextual()
+        .configure(|_, mode: &MqttIngestMode| {
+            mode.session() == MqttSession::Persistent && mode.qos() == MqttQos::AtLeastOnce
+        });
+    let body = choice((
+        suspend,
+        with_mqtt_mode_context(quiesce_buffer_parser()),
+        with_mqtt_mode_context(quiesce_drop_parser()),
+    ));
+
+    with_mqtt_mode_context(kw_phrase2(Identifier::On, Identifier::Quiesce)).ignore_then(body)
+}
+
+fn polling_quiesce_clause<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    quiesce_clause(choice((quiesce_suspend_parser(), quiesce_buffer_parser())))
+}
+
+fn endpoint_quiesce_clause<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    quiesce_clause(choice((
+        quiesce_reject_parser(),
+        endpoint_quiesce_buffer_parser(),
+    )))
+}
+
+fn alter_quiesce_body<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    boxed_choice!(
+        quiesce_suspend_parser(),
+        quiesce_buffer_parser(),
+        quiesce_drop_parser(),
+        quiesce_reject_parser(),
+        endpoint_quiesce_buffer_parser(),
+    )
+}
+
 fn kafka_ingest_source_parser<'src>()
 -> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
     let offset_mode = kw(Identifier::Offset)
@@ -316,13 +453,15 @@ fn kafka_ingest_source_parser<'src>()
         )
         .then_ignore(kw(Identifier::Mode))
         .then(mode_parser())
+        .then(suspend_only_quiesce_clause())
         .map(
-            |((((client, topic), offset_mode), instances), mode)| IngestSource::Kafka {
+            |(((((client, topic), offset_mode), instances), mode), quiesce)| IngestSource::Kafka {
                 client,
                 topic,
                 offset_mode,
                 instances,
                 mode,
+                quiesce,
             },
         )
 }
@@ -343,13 +482,17 @@ fn pulsar_ingest_source_parser<'src>()
         )
         .then_ignore(kw(Identifier::Mode))
         .then(pulsar_mode_parser())
+        .then(suspend_only_quiesce_clause())
         .map(
-            |((((client, topic), subscription), instances), mode)| IngestSource::Pulsar {
-                client,
-                topic,
-                subscription,
-                instances,
-                mode,
+            |(((((client, topic), subscription), instances), mode), quiesce)| {
+                IngestSource::Pulsar {
+                    client,
+                    topic,
+                    subscription,
+                    instances,
+                    mode,
+                    quiesce,
+                }
             },
         )
 }
@@ -368,12 +511,14 @@ fn rabbitmq_ingest_source_parser<'src>()
         )
         .then_ignore(kw(Identifier::Mode))
         .then(rabbitmq_mode_parser())
+        .then(suspend_only_quiesce_clause())
         .map(
-            |(((client, queue), instances), mode)| IngestSource::RabbitMq {
+            |((((client, queue), instances), mode), quiesce)| IngestSource::RabbitMq {
                 client,
                 queue,
                 instances,
                 mode,
+                quiesce,
             },
         )
 }
@@ -387,11 +532,15 @@ fn redis_pubsub_ingest_source_parser<'src>()
         .then(channel_ref())
         .then_ignore(kw(Identifier::Mode))
         .then(redis_pubsub_mode_parser())
-        .map(|((client, channel), mode)| IngestSource::RedisPubSub {
-            client,
-            channel,
-            mode,
-        })
+        .then(push_quiesce_clause())
+        .map(
+            |(((client, channel), mode), quiesce)| IngestSource::RedisPubSub {
+                client,
+                channel,
+                mode,
+                quiesce,
+            },
+        )
 }
 
 fn mqtt_ingest_source_parser<'src>()
@@ -406,13 +555,16 @@ fn mqtt_ingest_source_parser<'src>()
                 .or_not()
                 .map(|instances| instances.unwrap_or(1)),
         )
-        .then(mqtt_mode_parser())
-        .map(|(((client, topic), instances), mode)| IngestSource::Mqtt {
-            client,
-            topic,
-            instances,
-            mode,
-        })
+        .then(mqtt_mode_parser().then_with_ctx(mqtt_quiesce_clause()))
+        .map(
+            |(((client, topic), instances), (mode, quiesce))| IngestSource::Mqtt {
+                client,
+                topic,
+                instances,
+                mode,
+                quiesce,
+            },
+        )
 }
 
 fn prometheus_ingest_source_parser<'src>()
@@ -427,11 +579,15 @@ fn prometheus_ingest_source_parser<'src>()
                 .map(|_| every.clone())
                 .map_err(|err| Rich::custom(span, format!("invalid duration '{every}': {err}")))
         }))
-        .map(|((client, query), every)| IngestSource::Prometheus {
-            client,
-            query,
-            every,
-        })
+        .then(polling_quiesce_clause())
+        .map(
+            |(((client, query), every), quiesce)| IngestSource::Prometheus {
+                client,
+                query,
+                every,
+                quiesce,
+            },
+        )
 }
 
 fn http_ingest_source_parser<'src>()
@@ -444,7 +600,12 @@ fn http_ingest_source_parser<'src>()
                 .map(|_| every.clone())
                 .map_err(|err| Rich::custom(span, format!("invalid duration '{every}': {err}")))
         }))
-        .map(|(client, every)| IngestSource::Http { client, every })
+        .then(polling_quiesce_clause())
+        .map(|((client, every), quiesce)| IngestSource::Http {
+            client,
+            every,
+            quiesce,
+        })
 }
 
 fn nats_ingest_source_parser<'src>()
@@ -459,13 +620,15 @@ fn nats_ingest_source_parser<'src>()
         .then(instance_count())
         .then_ignore(kw(Identifier::Mode))
         .then(nats_mode_parser())
+        .then(push_quiesce_clause())
         .map(
-            |((((client, subject), queue_group), instances), mode)| IngestSource::Nats {
+            |(((((client, subject), queue_group), instances), mode), quiesce)| IngestSource::Nats {
                 client,
                 subject,
                 queue_group,
                 instances,
                 mode,
+                quiesce,
             },
         )
 }
@@ -476,7 +639,12 @@ fn zeromq_ingest_source_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Mode))
         .then(zeromq_mode_parser())
-        .map(|(client, mode)| IngestSource::ZeroMq { client, mode })
+        .then(flexible_quiesce_clause())
+        .map(|((client, mode), quiesce)| IngestSource::ZeroMq {
+            client,
+            mode,
+            quiesce,
+        })
 }
 
 fn sqs_ingest_source_parser<'src>()
@@ -493,12 +661,16 @@ fn sqs_ingest_source_parser<'src>()
         )
         .then_ignore(kw(Identifier::Mode))
         .then(sqs_mode_parser())
-        .map(|(((client, queue), instances), mode)| IngestSource::Sqs {
-            client,
-            queue,
-            instances,
-            mode,
-        })
+        .then(suspend_only_quiesce_clause())
+        .map(
+            |((((client, queue), instances), mode), quiesce)| IngestSource::Sqs {
+                client,
+                queue,
+                instances,
+                mode,
+                quiesce,
+            },
+        )
 }
 
 fn endpoint_ingest_source_parser<'src>()
@@ -507,7 +679,12 @@ fn endpoint_ingest_source_parser<'src>()
         .ignore_then(endpoint_ref())
         .then_ignore(kw(Identifier::Mode))
         .then(endpoint_mode_parser())
-        .map(|(endpoint, mode)| IngestSource::Endpoint { endpoint, mode })
+        .then(endpoint_quiesce_clause())
+        .map(|((endpoint, mode), quiesce)| IngestSource::Endpoint {
+            endpoint,
+            mode,
+            quiesce,
+        })
 }
 
 fn websockets_ingest_source_parser<'src>()
@@ -516,7 +693,12 @@ fn websockets_ingest_source_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Mode))
         .then(websockets_mode_parser())
-        .map(|(client, mode)| IngestSource::Websockets { client, mode })
+        .then(push_quiesce_clause())
+        .map(|((client, mode), quiesce)| IngestSource::Websockets {
+            client,
+            mode,
+            quiesce,
+        })
 }
 
 fn ingest_source_parser<'src>()
@@ -543,6 +725,10 @@ pub fn alter_ingestor_parser<'src>()
         .ignore_then(kw(Identifier::From))
         .ignore_then(ingest_source_parser())
         .map(|source| AlterIngestorOperation::SetSource { source });
+    let set_quiesce = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Quiesce))
+        .ignore_then(alter_quiesce_body())
+        .map(|quiesce| AlterIngestorOperation::SetQuiesce { quiesce });
     let set_decode = kw(Identifier::Set)
         .ignore_then(kw_phrase2(Identifier::Decode, Identifier::Using))
         .ignore_then(codec_ref())
@@ -585,6 +771,7 @@ pub fn alter_ingestor_parser<'src>()
 
     let operation = choice((
         set_source,
+        set_quiesce,
         set_decode,
         set_timestamp,
         drop_timestamp,
@@ -719,15 +906,157 @@ mod tests {
             .collect()
     }
 
+    fn ingestor_with_source(source: &str) -> String {
+        format!(
+            "CREATE INGESTOR i FROM {source} DECODE USING sch TO s UNBRANCHED FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        )
+    }
+
+    #[test]
+    fn parses_every_source_specific_quiesce_form() {
+        let sources = [
+            "KAFKA c TOPIC t OFFSET BY DOMAIN MODE NO_ACK PARALLEL ON QUIESCE SUSPEND",
+            "PULSAR c TOPIC t SUBSCRIPTION s MODE NO_ACK PARALLEL ON QUIESCE SUSPEND",
+            "RABBITMQ c QUEUE q MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 1s MAX 2s \
+             ON QUIESCE SUSPEND",
+            "SQS c QUEUE q MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 1s MAX 2s ON \
+             QUIESCE SUSPEND",
+            "MQTT c TOPIC 't' SESSION PERSISTENT QOS 1 MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND",
+            "MQTT c TOPIC 't' MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 64MiB ON OVERFLOW \
+             DROP OLDEST",
+            "MQTT c TOPIC 't' MODE NO_ACK SEQUENTIAL ON QUIESCE DROP",
+            "NATS c SUBJECT s QUEUE GROUP g INSTANCES 1 MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+             MAX SIZE 64MiB ON OVERFLOW DROP NEWEST",
+            "NATS c SUBJECT s QUEUE GROUP g INSTANCES 1 MODE NO_ACK SEQUENTIAL ON QUIESCE DROP",
+            "REDIS PUBSUB c CHANNEL ch MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 64MiB ON \
+             OVERFLOW DROP OLDEST",
+            "WEBSOCKETS c MODE NO_ACK SEQUENTIAL ON QUIESCE DROP",
+            "ZEROMQ c MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND",
+            "ZEROMQ c MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 64MiB ON OVERFLOW DROP \
+             NEWEST",
+            "HTTP c EVERY 1s ON QUIESCE SUSPEND",
+            "HTTP c EVERY 1s ON QUIESCE BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST",
+            "PROMETHEUS c QUERY 'up' EVERY 1s ON QUIESCE SUSPEND",
+            "ENDPOINT e MODE NO_ACK SEQUENTIAL ON QUIESCE REJECT RETRY AFTER 5s",
+            "ENDPOINT e MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 64MiB",
+        ];
+
+        for source in sources {
+            parse_create_ingestor(&ingestor_with_source(source))
+                .unwrap_or_else(|error| panic!("source `{source}` should parse: {error:?}"));
+        }
+    }
+
+    #[test]
+    fn requires_quiesce_clause_and_all_mode_variables() {
+        let invalid_sources = [
+            "KAFKA c TOPIC t OFFSET BY DOMAIN MODE NO_ACK PARALLEL",
+            "NATS c SUBJECT s QUEUE GROUP g INSTANCES 1 MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER",
+            "NATS c SUBJECT s QUEUE GROUP g INSTANCES 1 MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+             MAX SIZE 64MiB",
+            "NATS c SUBJECT s QUEUE GROUP g INSTANCES 1 MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+             MAX SIZE 0B ON OVERFLOW DROP OLDEST",
+            "ENDPOINT e MODE NO_ACK SEQUENTIAL ON QUIESCE REJECT",
+        ];
+
+        for source in invalid_sources {
+            assert!(
+                parse_create_ingestor(&ingestor_with_source(source)).is_err(),
+                "source `{source}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_quiesce_modes_foreign_to_the_source() {
+        let invalid_sources = [
+            "KAFKA c TOPIC t OFFSET BY DOMAIN MODE NO_ACK PARALLEL ON QUIESCE BUFFER MAX SIZE \
+             1MiB ON OVERFLOW DROP OLDEST",
+            "ENDPOINT e MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND",
+            "HTTP c EVERY 1s ON QUIESCE DROP",
+            "NATS c SUBJECT s QUEUE GROUP g INSTANCES 1 MODE NO_ACK SEQUENTIAL ON QUIESCE REJECT \
+             RETRY AFTER 1s",
+        ];
+
+        for source in invalid_sources {
+            assert!(
+                parse_create_ingestor(&ingestor_with_source(source)).is_err(),
+                "source `{source}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn mqtt_suspend_requires_a_persistent_qos_one_session() {
+        for source in [
+            "MQTT c TOPIC 't' MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND",
+            "MQTT c TOPIC 't' SESSION CLEAN QOS 1 MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND",
+            "MQTT c TOPIC 't' SESSION PERSISTENT QOS 0 MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND",
+        ] {
+            assert!(
+                parse_create_ingestor(&ingestor_with_source(source)).is_err(),
+                "source `{source}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn quiesce_completion_is_composed_and_source_specific() {
+        let kafka = "CREATE INGESTOR i FROM KAFKA c TOPIC t OFFSET BY DOMAIN MODE NO_ACK PARALLEL ";
+        let kafka_suggestions = suggest_create_ingestor(kafka, kafka.len());
+        assert!(kafka_suggestions.contains(&"ON QUIESCE".to_string()));
+        assert!(!kafka_suggestions.contains(&"DECODE USING".to_string()));
+
+        let nats = "CREATE INGESTOR i FROM NATS c SUBJECT s QUEUE GROUP g INSTANCES 1 MODE NO_ACK \
+                    SEQUENTIAL ON QUIESCE ";
+        let nats_suggestions = suggest_create_ingestor(nats, nats.len());
+        assert!(nats_suggestions.contains(&"BUFFER".to_string()));
+        assert!(nats_suggestions.contains(&"DROP".to_string()));
+        assert!(!nats_suggestions.contains(&"SUSPEND".to_string()));
+        assert!(!nats_suggestions.contains(&"REJECT".to_string()));
+
+        let endpoint = "CREATE INGESTOR i FROM ENDPOINT e MODE NO_ACK SEQUENTIAL ON QUIESCE ";
+        let endpoint_suggestions = suggest_create_ingestor(endpoint, endpoint.len());
+        assert!(endpoint_suggestions.contains(&"BUFFER".to_string()));
+        assert!(endpoint_suggestions.contains(&"REJECT".to_string()));
+        assert!(!endpoint_suggestions.contains(&"DROP".to_string()));
+        assert!(!endpoint_suggestions.contains(&"SUSPEND".to_string()));
+
+        let clean_mqtt =
+            "CREATE INGESTOR i FROM MQTT c TOPIC 't' MODE NO_ACK SEQUENTIAL ON QUIESCE ";
+        let clean_mqtt_suggestions = suggest_create_ingestor(clean_mqtt, clean_mqtt.len());
+        assert!(clean_mqtt_suggestions.contains(&"BUFFER".to_string()));
+        assert!(clean_mqtt_suggestions.contains(&"DROP".to_string()));
+        assert!(!clean_mqtt_suggestions.contains(&"SUSPEND".to_string()));
+
+        let persistent_mqtt = "CREATE INGESTOR i FROM MQTT c TOPIC 't' SESSION PERSISTENT QOS 1 \
+                               MODE NO_ACK SEQUENTIAL ON QUIESCE ";
+        let persistent_mqtt_suggestions =
+            suggest_create_ingestor(persistent_mqtt, persistent_mqtt.len());
+        assert!(persistent_mqtt_suggestions.contains(&"BUFFER".to_string()));
+        assert!(persistent_mqtt_suggestions.contains(&"DROP".to_string()));
+        assert!(persistent_mqtt_suggestions.contains(&"SUSPEND".to_string()));
+    }
+
+    #[test]
+    fn parses_set_quiesce_alter_operation() {
+        let parsed = parse_alter_ingestor(
+            "ALTER INGESTOR i SET QUIESCE BUFFER MAX SIZE 32MiB ON OVERFLOW DROP NEWEST;",
+        )
+        .expect("SET QUIESCE should parse");
+        assert_eq!(parsed.operations.len(), 1);
+    }
+
     #[test]
     fn parses_alter_ingestor_full_operations_and_expression_commas() {
         let parsed = parse_alter_ingestor(
-            "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL, SET \
-             DECODE USING event_codec_v2, SET TIMESTAMP NOW, SET FILTER WHERE concat(input.kind, \
-             ',') != '', REPLACE ROUTE TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON \
-             MESSAGE ERROR SEND TO errors SET code = concat(error.code, ',bad'), ADD ROUTE TO \
-             audit INHERIT ALL UNBRANCHED FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
-             LOG, SET GENERAL ERROR IGNORE;",
+            "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON \
+             QUIESCE BUFFER MAX SIZE 1MiB, SET DECODE USING event_codec_v2, SET TIMESTAMP NOW, \
+             SET FILTER WHERE concat(input.kind, ',') != '', REPLACE ROUTE TO events INHERIT ALL \
+             UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR SEND TO errors SET code = \
+             concat(error.code, ',bad'), ADD ROUTE TO audit INHERIT ALL UNBRANCHED FLUSH EACH \
+             10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
         )
         .expect("ALTER INGESTOR should parse all operations");
 
@@ -776,7 +1105,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR route_ingestor
                 FROM ENDPOINT input_endpoint MODE NO_ACK SEQUENTIAL
-                DECODE USING input_codec
+                ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING input_codec
                 TO accepted UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR IGNORE
                 TO rejected UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
                 ON GENERAL ERROR IGNORE;
@@ -806,7 +1135,7 @@ mod tests {
                     TOPIC notifications
                     OFFSET BY CONSUMER GROUP nervix_consumer
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-                DECODE USING notification_kafka_message
+                ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications
                 BRANCHED BY notification_params SET user_id = message.user_id
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -860,6 +1189,7 @@ mod tests {
                         max_backoff: "5s".to_string(),
                     },
                 },
+                quiesce: IngestQuiesceMode::Suspend,
             }
         );
         assert_eq!(
@@ -878,7 +1208,7 @@ mod tests {
             CREATE INGESTOR http_notifications
                 FROM ENDPOINT http_notifications_endpoint
                 MODE NO_ACK SEQUENTIAL
-                DECODE USING notification_codec
+                ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
                 TO notifications UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG
                 ON GENERAL ERROR LOG;
@@ -898,7 +1228,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR i
               FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL
-              DECODE USING sch
+              ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -960,7 +1290,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR i
               FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
-              DECODE USING sch
+              ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -992,7 +1322,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR i
               FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE NO_ACK PARALLEL
-              DECODE USING sch
+              ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1011,7 +1341,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR i
               FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE NO_ACK PARALLEL MAX 20
-              DECODE USING sch
+              ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1022,12 +1352,12 @@ mod tests {
     }
 
     #[test]
-    fn no_ack_parallel_completion_continues_to_decode_without_max() {
+    fn no_ack_parallel_completion_continues_to_quiesce_without_max() {
         let input = "CREATE INGESTOR i FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE \
                      NO_ACK PARALLEL ";
         let suggestions = suggest_create_ingestor(input, input.len());
 
-        assert!(suggestions.contains(&"DECODE USING".to_string()));
+        assert!(suggestions.contains(&"ON QUIESCE".to_string()));
         assert!(!suggestions.contains(&"MAX".to_string()));
     }
 
@@ -1036,7 +1366,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR pulsar_notifications
               FROM PULSAR pulsar_main TOPIC notifications SUBSCRIPTION nervix_subscription MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
-              DECODE USING notification_codec
+              ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1062,6 +1392,7 @@ mod tests {
                         max_backoff: "8s".to_string(),
                     },
                 },
+                quiesce: IngestQuiesceMode::Suspend,
             }
         );
     }
@@ -1087,7 +1418,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR rabbit_notifications
               FROM RABBITMQ rabbit_main QUEUE notifications MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s
-              DECODE USING notification_codec
+              ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1120,6 +1451,7 @@ mod tests {
                         max_backoff: "30s".to_string(),
                     },
                 },
+                quiesce: IngestQuiesceMode::Suspend,
             }
         );
     }
@@ -1129,7 +1461,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR redis_notifications
               FROM REDIS PUBSUB redis_main CHANNEL notifications MODE NO_ACK SEQUENTIAL
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1147,6 +1479,7 @@ mod tests {
                 channel: nervix_models::Identifier::try_from("notifications")
                     .expect("valid channel identifier"),
                 mode: RedisPubSubIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::Drop,
             }
         );
     }
@@ -1203,8 +1536,8 @@ mod tests {
 
     #[test]
     fn suggests_set_after_branched_by() {
-        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL DECODE USING sch \
-                     TO s BRANCHED BY u_branch ";
+        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+                     MAX SIZE 1MiB DECODE USING sch TO s BRANCHED BY u_branch ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"SET".to_string()));
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
@@ -1215,8 +1548,8 @@ mod tests {
 
     #[test]
     fn suggests_flush_on_output_without_transport_leakage() {
-        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL DECODE USING sch \
-                     TO s UNBRANCHED FL";
+        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+                     MAX SIZE 1MiB DECODE USING sch TO s UNBRANCHED FL";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(!suggestions.contains(&"TIMESTAMP".to_string()));
@@ -1265,7 +1598,7 @@ mod tests {
                     TOPIC notifications
                     OFFSET BY CONSUMER GROUP nervix_consumer
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-                DECODE USING notification_kafka_message
+                ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications BRANCHED BY user_id_kind_branch SET user_id = message.user_id
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
                 ON GENERAL ERROR LOG;
@@ -1288,7 +1621,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR i
               FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL
-              DECODE USING sch
+              ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH IMMEDIATE ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1311,7 +1644,7 @@ mod tests {
             CREATE INGESTOR i
               FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL
               COLLECT FOR 1s
-              DECODE USING sch
+              ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sch
               TO s UNBRANCHED
               FLUSH IMMEDIATE ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1330,8 +1663,8 @@ mod tests {
 
     #[test]
     fn suggests_branched_by_as_compound_keyword() {
-        let input =
-            "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL DECODE USING sch TO s ";
+        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+                     MAX SIZE 1MiB DECODE USING sch TO s ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"BRANCHED BY".to_string()));
         assert!(suggestions.contains(&"UNBRANCHED".to_string()));
@@ -1355,8 +1688,8 @@ mod tests {
 
     #[test]
     fn output_context_suggests_construction_and_branch_not_values() {
-        let input =
-            "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL DECODE USING sch TO s ";
+        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+                     MAX SIZE 1MiB DECODE USING sch TO s ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"SET".to_string()));
         assert!(suggestions.contains(&"BRANCHED BY".to_string()));
@@ -1366,7 +1699,8 @@ mod tests {
 
     #[test]
     fn suggests_to_keyword() {
-        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL DECODE USING sch ";
+        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+                     MAX SIZE 1MiB DECODE USING sch ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"TO".to_string()));
         assert!(!suggestions.contains(&"RELAY".to_string()));
@@ -1374,7 +1708,8 @@ mod tests {
 
     #[test]
     fn suggests_decode_using_as_compound_keyword() {
-        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ";
+        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+                     MAX SIZE 1MiB ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"DECODE USING".to_string()));
     }
@@ -1402,7 +1737,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR mqtt_notifications
               FROM MQTT mqtt_main TOPIC notifications MODE NO_ACK SEQUENTIAL
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1423,6 +1758,7 @@ mod tests {
                     session: MqttSession::Clean,
                     qos: MqttQos::AtMostOnce,
                 },
+                quiesce: IngestQuiesceMode::Drop,
             }
         );
     }
@@ -1432,7 +1768,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR mqtt_notifications
               FROM MQTT mqtt_main TOPIC notifications QOS 1 MODE NO_ACK PARALLEL
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1445,6 +1781,7 @@ mod tests {
             topic,
             instances,
             mode: MqttIngestMode::NoAckParallel { session, qos, .. },
+            ..
         } = &parsed.source
         else {
             panic!("expected parallel NO_ACK MQTT source");
@@ -1465,7 +1802,7 @@ mod tests {
               INSTANCES 3
               SESSION PERSISTENT QOS 1
               MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 250ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1489,6 +1826,7 @@ mod tests {
                         max_backoff: "2s".to_string(),
                     },
                 },
+                quiesce: IngestQuiesceMode::Drop,
             }
         );
     }
@@ -1501,7 +1839,7 @@ mod tests {
               TOPIC notifications
               SUBSCRIPTION SHARED nervix_group
               MODE NO_ACK SEQUENTIAL
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1516,7 +1854,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR mqtt_notifications
               FROM MQTT mqtt_main TOPIC notifications SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1544,7 +1882,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR mqtt_notifications
               FROM MQTT mqtt_main TOPIC notifications QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1559,7 +1897,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR mqtt_notifications
               FROM MQTT mqtt_main TOPIC notifications SESSION PERSISTENT MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1573,7 +1911,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR mqtt_notifications
               FROM MQTT mqtt_main TOPIC notifications MODE NO_ACK PARALLEL MAX 4
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1588,7 +1926,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR nats_notifications
               FROM NATS nats_main SUBJECT notifications QUEUE GROUP nats_notifications_group INSTANCES 3 MODE NO_ACK SEQUENTIAL
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1608,6 +1946,7 @@ mod tests {
                     .expect("valid queue group identifier"),
                 instances: 3,
                 mode: NatsIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::Drop,
             }
         );
     }
@@ -1617,7 +1956,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR nats_notifications
               FROM NATS nats_main SUBJECT notifications MODE NO_ACK SEQUENTIAL
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1632,7 +1971,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR nats_notifications
               FROM NATS nats_main SUBJECT notifications QUEUE GROUP nats_notifications_group INSTANCES 0 MODE NO_ACK SEQUENTIAL
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1681,7 +2020,7 @@ mod tests {
               FROM PROMETHEUS prom_main
               QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
               EVERY 15s
-              DECODE USING sample_codec
+              ON QUIESCE SUSPEND DECODE USING sample_codec
               TO samples BRANCHED BY source_branch SET source = message.source
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1697,6 +2036,7 @@ mod tests {
                     .expect("valid client identifier"),
                 query: r#"label_replace(vector(42.5), "source", "local", "", "")"#.to_string(),
                 every: "15s".to_string(),
+                quiesce: IngestQuiesceMode::Suspend,
             }
         );
     }
@@ -1706,7 +2046,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR http_notifications
               FROM HTTP http_main EVERY 1s
-              DECODE USING notification_codec
+              ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1721,6 +2061,7 @@ mod tests {
                 client: nervix_models::Identifier::try_from("http_main")
                     .expect("valid client identifier"),
                 every: "1s".to_string(),
+                quiesce: IngestQuiesceMode::Suspend,
             }
         );
     }
@@ -1730,7 +2071,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR http_notifications
               FROM HTTP http_main EVERY 1s
-              DECODE USING notification_codec
+              ON QUIESCE SUSPEND DECODE USING notification_codec
               TIMESTAMP AT occurred_at
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1752,7 +2093,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR http_notifications
               FROM HTTP http_main EVERY 1s
-              DECODE USING notification_codec
+              ON QUIESCE SUSPEND DECODE USING notification_codec
               TIMESTAMP NOW
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1769,7 +2110,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR ws_notifications
               FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
-              DECODE USING notification_codec
+              ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1784,6 +2125,9 @@ mod tests {
                 endpoint: nervix_models::Identifier::try_from("ws_notifications_endpoint")
                     .expect("valid endpoint identifier"),
                 mode: EndpointIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
             }
         );
     }
@@ -1793,7 +2137,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR ws_notifications
               FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
-              DECODE USING notification_codec
+              ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1808,6 +2152,7 @@ mod tests {
                 client: nervix_models::Identifier::try_from("ws_main")
                     .expect("valid client identifier"),
                 mode: WebsocketsIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::Drop,
             }
         );
     }
@@ -1817,7 +2162,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR zmq_notifications
               FROM ZEROMQ zmq_main MODE NO_ACK SEQUENTIAL
-              DECODE USING notification_codec
+              ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1832,6 +2177,7 @@ mod tests {
                 client: nervix_models::Identifier::try_from("zmq_main")
                     .expect("valid client identifier"),
                 mode: ZeroMqIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::Suspend,
             }
         );
     }
@@ -1841,7 +2187,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR sqs_notifications
               FROM SQS sqs_main QUEUE notifications MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m
-              DECODE USING notification_codec
+              ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1865,6 +2211,7 @@ mod tests {
                         max_backoff: "1m".to_string(),
                     },
                 },
+                quiesce: IngestQuiesceMode::Suspend,
             }
         );
     }
@@ -1874,7 +2221,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR i
               FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g INSTANCES 3 MODE NO_ACK PARALLEL
-              DECODE USING sch
+              ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1893,7 +2240,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR rabbit_notifications
               FROM RABBITMQ rabbit_main QUEUE notifications INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s
-              DECODE USING notification_codec
+              ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1912,7 +2259,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR sqs_notifications
               FROM SQS sqs_main QUEUE notifications INSTANCES 4 MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m
-              DECODE USING notification_codec
+              ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1931,7 +2278,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR i
               FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g INSTANCES 0 MODE NO_ACK PARALLEL
-              DECODE USING sch
+              ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1950,7 +2297,7 @@ mod tests {
         let input = r#"
             CREATE INGESTOR kafka_notifications
               FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL
-              DECODE USING notification_kafka_message
+              ON QUIESCE SUSPEND DECODE USING notification_kafka_message
               FILTER WHERE message.active
               TO notifications
                 SET normalized = lower(message.name), total = message.amount AS INT64

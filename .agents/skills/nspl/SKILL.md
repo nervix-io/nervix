@@ -29,7 +29,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
-  subscriptions, and whether an existing schema must be evolved atomically with its dependents.
+  subscriptions, each ingestor's source-supported quiesce behavior, and whether an existing schema
+  must be evolved atomically with its dependents.
 
 Read [references/configuring-nervix.md](references/configuring-nervix.md), then use its routing
 guidance to select the relevant Markdown entries from the public index.
@@ -77,7 +78,8 @@ attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
-dynamic. In `ALTER INGESTOR`, use a complete transport-specific source body after `SET FROM`.
+dynamic. In `ALTER INGESTOR`, use a complete transport-specific source body after `SET FROM`, or
+change only the current source's mode with `SET QUIESCE <body>`.
 Every reingestor and generator ALTER uses entity pause; reingestor route bodies retain their
 per-route branch selection, while generator route bodies remain set-only.
 `ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
@@ -159,6 +161,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   cadence is controlled by the guest.
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; `NO_ACK` has no in-flight ACK window and
   never accepts `MAX`.
+- End every ingestor source specification with an explicit source-supported `ON QUIESCE` body
+  immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `ENDPOINT`, an
+  explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include `RETRY AFTER` for endpoint
+  `REJECT`. Use MQTT `SUSPEND` only with `SESSION PERSISTENT QOS 1`. Do not invent a default or use a
+  mode offered by another source type.
 - Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
   MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
   branch guest's Wasmtime linear memory.

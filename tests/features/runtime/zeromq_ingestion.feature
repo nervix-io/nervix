@@ -28,7 +28,7 @@ Feature: ZeroMQ ingestion
         };
         CREATE INGESTOR zeromq_notifications
         FROM ZEROMQ zeromq_main MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_zeromq_notifications
@@ -85,7 +85,7 @@ Feature: ZeroMQ ingestion
         };
         CREATE INGESTOR zeromq_notifications
         FROM ZEROMQ zeromq_main MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_zeromq_notifications

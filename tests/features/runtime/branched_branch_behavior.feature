@@ -41,7 +41,7 @@ Feature: Branched branch behavior
         PATH '/notifications'
         TYPE HTTP; CREATE INGESTOR source_notifications
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_source_notifications
@@ -101,7 +101,7 @@ Feature: Branched branch behavior
         TYPE HTTP;
         CREATE INGESTOR source_txns
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -185,7 +185,7 @@ Feature: Branched branch behavior
         TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -265,7 +265,7 @@ Feature: Branched branch behavior
         TYPE HTTP;
         CREATE INGESTOR source_one
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_one
@@ -275,7 +275,7 @@ Feature: Branched branch behavior
         ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
         INHERIT ALL
         BRANCHED BY by_source_one
@@ -348,7 +348,7 @@ Feature: Branched branch behavior
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

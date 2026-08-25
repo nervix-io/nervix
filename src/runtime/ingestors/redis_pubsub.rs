@@ -54,6 +54,9 @@ impl RedisPubSubIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled Redis Pub/Sub ingestor must have quiesce control");
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -65,6 +68,7 @@ impl RedisPubSubIngestor {
         let task_addr = addr.clone();
         let task_config = resolved_client.entries.clone();
         let task_client_mounts = resolved_client.mounts.clone();
+        let task_quiesce = quiesce.clone();
         let task = tokio::spawn(async move {
             let _client_mounts = task_client_mounts;
             let mut backoff = RuntimeReconnectBackoff::default();
@@ -86,6 +90,25 @@ impl RedisPubSubIngestor {
                     break;
                 }
                 if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                    continue;
+                }
+                if task_quiesce.should_suspend_intake() {
+                    let _ = task_runtime
+                        .flush_ingest_collector(
+                            &task_domain,
+                            &task_ingestor,
+                            &branched_senders,
+                            &mut collector,
+                        )
+                        .await;
+                    tokio::select! {
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                        _ = task_quiesce.wait_until_not_suspended() => {}
+                    }
                     continue;
                 }
                 let client = match Self::client_from_config(&task_addr, &task_config) {
@@ -150,10 +173,49 @@ impl RedisPubSubIngestor {
                 let mut relay = pubsub.on_message();
                 loop {
                     tokio::task::consume_budget().await;
+                    if let Some(payload) = task_quiesce.pop_buffered(0) {
+                        if let Err(error) = task_runtime
+                            .dispatch_raw_ingest_payload(RawIngestDispatch {
+                                domain: &task_domain,
+                                ingestor: &task_ingestor,
+                                timestamp_source: task_timestamp_source.as_ref(),
+                                output_routes: &output_routes,
+                                filter_where: filter_where.as_ref(),
+                                branched_senders: &branched_senders,
+                                codec: codec.clone(),
+                                payload: &payload,
+                                collector: &mut collector,
+                                flush: false,
+                            })
+                            .await
+                        {
+                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                "failed to dispatch buffered redis pubsub payload for ingestor \
+                                 '{}' in domain '{}': {}",
+                                task_ingestor.as_str(),
+                                task_domain.as_str(),
+                                error
+                            )));
+                        }
+                        continue;
+                    }
                     let next_flush = collector.next_flush();
                     let flush_at =
                         next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
                     tokio::select! {
+                        _ = task_quiesce.wait_for_change() => {
+                            if task_quiesce.should_suspend_intake() {
+                                let _ = task_runtime
+                                    .flush_ingest_collector(
+                                        &task_domain,
+                                        &task_ingestor,
+                                        &branched_senders,
+                                        &mut collector,
+                                    )
+                                    .await;
+                                break;
+                            }
+                        }
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
                                 let _ = task_runtime
@@ -200,30 +262,35 @@ impl RedisPubSubIngestor {
                                         "received redis pubsub message"
                                     );
 
-                                    match decode_ingested_payload(codec.clone(), payload).await {
-                                        Ok(record) => {
-                                            if let Err(error) = task_runtime
-                                                .dispatch_ingested_records(IngestGroupDispatch {
-                                                    collector: &mut collector,
-                                                    domain: &task_domain,
-                                                    ingestor: &task_ingestor,
-                                                    timestamp_source: task_timestamp_source.as_ref(),
-                                                    output_routes: &output_routes,
-                                                    filter_where: filter_where.as_ref(),
-                                                    records: vec![record],
-                                                    metadata: Vec::new(),
-                                                    ingested_at: current_timestamp(),
-                                                    acks: vec![AckSet::empty()],
-                                                })
-                                                .await
-                                            {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                    "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                                                    task_ingestor.as_str(),
-                                                    task_domain.as_str(),
-                                                    error
-                                                )));
-                                            }
+                                    let payload = BufferedIngestPayload::new(
+                                        payload,
+                                        IngestFilterMapMetadata::default(),
+                                    );
+                                    if let IngestorQuiesceIntake::Dispatch(payload) =
+                                        task_quiesce.intake(0, payload, false)
+                                    {
+                                        if let Err(error) = task_runtime
+                                            .dispatch_raw_ingest_payload(RawIngestDispatch {
+                                                domain: &task_domain,
+                                                ingestor: &task_ingestor,
+                                                timestamp_source: task_timestamp_source.as_ref(),
+                                                output_routes: &output_routes,
+                                                filter_where: filter_where.as_ref(),
+                                                branched_senders: &branched_senders,
+                                                codec: codec.clone(),
+                                                payload: &payload,
+                                                collector: &mut collector,
+                                                flush: false,
+                                            })
+                                            .await
+                                        {
+                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                "failed to dispatch message for ingestor '{}' in domain '{}': {}",
+                                                task_ingestor.as_str(),
+                                                task_domain.as_str(),
+                                                error
+                                            )));
+                                        }
                                             if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                 && let Err(error) = task_runtime
                                                     .flush_ingest_collector(
@@ -243,21 +310,6 @@ impl RedisPubSubIngestor {
                                                     ),
                                                 ));
                                             }
-                                        }
-                                        Err(error) => {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                "failed to decode message for ingestor '{}' in domain '{}': {}",
-                                                task_ingestor.as_str(),
-                                                task_domain.as_str(),
-                                                error
-                                            )));
-                                            warn!(
-                                                domain = task_domain.as_str(),
-                                                ingestor = task_ingestor.as_str(),
-                                                error = %error,
-                                                "failed to decode redis pubsub message"
-                                            );
-                                        }
                                     }
                                 }
                                 None => {

@@ -32,7 +32,7 @@ Feature: Window processor metrics
         CREATE ENDPOINT window_metrics_ingress ON edge PATH '/window-metrics' TYPE HTTP;
         CREATE INGESTOR window_metrics_source
         FROM ENDPOINT window_metrics_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics_input
         INHERIT ALL
         BRANCHED BY by_window_metrics_source

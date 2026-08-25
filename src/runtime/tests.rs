@@ -26,12 +26,13 @@ use nervix_models::{
     EmitterPublishingMode, ErrorPolicies, Expression, FieldPath, FieldReference, FieldScope,
     GeneralErrorPolicy, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, MessageErrorCode,
-    MessageErrorOperation, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos, MqttSession,
-    OutputBranch, ParseAsType, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, RelayBranching, RemoteAckOutcome, RemoteAckResolution, ResourceId,
-    ResourceVersion, ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField, SqsFifoGroup,
-    StructuredMessageError, Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
+    InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, JsonType, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy,
+    ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
+    RemoteAckOutcome, RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus,
+    RetryPolicy, ScheduledNode, SchemaField, SqsFifoGroup, StructuredMessageError, Timestamp,
+    WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 use nervix_nspl::window_processor::aggregate::lower_window_assignments;
 use nervix_wasm::{
@@ -414,8 +415,194 @@ fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices> {
     ))
 }
 
+fn test_ingestor_quiesce_control(
+    runtime: &super::Runtime,
+    domain: &Domain,
+    ingestor: &Identifier,
+    mode: IngestQuiesceMode,
+) -> Arc<super::IngestorQuiesceControl> {
+    let metric_labels = runtime
+        .metrics
+        .register_ingestor_quiesce(domain, ingestor, None);
+    Arc::new(super::IngestorQuiesceControl::new(
+        mode,
+        runtime.metrics.clone(),
+        metric_labels,
+    ))
+}
+
+#[test]
+fn quiesce_buffer_enforces_drop_oldest_per_instance() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let ingestor = identifier("source");
+    let control = test_ingestor_quiesce_control(
+        &runtime,
+        &domain,
+        &ingestor,
+        IngestQuiesceMode::Buffer {
+            max_size: "5B".to_string(),
+            overflow: IngestQuiesceOverflow::DropOldest,
+        },
+    );
+    control.engage(super::IngestorQuiesceCause::EntityHold);
+
+    assert!(matches!(
+        control.intake(
+            0,
+            super::BufferedIngestPayload::new(b"one", super::IngestFilterMapMetadata::default(),),
+            false,
+        ),
+        super::IngestorQuiesceIntake::Buffered
+    ));
+    assert!(matches!(
+        control.intake(
+            0,
+            super::BufferedIngestPayload::new(b"two", super::IngestFilterMapMetadata::default(),),
+            false,
+        ),
+        super::IngestorQuiesceIntake::Buffered
+    ));
+    assert_eq!(control.counters().buffered_records, 1);
+    assert_eq!(control.counters().buffered_bytes, 3);
+    assert_eq!(control.counters().dropped_total, 1);
+
+    control.release(super::IngestorQuiesceCause::EntityHold);
+    assert_eq!(
+        control
+            .pop_buffered(0)
+            .expect("newest payload should remain")
+            .payload(),
+        b"two"
+    );
+}
+
+#[test]
+fn endpoint_quiesce_buffer_rejects_overflow_without_discarding_acknowledged_payloads() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let ingestor = identifier("source");
+    let control = test_ingestor_quiesce_control(
+        &runtime,
+        &domain,
+        &ingestor,
+        IngestQuiesceMode::EndpointBuffer {
+            max_size: "5B".to_string(),
+        },
+    );
+    control.engage(super::IngestorQuiesceCause::EntityHold);
+
+    assert!(matches!(
+        control.intake(
+            0,
+            super::BufferedIngestPayload::new(b"kept", super::IngestFilterMapMetadata::default(),),
+            true,
+        ),
+        super::IngestorQuiesceIntake::Buffered
+    ));
+    assert!(matches!(
+        control.intake(
+            0,
+            super::BufferedIngestPayload::new(b"no", super::IngestFilterMapMetadata::default(),),
+            true,
+        ),
+        super::IngestorQuiesceIntake::Rejected { retry_after: None }
+    ));
+    assert_eq!(control.counters().buffered_records, 1);
+    assert_eq!(control.counters().rejected_total, 1);
+    assert_eq!(control.counters().dropped_total, 0);
+
+    control.release(super::IngestorQuiesceCause::EntityHold);
+    assert_eq!(
+        control
+            .pop_buffered(0)
+            .expect("the acknowledged payload must remain buffered")
+            .payload(),
+        b"kept"
+    );
+}
+
+#[test]
+fn source_replacement_waits_when_the_active_hold_mode_is_not_supported() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let ingestor = identifier("source");
+    let control = test_ingestor_quiesce_control(
+        &runtime,
+        &domain,
+        &ingestor,
+        IngestQuiesceMode::EndpointBuffer {
+            max_size: "1KiB".to_string(),
+        },
+    );
+    control.engage(super::IngestorQuiesceCause::EntityHold);
+    control.update_declared_source(&IngestSource::ZeroMq {
+        client: identifier("zeromq"),
+        mode: ZeroMqIngestMode::NoAckSequential,
+        quiesce: IngestQuiesceMode::Suspend,
+    });
+
+    assert!(control.should_suspend_intake());
+    control.release(super::IngestorQuiesceCause::EntityHold);
+    assert_eq!(control.mode(), IngestQuiesceMode::Suspend);
+    assert!(!control.should_suspend_intake());
+}
+
+#[test]
+fn memory_pressure_turns_buffer_into_zero_capacity_without_losing_existing_payloads() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let ingestor = identifier("source");
+    let control = test_ingestor_quiesce_control(
+        &runtime,
+        &domain,
+        &ingestor,
+        IngestQuiesceMode::Buffer {
+            max_size: "1KiB".to_string(),
+            overflow: IngestQuiesceOverflow::DropNewest,
+        },
+    );
+    control.engage(super::IngestorQuiesceCause::EntityHold);
+    assert!(matches!(
+        control.intake(
+            0,
+            super::BufferedIngestPayload::new(
+                b"retained",
+                super::IngestFilterMapMetadata::default(),
+            ),
+            false,
+        ),
+        super::IngestorQuiesceIntake::Buffered
+    ));
+
+    control.engage(super::IngestorQuiesceCause::MemoryPressure);
+    assert!(matches!(
+        control.intake(
+            0,
+            super::BufferedIngestPayload::new(
+                b"discarded",
+                super::IngestFilterMapMetadata::default(),
+            ),
+            false,
+        ),
+        super::IngestorQuiesceIntake::Dropped
+    ));
+    assert_eq!(control.counters().buffered_records, 1);
+    assert_eq!(control.counters().dropped_total, 1);
+
+    control.release(super::IngestorQuiesceCause::MemoryPressure);
+    control.release(super::IngestorQuiesceCause::EntityHold);
+    assert_eq!(
+        control
+            .pop_buffered(0)
+            .expect("pre-pressure payload should remain")
+            .payload(),
+        b"retained"
+    );
+}
+
 #[tokio::test]
-async fn memory_pressure_pause_stops_registered_ingestors() {
+async fn memory_pressure_quiesces_registered_ingestors_without_stopping_them() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let ingestor = identifier("source");
@@ -436,11 +623,38 @@ async fn memory_pressure_pause_stops_registered_ingestors() {
             tasks: vec![task],
         },
     );
+    runtime.ingestor_quiescence.insert(
+        key.clone(),
+        test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend),
+    );
 
     assert_eq!(runtime.pause_ingestors_for_memory_pressure().await, 1);
     assert!(runtime.ingestors_paused_for_memory_pressure());
-    assert!(stopped.load(Ordering::SeqCst));
-    assert!(runtime.ingestors.get(&key).is_none());
+    assert!(!stopped.load(Ordering::SeqCst));
+    assert!(runtime.ingestors.get(&key).is_some());
+    assert_eq!(
+        runtime
+            .ingestor_quiescence
+            .get(&key)
+            .and_then(|control| control.cause()),
+        Some(super::IngestorQuiesceCause::MemoryPressure)
+    );
+    assert!(
+        runtime
+            .resume_one_ingestor_after_memory_pressure()
+            .await
+            .expect("resume should succeed")
+    );
+    assert!(
+        !runtime
+            .resume_one_ingestor_after_memory_pressure()
+            .await
+            .expect("pause should clear after the last ingestor resumes")
+    );
+    runtime
+        .stop_ingestor(&domain, &ingestor)
+        .await
+        .expect("test ingestor should stop");
 }
 
 #[tokio::test]
@@ -2388,90 +2602,13 @@ fn scheduled_model(
     }
 }
 
-fn insert_failing_ingestor_restart_schedule(
-    runtime: &super::Runtime,
-    domain: &Domain,
-    ingestor: &Identifier,
-    client: &Identifier,
-    relay: &Identifier,
-) {
-    let mut client_node = scheduled_model(
-        ModelKind::Client,
-        client.clone(),
-        nervix_models::Model::ClientHttp(CreateClientHttp {
-            name: client.clone(),
-            mount: None,
-            config: Vec::new(),
-        }),
-    );
-    client_node.primary_node = None;
-    client_node.assigned_nodes.clear();
-    let mut ingestor_node = scheduled_model(
-        ModelKind::Ingestor,
-        ingestor.clone(),
-        nervix_models::Model::Ingestor(CreateIngestor {
-            name: ingestor.clone(),
-            output_routes: with_inherit_all(ProcessorOutputs::single(relay.clone()))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
-                .with_branch(OutputBranch::Unbranched),
-            decode_using_codec: identifier("missing_codec"),
-            timestamp_source: None,
-            source: IngestSource::Http {
-                client: client.clone(),
-                every: "1s".to_string(),
-            },
-            general_error_policy: GeneralErrorPolicy::Log,
-            filter_where: None,
-        }),
-    );
-    ingestor_node.primary_node = None;
-    ingestor_node.assigned_nodes.clear();
-    let (shutdown, _) = watch::channel(false);
-    runtime.executions.insert(
-        domain.clone(),
-        super::DomainExecution {
-            schedule: DomainSchedule {
-                domain: domain.clone(),
-                nodes: vec![client_node, ingestor_node],
-                placement_groups: Vec::new(),
-            },
-            passive_only: false,
-            start_version: 0,
-            shutdown,
-            graph: StdArc::new(ArcSwapOption::empty()),
-            relay_registries: HashMap::default(),
-            relay_schemas: HashMap::default(),
-            relay_services: HashMap::default(),
-            relay_branchings: HashMap::default(),
-            relay_branching_schemas: HashMap::default(),
-            materialized_stream_specs: HashMap::default(),
-            materialized_stream_owner_nodes: HashMap::default(),
-            branched_ingestors: HashMap::default(),
-            branched_entrypoints: HashMap::default(),
-            codecs: HashMap::default(),
-            signaling_protocols: HashMap::default(),
-            lookups: HashMap::default(),
-            udfs: nervix_roto::UdfExecutor::default(),
-            endpoint_routes: HashMap::default(),
-            node_tasks: HashMap::default(),
-            emitter_tasks: HashMap::default(),
-            generator_tasks: HashMap::default(),
-            reingestor_tasks: HashMap::default(),
-            clients: HashMap::default(),
-            tasks: Vec::new(),
-        },
-    );
-}
-
 #[tokio::test]
-async fn canceled_ingestor_stop_keeps_retryable_entity_gate_recovery() {
+async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let relay = identifier("events");
     let ingestor = identifier("events_source");
-    let client = identifier("http_source");
     let operation_id = 41;
-    insert_failing_ingestor_restart_schedule(&runtime, &domain, &ingestor, &client, &relay);
 
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
     let gate = fanout.dispatch_gate();
@@ -2481,20 +2618,11 @@ async fn canceled_ingestor_stop_keeps_retryable_entity_gate_recovery() {
 
     let key = super::RuntimeKey::new(domain.clone(), ingestor.clone());
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let (stop_entered_tx, mut stop_entered_rx) = mpsc::channel(1);
-    let (allow_stop_tx, mut allow_stop_rx) = mpsc::channel(1);
-    let (task_finished_tx, mut task_finished_rx) = mpsc::channel(1);
+    let stopped = StdArc::new(AtomicBool::new(false));
+    let task_stopped = stopped.clone();
     let task = tokio::spawn(async move {
-        shutdown_rx
-            .wait_for(|shutdown| *shutdown)
-            .await
-            .expect("fake ingestor shutdown sender should remain open");
-        stop_entered_tx
-            .send(())
-            .await
-            .expect("test should wait for pending stop");
-        let _ = allow_stop_rx.recv().await;
-        let _ = task_finished_tx.send(()).await;
+        let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
+        task_stopped.store(true, Ordering::SeqCst);
     });
     runtime.ingestors.insert(
         key.clone(),
@@ -2504,81 +2632,59 @@ async fn canceled_ingestor_stop_keeps_retryable_entity_gate_recovery() {
             tasks: vec![task],
         },
     );
+    runtime.ingestor_quiescence.insert(
+        key.clone(),
+        test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend),
+    );
 
     let affected = crate::registry::RegistryEntity {
         kind: ModelKind::Ingestor,
         identifier: ingestor.clone(),
     };
-    let engagement = tokio::spawn({
-        let runtime = runtime.clone();
-        let domain = domain.clone();
-        let relay = relay.clone();
-        async move {
-            runtime
-                .engage_entity_gate_operation(
-                    operation_id,
-                    &domain,
-                    std::slice::from_ref(&relay),
-                    std::slice::from_ref(&affected),
-                    Instant::now() + Duration::from_secs(5),
-                    "cancellation regression",
-                )
-                .await
-        }
-    });
-
-    timeout(Duration::from_secs(1), stop_entered_rx.recv())
+    runtime
+        .engage_entity_gate_operation(
+            operation_id,
+            &domain,
+            std::slice::from_ref(&relay),
+            std::slice::from_ref(&affected),
+            Instant::now() + Duration::from_secs(5),
+            "quiesce regression",
+        )
         .await
-        .expect("stop should reach its cancellable task join")
-        .expect("fake ingestor should report pending stop");
-    assert!(runtime.ingestors.get(&key).is_none());
+        .expect("entity hold should engage");
+
+    assert!(runtime.ingestors.get(&key).is_some());
+    assert!(!stopped.load(Ordering::SeqCst));
     assert!(gate.is_closed());
     assert!(runtime.entity_gate_operation_is_held(operation_id, &domain));
-
-    engagement.abort();
-    assert!(
-        engagement
-            .await
-            .expect_err("engagement should cancel")
-            .is_cancelled()
+    assert_eq!(
+        runtime
+            .ingestor_quiescence
+            .get(&key)
+            .and_then(|control| control.cause()),
+        Some(super::IngestorQuiesceCause::EntityHold)
     );
-    allow_stop_tx
-        .send(())
-        .await
-        .expect("fake task should finish");
-    timeout(Duration::from_secs(1), task_finished_rx.recv())
-        .await
-        .expect("detached fake ingestor task should finish")
-        .expect("fake ingestor completion should be reported");
 
-    let error = runtime
-        .release_entity_gate_operation(operation_id, &domain)
-        .await
-        .expect_err("missing codec should fail the ingestor restart");
-    assert!(
-        error.contains("missing_codec"),
-        "unexpected restart error: {error}"
-    );
-    assert!(runtime.entity_gate_operation_is_held(operation_id, &domain));
-    assert!(gate.is_closed(), "failed restart must not open dispatch");
-
-    // Simulate the retry condition becoming healthy: a running ingestor makes restart discovery
-    // idempotently skip it.
-    let (resumed_shutdown, _resumed_rx) = watch::channel(false);
-    runtime.ingestors.insert(
-        key,
-        super::IngestorRuntime::Background {
-            shutdown: resumed_shutdown,
-            branched: Vec::new(),
-            tasks: Vec::new(),
-        },
-    );
     runtime
         .release_entity_gate_operation(operation_id, &domain)
         .await
-        .expect("retry should release after ingestor recovery");
+        .expect("entity hold should release");
     assert!(!runtime.entity_gate_operation_is_held(operation_id, &domain));
     assert!(!gate.is_closed());
+    assert!(runtime.ingestors.get(&key).is_some());
+    assert!(!stopped.load(Ordering::SeqCst));
+    assert_eq!(
+        runtime
+            .ingestor_quiescence
+            .get(&key)
+            .and_then(|control| control.cause()),
+        None
+    );
+
+    runtime
+        .stop_ingestor(&domain, &ingestor)
+        .await
+        .expect("test ingestor should stop");
 }
 
 #[tokio::test]
@@ -2861,6 +2967,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                                         session: MqttSession::Clean,
                                         qos: MqttQos::AtMostOnce,
                                     },
+                                    quiesce: nervix_models::IngestQuiesceMode::Drop,
                                 },
                                 general_error_policy: GeneralErrorPolicy::Log,
                                 filter_where: None,
@@ -3005,6 +3112,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                                             max_backoff: "200ms".to_string(),
                                         },
                                     },
+                                    quiesce: nervix_models::IngestQuiesceMode::Drop,
                                 },
                                 general_error_policy: GeneralErrorPolicy::Log,
                                 filter_where: None,
@@ -6737,6 +6845,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
@@ -6863,6 +6972,7 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
@@ -6965,6 +7075,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
@@ -7144,6 +7255,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
@@ -7275,6 +7387,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -7294,6 +7407,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -7391,6 +7505,7 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -7489,6 +7604,7 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -9785,6 +9901,9 @@ async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
         &IngestSource::Endpoint {
             endpoint: identifier("logic_endpoint"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
+            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                max_size: "1MiB".to_string(),
+            },
         },
         &construction(
             "INHERIT tenant SET u8_next = input.u8 + (1 AS U8), i8_abs = abs(input.i8), u16_keep \
@@ -10053,6 +10172,9 @@ async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
         &IngestSource::Endpoint {
             endpoint: identifier("logic_endpoint"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
+            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                max_size: "1MiB".to_string(),
+            },
         },
         &construction("INHERIT tenant SET normalized = lower(input.raw)"),
         super::RuntimeVmSchemaPair {
@@ -10118,6 +10240,7 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
                     max_backoff: "200ms".to_string(),
                 },
             },
+            quiesce: nervix_models::IngestQuiesceMode::Suspend,
         },
         &construction(
             "INHERIT tenant SET topic = metadata.topic, partition = metadata.partition, offset = \
@@ -10257,6 +10380,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
                 max_backoff: "200ms".to_string(),
             },
         },
+        quiesce: nervix_models::IngestQuiesceMode::Suspend,
     };
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),

@@ -31,7 +31,7 @@ Feature: RabbitMQ emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -108,7 +108,7 @@ Feature: RabbitMQ emission
           OFFSET BY CONSUMER GROUP rabbitmq_boundary_group_{{test_id}}
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
           INHERIT ALL
           BRANCHED BY by_kafka_notifications

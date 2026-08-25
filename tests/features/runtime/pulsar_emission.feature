@@ -29,7 +29,7 @@ Feature: Pulsar emission
         };
         CREATE INGESTOR pulsar_ingress
         FROM PULSAR pulsar_main TOPIC notifications_in_{{test_id}} SUBSCRIPTION nervix_pulsar_emission_{{test_id}} INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_pulsar_ingress
@@ -101,7 +101,7 @@ Feature: Pulsar emission
           OFFSET BY CONSUMER GROUP pulsar_boundary_group_{{test_id}}
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
           INHERIT ALL
           BRANCHED BY by_kafka_notifications

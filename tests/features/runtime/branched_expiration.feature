@@ -31,7 +31,7 @@ Feature: Branched branch expiration
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -136,7 +136,7 @@ Feature: Branched branch expiration
 
       CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -219,7 +219,7 @@ Feature: Branched branch expiration
 
       CREATE INGESTOR left_ingestor
         FROM ENDPOINT left_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO left_events
         INHERIT ALL
         BRANCHED BY by_correlated_users
@@ -230,7 +230,7 @@ Feature: Branched branch expiration
 
       CREATE INGESTOR right_ingestor
         FROM ENDPOINT right_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO right_events
         INHERIT ALL
         BRANCHED BY by_correlated_users
@@ -331,7 +331,7 @@ Feature: Branched branch expiration
 
       CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_suppressed_users
@@ -426,7 +426,7 @@ Feature: Branched branch expiration
 
       CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_limited_users

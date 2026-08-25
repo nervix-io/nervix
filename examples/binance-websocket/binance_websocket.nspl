@@ -87,7 +87,7 @@ CREATE IF NOT EXISTS SCHEMA symbol_branch (
 
 CREATE INGESTOR ingest_binance_ws
   FROM WEBSOCKETS binance_ws MODE NO_ACK SEQUENTIAL
-  DECODE USING binance_ws_event_codec
+  ON QUIESCE DROP DECODE USING binance_ws_event_codec
   TO binance_ws_events
   INHERIT ALL
   BRANCHED BY by_symbol

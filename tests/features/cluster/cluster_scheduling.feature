@@ -46,7 +46,7 @@ Feature: Cluster scheduling
       CREATE RELAY stage_12 SCHEMA event BRANCHED BY by_event;
       CREATE VHOST edge random-scheduler-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL DECODE USING event_codec TO stage_0 INHERIT ALL BRANCHED BY by_event SET id = message.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR event_ingestor FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO stage_0 INHERIT ALL BRANCHED BY by_event SET id = message.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR hop_1 FROM stage_0 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_1 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR hop_2 FROM stage_1 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_2 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR hop_3 FROM stage_2 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_3 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -139,7 +139,7 @@ Feature: Cluster scheduling
           'auto.offset.reset' = 'earliest'
         }; CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_kafka_notifications
@@ -202,7 +202,7 @@ Feature: Cluster scheduling
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -276,7 +276,7 @@ Feature: Cluster scheduling
 
       CREATE INGESTOR source_logs
         FROM KAFKA kafka_main TOPIC deduplicator_describe_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_deduplicator_describe_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
         INHERIT ALL
         BRANCHED BY by_source_logs
@@ -380,7 +380,7 @@ Feature: Cluster scheduling
 
       CREATE INGESTOR source_logs
         FROM KAFKA kafka_main TOPIC scheduled_dedup_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_scheduled_dedup_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
         INHERIT ALL
         BRANCHED BY by_source_logs
@@ -502,7 +502,7 @@ Feature: Cluster scheduling
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -577,7 +577,7 @@ Feature: Cluster scheduling
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_kafka_notifications
@@ -643,7 +643,7 @@ Feature: Cluster scheduling
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_kafka_notifications
@@ -781,7 +781,7 @@ Feature: Cluster scheduling
 
       CREATE INGESTOR source_logs
         FROM KAFKA kafka_main TOPIC moved_dedup_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_moved_dedup_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
         INHERIT ALL
         BRANCHED BY by_source_logs

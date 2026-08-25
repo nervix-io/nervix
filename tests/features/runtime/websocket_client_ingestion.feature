@@ -50,7 +50,7 @@ Feature: Websocket client ingestion
       """
       CREATE INGESTOR ws_notifications
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ws_notifications
@@ -101,7 +101,7 @@ Feature: Websocket client ingestion
         };
         CREATE INGESTOR ws_notifications
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ws_notifications

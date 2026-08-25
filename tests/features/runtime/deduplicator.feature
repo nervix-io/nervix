@@ -30,7 +30,7 @@ Feature: Relay deduplication
         TYPE HTTP;
         CREATE INGESTOR source_txns
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -97,7 +97,7 @@ Feature: Relay deduplication
         CREATE ENDPOINT ingress ON edge PATH '/dedup-expire' TYPE HTTP;
         CREATE INGESTOR source_txns
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -179,7 +179,7 @@ Feature: Relay deduplication
         TYPE HTTP;
         CREATE INGESTOR source_txns
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -257,7 +257,7 @@ Feature: Relay deduplication
         CREATE ENDPOINT ingress ON edge PATH '/dedup-describe' TYPE HTTP;
         CREATE INGESTOR source_txns
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -350,7 +350,7 @@ Feature: Relay deduplication
         TYPE HTTP;
         CREATE INGESTOR state_txns_ingestor
         FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO state_txns
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -360,7 +360,7 @@ Feature: Relay deduplication
         ON GENERAL ERROR LOG;
         CREATE INGESTOR source_txns
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns

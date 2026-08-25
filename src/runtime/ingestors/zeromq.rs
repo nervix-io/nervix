@@ -40,6 +40,9 @@ impl ZeroMqIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled ZeroMQ ingestor must have quiesce control");
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
         let task_domain = domain.clone();
@@ -90,6 +93,60 @@ impl ZeroMqIngestor {
                 backoff.reset();
                 loop {
                     tokio::task::consume_budget().await;
+                    if let Some(payload) = quiesce.pop_buffered(0) {
+                        if let Err(error) = task_runtime
+                            .dispatch_raw_ingest_payload(RawIngestDispatch {
+                                domain: &task_domain,
+                                ingestor: &task_ingestor,
+                                timestamp_source: task_timestamp_source.as_ref(),
+                                output_routes: &output_routes,
+                                filter_where: filter_where.as_ref(),
+                                branched_senders: &branched_senders,
+                                codec: codec.clone(),
+                                payload: &payload,
+                                collector: &mut collector,
+                                flush: false,
+                            })
+                            .await
+                        {
+                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                "failed to dispatch buffered zeromq payload for ingestor '{}' in \
+                                 domain '{}': {}",
+                                task_ingestor.as_str(),
+                                task_domain.as_str(),
+                                error
+                            )));
+                        }
+                        continue;
+                    }
+                    if quiesce.should_suspend_intake() {
+                        if let Err(error) = task_runtime
+                            .flush_ingest_collector(
+                                &task_domain,
+                                &task_ingestor,
+                                &branched_senders,
+                                &mut collector,
+                            )
+                            .await
+                        {
+                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                "failed to flush accepted zeromq messages before quiescing \
+                                 ingestor '{}' in domain '{}': {}",
+                                task_ingestor.as_str(),
+                                task_domain.as_str(),
+                                error
+                            )));
+                        }
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break 'outer;
+                                }
+                            }
+                            _ = quiesce.wait_until_not_suspended() => {}
+                        }
+                        continue;
+                    }
                     let next_flush = collector.next_flush();
                     let flush_at =
                         next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
@@ -140,30 +197,35 @@ impl ZeroMqIngestor {
                                         "received zeromq message"
                                     );
 
-                                    match decode_ingested_payload(codec.clone(), payload).await {
-                                        Ok(record) => {
-                                            if let Err(error) = task_runtime
-                                                .dispatch_ingested_records(IngestGroupDispatch {
-                                                    collector: &mut collector,
-                                                    domain: &task_domain,
-                                                    ingestor: &task_ingestor,
-                                                    timestamp_source: task_timestamp_source.as_ref(),
-                                                    output_routes: &output_routes,
-                                                    filter_where: filter_where.as_ref(),
-                                                    records: vec![record],
-                                                    metadata: Vec::new(),
-                                                    ingested_at: current_timestamp(),
-                                                    acks: vec![AckSet::empty()],
-                                                })
-                                                .await
-                                            {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                    "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                                                    task_ingestor.as_str(),
-                                                    task_domain.as_str(),
-                                                    error
-                                                )));
-                                            }
+                                    let payload = BufferedIngestPayload::new(
+                                        payload,
+                                        IngestFilterMapMetadata::default(),
+                                    );
+                                    if let IngestorQuiesceIntake::Dispatch(payload) =
+                                        quiesce.intake(0, payload, false)
+                                    {
+                                        if let Err(error) = task_runtime
+                                            .dispatch_raw_ingest_payload(RawIngestDispatch {
+                                                domain: &task_domain,
+                                                ingestor: &task_ingestor,
+                                                timestamp_source: task_timestamp_source.as_ref(),
+                                                output_routes: &output_routes,
+                                                filter_where: filter_where.as_ref(),
+                                                branched_senders: &branched_senders,
+                                                codec: codec.clone(),
+                                                payload: &payload,
+                                                collector: &mut collector,
+                                                flush: false,
+                                            })
+                                            .await
+                                        {
+                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                "failed to dispatch message for ingestor '{}' in domain '{}': {}",
+                                                task_ingestor.as_str(),
+                                                task_domain.as_str(),
+                                                error
+                                            )));
+                                        }
                                             if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                 && let Err(error) = task_runtime
                                                     .flush_ingest_collector(
@@ -183,21 +245,6 @@ impl ZeroMqIngestor {
                                                     ),
                                                 ));
                                             }
-                                        }
-                                        Err(error) => {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                "failed to decode message for ingestor '{}' in domain '{}': {}",
-                                                task_ingestor.as_str(),
-                                                task_domain.as_str(),
-                                                error
-                                            )));
-                                            warn!(
-                                                domain = task_domain.as_str(),
-                                                ingestor = task_ingestor.as_str(),
-                                                error = %error,
-                                                "failed to decode zeromq message"
-                                            );
-                                        }
                                     }
                                 }
                                 Err(error) => {

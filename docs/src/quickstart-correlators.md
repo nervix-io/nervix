@@ -36,7 +36,7 @@ CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
 
 CREATE INGESTOR payment_source
   FROM ENDPOINT payment_ingress MODE NO_ACK SEQUENTIAL
-  DECODE USING payment_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING payment_codec
   TO payments
     INHERIT ALL
     UNBRANCHED

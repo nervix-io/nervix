@@ -156,6 +156,12 @@ base-model comparison remains a final consistency check.
 Nervix classifies the validated base-to-candidate model diff, not the spelling of the statements
 that produced it. The batch uses the highest level contributed by any changed entity:
 
+Quiesce level and ingestor quiesce mode are separate contracts. `DYNAMIC`, `ENTITY_PAUSE`, and
+`DOMAIN_PAUSE` determine which graph work must pause before a change commits. The required `ON
+QUIESCE` clause on each ingestor determines what that ingestor's external source experiences while
+an entity or domain pause is active. Memory-pressure shedding consults the same mode. There is no
+operator `PAUSE` or `RESUME` statement.
+
 - `DYNAMIC` changes do not pause ingestion. Relay capacity; processor filters, source predicates,
   collection, route construction, route flush, and same-target message-error policies;
   deduplicator/reorderer `MAX TIME`; emitter flush policy; and placement definitions are
@@ -170,9 +176,10 @@ that produced it. The batch uses the highest level contributed by any changed en
   old ordering buffers before swapping. Relay materialized-state changes update membership in
   place. Emitter source-predicate, sink, publishing-mode (including any confirmation window,
   timeout, or retry-policy variable), client, codec, input-collection, and attachment changes
-  drain and replace only the affected emitter task. Every current ingestor alteration stops and
-  drains only the affected ingestor instances, then starts their desired source configuration from
-  the published schedule. Reingestor alterations replace their relay consumers and
+  drain and replace only the affected emitter task. Every ingestor alteration quiesces and drains
+  only the affected ingestor instances under their declared source mode, then starts their desired
+  source configuration from the published schedule. A `SET QUIESCE` operation still uses this
+  level; the mode active when the hold began governs that hold. Reingestor alterations replace their relay consumers and
   branch-entrypoint wiring; generator alterations quiesce and replace their timed task after
   flushing pending route output.
   Correlator, window-processor, inferencer, and WASM-processor structural changes use this level
@@ -193,13 +200,20 @@ models the batch names, so a dependent node cannot observe a half-applied change
 relay.
 
 Entity holds are transient and deadline-bound. A relay gate self-releases if the leader disappears;
-an ingestor hold restarts the old source when it expires. Schedule application re-engages a local
+an ingestor hold releases the old source under its declared mode when it expires. Schedule application re-engages a local
 relay gate before an affected node swaps itself. Sibling consumers of a gated relay can therefore
 see bounded backpressure for at most the gate deadline, but unrelated relays and nodes continue
 flowing. Pending `REQUIRED WAIT` materialized records are carried through a node handoff rather than
 treated as drainable work. A node that joins the cluster while an entity hold is engaged is not
 covered by that hold; it re-engages its own local relay gate when it applies the new schedule, and
 the hold's deadline bounds the window.
+
+These modes govern only pauses that resume the same running graph on the same node. Stopping a
+domain, dropping an ingestor, node drain or cordon relocation, failover, and graceful shutdown are
+terminations: the source session ends after already admitted work drains, and a later start relies
+only on external source retention. Volatile quiesce buffers do not migrate and are lost if a
+termination or crash interrupts them. Quiesced connected modes count as drained because their raw
+buffers have not entered the graph.
 
 An unchanged candidate contributes no aspect. An all-no-op batch therefore performs no storage
 write or schedule publication and reports `DYNAMIC`, even when the running domain has work that

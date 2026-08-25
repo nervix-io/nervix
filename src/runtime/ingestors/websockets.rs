@@ -15,6 +15,7 @@ struct WebsocketDispatchContext<'a> {
     branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
     codec: &'a Arc<CompiledCodec>,
     events: &'a broadcast::Sender<RuntimeEvent>,
+    quiesce: &'a Arc<IngestorQuiesceControl>,
 }
 
 impl WebsocketsIngestor {
@@ -85,6 +86,9 @@ impl WebsocketsIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled WebSockets ingestor must have quiesce control");
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -142,6 +146,7 @@ impl WebsocketsIngestor {
                 branched_senders: &branched_senders,
                 codec: &codec,
                 events: &task_events,
+                quiesce: &quiesce,
             };
             let mut backoff = RuntimeReconnectBackoff::default();
             info!(
@@ -153,6 +158,17 @@ impl WebsocketsIngestor {
 
             'outer: loop {
                 tokio::task::consume_budget().await;
+                if quiesce.should_suspend_intake() {
+                    tokio::select! {
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                        _ = quiesce.wait_until_not_suspended() => {}
+                    }
+                    continue;
+                }
                 if task_runtime
                     .wait_if_ingestor_faulted(&task_domain, &task_ingestor, &mut shutdown_rx)
                     .await
@@ -230,7 +246,16 @@ impl WebsocketsIngestor {
 
                                 loop {
                                     tokio::task::consume_budget().await;
+                                    if let Some(payload) = quiesce.pop_buffered(0) {
+                                        Self::dispatch_payload(&dispatch_context, &payload).await;
+                                        continue;
+                                    }
                                     tokio::select! {
+                                        _ = quiesce.wait_for_change() => {
+                                            if quiesce.should_suspend_intake() {
+                                                break;
+                                            }
+                                        }
                                         changed = shutdown_rx.changed() => {
                                             if changed.is_err() || *shutdown_rx.borrow() {
                                                 break 'outer;
@@ -256,7 +281,7 @@ impl WebsocketsIngestor {
                                                         break;
                                                     };
 
-                                                    Self::dispatch_payload(
+                                                    Self::accept_payload(
                                                         &dispatch_context,
                                                         &payload,
                                                     )
@@ -335,7 +360,18 @@ impl WebsocketsIngestor {
         Ok(())
     }
 
-    async fn dispatch_payload(context: &WebsocketDispatchContext<'_>, payload: &[u8]) {
+    async fn accept_payload(context: &WebsocketDispatchContext<'_>, payload: &[u8]) {
+        let payload = BufferedIngestPayload::new(payload, IngestFilterMapMetadata::default());
+        if let IngestorQuiesceIntake::Dispatch(payload) = context.quiesce.intake(0, payload, false)
+        {
+            Self::dispatch_payload(context, &payload).await;
+        }
+    }
+
+    async fn dispatch_payload(
+        context: &WebsocketDispatchContext<'_>,
+        payload: &BufferedIngestPayload,
+    ) {
         let WebsocketDispatchContext {
             runtime,
             domain,
@@ -346,50 +382,30 @@ impl WebsocketsIngestor {
             branched_senders,
             codec,
             events,
+            quiesce: _,
         } = *context;
-        match decode_ingested_payload(codec.clone(), payload).await {
-            Ok(record) => {
-                let mut collector = IngestRouteCollector::default();
-                let dispatch_result = runtime
-                    .dispatch_ingested_records(IngestGroupDispatch {
-                        collector: &mut collector,
-                        domain,
-                        ingestor,
-                        timestamp_source,
-                        output_routes,
-                        filter_where,
-                        records: vec![record],
-                        metadata: Vec::new(),
-                        ingested_at: current_timestamp(),
-                        acks: vec![AckSet::empty()],
-                    })
-                    .await;
-                let flush_result = runtime
-                    .flush_ingest_collector(domain, ingestor, branched_senders, &mut collector)
-                    .await;
-                if let Err(error) = dispatch_result.and(flush_result) {
-                    let _ = events.send(RuntimeEvent::Error(format!(
-                        "failed to dispatch websocket payload for ingestor '{}' in domain '{}': {}",
-                        ingestor.as_str(),
-                        domain.as_str(),
-                        error
-                    )));
-                }
-            }
-            Err(error) => {
-                let _ = events.send(RuntimeEvent::Error(format!(
-                    "failed to decode websocket payload for ingestor '{}' in domain '{}': {}",
-                    ingestor.as_str(),
-                    domain.as_str(),
-                    error
-                )));
-                warn!(
-                    domain = domain.as_str(),
-                    ingestor = ingestor.as_str(),
-                    error = %error,
-                    "failed to decode websocket payload"
-                );
-            }
+        let mut collector = IngestRouteCollector::default();
+        if let Err(error) = runtime
+            .dispatch_raw_ingest_payload(RawIngestDispatch {
+                domain,
+                ingestor,
+                timestamp_source,
+                output_routes,
+                filter_where,
+                branched_senders,
+                codec: codec.clone(),
+                payload,
+                collector: &mut collector,
+                flush: true,
+            })
+            .await
+        {
+            let _ = events.send(RuntimeEvent::Error(format!(
+                "failed to dispatch websocket payload for ingestor '{}' in domain '{}': {}",
+                ingestor.as_str(),
+                domain.as_str(),
+                error
+            )));
         }
     }
 
@@ -414,6 +430,6 @@ struct ClientSignalingDataSink<'a, 'ctx> {
 
 impl SignalingDataSink for ClientSignalingDataSink<'_, '_> {
     async fn accept(&self, payload: Vec<u8>) {
-        WebsocketsIngestor::dispatch_payload(self.context, payload.as_slice()).await;
+        WebsocketsIngestor::accept_payload(self.context, payload.as_slice()).await;
     }
 }

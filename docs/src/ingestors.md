@@ -14,7 +14,7 @@ CREATE IF NOT EXISTS INGESTOR kafka_notifications
   OFFSET BY CONSUMER GROUP nervix_consumer
   INSTANCES 1
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-  DECODE USING notification_codec
+  ON QUIESCE SUSPEND DECODE USING notification_codec
   TIMESTAMP NOW
   TO notifications
     INHERIT ALL
@@ -35,6 +35,7 @@ Every ingestor defines:
 - the timestamp source
 - the transport-specific source
 - the delivery mode
+- the source-specific quiesce mode and every variable it requires
 - optional node-level `FILTER WHERE` and route-local `INHERIT` / `SET` / `WHERE`
 
 `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required after every `TO
@@ -68,6 +69,7 @@ flush policy.
 ```nspl,ignore
 ALTER INGESTOR <ingestor>
     SET FROM <full source clause>
+  | SET QUIESCE <source-supported quiesce body>
   | SET DECODE USING <codec>
   | SET TIMESTAMP NOW
   | SET TIMESTAMP AT <field>
@@ -84,17 +86,84 @@ ALTER INGESTOR <ingestor>
 
 `SET FROM` accepts the complete transport-specific source body that follows `FROM` in `CREATE
 INGESTOR`. Change a client, source address, Kafka topic or offset mode, `INSTANCES`, delivery mode,
-or source-specific subscription settings by supplying that complete body. `ADD ROUTE` appends a
-route, while `REPLACE ROUTE` preserves the matched route's position. Duplicate routes to the same
-relay remain legal, so `DROP ROUTE` and `REPLACE ROUTE` reject an ambiguous target. An ingestor must
-retain at least one route.
+or source-specific subscription settings by supplying that complete body, including its required
+`ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and its variables. The body must be
+one offered by the ingestor's current source type; there is no `DROP QUIESCE` operation. `ADD ROUTE`
+appends a route, while `REPLACE ROUTE` preserves the matched route's position. Duplicate routes to
+the same relay remain legal, so `DROP ROUTE` and `REPLACE ROUTE` reject an ambiguous target. An
+ingestor must retain at least one route.
 
-Every ingestor alteration currently uses `ENTITY_PAUSE`. Nervix stops only the affected ingestor
-instances on all live nodes and waits for their in-flight work to drain before commit. Schedule
-application starts the new source configuration on its assigned nodes; unrelated graph paths keep
-flowing. A drain or cutover failure leaves the candidate unapplied and restarts the old source.
-The transient hold also expires automatically, so loss of the coordinating leader cannot leave an
-ingestor stopped indefinitely.
+Every ingestor alteration uses `ENTITY_PAUSE`. Nervix quiesces only the affected ingestor instances
+on all live nodes and waits for their already accepted in-flight work to drain before commit.
+Schedule application starts the desired source configuration on its assigned nodes; unrelated graph
+paths keep flowing. The quiesce mode in effect when the hold begins governs that hold; a mode changed
+by the alteration applies to later pauses. A drain or cutover failure leaves the candidate unapplied
+and releases the old source. The transient hold also expires automatically, so loss of the
+coordinating leader cannot leave an ingestor quiesced indefinitely.
+
+## Quiesce Modes
+
+Every source specification ends with a required `ON QUIESCE <body>` immediately before `DECODE
+USING`. The quiesce *level* says which runtime work pauses for an alteration; an ingestor's quiesce
+*mode* says what its external source experiences while that ingestor is paused. There is no default.
+
+The shared mode vocabulary is:
+
+- `SUSPEND` stops taking payloads. Data waits in the external source where that source retains it;
+  the source's retention, queue, or session limits continue to run. ZeroMQ instead keeps its socket
+  open and stops reading, leaving transport flow control and the peer's high-water marks to govern
+  the backlog. Polling ingestors skip polls. `SUSPEND` has no variables.
+- `BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST` keeps a push connection active and
+  retains raw payloads plus their ingest context in a per-instance volatile buffer. `MAX SIZE` must
+  be positive. A payload larger than the bound is dropped, and a full buffer applies the declared
+  side of the overflow policy. Every discard is counted.
+- `DROP` keeps the source connection and protocol maintenance active but discards and counts every
+  payload received during the quiesce.
+- `REJECT RETRY AFTER <duration>` is available only to `ENDPOINT`. HTTP requests and new WebSocket
+  upgrades receive 503; HTTP includes `Retry-After`, rounded up to whole seconds. Established
+  WebSockets close with code 1013 (Try Again Later).
+- Endpoint buffering is `BUFFER MAX SIZE <bytes>` without `ON OVERFLOW`. Requests that fit receive
+  202 and are held. A full buffer, or a body that cannot fit, is rejected with HTTP 503 or a
+  WebSocket 1013 close; an acknowledged body is never discarded by buffer policy.
+
+Only modes that the source can honor are accepted or offered by completion:
+
+| Source | Allowed `ON QUIESCE` bodies |
+|---|---|
+| Kafka, Pulsar, RabbitMQ, SQS | `SUSPEND` |
+| MQTT | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP`; `SUSPEND` requires `SESSION PERSISTENT QOS 1` |
+| NATS, Redis Pub/Sub, WebSocket client | `BUFFER ... ON OVERFLOW ...`, `DROP` |
+| ZeroMQ | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
+| HTTP polling, Prometheus | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
+| Endpoint | `REJECT RETRY AFTER ...`, `BUFFER MAX SIZE ...` |
+
+The mode is consulted for resumable pauses on the same node: `ENTITY_PAUSE` holds,
+`DOMAIN_PAUSE` batches, and memory-pressure shedding. `STOP`, `DROP INGESTOR`, node drain or cordon
+moves, failover, and graceful shutdown terminate the source session instead. A graceful termination
+delivers payloads the ingestor already admitted, but any volatile quiesce buffer is lost if a
+termination or crash interrupts it. The gap until a later start is covered only by the external
+source's own retention; ephemeral sources provide none.
+
+Entering quiesce does not wait for downstream ACK chains. Already admitted route batches continue
+downstream. A source item not yet acknowledged, committed, or deleted is eligible for redelivery on
+resume, so existing at-least-once duplicate windows remain. A quiesced ingestor counts as drained
+even while a connected mode is reading into its quiesce buffer; those raw payloads are not runtime
+graph work yet. Ordinary relay backpressure is not quiesce and does not consult this policy.
+
+Buffered payloads drain in arrival order per instance before that instance admits new live intake.
+There is no total order across instances. Decode, timestamp selection, filters, construction,
+routing, and domain pacing use the configuration in effect at delivery, so a codec installed by an
+alteration decodes payloads buffered during its hold. `TIMESTAMP NOW` therefore records delivery
+time. Bounds are per instance, and an endpoint has an independent buffer on every serving node.
+
+Memory pressure never adds buffered bytes. During memory-pressure quiesce, a `BUFFER` push source
+drops and counts new payloads, polling sources skip polls, and endpoints reject. Payloads already
+buffered by an overlapping alteration remain retained. `DROP` continues to discard and `SUSPEND`
+continues to hold at the source.
+
+`DESCRIBE INGESTOR` renders `quiesce:`, `quiesce state: none|entity hold|domain pause|memory
+pressure`, `status: quiesced` for every active mode, and the four quiesce counters. `SHOW CREATE`
+round-trips the full clause.
 
 ## Branch Semantics
 
@@ -131,7 +200,7 @@ CREATE BRANCH by_tenant
 
 CREATE IF NOT EXISTS INGESTOR notifications_in
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-  DECODE USING notification_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
   FILTER WHERE input.active
   TO notifications
     INHERIT ALL EXCEPT raw
@@ -287,10 +356,14 @@ CREATE IF NOT EXISTS CLIENT http_tls
 
 ```nspl,ignore
 FROM HTTP <client> EVERY <duration>
+ON QUIESCE SUSPEND
+  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
 ```
 
 - polls a configured HTTP endpoint periodically
 - `204 No Content` is treated as no message
+- `SUSPEND` skips polls and therefore creates a sampling gap
+- `BUFFER` keeps polling on the declared cadence and drains retained poll payloads in order
 
 ### Kafka
 
@@ -300,6 +373,7 @@ TOPIC <topic>
 OFFSET BY CONSUMER GROUP <group>|DOMAIN
 INSTANCES <count>
 MODE ACK PARALLEL MAX <n>|ACK SEQUENTIAL|NO_ACK PARALLEL
+ON QUIESCE SUSPEND
 ```
 
 Kafka is the richest ingestion surface today.
@@ -320,6 +394,14 @@ Offset recovery details:
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
 - if a partition appears later and has no stored domain offset yet, unpaced domains start from the normal default behavior, while paced domains seek from the domain's current logical time
 
+Quiescing leaves a consumer group, or unassigns domain-owned partitions, and resume continues from
+committed offsets. Topic time and size retention continue during the pause. For consumer-group
+offsets that age out, the client's pass-through `auto.offset.reset` setting decides whether resume
+uses the earliest retained record, skips to new records, or raises a general source error. Domain
+offsets clamp to the live watermark range and resume at the earliest retained record, exposing a
+gap. Other members of a user-named group may consume and commit while Nervix is absent. Existing
+`NO_ACK PARALLEL` auto-commit loss windows are unchanged.
+
 ### Pulsar
 
 ```nspl,ignore
@@ -328,6 +410,7 @@ TOPIC <topic>
 SUBSCRIPTION <subscription>
 INSTANCES <count>
 MODE ACK PARALLEL MAX <n>|ACK SEQUENTIAL|NO_ACK PARALLEL
+ON QUIESCE SUSPEND
 ```
 
 Pulsar ingestors use Nervix-managed shared subscriptions. The subscription
@@ -342,6 +425,11 @@ Client config currently supports:
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
 
+Suspension disconnects the consumer. The durable subscription retains its backlog and redelivers
+unacknowledged in-flight messages. Broker message TTL, backlog quota policy, and inactive-subscription
+expiry remain in force. If the subscription expires, resume creates it again at the broker's new
+subscription initial position and the suspension window is lost.
+
 ### RabbitMQ
 
 ```nspl,ignore
@@ -349,7 +437,13 @@ FROM RABBITMQ <client>
 QUEUE <queue>
 INSTANCES <count>
 MODE ACK SEQUENTIAL
+ON QUIESCE SUSPEND
 ```
+
+Suspension cancels the consumer and RabbitMQ requeues unacknowledged in-flight deliveries. Other
+consumers on the same queue continue. Queue length, message TTL, overflow, and auto-expiry policies
+remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
+re-provisions it; Nervix never creates it.
 
 ### Redis Pub/Sub
 
@@ -357,7 +451,13 @@ MODE ACK SEQUENTIAL
 FROM REDIS PUBSUB <client>
 CHANNEL <channel>
 MODE NO_ACK SEQUENTIAL
+ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+  | DROP
 ```
+
+Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes keep reading and
+keep the subscriber healthy; payloads are either retained locally within the declared bound or
+discarded and counted.
 
 ### MQTT
 
@@ -371,6 +471,9 @@ MODE NO_ACK SEQUENTIAL
   | NO_ACK PARALLEL
   | ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
   | ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
+ON QUIESCE SUSPEND
+  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+  | DROP
 ```
 
 MQTT topic filters may be bare identifiers or string literals for filters containing `/`, `+`, or `#`.
@@ -383,6 +486,13 @@ Delivery constraints:
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
 
+`SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. It disconnects while asking the broker to
+retain the session; broker offline-queue bounds and session expiry limit what can return. If the
+session expires, resume establishes a fresh session and the interim is lost. `BUFFER` and `DROP`
+remain connected under any valid session declaration. In ACK modes, Nervix acknowledges a payload
+when it is buffered or deliberately dropped, trading broker redelivery for the declared connected
+behavior.
+
 ### NATS
 
 ```nspl,ignore
@@ -391,17 +501,30 @@ SUBJECT <subject>
 QUEUE GROUP <queue_group>
 INSTANCES <count>
 MODE NO_ACK SEQUENTIAL
+ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+  | DROP
 ```
 
 NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
+
+Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance remains a member of
+its queue group and keeps receiving its share; that share is buffered or discarded rather than
+shifted to other members.
 
 ### ZeroMQ
 
 ```nspl,ignore
 FROM ZEROMQ <client>
 MODE NO_ACK SEQUENTIAL
+ON QUIESCE SUSPEND
+  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+  | DROP
 ```
+
+The source is a PULL socket. `SUSPEND` keeps it open but unread, so transport buffers fill and the
+peer's own high-water-mark policy determines whether sends queue, block, or drop. Buffered transport
+data is read on resume. `BUFFER` and `DROP` keep reading locally.
 
 ### SQS
 
@@ -410,7 +533,12 @@ FROM SQS <client>
 QUEUE <queue>
 INSTANCES <count>
 MODE ACK SEQUENTIAL
+ON QUIESCE SUSPEND
 ```
+
+Suspension stops polling. Messages remain only for the queue's configured retention period. An
+already received message remains invisible until its visibility timeout and may then be redelivered
+as a duplicate; the ingestor resumes by polling past anything the service expired.
 
 ### Prometheus
 
@@ -418,17 +546,31 @@ MODE ACK SEQUENTIAL
 FROM PROMETHEUS <client>
 QUERY '<promql>'
 EVERY <duration>
+ON QUIESCE SUSPEND
+  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
 ```
 
 Prometheus samples are flattened into JSON before codec decoding.
+`SUSPEND` skips scrapes and leaves a sampling gap. `BUFFER` keeps querying at the declared cadence
+and delivers retained results in order after resume.
 
 ### HTTP Endpoints
 
 ```nspl,ignore
 FROM ENDPOINT <endpoint> MODE NO_ACK SEQUENTIAL
+ON QUIESCE REJECT RETRY AFTER <duration>
+  | BUFFER MAX SIZE <bytes>
 ```
 
 This is how Nervix receives inbound HTTP requests on its own server-side endpoints.
+
+Quiesce is enforced independently on every serving node. With `REJECT`, HTTP requests and new
+WebSocket upgrades receive 503, while established WebSockets close with 1013. With `BUFFER`, bodies
+that fit receive 202 and drain after resume; a full buffer rejects further intake without discarding
+anything already acknowledged. A stopped, absent, or otherwise unable ingestor always rejects and
+never returns a silent 202. If several ingestors share a route, the request is accepted when at least
+one accepts it. It is rejected only when all reject, and `Retry-After` is included only when every
+rejecting ingestor declares `REJECT`.
 
 Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and WS on the HTTP listener. A TLS-enabled VHOST serves HTTPS and WSS on the separate HTTPS listener.
 
@@ -456,9 +598,14 @@ The referenced resource bundle must contain:
 
 ```nspl,ignore
 FROM WEBSOCKETS <client> MODE NO_ACK SEQUENTIAL
+ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+  | DROP
 ```
 
 This opens an outbound WebSocket connection and decodes text or binary frames.
+Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
+A stop-reading mode is unavailable because it would starve protocol maintenance and become a
+disconnect.
 
 Outbound WebSocket clients can declare `WITH SIGNALING PROTOCOL <name>` after
 `TYPE WEBSOCKETS`. Server-side WebSocket endpoints can declare the same clause

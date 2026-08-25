@@ -31,7 +31,7 @@ Feature: SQS emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -114,7 +114,7 @@ Feature: SQS emission
       };
       CREATE INGESTOR mqtt_notifications
       FROM MQTT mqtt_ingress TOPIC sqs_poison_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-      DECODE USING notification_codec
+      ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
       UNBRANCHED
@@ -199,7 +199,7 @@ Feature: SQS emission
       };
       CREATE INGESTOR mqtt_orders
       FROM MQTT mqtt_ingress TOPIC sqs_fifo_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-      DECODE USING order_codec
+      ON QUIESCE DROP DECODE USING order_codec
       TO orders
       INHERIT ALL
       BRANCHED BY by_tenant

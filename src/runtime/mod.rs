@@ -45,13 +45,14 @@ use nervix_models::{
     DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterPublishingMode,
     EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy, IcebergCatalog,
     IcebergStorageBackend, IcebergValueMapping, Identifier, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorMapping, IngestSource, IngestTimestampSource,
-    KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral,
-    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelKind, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, OtelAggregationTemporality, OtelMetric, OtelMetricKind,
-    OtelScope, OtelSignal, OtelValueMapping, PostgresConflictAction, PostgresValueMapping,
-    ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
+    InferencerTensorDeclaration, InferencerTensorMapping, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
+    MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OtelValueMapping, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
+    PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
     RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceVersionStatus, RetryPolicy,
     RouteConstruction, ScheduledNode, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
     StructuredMessageError, Timestamp, WireSchemaDefinition,
@@ -106,8 +107,9 @@ use upon::Engine as TemplateEngine;
 use crate::{
     cluster,
     metrics::{
-        BranchEvictionReason, NodeBatchObservation, NodeLatencyObservation,
-        NodeWithoutRelayObservation, RelayBatchObservation, RelayBufferObservation, RuntimeMetrics,
+        BranchEvictionReason, IngestorQuiesceMetricLabels, NodeBatchObservation,
+        NodeLatencyObservation, NodeWithoutRelayObservation, RelayBatchObservation,
+        RelayBufferObservation, RuntimeMetrics,
     },
     registry::{ActiveGraph, RegistryEntity, RuntimeChange, RuntimeChanges},
     resource::ResourceStore,
@@ -353,7 +355,447 @@ enum IngestorRuntime {
     Endpoint {
         route_keys: Vec<HttpRouteKey>,
         branched: Vec<Arc<IngestorRouteRuntime>>,
+        shutdown: watch::Sender<bool>,
+        tasks: Vec<JoinHandle<()>>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IngestorQuiesceCause {
+    EntityHold,
+    DomainPause,
+    MemoryPressure,
+}
+
+impl IngestorQuiesceCause {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::EntityHold => "entity hold",
+            Self::DomainPause => "domain pause",
+            Self::MemoryPressure => "memory pressure",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct IngestorQuiesceReasons {
+    entity_holds: usize,
+    domain_pause: bool,
+    memory_pressure: bool,
+}
+
+impl IngestorQuiesceReasons {
+    fn active(&self) -> Option<IngestorQuiesceCause> {
+        if self.memory_pressure {
+            Some(IngestorQuiesceCause::MemoryPressure)
+        } else if self.domain_pause {
+            Some(IngestorQuiesceCause::DomainPause)
+        } else if self.entity_holds > 0 {
+            Some(IngestorQuiesceCause::EntityHold)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug)]
+struct IngestorQuiesceModes {
+    active: IngestQuiesceMode,
+    pending: Option<IngestQuiesceMode>,
+    active_supported_by_source: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BufferedIngestPayload {
+    payloads: Vec<Vec<u8>>,
+    metadata: Vec<IngestFilterMapMetadata>,
+}
+
+impl BufferedIngestPayload {
+    pub(crate) fn new(payload: &[u8], metadata: IngestFilterMapMetadata) -> Self {
+        Self {
+            payloads: vec![payload.to_vec()],
+            metadata: vec![metadata],
+        }
+    }
+
+    pub(crate) fn batch(entries: Vec<(Vec<u8>, IngestFilterMapMetadata)>) -> Self {
+        let (payloads, metadata) = entries.into_iter().unzip();
+        Self { payloads, metadata }
+    }
+
+    pub(crate) fn payload(&self) -> &[u8] {
+        self.payloads
+            .first()
+            .expect("buffered ingest payload must contain at least one source payload")
+    }
+
+    pub(crate) fn metadata(&self) -> &IngestFilterMapMetadata {
+        self.metadata
+            .first()
+            .expect("buffered ingest payload must contain matching ingest metadata")
+    }
+
+    fn entries(&self) -> impl Iterator<Item = (&[u8], &IngestFilterMapMetadata)> {
+        self.payloads
+            .iter()
+            .zip(&self.metadata)
+            .map(|(payload, metadata)| (payload.as_slice(), metadata))
+    }
+
+    fn byte_len(&self) -> usize {
+        self.payloads.iter().map(Vec::len).sum()
+    }
+}
+
+#[derive(Debug, Default)]
+struct IngestorQuiesceBuffer {
+    payloads: VecDeque<BufferedIngestPayload>,
+    bytes: usize,
+}
+
+#[derive(Debug)]
+pub(crate) enum IngestorQuiesceIntake {
+    Dispatch(BufferedIngestPayload),
+    Buffered,
+    Dropped,
+    Rejected { retry_after: Option<Duration> },
+}
+
+#[derive(Debug)]
+pub(crate) struct IngestorQuiesceControl {
+    modes: RwLock<IngestorQuiesceModes>,
+    reasons: RwLock<IngestorQuiesceReasons>,
+    buffers: parking_lot::Mutex<HashMap<u64, IngestorQuiesceBuffer>>,
+    changed: Notify,
+    buffered_records: AtomicUsize,
+    buffered_bytes: AtomicUsize,
+    dropped_total: AtomicU64,
+    rejected_total: AtomicU64,
+    metrics: RuntimeMetrics,
+    metric_labels: IngestorQuiesceMetricLabels,
+}
+
+impl IngestorQuiesceControl {
+    fn new(
+        mode: IngestQuiesceMode,
+        metrics: RuntimeMetrics,
+        metric_labels: IngestorQuiesceMetricLabels,
+    ) -> Self {
+        Self {
+            modes: RwLock::new(IngestorQuiesceModes {
+                active: mode,
+                pending: None,
+                active_supported_by_source: true,
+            }),
+            reasons: RwLock::new(IngestorQuiesceReasons::default()),
+            buffers: parking_lot::Mutex::new(HashMap::default()),
+            changed: Notify::new(),
+            buffered_records: AtomicUsize::new(0),
+            buffered_bytes: AtomicUsize::new(0),
+            dropped_total: AtomicU64::new(0),
+            rejected_total: AtomicU64::new(0),
+            metrics,
+            metric_labels,
+        }
+    }
+
+    fn sync_buffered_metrics(&self) {
+        self.metrics.set_ingestor_quiesce_buffered(
+            &self.metric_labels,
+            self.buffered_records.load(Ordering::Relaxed),
+            self.buffered_bytes.load(Ordering::Relaxed),
+        );
+    }
+
+    fn record_dropped(&self, count: u64) {
+        self.dropped_total.fetch_add(count, Ordering::Relaxed);
+        self.metrics
+            .increment_ingestor_quiesce_dropped(&self.metric_labels, count);
+    }
+
+    fn record_rejected(&self, count: u64) {
+        self.rejected_total.fetch_add(count, Ordering::Relaxed);
+        self.metrics
+            .increment_ingestor_quiesce_rejected(&self.metric_labels, count);
+    }
+
+    fn update_declared_source(&self, source: &IngestSource) {
+        let quiesced = self.reasons.read().active().is_some();
+        let mut modes = self.modes.write();
+        if quiesced {
+            modes.active_supported_by_source = source.supports_quiesce(&modes.active);
+            modes.pending = Some(source.quiesce().clone());
+        } else {
+            modes.active = source.quiesce().clone();
+            modes.pending = None;
+            modes.active_supported_by_source = true;
+        }
+        drop(modes);
+        self.changed.notify_waiters();
+    }
+
+    fn engage(&self, cause: IngestorQuiesceCause) {
+        let mut reasons = self.reasons.write();
+        match cause {
+            IngestorQuiesceCause::EntityHold => {
+                reasons.entity_holds = reasons.entity_holds.saturating_add(1);
+            }
+            IngestorQuiesceCause::DomainPause => reasons.domain_pause = true,
+            IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = true,
+        }
+        drop(reasons);
+        self.changed.notify_waiters();
+    }
+
+    fn release(&self, cause: IngestorQuiesceCause) {
+        let now_active = {
+            let mut reasons = self.reasons.write();
+            match cause {
+                IngestorQuiesceCause::EntityHold => {
+                    reasons.entity_holds = reasons.entity_holds.saturating_sub(1);
+                }
+                IngestorQuiesceCause::DomainPause => reasons.domain_pause = false,
+                IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = false,
+            }
+            reasons.active()
+        };
+        if now_active.is_none() {
+            let mut modes = self.modes.write();
+            if let Some(pending) = modes.pending.take() {
+                modes.active = pending;
+            }
+            modes.active_supported_by_source = true;
+        }
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) fn cause(&self) -> Option<IngestorQuiesceCause> {
+        self.reasons.read().active()
+    }
+
+    pub(crate) fn is_quiesced(&self) -> bool {
+        self.cause().is_some()
+    }
+
+    pub(crate) fn mode(&self) -> IngestQuiesceMode {
+        self.modes.read().active.clone()
+    }
+
+    fn active_mode_is_supported(&self) -> bool {
+        self.modes.read().active_supported_by_source
+    }
+
+    pub(crate) fn should_suspend_intake(&self) -> bool {
+        self.is_quiesced()
+            && (!self.active_mode_is_supported()
+                || matches!(self.mode(), IngestQuiesceMode::Suspend))
+    }
+
+    pub(crate) fn should_skip_poll(&self) -> bool {
+        match self.cause() {
+            Some(IngestorQuiesceCause::MemoryPressure) => true,
+            Some(_) if !self.active_mode_is_supported() => true,
+            Some(_) => matches!(self.mode(), IngestQuiesceMode::Suspend),
+            None => false,
+        }
+    }
+
+    pub(crate) async fn wait_until_not_suspended(&self) {
+        loop {
+            if !self.should_suspend_intake() {
+                return;
+            }
+            let changed = self.changed.notified();
+            if !self.should_suspend_intake() {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) async fn wait_for_change(&self) {
+        self.changed.notified().await;
+    }
+
+    pub(crate) fn intake(
+        &self,
+        instance: u64,
+        payload: BufferedIngestPayload,
+        endpoint: bool,
+    ) -> IngestorQuiesceIntake {
+        let Some(cause) = self.cause() else {
+            return IngestorQuiesceIntake::Dispatch(payload);
+        };
+        let mode = self.mode();
+        if !self.active_mode_is_supported() {
+            if endpoint {
+                self.record_rejected(1);
+                return IngestorQuiesceIntake::Rejected { retry_after: None };
+            }
+            self.record_dropped(1);
+            return IngestorQuiesceIntake::Dropped;
+        }
+        if cause == IngestorQuiesceCause::MemoryPressure {
+            if endpoint {
+                self.record_rejected(1);
+                return IngestorQuiesceIntake::Rejected {
+                    retry_after: match mode {
+                        IngestQuiesceMode::Reject { retry_after } => {
+                            humantime::parse_duration(&retry_after).ok()
+                        }
+                        _ => None,
+                    },
+                };
+            }
+            self.record_dropped(1);
+            return IngestorQuiesceIntake::Dropped;
+        }
+
+        match mode {
+            IngestQuiesceMode::Suspend => IngestorQuiesceIntake::Dispatch(payload),
+            IngestQuiesceMode::Drop => {
+                self.record_dropped(1);
+                IngestorQuiesceIntake::Dropped
+            }
+            IngestQuiesceMode::Reject { retry_after } => {
+                self.record_rejected(1);
+                IngestorQuiesceIntake::Rejected {
+                    retry_after: humantime::parse_duration(&retry_after).ok(),
+                }
+            }
+            IngestQuiesceMode::EndpointBuffer { max_size } => {
+                let max_size = quiesce_max_size_bytes(&max_size);
+                let payload_bytes = payload.byte_len();
+                let mut buffers = self.buffers.lock();
+                let buffer = buffers.entry(instance).or_default();
+                if payload_bytes > max_size || buffer.bytes.saturating_add(payload_bytes) > max_size
+                {
+                    self.record_rejected(1);
+                    return IngestorQuiesceIntake::Rejected { retry_after: None };
+                }
+                buffer.bytes = buffer.bytes.saturating_add(payload_bytes);
+                buffer.payloads.push_back(payload);
+                self.buffered_records.fetch_add(1, Ordering::Relaxed);
+                self.buffered_bytes
+                    .fetch_add(payload_bytes, Ordering::Relaxed);
+                self.sync_buffered_metrics();
+                IngestorQuiesceIntake::Buffered
+            }
+            IngestQuiesceMode::Buffer { max_size, overflow } => {
+                let max_size = quiesce_max_size_bytes(&max_size);
+                let payload_bytes = payload.byte_len();
+                let mut buffers = self.buffers.lock();
+                let buffer = buffers.entry(instance).or_default();
+                if payload_bytes > max_size {
+                    self.record_dropped(1);
+                    return IngestorQuiesceIntake::Dropped;
+                }
+                if overflow == IngestQuiesceOverflow::DropNewest
+                    && buffer.bytes.saturating_add(payload_bytes) > max_size
+                {
+                    self.record_dropped(1);
+                    return IngestorQuiesceIntake::Dropped;
+                }
+                while buffer.bytes.saturating_add(payload_bytes) > max_size {
+                    let Some(dropped) = buffer.payloads.pop_front() else {
+                        break;
+                    };
+                    buffer.bytes = buffer.bytes.saturating_sub(dropped.byte_len());
+                    self.buffered_records.fetch_sub(1, Ordering::Relaxed);
+                    self.buffered_bytes
+                        .fetch_sub(dropped.byte_len(), Ordering::Relaxed);
+                    self.record_dropped(1);
+                }
+                buffer.bytes = buffer.bytes.saturating_add(payload_bytes);
+                buffer.payloads.push_back(payload);
+                self.buffered_records.fetch_add(1, Ordering::Relaxed);
+                self.buffered_bytes
+                    .fetch_add(payload_bytes, Ordering::Relaxed);
+                self.sync_buffered_metrics();
+                IngestorQuiesceIntake::Buffered
+            }
+        }
+    }
+
+    fn endpoint_admission(&self) -> Result<(), Option<Duration>> {
+        let Some(cause) = self.cause() else {
+            return Ok(());
+        };
+        let mode = self.mode();
+        if !self.active_mode_is_supported() {
+            self.record_rejected(1);
+            return Err(None);
+        }
+        if cause != IngestorQuiesceCause::MemoryPressure
+            && matches!(mode, IngestQuiesceMode::EndpointBuffer { .. })
+        {
+            return Ok(());
+        }
+        self.record_rejected(1);
+        Err(match mode {
+            IngestQuiesceMode::Reject { retry_after } => {
+                humantime::parse_duration(&retry_after).ok()
+            }
+            _ => None,
+        })
+    }
+
+    pub(crate) fn pop_buffered(&self, instance: u64) -> Option<BufferedIngestPayload> {
+        if self.is_quiesced() {
+            return None;
+        }
+        let mut buffers = self.buffers.lock();
+        let buffer = buffers.get_mut(&instance)?;
+        let payload = buffer.payloads.pop_front()?;
+        buffer.bytes = buffer.bytes.saturating_sub(payload.byte_len());
+        self.buffered_records.fetch_sub(1, Ordering::Relaxed);
+        self.buffered_bytes
+            .fetch_sub(payload.byte_len(), Ordering::Relaxed);
+        self.sync_buffered_metrics();
+        Some(payload)
+    }
+
+    fn counters(&self) -> IngestorQuiesceCounters {
+        IngestorQuiesceCounters {
+            buffered_records: self.buffered_records.load(Ordering::Relaxed),
+            buffered_bytes: self.buffered_bytes.load(Ordering::Relaxed),
+            dropped_total: self.dropped_total.load(Ordering::Relaxed),
+            rejected_total: self.rejected_total.load(Ordering::Relaxed),
+        }
+    }
+
+    fn terminate(&self) {
+        let dropped = {
+            let mut buffers = self.buffers.lock();
+            let dropped = buffers
+                .values()
+                .map(|buffer| buffer.payloads.len())
+                .sum::<usize>();
+            buffers.clear();
+            dropped
+        };
+        self.buffered_records.store(0, Ordering::Relaxed);
+        self.buffered_bytes.store(0, Ordering::Relaxed);
+        self.sync_buffered_metrics();
+        self.record_dropped(u64::try_from(dropped).unwrap_or(u64::MAX));
+    }
+}
+
+fn quiesce_max_size_bytes(value: &str) -> usize {
+    value
+        .parse::<ubyte::ByteUnit>()
+        .ok()
+        .and_then(|size| usize::try_from(size.as_u64()).ok())
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IngestorQuiesceCounters {
+    pub buffered_records: usize,
+    pub buffered_bytes: usize,
+    pub dropped_total: u64,
+    pub rejected_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -559,7 +1001,7 @@ pub struct EntityGateHold {
 
 struct EntityAlterHold {
     gates: EntityGateHold,
-    resume_ingestors: bool,
+    quiesced_ingestors: Vec<Identifier>,
 }
 
 #[derive(Debug, Default)]
@@ -890,6 +1332,7 @@ struct EndpointRoute {
 #[derive(Clone)]
 struct EndpointIngestBinding {
     runtime_key: RuntimeKey,
+    quiesce: Arc<IngestorQuiesceControl>,
     domain: Domain,
     ingestor: Identifier,
     timestamp_source: Option<IngestTimestampSource>,
@@ -897,6 +1340,19 @@ struct EndpointIngestBinding {
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
     branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EndpointDispatchOutcome {
+    pub accepted: usize,
+    pub rejected: usize,
+    pub retry_after: Option<Duration>,
+}
+
+impl EndpointDispatchOutcome {
+    pub fn is_accepted(self) -> bool {
+        self.accepted > 0
+    }
 }
 
 struct IngestorDependencies {
@@ -928,6 +1384,19 @@ struct IngestGroupDispatch<'a> {
     /// when they flush it: stream sources group by size/idle time, while request-scoped
     /// sources flush at the end of the request or response.
     collector: &'a mut IngestRouteCollector,
+}
+
+struct RawIngestDispatch<'a> {
+    domain: &'a Domain,
+    ingestor: &'a Identifier,
+    timestamp_source: Option<&'a IngestTimestampSource>,
+    output_routes: &'a RelayProcessorOutputsNode,
+    filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
+    branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    codec: Arc<CompiledCodec>,
+    payload: &'a BufferedIngestPayload,
+    collector: &'a mut IngestRouteCollector,
+    flush: bool,
 }
 
 /// Row-aligned ingest group state.
@@ -1977,6 +2446,8 @@ pub struct KafkaDomainOffsetDescribe {
 pub struct IngestorDescribe {
     pub running: bool,
     pub ready: bool,
+    pub quiesce_state: Option<String>,
+    pub quiesce_counters: IngestorQuiesceCounters,
     pub memory_backpressure_paused: bool,
     pub transient_error: Option<String>,
     pub reconnect_backoff: Option<String>,
@@ -2508,6 +2979,7 @@ impl Drop for DomainAlterGuard {
 #[derive(Clone)]
 pub struct Runtime {
     ingestors: Arc<DashMap<RuntimeKey, IngestorRuntime, RandomState>>,
+    ingestor_quiescence: Arc<DashMap<RuntimeKey, Arc<IngestorQuiesceControl>, RandomState>>,
     ingestors_paused_for_memory_pressure: Arc<AtomicBool>,
     ingestor_transient_errors: Arc<DashMap<RuntimeKey, String, RandomState>>,
     ingestor_reconnect_backoffs: Arc<DashMap<RuntimeKey, RuntimeReconnectStatus, RandomState>>,
@@ -2543,6 +3015,8 @@ pub struct Runtime {
     schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     #[cfg(feature = "testing")]
     transaction_commit_pauses: Arc<test_hooks::TransactionCommitPauseInjector>,
+    #[cfg(feature = "testing")]
+    entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,

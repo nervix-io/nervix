@@ -4680,6 +4680,44 @@ fn validate_ingestor_source(
     identifier: &Identifier,
     ingestor: &CreateIngestor,
 ) -> Result<(), Report<RegistryError>> {
+    let invalid = |reason: String| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason,
+        })
+    };
+    let quiesce = ingestor.source.quiesce();
+    if !ingestor.source.supports_quiesce(quiesce) {
+        return Err(invalid(format!(
+            "{} ingestors do not support ON QUIESCE {}",
+            ingestor.source.transport_label(),
+            quiesce.kind_label()
+        )));
+    }
+    match quiesce {
+        nervix_models::IngestQuiesceMode::Buffer { max_size, .. }
+        | nervix_models::IngestQuiesceMode::EndpointBuffer { max_size } => {
+            let parsed = max_size.parse::<ubyte::ByteUnit>().map_err(|error| {
+                invalid(format!(
+                    "invalid quiesce BUFFER MAX SIZE '{max_size}': {error}"
+                ))
+            })?;
+            if parsed.as_u64() == 0 {
+                return Err(invalid(
+                    "quiesce BUFFER MAX SIZE must be greater than 0".to_string(),
+                ));
+            }
+        }
+        nervix_models::IngestQuiesceMode::Reject { retry_after } => {
+            humantime::parse_duration(retry_after).map_err(|error| {
+                invalid(format!(
+                    "invalid quiesce REJECT RETRY AFTER duration '{retry_after}': {error}"
+                ))
+            })?;
+        }
+        nervix_models::IngestQuiesceMode::Suspend | nervix_models::IngestQuiesceMode::Drop => {}
+    }
     if let IngestSource::Mqtt {
         topic,
         instances,
@@ -11794,6 +11832,7 @@ mod tests {
                         max_backoff: "5s".to_string(),
                     },
                 },
+                quiesce: nervix_models::IngestQuiesceMode::Suspend,
             },
             general_error_policy: GeneralErrorPolicy::Log,
 
@@ -14243,6 +14282,9 @@ mod tests {
         ingestor.source = IngestSource::Endpoint {
             endpoint: identifier("ingest_http"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
+            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                max_size: "1MiB".to_string(),
+            },
         };
         endpoint_models.extend([
             vhost("public", &["events.example.com"]),
@@ -14401,6 +14443,9 @@ mod tests {
                         source: IngestSource::Endpoint {
                             endpoint: identifier("ingest_http"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
                         },
                     }],
                 })],
@@ -15008,6 +15053,9 @@ mod tests {
                         source: IngestSource::Endpoint {
                             endpoint: Identifier::parse("ingest_http").expect("valid identifier"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
                         },
                         general_error_policy: GeneralErrorPolicy::Log,
 
@@ -15070,6 +15118,7 @@ mod tests {
                             session: MqttSession::Clean,
                             qos: MqttQos::AtMostOnce,
                         },
+                        quiesce: nervix_models::IngestQuiesceMode::Drop,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
@@ -15142,6 +15191,7 @@ mod tests {
                         ),
                         instances: 1,
                         mode: KafkaIngestMode::NoAckParallel,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -15259,6 +15309,7 @@ mod tests {
                             ),
                             instances: 1,
                             mode: KafkaIngestMode::NoAckParallel,
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         },
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
@@ -15332,6 +15383,7 @@ mod tests {
                         ),
                         instances: 1,
                         mode: KafkaIngestMode::NoAckParallel,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -15417,6 +15469,7 @@ mod tests {
                         ),
                         instances: 1,
                         mode: KafkaIngestMode::NoAckParallel,
+                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -15464,6 +15517,9 @@ mod tests {
                         source: IngestSource::Endpoint {
                             endpoint: Identifier::parse("ingest_ws").expect("valid identifier"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
                         },
                         general_error_policy: GeneralErrorPolicy::Log,
 
@@ -17109,6 +17165,7 @@ mod tests {
                                     max_backoff: "5s".to_string(),
                                 },
                             },
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         },
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,

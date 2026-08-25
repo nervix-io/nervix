@@ -36,7 +36,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -142,7 +142,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -243,7 +243,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -329,7 +329,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -454,7 +454,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -567,7 +567,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -644,7 +644,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -721,7 +721,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -793,7 +793,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -893,7 +893,7 @@ Feature: Window processor runtime behavior
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -1002,7 +1002,7 @@ Feature: Window processor runtime behavior
       };
         CREATE INGESTOR kafka_metrics
         FROM KAFKA kafka_main TOPIC metrics_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING metric_codec
+        ON QUIESCE SUSPEND DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_kafka_metrics
@@ -1090,7 +1090,7 @@ Feature: Window processor runtime behavior
       };
         CREATE INGESTOR kafka_metrics
         FROM KAFKA kafka_main TOPIC metrics_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING metric_codec
+        ON QUIESCE SUSPEND DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_kafka_metrics

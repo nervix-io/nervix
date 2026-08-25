@@ -2127,6 +2127,9 @@ impl CreateIngestor {
             AlterIngestorOperation::SetSource { source } => {
                 self.source = source.clone();
             }
+            AlterIngestorOperation::SetQuiesce { quiesce } => {
+                self.source.set_quiesce(quiesce.clone())?;
+            }
             AlterIngestorOperation::SetDecodeUsing { codec } => {
                 self.decode_using_codec = codec.clone();
             }
@@ -2193,6 +2196,7 @@ pub struct AlterIngestor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterIngestorOperation {
     SetSource { source: IngestSource },
+    SetQuiesce { quiesce: IngestQuiesceMode },
     SetDecodeUsing { codec: Identifier },
     SetTimestamp { source: IngestTimestampSource },
     DropTimestamp,
@@ -2217,6 +2221,8 @@ pub enum AlterIngestorError {
     RouteTargetAmbiguous { relay: Identifier },
     #[error("an ingestor must retain at least one route")]
     CannotDropLastRoute,
+    #[error("{transport} ingestors do not support ON QUIESCE {mode}")]
+    UnsupportedQuiesceMode { transport: String, mode: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2798,6 +2804,7 @@ pub enum IngestSource {
     Http {
         client: Identifier,
         every: String,
+        quiesce: IngestQuiesceMode,
     },
     Kafka {
         client: Identifier,
@@ -2805,6 +2812,7 @@ pub enum IngestSource {
         offset_mode: KafkaOffsetMode,
         instances: u64,
         mode: KafkaIngestMode,
+        quiesce: IngestQuiesceMode,
     },
     Pulsar {
         client: Identifier,
@@ -2812,12 +2820,14 @@ pub enum IngestSource {
         subscription: Identifier,
         instances: u64,
         mode: PulsarIngestMode,
+        quiesce: IngestQuiesceMode,
     },
     Mqtt {
         client: Identifier,
         topic: String,
         instances: u64,
         mode: MqttIngestMode,
+        quiesce: IngestQuiesceMode,
     },
     Nats {
         client: Identifier,
@@ -2825,6 +2835,7 @@ pub enum IngestSource {
         queue_group: Identifier,
         instances: u64,
         mode: NatsIngestMode,
+        quiesce: IngestQuiesceMode,
     },
     #[strum(serialize = "RABBITMQ")]
     RabbitMq {
@@ -2832,36 +2843,43 @@ pub enum IngestSource {
         queue: Identifier,
         instances: u64,
         mode: RabbitMqIngestMode,
+        quiesce: IngestQuiesceMode,
     },
     #[strum(serialize = "REDIS")]
     RedisPubSub {
         client: Identifier,
         channel: Identifier,
         mode: RedisPubSubIngestMode,
+        quiesce: IngestQuiesceMode,
     },
     Prometheus {
         client: Identifier,
         query: String,
         every: String,
+        quiesce: IngestQuiesceMode,
     },
     #[strum(serialize = "ZEROMQ")]
     ZeroMq {
         client: Identifier,
         mode: ZeroMqIngestMode,
+        quiesce: IngestQuiesceMode,
     },
     Sqs {
         client: Identifier,
         queue: Identifier,
         instances: u64,
         mode: SqsIngestMode,
+        quiesce: IngestQuiesceMode,
     },
     Endpoint {
         endpoint: Identifier,
         mode: EndpointIngestMode,
+        quiesce: IngestQuiesceMode,
     },
     Websockets {
         client: Identifier,
         mode: WebsocketsIngestMode,
+        quiesce: IngestQuiesceMode,
     },
 }
 
@@ -2891,6 +2909,141 @@ impl IngestSource {
         match self {
             Self::Endpoint { .. } => ModelKind::Endpoint,
             _ => ModelKind::Client,
+        }
+    }
+
+    pub fn quiesce(&self) -> &IngestQuiesceMode {
+        match self {
+            Self::Http { quiesce, .. }
+            | Self::Kafka { quiesce, .. }
+            | Self::Pulsar { quiesce, .. }
+            | Self::Mqtt { quiesce, .. }
+            | Self::Nats { quiesce, .. }
+            | Self::RabbitMq { quiesce, .. }
+            | Self::RedisPubSub { quiesce, .. }
+            | Self::Prometheus { quiesce, .. }
+            | Self::ZeroMq { quiesce, .. }
+            | Self::Sqs { quiesce, .. }
+            | Self::Endpoint { quiesce, .. }
+            | Self::Websockets { quiesce, .. } => quiesce,
+        }
+    }
+
+    pub fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
+        match self {
+            Self::Kafka { .. } | Self::Pulsar { .. } | Self::RabbitMq { .. } | Self::Sqs { .. } => {
+                matches!(quiesce, IngestQuiesceMode::Suspend)
+            }
+            Self::Mqtt { mode, .. } => match quiesce {
+                IngestQuiesceMode::Suspend => {
+                    mode.session() == MqttSession::Persistent && mode.qos() == MqttQos::AtLeastOnce
+                }
+                IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop => true,
+                IngestQuiesceMode::EndpointBuffer { .. } | IngestQuiesceMode::Reject { .. } => {
+                    false
+                }
+            },
+            Self::Nats { .. } | Self::RedisPubSub { .. } | Self::Websockets { .. } => {
+                matches!(
+                    quiesce,
+                    IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
+                )
+            }
+            Self::ZeroMq { .. } => matches!(
+                quiesce,
+                IngestQuiesceMode::Suspend
+                    | IngestQuiesceMode::Buffer { .. }
+                    | IngestQuiesceMode::Drop
+            ),
+            Self::Http { .. } | Self::Prometheus { .. } => matches!(
+                quiesce,
+                IngestQuiesceMode::Suspend | IngestQuiesceMode::Buffer { .. }
+            ),
+            Self::Endpoint { .. } => matches!(
+                quiesce,
+                IngestQuiesceMode::EndpointBuffer { .. } | IngestQuiesceMode::Reject { .. }
+            ),
+        }
+    }
+
+    pub fn set_quiesce(&mut self, quiesce: IngestQuiesceMode) -> Result<(), AlterIngestorError> {
+        if !self.supports_quiesce(&quiesce) {
+            return Err(AlterIngestorError::UnsupportedQuiesceMode {
+                transport: self.transport_label().to_string(),
+                mode: quiesce.kind_label().to_string(),
+            });
+        }
+        match self {
+            Self::Http {
+                quiesce: current, ..
+            }
+            | Self::Kafka {
+                quiesce: current, ..
+            }
+            | Self::Pulsar {
+                quiesce: current, ..
+            }
+            | Self::Mqtt {
+                quiesce: current, ..
+            }
+            | Self::Nats {
+                quiesce: current, ..
+            }
+            | Self::RabbitMq {
+                quiesce: current, ..
+            }
+            | Self::RedisPubSub {
+                quiesce: current, ..
+            }
+            | Self::Prometheus {
+                quiesce: current, ..
+            }
+            | Self::ZeroMq {
+                quiesce: current, ..
+            }
+            | Self::Sqs {
+                quiesce: current, ..
+            }
+            | Self::Endpoint {
+                quiesce: current, ..
+            }
+            | Self::Websockets {
+                quiesce: current, ..
+            } => *current = quiesce,
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IngestQuiesceOverflow {
+    DropOldest,
+    DropNewest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IngestQuiesceMode {
+    Suspend,
+    Buffer {
+        max_size: String,
+        overflow: IngestQuiesceOverflow,
+    },
+    Drop,
+    Reject {
+        retry_after: String,
+    },
+    EndpointBuffer {
+        max_size: String,
+    },
+}
+
+impl IngestQuiesceMode {
+    pub const fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Suspend => "SUSPEND",
+            Self::Buffer { .. } | Self::EndpointBuffer { .. } => "BUFFER",
+            Self::Drop => "DROP",
+            Self::Reject { .. } => "REJECT",
         }
     }
 }
@@ -4030,8 +4183,9 @@ mod tests {
     };
     use crate::{
         CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Expression, Identifier,
-        IngestSource, Literal, MaterializedStateDependency, MaterializedStatePolicy, ParseAsType,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, SchemaField,
+        IngestQuiesceMode, IngestSource, Literal, MaterializedStateDependency,
+        MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        SchemaField,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -4292,6 +4446,9 @@ mod tests {
                 source: IngestSource::Endpoint {
                     endpoint: identifier("public_http"),
                     mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
                 general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4879,6 +5036,9 @@ mod tests {
             source: IngestSource::Endpoint {
                 endpoint: identifier("ingress_a"),
                 mode: EndpointIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
             },
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
@@ -4891,6 +5051,9 @@ mod tests {
                         source: IngestSource::Endpoint {
                             endpoint: identifier("ingress_b"),
                             mode: EndpointIngestMode::NoAckSequential,
+                            quiesce: IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
                         },
                     },
                     AlterIngestorOperation::SetDecodeUsing {
@@ -4930,6 +5093,9 @@ mod tests {
             IngestSource::Endpoint {
                 endpoint: identifier("ingress_b"),
                 mode: EndpointIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
             }
         );
         assert_eq!(ingestor.decode_using_codec, identifier("event_codec_v2"));
@@ -4974,6 +5140,9 @@ mod tests {
             source: IngestSource::Endpoint {
                 endpoint: identifier("ingress"),
                 mode: EndpointIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
             },
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,

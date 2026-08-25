@@ -346,6 +346,7 @@ pub struct ConsensusRuntimeState {
 struct StateMachineData {
     last_applied_log_id: Option<LogIdOf>,
     last_membership: StoredMembershipOf,
+    runtime_revision: u64,
     schedule: ClusterSchedule,
     domains: BTreeMap<DomainId, DomainState>,
     #[serde(default)]
@@ -357,6 +358,12 @@ struct StateMachineData {
 }
 
 impl StateMachineData {
+    fn record_runtime_revision(&mut self, revision: u64, applied: &AppliedConsensusCommand) {
+        if applied.schedule_changed || applied.domains_changed {
+            self.runtime_revision = revision;
+        }
+    }
+
     fn replace_domain_schedule(&mut self, domain: &Domain, schedule: Option<&DomainSchedule>) {
         let Some(domain_schedule) = schedule else {
             self.schedule.domains.retain(|item| item.domain != *domain);
@@ -606,10 +613,7 @@ impl ConsensusHandle {
     pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
         let state = self.store.inner.state_machine.read().await;
         ConsensusRuntimeState {
-            revision: state
-                .last_applied_log_id
-                .as_ref()
-                .map_or(0, |log_id| log_id.index),
+            revision: state.runtime_revision,
             schedule: state.schedule.clone(),
             domains: state.domains.clone(),
         }
@@ -1866,6 +1870,7 @@ impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
             }
             if let EntryPayload::Normal(command) = &entry.payload {
                 let applied = apply_consensus_command(&mut state, command);
+                state.record_runtime_revision(entry.log_id.index, &applied);
                 if applied.schedule_changed {
                     write_key(&self.inner.schedule, KEY_CLUSTER_SCHEDULE, &state.schedule)?;
                     let _ = self.inner.schedule_tx.send(state.schedule.clone());
@@ -2883,6 +2888,41 @@ mod tests {
 
         assert_eq!(state.domains.get(&domain("tenant")), Some(&domain_state));
         assert_eq!(state.schedule.domain(&domain("tenant")), Some(&schedule));
+    }
+
+    #[test]
+    fn runtime_revision_advances_only_for_runtime_state_changes() {
+        let mut state = StateMachineData::default();
+        let domain_change = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::PutDomain {
+                domain: Box::new(running_domain_state("tenant")),
+            },
+        );
+        state.record_runtime_revision(41, &domain_change);
+        assert_eq!(state.runtime_revision, 41);
+
+        let user_change = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::CreateUser {
+                user: Box::new(UserCredentials {
+                    name: Identifier::parse("app_user").expect("valid identifier"),
+                    password_hash: "argon2-hash".to_string(),
+                }),
+            },
+        );
+        state.record_runtime_revision(42, &user_change);
+        assert_eq!(state.runtime_revision, 41);
+
+        let schedule_change = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReplaceDomainSchedule {
+                domain: domain("tenant"),
+                schedule: Some(Box::new(domain_schedule("tenant"))),
+            },
+        );
+        state.record_runtime_revision(43, &schedule_change);
+        assert_eq!(state.runtime_revision, 43);
     }
 
     #[test]

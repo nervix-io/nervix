@@ -74,6 +74,9 @@ impl HttpIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled HTTP ingestor must have quiesce control");
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -82,6 +85,7 @@ impl HttpIngestor {
         let task_timestamp_source = ingestor.timestamp_source.clone();
         let task_events = runtime.events.clone();
         let task_client_mounts = resolved_client.mounts.clone();
+        let task_quiesce = quiesce.clone();
         let task = tokio::spawn(async move {
             let _client_mounts = task_client_mounts;
             let mut ticker = tokio::time::interval(interval);
@@ -105,6 +109,33 @@ impl HttpIngestor {
                 if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
                     continue;
                 }
+                if let Some(payload) = task_quiesce.pop_buffered(0) {
+                    let mut collector = IngestRouteCollector::default();
+                    if let Err(error) = task_runtime
+                        .dispatch_raw_ingest_payload(RawIngestDispatch {
+                            domain: &task_domain,
+                            ingestor: &task_ingestor,
+                            timestamp_source: task_timestamp_source.as_ref(),
+                            output_routes: &output_routes,
+                            filter_where: filter_where.as_ref(),
+                            branched_senders: &branched_senders,
+                            codec: codec.clone(),
+                            payload: &payload,
+                            collector: &mut collector,
+                            flush: true,
+                        })
+                        .await
+                    {
+                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                            "failed to dispatch buffered http payload for ingestor '{}' in domain \
+                             '{}': {}",
+                            task_ingestor.as_str(),
+                            task_domain.as_str(),
+                            error
+                        )));
+                    }
+                    continue;
+                }
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -112,6 +143,9 @@ impl HttpIngestor {
                         }
                     }
                     _ = ticker.tick() => {
+                        if task_quiesce.should_skip_poll() {
+                            continue;
+                        }
                         match http_client.request(method.clone(), endpoint.as_str()).send().await {
                             Ok(response) => {
                                 if response.status() == reqwest::StatusCode::NO_CONTENT {
@@ -144,40 +178,33 @@ impl HttpIngestor {
 
                                 let headers = Self::headers_from_response(&response);
                                 match response.bytes().await {
-                                    Ok(payload) => match decode_ingested_payload(codec.clone(), payload.as_ref()).await {
-                                        Ok(record) => {
-                                            task_runtime.clear_ingestor_transient_error(
-                                                &task_domain,
-                                                &task_ingestor,
-                                            );
+                                    Ok(payload) => {
+                                        task_runtime.clear_ingestor_transient_error(
+                                            &task_domain,
+                                            &task_ingestor,
+                                        );
+                                        let payload = BufferedIngestPayload::new(
+                                            payload.as_ref(),
+                                            IngestFilterMapMetadata::from_headers(headers),
+                                        );
+                                        if let IngestorQuiesceIntake::Dispatch(payload) =
+                                            task_quiesce.intake(0, payload, false)
+                                        {
                                             let mut collector = IngestRouteCollector::default();
-                                            let dispatch_result = task_runtime
-                                                .dispatch_ingested_records(IngestGroupDispatch {
-                                                    collector: &mut collector,
+                                            if let Err(error) = task_runtime
+                                                .dispatch_raw_ingest_payload(RawIngestDispatch {
                                                     domain: &task_domain,
                                                     ingestor: &task_ingestor,
                                                     timestamp_source: task_timestamp_source.as_ref(),
                                                     output_routes: &output_routes,
                                                     filter_where: filter_where.as_ref(),
-                                                    records: vec![record],
-                                                    metadata: vec![
-                                                        IngestFilterMapMetadata::from_headers(
-                                                            headers.clone(),
-                                                        ),
-                                                    ],
-                                                    ingested_at: current_timestamp(),
-                                                    acks: vec![AckSet::empty()],
+                                                    branched_senders: &branched_senders,
+                                                    codec: codec.clone(),
+                                                    payload: &payload,
+                                                    collector: &mut collector,
+                                                    flush: true,
                                                 })
-                                                .await;
-                                            let flush_result = task_runtime
-                                                .flush_ingest_collector(
-                                                    &task_domain,
-                                                    &task_ingestor,
-                                                    &branched_senders,
-                                                    &mut collector,
-                                                )
-                                                .await;
-                                            if let Err(error) = dispatch_result.and(flush_result)
+                                                .await
                                             {
                                                 let _ = task_events.send(RuntimeEvent::Error(format!(
                                                     "failed to dispatch http payload for ingestor '{}' in domain '{}': {}",
@@ -187,21 +214,7 @@ impl HttpIngestor {
                                                 )));
                                             }
                                         }
-                                        Err(error) => {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                "failed to decode http payload for ingestor '{}' in domain '{}': {}",
-                                                task_ingestor.as_str(),
-                                                task_domain.as_str(),
-                                                error
-                                            )));
-                                            warn!(
-                                                domain = task_domain.as_str(),
-                                                ingestor = task_ingestor.as_str(),
-                                                error = %error,
-                                                "failed to decode http payload"
-                                            );
-                                        }
-                                    },
+                                    }
                                     Err(error) => {
                                         task_runtime.record_ingestor_transient_error(
                                             &task_domain,

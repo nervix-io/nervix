@@ -41,7 +41,7 @@ Feature: Drain node
 
       CREATE INGESTOR source_txns
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -101,7 +101,7 @@ Feature: Drain node
 
       CREATE INGESTOR kafka_a
         FROM KAFKA kafka_main TOPIC notifications_a_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_a_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -111,7 +111,7 @@ Feature: Drain node
 
       CREATE INGESTOR kafka_b
         FROM KAFKA kafka_main TOPIC notifications_b_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_b_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -121,7 +121,7 @@ Feature: Drain node
 
       CREATE INGESTOR kafka_c
         FROM KAFKA kafka_main TOPIC notifications_c_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_c_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED

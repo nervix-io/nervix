@@ -43,6 +43,9 @@ impl EndpointIngestor {
         );
         let binding = EndpointIngestBinding {
             runtime_key: key.clone(),
+            quiesce: runtime
+                .ingestor_quiesce_control(domain, &ingestor.name)
+                .expect("scheduled endpoint ingestor must have quiesce control"),
             domain: domain.clone(),
             ingestor: ingestor.name.clone(),
             timestamp_source: ingestor.timestamp_source.clone(),
@@ -69,11 +72,37 @@ impl EndpointIngestor {
                 .push(binding.clone());
         }
 
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let task_runtime = runtime.clone();
+        let task_binding = binding.clone();
+        let task_quiesce = binding.quiesce.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::task::consume_budget().await;
+                while let Some(payload) = task_quiesce.pop_buffered(0) {
+                    tokio::task::consume_budget().await;
+                    task_runtime
+                        .dispatch_endpoint_binding(&task_binding, payload, "endpoint buffer")
+                        .await;
+                }
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = task_quiesce.wait_for_change() => {}
+                }
+            }
+        });
+
         runtime.ingestors.insert(
             key,
             IngestorRuntime::Endpoint {
                 route_keys,
                 branched: branched_runtime.runtimes,
+                shutdown,
+                tasks: vec![task],
             },
         );
 

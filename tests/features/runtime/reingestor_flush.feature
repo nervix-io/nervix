@@ -35,7 +35,7 @@ Feature: Reingestor output flushing
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming
           INHERIT ALL
           BRANCHED BY by_ingress

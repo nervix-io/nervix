@@ -29,6 +29,7 @@ struct MqttTaskContext {
     codec: Arc<CompiledCodec>,
     branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
     events: broadcast::Sender<RuntimeEvent>,
+    quiesce: Arc<IngestorQuiesceControl>,
 }
 
 #[derive(Clone)]
@@ -47,6 +48,7 @@ enum MqttNextPublish {
     Flush,
     Shutdown,
     Reconnect,
+    Suspend,
 }
 
 enum MqttSubscriptionState {
@@ -159,6 +161,9 @@ impl MqttIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled MQTT ingestor must have quiesce control");
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -183,6 +188,7 @@ impl MqttIngestor {
                 codec: codec.clone(),
                 branched_senders: branched_senders.clone(),
                 events: runtime.events.clone(),
+                quiesce: quiesce.clone(),
             };
             let task_topic = topic.clone();
             let task_subscribe_filter = subscribe_filter.clone();
@@ -233,6 +239,17 @@ impl MqttIngestor {
                         .ingestor_faults
                         .is_failed(&task_context.ingestor)
                     {
+                        continue;
+                    }
+                    if task_context.quiesce.should_suspend_intake() {
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                            _ = task_context.quiesce.wait_until_not_suspended() => {}
+                        }
                         continue;
                     }
                     let resolved_client =
@@ -321,6 +338,33 @@ impl MqttIngestor {
 
                     loop {
                         tokio::task::consume_budget().await;
+                        if let Some(payload) = task_context.quiesce.pop_buffered(instance_idx) {
+                            if let Err(error) = task_context
+                                .runtime
+                                .dispatch_raw_ingest_payload(RawIngestDispatch {
+                                    domain: &task_context.domain,
+                                    ingestor: &task_context.ingestor,
+                                    timestamp_source: task_context.timestamp_source.as_ref(),
+                                    output_routes: &task_context.output_routes,
+                                    filter_where: task_context.filter_where.as_ref(),
+                                    branched_senders: &task_context.branched_senders,
+                                    codec: task_context.codec.clone(),
+                                    payload: &payload,
+                                    collector: &mut ingest_collector,
+                                    flush: task_mode.is_ack(),
+                                })
+                                .await
+                            {
+                                let _ = task_context.events.send(RuntimeEvent::Error(format!(
+                                    "failed to dispatch buffered mqtt payload for ingestor '{}' \
+                                     in domain '{}': {}",
+                                    task_context.ingestor.as_str(),
+                                    task_context.domain.as_str(),
+                                    error
+                                )));
+                            }
+                            continue;
+                        }
                         let next_flush = if task_mode.is_ack() {
                             None
                         } else {
@@ -350,6 +394,23 @@ impl MqttIngestor {
                                     .await;
                                 break;
                             }
+                            MqttNextPublish::Suspend => {
+                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await;
+                                break;
+                            }
+                        };
+
+                        let Some(publish) = Self::apply_quiesce_to_publish(
+                            &task_context,
+                            &client_handle,
+                            instance_idx,
+                            task_mode.is_ack(),
+                            publish,
+                        )
+                        .await
+                        else {
+                            continue;
                         };
 
                         match &task_mode {
@@ -397,7 +458,16 @@ impl MqttIngestor {
                                         next = Self::next_publish(&mut eventloop, &mut shutdown_rx, &task_context, None) => {
                                             match next {
                                                 MqttNextPublish::Publish(publish) => {
-                                                    if let Some(entry) = Self::decode_publish(&task_context, *publish).await {
+                                                    let Some(publish) = Self::apply_quiesce_to_publish(
+                                                        &task_context,
+                                                        &client_handle,
+                                                        instance_idx,
+                                                        true,
+                                                        *publish,
+                                                    ).await else {
+                                                        continue;
+                                                    };
+                                                    if let Some(entry) = Self::decode_publish(&task_context, publish).await {
                                                         batch.push(entry);
                                                     } else {
                                                         if !backoff.wait(&mut shutdown_rx).await {
@@ -409,6 +479,7 @@ impl MqttIngestor {
                                                 MqttNextPublish::Flush => {}
                                                 MqttNextPublish::Shutdown => break 'outer,
                                                 MqttNextPublish::Reconnect => break,
+                                                MqttNextPublish::Suspend => break,
                                             }
                                         }
                                     }
@@ -428,6 +499,9 @@ impl MqttIngestor {
                                 }
                             }
                         }
+                    }
+                    if task_context.quiesce.should_suspend_intake() {
+                        continue;
                     }
                     if !backoff.wait(&mut shutdown_rx).await {
                         break;
@@ -581,6 +655,9 @@ impl MqttIngestor {
     ) -> MqttNextPublish {
         loop {
             tokio::task::consume_budget().await;
+            if context.quiesce.should_suspend_intake() {
+                return MqttNextPublish::Suspend;
+            }
             tokio::select! {
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
@@ -591,6 +668,11 @@ impl MqttIngestor {
                     flush_at.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400)),
                 ), if flush_at.is_some() => {
                     return MqttNextPublish::Flush;
+                }
+                _ = context.quiesce.wait_for_change() => {
+                    if context.quiesce.should_suspend_intake() {
+                        return MqttNextPublish::Suspend;
+                    }
                 }
                 event = eventloop.poll() => {
                     match event {
@@ -621,6 +703,40 @@ impl MqttIngestor {
                     }
                 }
             }
+        }
+    }
+
+    async fn apply_quiesce_to_publish(
+        context: &MqttTaskContext,
+        client: &AsyncClient,
+        instance_idx: u64,
+        manual_ack: bool,
+        publish: Publish,
+    ) -> Option<Publish> {
+        let payload = BufferedIngestPayload::new(
+            publish.payload.as_ref(),
+            IngestFilterMapMetadata::default(),
+        );
+        match context.quiesce.intake(instance_idx, payload, false) {
+            IngestorQuiesceIntake::Dispatch(_) => Some(publish),
+            IngestorQuiesceIntake::Buffered | IngestorQuiesceIntake::Dropped => {
+                if manual_ack && let Err(error) = client.ack(&publish).await {
+                    context.runtime.record_ingestor_transient_error(
+                        &context.domain,
+                        &context.ingestor,
+                        format!("mqtt quiesce acknowledgement failed: {error}"),
+                    );
+                    let _ = context.events.send(RuntimeEvent::Error(format!(
+                        "failed to acknowledge mqtt payload under quiesce for ingestor '{}' in \
+                         domain '{}': {}",
+                        context.ingestor.as_str(),
+                        context.domain.as_str(),
+                        error
+                    )));
+                }
+                None
+            }
+            IngestorQuiesceIntake::Rejected { .. } => None,
         }
     }
 

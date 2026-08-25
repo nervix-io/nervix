@@ -404,6 +404,7 @@ impl Runtime {
             .map(Arc::new);
         Ok(Self {
             ingestors: Arc::new(DashMap::default()),
+            ingestor_quiescence: Arc::new(DashMap::default()),
             ingestors_paused_for_memory_pressure: Arc::new(AtomicBool::new(false)),
             ingestor_transient_errors: Arc::new(DashMap::default()),
             ingestor_reconnect_backoffs: Arc::new(DashMap::default()),
@@ -438,6 +439,8 @@ impl Runtime {
             schedule_publication_faults: hooks.schedule_publication_faults,
             #[cfg(feature = "testing")]
             transaction_commit_pauses: hooks.transaction_commit_pauses,
+            #[cfg(feature = "testing")]
+            entity_gate_pauses: hooks.entity_gate_pauses,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
             remote_dispatcher: Arc::new(RwLock::new(None)),
@@ -583,7 +586,7 @@ impl Runtime {
             hold_key.clone(),
             EntityAlterHold {
                 gates,
-                resume_ingestors: false,
+                quiesced_ingestors: Vec::new(),
             },
         );
         let ingestors = affected_entities
@@ -597,23 +600,10 @@ impl Runtime {
             if !self.ingestors.contains_key(&key) {
                 continue;
             }
-            if let Some(mut hold) = self.entity_gate_holds.get_mut(&hold_key) {
-                // Record the recovery obligation before the cancellable stop. Starting an
-                // already-running ingestor is idempotently skipped, while failing to record this
-                // first could leave a successfully stopped ingestor without an owner on cancel.
-                hold.resume_ingestors = true;
-            }
-            if let Err(error) = self.stop_ingestor(domain, ingestor).await {
-                if let Err(resume_error) = self
-                    .release_entity_gate_operation(operation_id, domain)
-                    .await
-                {
-                    return Err(format!(
-                        "{error}; failed to resume ingestors after entity-pause engagement \
-                         failure: {resume_error}"
-                    ));
-                }
-                return Err(error.to_string());
+            if self.engage_ingestor_quiesce(domain, ingestor, IngestorQuiesceCause::EntityHold)
+                && let Some(mut hold) = self.entity_gate_holds.get_mut(&hold_key)
+            {
+                hold.quiesced_ingestors.push(ingestor.clone());
             }
         }
         self.force_flush_domain(domain);
@@ -626,20 +616,23 @@ impl Runtime {
         domain: &Domain,
     ) -> Result<(), String> {
         let hold_key = (domain.clone(), operation_id);
-        let Some(resume_ingestors) = self
+        let Some(quiesced_ingestors) = self
             .entity_gate_holds
             .get(&hold_key)
-            .map(|hold| hold.resume_ingestors)
+            .map(|hold| hold.quiesced_ingestors.clone())
         else {
             return Ok(());
         };
-        if resume_ingestors {
-            self.start_missing_domain_ingestors(domain)
-                .await
-                .map_err(|error| error.to_string())?;
+        for ingestor in &quiesced_ingestors {
+            tokio::task::consume_budget().await;
+            self.release_ingestor_quiesce(domain, ingestor, IngestorQuiesceCause::EntityHold);
+            if !self
+                .ingestors
+                .contains_key(&RuntimeKey::new(domain.clone(), ingestor.clone()))
+            {
+                self.remove_ingestor_quiescence(domain, ingestor);
+            }
         }
-        // Keep both the gate lease and the recovery obligation in the map through every
-        // cancellable restart await. A failed or canceled release can then be retried safely.
         if let Some((_, hold)) = self.entity_gate_holds.remove(&hold_key) {
             hold.gates.release();
         }
@@ -875,6 +868,11 @@ impl Runtime {
             .await;
     }
 
+    #[cfg(feature = "testing")]
+    pub async fn pause_entity_gate_if_armed(&self, domain: &Domain) {
+        self.entity_gate_pauses.pause_if_armed(domain).await;
+    }
+
     pub(in crate::runtime) fn record_ingestor_transient_error(
         &self,
         domain: &Domain,
@@ -927,6 +925,124 @@ impl Runtime {
             RuntimeKey::new(domain.clone(), ingestor.clone()),
             IngestorReadiness::new(expected_instances),
         );
+    }
+
+    pub(in crate::runtime) fn prepare_ingestor_quiescence(
+        &self,
+        domain: &Domain,
+        ingestor: &CreateIngestor,
+    ) -> Arc<IngestorQuiesceControl> {
+        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
+        if let Some(control) = self.ingestor_quiescence.get(&key) {
+            control.update_declared_source(&ingestor.source);
+            return control.clone();
+        }
+        let metric_labels = self.metrics.register_ingestor_quiesce(
+            domain,
+            &ingestor.name,
+            self.local_node_id.read().as_deref(),
+        );
+        let control = Arc::new(IngestorQuiesceControl::new(
+            ingestor.source.quiesce().clone(),
+            self.metrics.clone(),
+            metric_labels,
+        ));
+        if self.ingestors_paused_for_memory_pressure() {
+            control.engage(IngestorQuiesceCause::MemoryPressure);
+        }
+        self.ingestor_quiescence.insert(key, control.clone());
+        control
+    }
+
+    pub(in crate::runtime) fn ingestor_quiesce_control(
+        &self,
+        domain: &Domain,
+        ingestor: &Identifier,
+    ) -> Option<Arc<IngestorQuiesceControl>> {
+        self.ingestor_quiescence
+            .get(&RuntimeKey::new(domain.clone(), ingestor.clone()))
+            .map(|control| control.clone())
+    }
+
+    fn engage_ingestor_quiesce(
+        &self,
+        domain: &Domain,
+        ingestor: &Identifier,
+        cause: IngestorQuiesceCause,
+    ) -> bool {
+        let Some(control) = self.ingestor_quiesce_control(domain, ingestor) else {
+            return false;
+        };
+        control.engage(cause);
+        info!(
+            domain = domain.as_str(),
+            ingestor = ingestor.as_str(),
+            cause = cause.as_str(),
+            "ingestor entered quiesce"
+        );
+        true
+    }
+
+    fn release_ingestor_quiesce(
+        &self,
+        domain: &Domain,
+        ingestor: &Identifier,
+        cause: IngestorQuiesceCause,
+    ) -> bool {
+        let Some(control) = self.ingestor_quiesce_control(domain, ingestor) else {
+            return false;
+        };
+        control.release(cause);
+        info!(
+            domain = domain.as_str(),
+            ingestor = ingestor.as_str(),
+            cause = cause.as_str(),
+            "ingestor left quiesce"
+        );
+        true
+    }
+
+    fn engage_domain_ingestor_quiesce(&self, domain: &Domain) {
+        let ingestors = self
+            .ingestors
+            .iter()
+            .filter(|entry| &entry.key().domain == domain)
+            .map(|entry| entry.key().identifier.clone())
+            .collect::<Vec<_>>();
+        for ingestor in ingestors {
+            self.engage_ingestor_quiesce(domain, &ingestor, IngestorQuiesceCause::DomainPause);
+        }
+    }
+
+    fn release_domain_ingestor_quiesce(&self, domain: &Domain) {
+        let ingestors = self
+            .ingestor_quiescence
+            .iter()
+            .filter(|entry| &entry.key().domain == domain)
+            .map(|entry| entry.key().identifier.clone())
+            .collect::<Vec<_>>();
+        for ingestor in ingestors {
+            self.release_ingestor_quiesce(domain, &ingestor, IngestorQuiesceCause::DomainPause);
+        }
+    }
+
+    fn remove_ingestor_quiescence(&self, domain: &Domain, ingestor: &Identifier) {
+        let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+        if let Some((_, control)) = self.ingestor_quiescence.remove(&key) {
+            control.terminate();
+        }
+    }
+
+    fn clear_domain_ingestor_quiescence(&self, domain: &Domain) {
+        let ingestors = self
+            .ingestor_quiescence
+            .iter()
+            .filter(|entry| &entry.key().domain == domain)
+            .map(|entry| entry.key().identifier.clone())
+            .collect::<Vec<_>>();
+        for ingestor in ingestors {
+            self.remove_ingestor_quiescence(domain, &ingestor);
+        }
     }
 
     pub(in crate::runtime) fn mark_ingestor_instance_ready(
@@ -2515,7 +2631,13 @@ impl Runtime {
         let active_ingestors = self
             .ingestors
             .iter()
-            .filter(|entry| &entry.key().domain == domain)
+            .filter(|entry| {
+                &entry.key().domain == domain
+                    && self
+                        .ingestor_quiescence
+                        .get(entry.key())
+                        .is_none_or(|control| !control.is_quiesced())
+            })
             .count();
         let active_generators = self
             .generator_activity_by_domain
@@ -4878,7 +5000,7 @@ impl Runtime {
             drop(domain_state);
 
             if let nervix_models::DomainStatus::Paused = domain_status {
-                self.stop_domain_ingestors(&domain.domain).await;
+                self.engage_domain_ingestor_quiesce(&domain.domain);
             }
             let desired_passive_only =
                 matches!(domain_status, nervix_models::DomainStatus::Stopped);
@@ -4932,6 +5054,7 @@ impl Runtime {
                 if start_ingestors {
                     self.start_missing_domain_ingestors(&domain.domain).await?;
                 }
+                self.release_domain_ingestor_quiesce(&domain.domain);
             }
         }
 
@@ -6077,6 +6200,7 @@ impl Runtime {
         };
 
         let Some(schedule) = schedule else {
+            self.clear_domain_ingestor_quiescence(domain);
             self.compiled_domain_udfs.remove(domain);
             self.clear_state_schema_fingerprints(domain);
             self.clear_domain_graph_handle(domain).await;
@@ -6089,6 +6213,7 @@ impl Runtime {
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped))
         {
+            self.clear_domain_ingestor_quiescence(domain);
             self.purge_stopped_domain_runtime_state(domain)?;
             self.clear_expiring_stream_states_for_domain(domain);
             let execution = self
@@ -7111,15 +7236,6 @@ impl Runtime {
             return Ok(());
         }
 
-        if self.ingestors_paused_for_memory_pressure() {
-            info!(
-                domain = domain.as_str(),
-                ingestors = ingestor_specs.len(),
-                "deferring scheduled ingestor starts because memory pressure is active"
-            );
-            return Ok(());
-        }
-
         for (ingestor, kafka_offset_state) in ingestor_specs {
             let Some(source_model) =
                 Self::source_model_for_scheduled_ingestor(&schedule, &ingestor)
@@ -7358,9 +7474,43 @@ impl Runtime {
         path: &str,
         payload: &[u8],
         headers: IngestHeaders,
-    ) -> usize {
+    ) -> EndpointDispatchOutcome {
         self.dispatch_endpoint_payload(host, path, payload, headers, "websocket")
             .await
+    }
+
+    pub async fn websocket_endpoint_admission(
+        &self,
+        host: &str,
+        path: &str,
+    ) -> EndpointDispatchOutcome {
+        let route_key = HttpRouteKey {
+            host: normalize_http_host(host),
+            path: path.to_string(),
+        };
+        let bindings = self
+            .endpoint_bindings
+            .get(&route_key)
+            .map(|bindings| bindings.clone())
+            .unwrap_or_default();
+        let mut outcome = EndpointDispatchOutcome::default();
+        let mut retry_after = Vec::new();
+        for binding in &bindings {
+            match binding.quiesce.endpoint_admission() {
+                Ok(()) => outcome.accepted = outcome.accepted.saturating_add(1),
+                Err(duration) => {
+                    outcome.rejected = outcome.rejected.saturating_add(1);
+                    retry_after.push(duration);
+                }
+            }
+        }
+        if outcome.accepted == 0
+            && !retry_after.is_empty()
+            && retry_after.iter().all(Option::is_some)
+        {
+            outcome.retry_after = retry_after.into_iter().flatten().max();
+        }
+        outcome
     }
 
     pub async fn dispatch_http_payload(
@@ -7369,7 +7519,7 @@ impl Runtime {
         path: &str,
         payload: &[u8],
         headers: IngestHeaders,
-    ) -> usize {
+    ) -> EndpointDispatchOutcome {
         self.dispatch_endpoint_payload(host, path, payload, headers, "http")
             .await
     }
@@ -7381,7 +7531,7 @@ impl Runtime {
         payload: &[u8],
         headers: IngestHeaders,
         protocol: &str,
-    ) -> usize {
+    ) -> EndpointDispatchOutcome {
         let route_key = HttpRouteKey {
             host: normalize_http_host(host),
             path: path.to_string(),
@@ -7393,52 +7543,78 @@ impl Runtime {
                 .unwrap_or_default()
         };
 
+        let mut outcome = EndpointDispatchOutcome::default();
+        let mut retry_after = Vec::new();
         for binding in &bindings {
-            match decode_ingested_payload(binding.codec.clone(), payload).await {
-                Ok(record) => {
-                    let mut collector = IngestRouteCollector::default();
-                    let dispatch_result = self
-                        .dispatch_ingested_records(IngestGroupDispatch {
-                            collector: &mut collector,
-                            domain: &binding.domain,
-                            ingestor: &binding.ingestor,
-                            timestamp_source: binding.timestamp_source.as_ref(),
-                            output_routes: &binding.output_routes,
-                            filter_where: binding.filter_where.as_ref(),
-                            records: vec![record],
-                            metadata: vec![IngestFilterMapMetadata::from_headers(headers.clone())],
-                            ingested_at: current_timestamp(),
-                            acks: vec![AckSet::empty()],
-                        })
+            let payload = BufferedIngestPayload::new(
+                payload,
+                IngestFilterMapMetadata::from_headers(headers.clone()),
+            );
+            match binding.quiesce.intake(0, payload, true) {
+                IngestorQuiesceIntake::Dispatch(payload) => {
+                    outcome.accepted = outcome.accepted.saturating_add(1);
+                    self.dispatch_endpoint_binding(binding, payload, protocol)
                         .await;
-                    let flush_result = self
-                        .flush_ingest_collector(
-                            &binding.domain,
-                            &binding.ingestor,
-                            &binding.branched_senders,
-                            &mut collector,
-                        )
-                        .await;
-                    if let Err(error) = dispatch_result.and(flush_result) {
-                        let _ = self.events.send(RuntimeEvent::Error(format!(
-                            "failed to dispatch {protocol} message for ingestor '{}' in domain \
-                             '{}': {}",
-                            binding.ingestor.as_str(),
-                            binding.domain.as_str(),
-                            error
-                        )));
-                        warn!(
-                            domain = binding.domain.as_str(),
-                            ingestor = binding.ingestor.as_str(),
-                            error = %error,
-                            protocol,
-                            "failed to dispatch endpoint message"
-                        );
-                    }
                 }
-                Err(error) => {
+                IngestorQuiesceIntake::Buffered => {
+                    outcome.accepted = outcome.accepted.saturating_add(1);
+                }
+                IngestorQuiesceIntake::Dropped => {
+                    outcome.rejected = outcome.rejected.saturating_add(1);
+                    retry_after.push(None);
+                }
+                IngestorQuiesceIntake::Rejected {
+                    retry_after: binding_retry_after,
+                } => {
+                    outcome.rejected = outcome.rejected.saturating_add(1);
+                    retry_after.push(binding_retry_after);
+                }
+            }
+        }
+        if outcome.accepted == 0
+            && !retry_after.is_empty()
+            && retry_after.iter().all(Option::is_some)
+        {
+            outcome.retry_after = retry_after.into_iter().flatten().max();
+        }
+        outcome
+    }
+
+    pub(in crate::runtime) async fn dispatch_endpoint_binding(
+        &self,
+        binding: &EndpointIngestBinding,
+        payload: BufferedIngestPayload,
+        protocol: &str,
+    ) {
+        match decode_ingested_payload(binding.codec.clone(), payload.payload()).await {
+            Ok(record) => {
+                let mut collector = IngestRouteCollector::default();
+                let dispatch_result = self
+                    .dispatch_ingested_records(IngestGroupDispatch {
+                        collector: &mut collector,
+                        domain: &binding.domain,
+                        ingestor: &binding.ingestor,
+                        timestamp_source: binding.timestamp_source.as_ref(),
+                        output_routes: &binding.output_routes,
+                        filter_where: binding.filter_where.as_ref(),
+                        records: vec![record],
+                        metadata: vec![payload.metadata().clone()],
+                        ingested_at: current_timestamp(),
+                        acks: vec![AckSet::empty()],
+                    })
+                    .await;
+                let flush_result = self
+                    .flush_ingest_collector(
+                        &binding.domain,
+                        &binding.ingestor,
+                        &binding.branched_senders,
+                        &mut collector,
+                    )
+                    .await;
+                if let Err(error) = dispatch_result.and(flush_result) {
                     let _ = self.events.send(RuntimeEvent::Error(format!(
-                        "failed to decode {protocol} message for ingestor '{}' in domain '{}': {}",
+                        "failed to dispatch {protocol} message for ingestor '{}' in domain '{}': \
+                         {}",
                         binding.ingestor.as_str(),
                         binding.domain.as_str(),
                         error
@@ -7448,13 +7624,75 @@ impl Runtime {
                         ingestor = binding.ingestor.as_str(),
                         error = %error,
                         protocol,
-                        "failed to decode endpoint message"
+                        "failed to dispatch endpoint message"
                     );
                 }
             }
+            Err(error) => {
+                let _ = self.events.send(RuntimeEvent::Error(format!(
+                    "failed to decode {protocol} message for ingestor '{}' in domain '{}': {}",
+                    binding.ingestor.as_str(),
+                    binding.domain.as_str(),
+                    error
+                )));
+                warn!(
+                    domain = binding.domain.as_str(),
+                    ingestor = binding.ingestor.as_str(),
+                    error = %error,
+                    protocol,
+                    "failed to decode endpoint message"
+                );
+            }
         }
+    }
 
-        bindings.len()
+    pub(in crate::runtime) async fn dispatch_raw_ingest_payload(
+        &self,
+        dispatch: RawIngestDispatch<'_>,
+    ) -> Result<(), String> {
+        let RawIngestDispatch {
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            branched_senders,
+            codec,
+            payload,
+            collector,
+            flush,
+        } = dispatch;
+        let mut records = Vec::new();
+        let mut metadata = Vec::new();
+        for (source_payload, source_metadata) in payload.entries() {
+            tokio::task::consume_budget().await;
+            records.push(
+                decode_ingested_payload(codec.clone(), source_payload)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            );
+            metadata.push(source_metadata.clone());
+        }
+        self.dispatch_ingested_records(IngestGroupDispatch {
+            collector,
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            records,
+            metadata,
+            ingested_at: current_timestamp(),
+            acks: vec![AckSet::empty()],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        if flush {
+            self.flush_ingest_collector(domain, ingestor, branched_senders, collector)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn subscribe_stream(
@@ -7778,6 +8016,15 @@ impl Runtime {
         ingestor: &Identifier,
     ) -> Result<IngestorDescribe, String> {
         let memory_backpressure_paused = self.ingestors_paused_for_memory_pressure();
+        let quiesce_control = self.ingestor_quiesce_control(domain, ingestor);
+        let quiesce_state = quiesce_control
+            .as_ref()
+            .and_then(|control| control.cause())
+            .map(|cause| cause.as_str().to_string());
+        let quiesce_counters = quiesce_control
+            .as_ref()
+            .map(|control| control.counters())
+            .unwrap_or_default();
         if !self.executions.contains_key(domain) {
             if let Some(error) = self.domain_instantiation_errors.get(domain) {
                 return Err(error.value().clone());
@@ -7785,6 +8032,8 @@ impl Runtime {
             return Ok(IngestorDescribe {
                 running: false,
                 ready: false,
+                quiesce_state: quiesce_state.clone(),
+                quiesce_counters,
                 memory_backpressure_paused,
                 transient_error: self.ingestor_transient_error(domain, ingestor),
                 reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
@@ -7798,6 +8047,8 @@ impl Runtime {
             return Ok(IngestorDescribe {
                 running: false,
                 ready: false,
+                quiesce_state: quiesce_state.clone(),
+                quiesce_counters,
                 memory_backpressure_paused,
                 transient_error: self.ingestor_transient_error(domain, ingestor).or_else(|| {
                     self.domain_instantiation_errors
@@ -7813,6 +8064,8 @@ impl Runtime {
             return Ok(IngestorDescribe {
                 running: true,
                 ready: self.ingestor_ready(domain, ingestor),
+                quiesce_state: quiesce_state.clone(),
+                quiesce_counters,
                 memory_backpressure_paused,
                 transient_error: self.ingestor_transient_error(domain, ingestor),
                 reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
@@ -7853,6 +8106,8 @@ impl Runtime {
         Ok(IngestorDescribe {
             running: true,
             ready: self.ingestor_ready(domain, ingestor),
+            quiesce_state,
+            quiesce_counters,
             memory_backpressure_paused,
             transient_error: self.ingestor_transient_error(domain, ingestor),
             reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
@@ -8531,15 +8786,6 @@ impl Runtime {
         self.rebuild_domain_execution(&domain, graph).await?;
 
         if starts_are_scheduled_by_graph {
-            return Ok(());
-        }
-
-        if self.ingestors_paused_for_memory_pressure() {
-            info!(
-                domain = domain.as_str(),
-                ingestors = starts.len(),
-                "deferring ingestor starts because memory pressure is active"
-            );
             return Ok(());
         }
 
@@ -11376,42 +11622,48 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
 
-        let mut stopped = 0;
+        let mut quiesced = 0;
         for key in ingestors {
-            match self.stop_ingestor(&key.domain, &key.identifier).await {
-                Ok(()) => {
-                    stopped += 1;
-                }
-                Err(error) => {
-                    warn!(
-                        domain = key.domain.as_str(),
-                        ingestor = key.identifier.as_str(),
-                        error = %error,
-                        "failed to pause ingestor during memory pressure"
-                    );
-                }
+            tokio::task::consume_budget().await;
+            if self.engage_ingestor_quiesce(
+                &key.domain,
+                &key.identifier,
+                IngestorQuiesceCause::MemoryPressure,
+            ) {
+                quiesced += 1;
             }
         }
-        stopped
+        quiesced
     }
 
     pub async fn resume_one_ingestor_after_memory_pressure(&self) -> Result<bool, RuntimeError> {
-        let Some(spec) = self.next_scheduled_ingestor_start_spec(None) else {
+        let mut keys = self
+            .ingestor_quiescence
+            .iter()
+            .filter_map(|entry| {
+                (entry.value().cause() == Some(IngestorQuiesceCause::MemoryPressure))
+                    .then(|| entry.key().clone())
+            })
+            .collect::<Vec<_>>();
+        keys.sort_by(|left, right| {
+            left.domain
+                .as_str()
+                .cmp(right.domain.as_str())
+                .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
+        });
+        let Some(key) = keys.first() else {
             self.ingestors_paused_for_memory_pressure
                 .store(false, Ordering::SeqCst);
             return Ok(false);
         };
-        let ingestor = spec.ingestor.name.clone();
-        self.start_scheduled_ingestor(
-            &spec.domain,
-            spec.source_model,
-            spec.ingestor,
-            spec.kafka_offset_state,
-        )
-        .await?;
+        self.release_ingestor_quiesce(
+            &key.domain,
+            &key.identifier,
+            IngestorQuiesceCause::MemoryPressure,
+        );
         info!(
-            domain = spec.domain.as_str(),
-            ingestor = ingestor.as_str(),
+            domain = key.domain.as_str(),
+            ingestor = key.identifier.as_str(),
             "resumed ingestor after memory pressure"
         );
         Ok(true)
@@ -11423,9 +11675,6 @@ impl Runtime {
     }
 
     async fn start_missing_domain_ingestors(&self, domain: &Domain) -> Result<(), RuntimeError> {
-        if self.ingestors_paused_for_memory_pressure() {
-            return Ok(());
-        }
         while let Some(spec) = self.next_scheduled_ingestor_start_spec(Some(domain)) {
             tokio::task::consume_budget().await;
             self.start_scheduled_ingestor(
@@ -11441,9 +11690,6 @@ impl Runtime {
 
     pub async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
         let _lock = self.schedule_apply_lock.lock().await;
-        if self.ingestors_paused_for_memory_pressure() {
-            return Ok(());
-        }
         while let Some(spec) = self.next_scheduled_ingestor_start_spec(None) {
             tokio::task::consume_budget().await;
             self.start_scheduled_ingestor(
@@ -11773,10 +12019,11 @@ impl Runtime {
         for domain in &domains {
             self.stop_domain_ingestors(domain).await;
         }
-        for domain in domains {
-            if let Some((_, execution)) = self.executions.remove(&domain) {
-                self.stop_domain_execution(&domain, execution).await;
+        for domain in &domains {
+            if let Some((_, execution)) = self.executions.remove(domain) {
+                self.stop_domain_execution(domain, execution).await;
             }
+            self.clear_domain_ingestor_quiescence(domain);
         }
         self.endpoint_bindings.clear();
         self.compiled_domain_udfs.clear();
@@ -12077,7 +12324,20 @@ impl Runtime {
             IngestorRuntime::Endpoint {
                 route_keys,
                 branched,
+                shutdown,
+                tasks,
             } => {
+                if shutdown.send(true).is_err() {
+                    warn!(
+                        domain = domain.as_str(),
+                        ingestor = ingestor.as_str(),
+                        "endpoint ingestor shutdown signal had no receiver"
+                    );
+                }
+                for task in tasks {
+                    Self::await_shutdown_task(task, domain, Some(ingestor), "endpoint ingestor")
+                        .await;
+                }
                 for route_key in route_keys {
                     let remove_route =
                         if let Some(mut bindings) = self.endpoint_bindings.get_mut(&route_key) {
@@ -12097,6 +12357,12 @@ impl Runtime {
         }
 
         self.clear_ingestor_readiness(domain, ingestor);
+        if self
+            .ingestor_quiesce_control(domain, ingestor)
+            .is_some_and(|control| !control.is_quiesced())
+        {
+            self.remove_ingestor_quiescence(domain, ingestor);
+        }
         Ok(())
     }
 

@@ -78,6 +78,9 @@ impl PulsarIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled Pulsar ingestor must have quiesce control");
         let resolved_client = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
             .map_err(|reason| RuntimeError::StartIngestor {
@@ -137,6 +140,9 @@ impl PulsarIngestor {
             });
             let task_batch_timeout = batch_timeout;
             let task_client_mounts = resolved_client.mounts.clone();
+            let task_quiesce = quiesce.clone();
+            let task_pulsar = pulsar.clone();
+            let task_consumer_name = consumer_name.clone();
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
 
@@ -177,10 +183,67 @@ impl PulsarIngestor {
                     if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
                         continue;
                     }
+                    if task_quiesce.should_suspend_intake() {
+                        let _ = Self::flush_no_ack_group(
+                            &task_runtime,
+                            &task_domain,
+                            &task_ingestor,
+                            &task_branched_senders,
+                            &mut consumer,
+                            &mut ingest_collector,
+                            &mut no_ack_messages,
+                        )
+                        .await;
+                        if let Err(error) = consumer.close().await {
+                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                "failed to close pulsar consumer while quiescing ingestor '{}' in \
+                                 domain '{}': {}",
+                                task_ingestor.as_str(),
+                                task_domain.as_str(),
+                                error
+                            )));
+                        }
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                            _ = task_quiesce.wait_until_not_suspended() => {}
+                        }
+                        match task_pulsar
+                            .consumer()
+                            .with_topic(task_topic.as_str())
+                            .with_consumer_name(task_consumer_name.clone())
+                            .with_subscription(task_subscription.as_str())
+                            .with_subscription_type(PulsarSubType::Shared)
+                            .with_options(
+                                PulsarConsumerOptions::default()
+                                    .with_initial_position(PulsarInitialPosition::Earliest),
+                            )
+                            .build()
+                            .await
+                        {
+                            Ok(resumed) => consumer = resumed,
+                            Err(error) => {
+                                task_runtime.record_ingestor_transient_error(
+                                    &task_domain,
+                                    &task_ingestor,
+                                    format!("pulsar resume failed: {error}"),
+                                );
+                                sleep(retry_delay).await;
+                                retry_delay = next_retry_delay(retry_delay, retry_policy);
+                            }
+                        }
+                        continue;
+                    }
                     let next_flush = ingest_collector.next_flush();
                     let flush_at =
                         next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
                     tokio::select! {
+                        _ = task_quiesce.wait_for_change() => {
+                            continue 'ingest;
+                        }
                         changed = shutdown_rx.changed() => {
                             let _ = Self::flush_no_ack_group(
                                 &task_runtime,
@@ -512,6 +575,9 @@ impl PulsarIngestor {
                                             while batch.len() < ack_parallel_limit {
                                                 tokio::task::consume_budget().await;
                                                 tokio::select! {
+                                                    _ = task_quiesce.wait_for_change() => {
+                                                        continue 'ingest;
+                                                    }
                                                     changed = shutdown_rx.changed() => {
                                                         if changed.is_err() || *shutdown_rx.borrow() {
                                                             break 'ingest;

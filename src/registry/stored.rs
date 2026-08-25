@@ -16,17 +16,17 @@ use nervix_models::{
     EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog,
     IcebergStorageBackend, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestSource, IngestTimestampSource, InputCollectPolicy, JsonType,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy,
-    Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
-    NameError, NatsIngestMode, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope,
-    OtelSignal, OutputFlushPolicy, ParseAsType, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
-    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, SchemaField,
-    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
-    VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness,
-    ZeroMqIngestMode,
+    InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode,
+    KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OutputFlushPolicy, ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
+    RedisPubSubIngestMode, RelayBranching, RetryPolicy, SchemaField, SignalingProtobufConfig,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    SqsFifoGroup, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource,
+    WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -876,6 +876,7 @@ pub enum StoredIngestSource {
     Http {
         client: String,
         every: String,
+        quiesce: StoredIngestQuiesceMode,
     },
     Kafka {
         client: String,
@@ -883,6 +884,7 @@ pub enum StoredIngestSource {
         offset_mode: StoredKafkaOffsetMode,
         instances: u64,
         mode: StoredKafkaIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
     Pulsar {
         client: String,
@@ -890,23 +892,27 @@ pub enum StoredIngestSource {
         subscription: String,
         instances: u64,
         mode: StoredKafkaIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
     RabbitMq {
         client: String,
         queue: String,
         instances: u64,
         mode: StoredRabbitMqIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
     RedisPubSub {
         client: String,
         channel: String,
         mode: StoredRedisPubSubIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
     Mqtt {
         client: String,
         topic: String,
         instances: u64,
         mode: StoredMqttIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
     Nats {
         client: String,
@@ -914,30 +920,58 @@ pub enum StoredIngestSource {
         queue_group: String,
         instances: u64,
         mode: StoredNatsIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
     Prometheus {
         client: String,
         query: String,
         every: String,
+        quiesce: StoredIngestQuiesceMode,
     },
     ZeroMq {
         client: String,
         mode: StoredZeroMqIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
     Sqs {
         client: String,
         queue: String,
         instances: u64,
         mode: StoredSqsIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
     Endpoint {
         endpoint: String,
         mode: StoredEndpointIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
     Websockets {
         client: String,
         mode: StoredWebsocketsIngestMode,
+        quiesce: StoredIngestQuiesceMode,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredIngestQuiesceMode {
+    Suspend,
+    Buffer {
+        max_size: String,
+        overflow: StoredIngestQuiesceOverflow,
+    },
+    Drop,
+    Reject {
+        retry_after: String,
+    },
+    EndpointBuffer {
+        max_size: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredIngestQuiesceOverflow {
+    DropOldest,
+    DropNewest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -3686,9 +3720,14 @@ impl From<StoredInferencerTensorSchema> for InferencerTensorSchema {
 impl From<IngestSource> for StoredIngestSource {
     fn from(value: IngestSource) -> Self {
         match value {
-            IngestSource::Http { client, every } => Self::Http {
+            IngestSource::Http {
+                client,
+                every,
+                quiesce,
+            } => Self::Http {
                 client: client.to_string(),
                 every,
+                quiesce: quiesce.into(),
             },
             IngestSource::Kafka {
                 client,
@@ -3696,12 +3735,14 @@ impl From<IngestSource> for StoredIngestSource {
                 offset_mode,
                 instances,
                 mode,
+                quiesce,
             } => Self::Kafka {
                 client: client.to_string(),
                 topic: topic.to_string(),
                 offset_mode: offset_mode.into(),
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
             IngestSource::Pulsar {
                 client,
@@ -3709,43 +3750,51 @@ impl From<IngestSource> for StoredIngestSource {
                 subscription,
                 instances,
                 mode,
+                quiesce,
             } => Self::Pulsar {
                 client: client.to_string(),
                 topic: topic.to_string(),
                 subscription: subscription.to_string(),
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
             IngestSource::RabbitMq {
                 client,
                 queue,
                 instances,
                 mode,
+                quiesce,
             } => Self::RabbitMq {
                 client: client.to_string(),
                 queue: queue.to_string(),
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
             IngestSource::RedisPubSub {
                 client,
                 channel,
                 mode,
+                quiesce,
             } => Self::RedisPubSub {
                 client: client.to_string(),
                 channel: channel.to_string(),
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
             IngestSource::Mqtt {
                 client,
                 topic,
                 instances,
                 mode,
+                quiesce,
             } => Self::Mqtt {
                 client: client.to_string(),
                 topic,
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
             IngestSource::Nats {
                 client,
@@ -3753,44 +3802,65 @@ impl From<IngestSource> for StoredIngestSource {
                 queue_group,
                 instances,
                 mode,
+                quiesce,
             } => Self::Nats {
                 client: client.to_string(),
                 subject: subject.to_string(),
                 queue_group: queue_group.to_string(),
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
             IngestSource::Prometheus {
                 client,
                 query,
                 every,
+                quiesce,
             } => Self::Prometheus {
                 client: client.to_string(),
                 query,
                 every,
+                quiesce: quiesce.into(),
             },
-            IngestSource::ZeroMq { client, mode } => Self::ZeroMq {
+            IngestSource::ZeroMq {
+                client,
+                mode,
+                quiesce,
+            } => Self::ZeroMq {
                 client: client.to_string(),
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
             IngestSource::Sqs {
                 client,
                 queue,
                 instances,
                 mode,
+                quiesce,
             } => Self::Sqs {
                 client: client.to_string(),
                 queue: queue.to_string(),
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
-            IngestSource::Endpoint { endpoint, mode } => Self::Endpoint {
+            IngestSource::Endpoint {
+                endpoint,
+                mode,
+                quiesce,
+            } => Self::Endpoint {
                 endpoint: endpoint.to_string(),
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
-            IngestSource::Websockets { client, mode } => Self::Websockets {
+            IngestSource::Websockets {
+                client,
+                mode,
+                quiesce,
+            } => Self::Websockets {
                 client: client.to_string(),
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             },
         }
     }
@@ -3801,9 +3871,14 @@ impl TryFrom<StoredIngestSource> for IngestSource {
 
     fn try_from(value: StoredIngestSource) -> Result<Self, Self::Error> {
         match value {
-            StoredIngestSource::Http { client, every } => Ok(Self::Http {
+            StoredIngestSource::Http {
+                client,
+                every,
+                quiesce,
+            } => Ok(Self::Http {
                 client: Identifier::parse(&client)?,
                 every,
+                quiesce: quiesce.into(),
             }),
             StoredIngestSource::Kafka {
                 client,
@@ -3811,12 +3886,14 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 offset_mode,
                 instances,
                 mode,
+                quiesce,
             } => Ok(Self::Kafka {
                 client: Identifier::parse(&client)?,
                 topic: Identifier::parse(&topic)?,
                 offset_mode: offset_mode.try_into()?,
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             }),
             StoredIngestSource::Pulsar {
                 client,
@@ -3824,43 +3901,51 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 subscription,
                 instances,
                 mode,
+                quiesce,
             } => Ok(Self::Pulsar {
                 client: Identifier::parse(&client)?,
                 topic: Identifier::parse(&topic)?,
                 subscription: Identifier::parse(&subscription)?,
                 instances,
                 mode: PulsarIngestMode::from(mode),
+                quiesce: quiesce.into(),
             }),
             StoredIngestSource::RabbitMq {
                 client,
                 queue,
                 instances,
                 mode,
+                quiesce,
             } => Ok(Self::RabbitMq {
                 client: Identifier::parse(&client)?,
                 queue: Identifier::parse(&queue)?,
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             }),
             StoredIngestSource::RedisPubSub {
                 client,
                 channel,
                 mode,
+                quiesce,
             } => Ok(Self::RedisPubSub {
                 client: Identifier::parse(&client)?,
                 channel: Identifier::parse(&channel)?,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             }),
             StoredIngestSource::Mqtt {
                 client,
                 topic,
                 instances,
                 mode,
+                quiesce,
             } => Ok(Self::Mqtt {
                 client: Identifier::parse(&client)?,
                 topic,
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             }),
             StoredIngestSource::Nats {
                 client,
@@ -3868,45 +3953,104 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 queue_group,
                 instances,
                 mode,
+                quiesce,
             } => Ok(Self::Nats {
                 client: Identifier::parse(&client)?,
                 subject: Identifier::parse(&subject)?,
                 queue_group: Identifier::parse(&queue_group)?,
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             }),
             StoredIngestSource::Prometheus {
                 client,
                 query,
                 every,
+                quiesce,
             } => Ok(Self::Prometheus {
                 client: Identifier::parse(&client)?,
                 query,
                 every,
+                quiesce: quiesce.into(),
             }),
-            StoredIngestSource::ZeroMq { client, mode } => Ok(Self::ZeroMq {
+            StoredIngestSource::ZeroMq {
+                client,
+                mode,
+                quiesce,
+            } => Ok(Self::ZeroMq {
                 client: Identifier::parse(&client)?,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             }),
             StoredIngestSource::Sqs {
                 client,
                 queue,
                 instances,
                 mode,
+                quiesce,
             } => Ok(Self::Sqs {
                 client: Identifier::parse(&client)?,
                 queue: Identifier::parse(&queue)?,
                 instances,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             }),
-            StoredIngestSource::Endpoint { endpoint, mode } => Ok(Self::Endpoint {
+            StoredIngestSource::Endpoint {
+                endpoint,
+                mode,
+                quiesce,
+            } => Ok(Self::Endpoint {
                 endpoint: Identifier::parse(&endpoint)?,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             }),
-            StoredIngestSource::Websockets { client, mode } => Ok(Self::Websockets {
+            StoredIngestSource::Websockets {
+                client,
+                mode,
+                quiesce,
+            } => Ok(Self::Websockets {
                 client: Identifier::parse(&client)?,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
             }),
+        }
+    }
+}
+
+impl From<IngestQuiesceMode> for StoredIngestQuiesceMode {
+    fn from(value: IngestQuiesceMode) -> Self {
+        match value {
+            IngestQuiesceMode::Suspend => Self::Suspend,
+            IngestQuiesceMode::Buffer { max_size, overflow } => Self::Buffer {
+                max_size,
+                overflow: match overflow {
+                    IngestQuiesceOverflow::DropOldest => StoredIngestQuiesceOverflow::DropOldest,
+                    IngestQuiesceOverflow::DropNewest => StoredIngestQuiesceOverflow::DropNewest,
+                },
+            },
+            IngestQuiesceMode::Drop => Self::Drop,
+            IngestQuiesceMode::Reject { retry_after } => Self::Reject { retry_after },
+            IngestQuiesceMode::EndpointBuffer { max_size } => Self::EndpointBuffer { max_size },
+        }
+    }
+}
+
+impl From<StoredIngestQuiesceMode> for IngestQuiesceMode {
+    fn from(value: StoredIngestQuiesceMode) -> Self {
+        match value {
+            StoredIngestQuiesceMode::Suspend => Self::Suspend,
+            StoredIngestQuiesceMode::Buffer { max_size, overflow } => Self::Buffer {
+                max_size,
+                overflow: match overflow {
+                    StoredIngestQuiesceOverflow::DropOldest => IngestQuiesceOverflow::DropOldest,
+                    StoredIngestQuiesceOverflow::DropNewest => IngestQuiesceOverflow::DropNewest,
+                },
+            },
+            StoredIngestQuiesceMode::Drop => Self::Drop,
+            StoredIngestQuiesceMode::Reject { retry_after } => Self::Reject { retry_after },
+            StoredIngestQuiesceMode::EndpointBuffer { max_size } => {
+                Self::EndpointBuffer { max_size }
+            }
         }
     }
 }
@@ -5470,6 +5614,7 @@ mod tests {
                 source: IngestSource::Http {
                     client: identifier("http_client"),
                     every: "5s".to_string(),
+                    quiesce: IngestQuiesceMode::Suspend,
                 },
                 general_error_policy: GeneralErrorPolicy::Log,
 
