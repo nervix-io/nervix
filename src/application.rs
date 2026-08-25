@@ -21014,7 +21014,6 @@ mod tests {
                     &tx,
                     &mut subscriptions,
                 )
-                
                 .await;
             assert!(
                 result.success,
