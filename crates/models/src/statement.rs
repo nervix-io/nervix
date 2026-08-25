@@ -696,6 +696,7 @@ pub enum Model {
     ClientPulsar(CreateClientPulsar),
     ClientHttp(CreateClientHttp),
     ClientSentry(CreateClientSentry),
+    ClientOtel(CreateClientOtel),
     ClientPrometheus(CreateClientPrometheus),
     ClientMqtt(CreateClientMqtt),
     ClientNats(CreateClientNats),
@@ -746,6 +747,7 @@ impl Model {
             | Self::ClientPulsar(_)
             | Self::ClientHttp(_)
             | Self::ClientSentry(_)
+            | Self::ClientOtel(_)
             | Self::ClientPrometheus(_)
             | Self::ClientMqtt(_)
             | Self::ClientNats(_)
@@ -796,6 +798,7 @@ impl Model {
             Self::ClientPulsar(v) => &v.name,
             Self::ClientHttp(v) => &v.name,
             Self::ClientSentry(v) => &v.name,
+            Self::ClientOtel(v) => &v.name,
             Self::ClientPrometheus(v) => &v.name,
             Self::ClientMqtt(v) => &v.name,
             Self::ClientNats(v) => &v.name,
@@ -841,6 +844,7 @@ impl Model {
             Self::ClientPulsar(_) => Some("PULSAR"),
             Self::ClientHttp(_) => Some("HTTP"),
             Self::ClientSentry(_) => Some("SENTRY"),
+            Self::ClientOtel(_) => Some("OTEL"),
             Self::ClientPrometheus(_) => Some("PROMETHEUS"),
             Self::ClientMqtt(_) => Some("MQTT"),
             Self::ClientNats(_) => Some("NATS"),
@@ -1436,6 +1440,14 @@ pub enum EmitSink {
     Sentry {
         client: Identifier,
     },
+    Otel {
+        client: Identifier,
+        signal: OtelSignal,
+        values: Vec<OtelValueMapping>,
+        attributes: Vec<OtelValueMapping>,
+        resource: Vec<OtelValueMapping>,
+        scope: Option<OtelScope>,
+    },
     #[strum(serialize = "CLICKHOUSE")]
     ClickHouse {
         client: Identifier,
@@ -1500,6 +1512,7 @@ impl EmitSink {
             | Self::ZeroMq { client }
             | Self::Sqs { client, .. }
             | Self::Sentry { client }
+            | Self::Otel { client, .. }
             | Self::ClickHouse { client, .. }
             | Self::Postgres { client, .. }
             | Self::MySql { client, .. }
@@ -1534,6 +1547,7 @@ impl EmitSink {
                 EmitterPublishingMode::SqsSingle { .. } | EmitterPublishingMode::SqsBatch { .. }
             ),
             Self::Sentry { .. }
+            | Self::Otel { .. }
             | Self::ClickHouse { .. }
             | Self::Postgres { .. }
             | Self::MySql { .. }
@@ -1555,6 +1569,7 @@ impl EmitSink {
             | Self::ZeroMq { client }
             | Self::Sqs { client, .. }
             | Self::Sentry { client }
+            | Self::Otel { client, .. }
             | Self::ClickHouse { client, .. }
             | Self::Postgres { client, .. }
             | Self::MySql { client, .. }
@@ -1587,7 +1602,8 @@ impl EmitSink {
             | Self::Nats { .. }
             | Self::ZeroMq { .. }
             | Self::Sqs { .. }
-            | Self::Sentry { .. } => {}
+            | Self::Sentry { .. }
+            | Self::Otel { .. } => {}
         }
     }
 
@@ -1614,6 +1630,7 @@ impl EmitSink {
             Self::ZeroMq { .. } => "ZEROMQ",
             Self::Sqs { .. } => "SQS",
             Self::Sentry { .. } => "SENTRY",
+            Self::Otel { .. } => "OTEL",
             Self::ClickHouse { .. } => "CLICKHOUSE",
             Self::Postgres { .. } => "POSTGRES",
             Self::MySql { .. } => "MYSQL",
@@ -1645,6 +1662,7 @@ impl EmitSink {
                 | (Self::ZeroMq { .. }, Model::ClientZeroMq(_))
                 | (Self::Sqs { .. }, Model::ClientSqs(_))
                 | (Self::Sentry { .. }, Model::ClientSentry(_))
+                | (Self::Otel { .. }, Model::ClientOtel(_))
                 | (Self::ClickHouse { .. }, Model::ClientClickHouse(_))
                 | (Self::Postgres { .. }, Model::ClientPostgres(_))
                 | (Self::MySql { .. }, Model::ClientMySql(_))
@@ -1684,7 +1702,8 @@ impl EmitSink {
             | Self::ZeroMq { .. }
             | Self::Sqs { .. }
             | Self::Sentry { .. } => true,
-            Self::ClickHouse { .. }
+            Self::Otel { .. }
+            | Self::ClickHouse { .. }
             | Self::Postgres { .. }
             | Self::MySql { .. }
             | Self::MongoDb { .. }
@@ -1711,7 +1730,8 @@ impl EmitSink {
             | Self::Nats { .. }
             | Self::ZeroMq { .. }
             | Self::Sqs { .. }
-            | Self::Sentry { .. } => None,
+            | Self::Sentry { .. }
+            | Self::Otel { .. } => None,
         }
     }
 
@@ -1731,6 +1751,7 @@ impl EmitSink {
             | Self::ZeroMq { .. }
             | Self::Sqs { .. }
             | Self::Sentry { .. }
+            | Self::Otel { .. }
             | Self::ClickHouse { .. }
             | Self::Postgres { .. }
             | Self::MySql { .. }
@@ -1743,6 +1764,48 @@ impl EmitSink {
 pub struct ClickHouseValueMapping {
     pub column: String,
     pub expression: crate::Expression,
+}
+
+pub type OtelValueMapping = ClickHouseValueMapping;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OtelSignal {
+    Logs,
+    Traces,
+    Metric(OtelMetric),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OtelMetric {
+    pub name: String,
+    pub unit: String,
+    pub description: Option<String>,
+    pub kind: OtelMetricKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OtelMetricKind {
+    Gauge,
+    Sum {
+        monotonic: bool,
+        temporality: OtelAggregationTemporality,
+    },
+    Histogram {
+        temporality: OtelAggregationTemporality,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum OtelAggregationTemporality {
+    Delta,
+    Cumulative,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OtelScope {
+    pub name: String,
+    pub version: Option<String>,
 }
 
 pub type PostgresValueMapping = ClickHouseValueMapping;
@@ -1811,6 +1874,13 @@ pub struct CreateClientHttp {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateClientSentry {
+    pub name: Identifier,
+    pub mount: Option<Identifier>,
+    pub config: Vec<ClientConfigEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateClientOtel {
     pub name: Identifier,
     pub mount: Option<Identifier>,
     pub config: Vec<ClientConfigEntry>,
@@ -1939,6 +2009,7 @@ pub type KafkaConfigEntry = ClientConfigEntry;
 pub type PulsarConfigEntry = ClientConfigEntry;
 pub type HttpConfigEntry = ClientConfigEntry;
 pub type SentryConfigEntry = ClientConfigEntry;
+pub type OtelConfigEntry = ClientConfigEntry;
 pub type RabbitMqConfigEntry = ClientConfigEntry;
 pub type RedisConfigEntry = ClientConfigEntry;
 pub type MqttConfigEntry = ClientConfigEntry;

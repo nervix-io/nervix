@@ -104,9 +104,9 @@ The shared variables are:
   such as an HTTP rate-limit interval, can extend an individual delay. Retries continue with
   backpressure until the external system recovers or an operator repairs its provisioning.
 
-Request/response sinks—SQS, Sentry, the databases, and Iceberg—do not take `ACK TIMEOUT`; their
-client request timeout bounds the response. SQS, Sentry, and ClickHouse clients expose that bound
-as the optional `timeout_ms` CONFIG key. For every sink, Nervix accounts for records individually
+Request/response sinks—SQS, Sentry, OTEL, the databases, and Iceberg—do not take `ACK TIMEOUT`;
+their client request timeout bounds the response. SQS, Sentry, OTEL, and ClickHouse clients expose
+that bound as the optional `timeout_ms` CONFIG key. For every sink, Nervix accounts for records individually
 wherever the transport exposes individual results: delivered records acknowledge upstream,
 definitively invalid records follow `ON MESSAGE ERROR`, and a retry resends only records that are
 neither delivered nor rejected. An ambiguous or infrastructure-wide failure is never used to
@@ -123,6 +123,7 @@ discard a record.
 | ZeroMQ | `NO_ACK` | Socket acceptance |
 | SQS | `SINGLE`; `BATCH` | Successful per-record or per-entry service response |
 | Sentry | `ACK` | Successful one-event envelope response |
+| OTEL | `ACK` | Successful OTLP Export response; `partial_success` is acknowledged with a warning |
 | ClickHouse, Postgres, MySQL, MongoDB | `ACK` | Successful insert/write result |
 | Iceberg | `ACK` | Successful catalog commit |
 
@@ -210,7 +211,7 @@ explicit `INHERIT field LEAK SENSITIVE`, even when the codec target field is als
 
 ## Direct-emitter values
 
-Database and object-store direct emitters construct external name-keyed mappings:
+Database, object-store, and OTEL direct emitters construct external name-keyed mappings:
 
 ```nspl,ignore
 VALUES {
@@ -236,7 +237,8 @@ partial-envelope publication.
 
 Header output is supported only on codec emitters for Kafka, NATS, Pulsar, RabbitMQ, and SQS.
 Kafka and NATS preserve ordered repeated values. Pulsar, RabbitMQ, and SQS use last-write-wins
-behavior. Redis, MQTT, ZeroMQ, Sentry, direct database sinks, and Iceberg reject header writes.
+behavior. Redis, MQTT, ZeroMQ, Sentry, OTEL, direct database sinks, and Iceberg reject header
+writes.
 
 Emitter expressions use the same typed surface as other runtime nodes:
 
@@ -285,6 +287,8 @@ Transport-specific expectations:
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
 - `SENTRY`: the referenced `TYPE SENTRY` client carries an `https://...` `dsn`; Nervix honors the
   client's `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
+- `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
+  `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf.
 - `CLICKHOUSE`: use an `https://...` `addr`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
 - `POSTGRES`: include `sslmode=require` in `addr`; Nervix honors `tls_ca_file`.
 - `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
@@ -473,6 +477,125 @@ Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters re
 USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
 fields. The optional Sentry client keys `timeout_ms`, `tls_ca_file`, `tls_cert_file`, and
 `tls_key_file` have their usual meanings.
+
+### OTEL
+
+OTEL emission is a codec-free direct sink for OTLP logs, traces, and metric data points. It uses a
+`TYPE OTEL` client and supports both OTLP/gRPC and OTLP/HTTP-protobuf. The protocol is always
+explicit; there is no hidden default:
+
+```nspl
+CREATE CLIENT otel_main
+  TYPE OTEL
+  CONFIG {
+    'endpoint' = 'http://127.0.0.1:4317',
+    'protocol' = 'grpc',
+    'headers' = 'authorization=Bearer <token>',
+    'compression' = 'gzip',
+    'timeout_ms' = 5000
+  };
+```
+
+`endpoint` and `protocol` are required. `protocol` is exactly `grpc` or `http/protobuf`.
+`headers` is the OTLP comma-separated `key=value` form, `compression` accepts only `gzip`, and an
+absent compression key sends an uncompressed request. `timeout_ms` is an optional positive request
+bound. For `http/protobuf`, Nervix appends `/v1/logs`, `/v1/traces`, or `/v1/metrics` to the endpoint
+path. Mount TLS files and use `tls_ca_file`, `tls_cert_file`, and `tls_key_file` in the same client;
+the certificate and key must be supplied together.
+
+One log record is mapped as follows:
+
+```nspl
+CREATE EMITTER audit_to_otel
+  FROM audit_events
+  TO OTEL otel_main LOGS
+  VALUES {
+    'time' = input.event_ts,
+    'severity_text' = input.level,
+    'severity_number' = input.level_num,
+    'body' = input.message,
+    'trace_id' = input.trace_id,
+    'span_id' = input.span_id
+  }
+  ATTRIBUTES {
+    'user.id' = input.user_id,
+    'audit.action' = leak_sensitive(input.action)
+  }
+  RESOURCE {
+    'service.name' = 'checkout-pipeline',
+    'deployment.environment.name' = 'prod'
+  }
+  SCOPE 'nervix/audit' VERSION '1.0'
+  MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  FLUSH EACH 2s MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+The clause order is fixed: signal, required `VALUES`, optional `ATTRIBUTES`, optional `RESOURCE`,
+optional `SCOPE '<name>' [VERSION '<version>']`, then `MODE`. `RESOURCE` values must be literals or
+literal arrays. `ATTRIBUTES` may use exact-typed `STRING`, `BOOL`, integer-family, `F32`, `F64`,
+`DATETIME`, or array values; datetimes become RFC 3339 strings. Null attribute values are omitted.
+Normal sensitivity rules apply to every expression, including `ATTRIBUTES`.
+
+The closed log `VALUES` set is:
+
+- `time`: required `DATETIME`
+- `body`: required `STRING`
+- `severity_text`: optional `STRING`
+- `severity_number`: optional `I32` in `0..=24`
+- `trace_id`: optional nonzero 32-hex-character `STRING`
+- `span_id`: optional nonzero 16-hex-character `STRING`
+
+Trace emitters use `TO OTEL <client> TRACES`. Their closed `VALUES` set requires `trace_id`
+(nonzero 32-hex `STRING`), `span_id` (nonzero 16-hex `STRING`), `name` (`STRING`), `start_time`
+(`DATETIME`), and `end_time` (`DATETIME`). Optional keys are `parent_span_id` (nonzero 16-hex
+`STRING`), `kind` (`SERVER`, `CLIENT`, `INTERNAL`, `PRODUCER`, or `CONSUMER`), `status_code` (`OK`,
+`ERROR`, or `UNSET`), and `status_message` (`STRING`). Enum strings are case-sensitive.
+
+Each metric emitter defines exactly one metric stream:
+
+```nspl,ignore
+TO OTEL otel_main
+METRIC 'http.server.request.count' UNIT '1'
+DESCRIPTION 'Completed HTTP requests'
+SUM MONOTONIC DELTA
+VALUES {
+  'time' = input.window_end,
+  'start_time' = input.window_start,
+  'value' = input.request_count
+}
+ATTRIBUTES { 'http.route' = input.route }
+RESOURCE { 'service.name' = 'checkout-pipeline' }
+MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+```
+
+Metric shapes are `GAUGE`, `SUM [MONOTONIC] (DELTA | CUMULATIVE)`, and `HISTOGRAM (DELTA |
+CUMULATIVE)`. `DESCRIPTION` is optional and follows the required `UNIT`. Gauge and sum points
+require `time` (`DATETIME`) and `value` (an exact integer-family, `F32`, or `F64` value). Integer
+values use OTLP `as_int`; floating-point values use `as_double`. `start_time` is required for a
+delta sum and optional otherwise.
+
+Histogram points require `time`, integer-family `count`, integer-array `bucket_counts`, and `F32`
+or `F64` array `explicit_bounds`. Optional keys are `start_time`, numeric `sum`, `min`, and `max`;
+`start_time` is required for delta histograms. At runtime, counts must be non-negative and
+`len(bucket_counts)` must equal `len(explicit_bounds) + 1`. Exponential histograms and summaries
+are not supported.
+
+For each pending Arrow batch, Nervix builds one Export request containing one resource, one scope,
+and all successfully converted records. `FLUSH ... MAX BATCH SIZE` measures the Arrow batch before
+protobuf encoding, so the encoded request can be larger than the configured boundary and must fit
+the receiver's request-size limit. Nervix stamps log `observed_time_unix_nano` at emission.
+
+Connection failures, HTTP `429` and `5xx`, and gRPC `UNAVAILABLE` or `RESOURCE_EXHAUSTED` retry with
+backpressure. `Retry-After` and gRPC `RetryInfo` can extend the declared retry delay. Bad IDs, enum
+strings, severity values, numeric ranges, or histogram shapes reject only the affected record
+through `ON MESSAGE ERROR`. HTTP `400` and gRPC `INVALID_ARGUMENT` reject every record in that
+request without retry. OTLP `partial_success` cannot be retried safely: Nervix acknowledges every
+record and logs a warning, so records rejected by the receiver in that response are lost.
+
+Nervix does not provision collectors, indexes, tenants, or vendor-side telemetry objects. The OTLP
+endpoint must already exist; an unreachable endpoint remains an initialization or publish error.
 
 ### ClickHouse
 
@@ -779,7 +902,8 @@ Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out beha
 `ENCODE USING <codec>` follows the sink it encodes for, because whether a codec applies is a
 property of the sink. Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS and Sentry publish an
 encoded payload and require it. ClickHouse, Postgres, MySQL, and MongoDB map columns with `VALUES`
-and do not take a codec. Iceberg writes typed records and takes none.
+and do not take a codec. OTEL maps signal fields and attributes with `VALUES` and takes no codec.
+Iceberg writes typed records and takes none.
 
 JAQ-native codecs can reshape outbound payloads with `ON EMITTING` before writing the selected
 format:
@@ -842,6 +966,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
 | Sentry | Retry after an ambiguous HTTP result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
+| OTEL | Retry after an ambiguous Export result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |
 | ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |
 | Postgres | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
 | MySQL | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |

@@ -6618,6 +6618,7 @@ dependencies = [
  "error-stack",
  "fastrand",
  "fjall",
+ "flate2",
  "futures-util",
  "governor",
  "hdrhistogram",
@@ -6653,6 +6654,7 @@ dependencies = [
  "opendal 0.56.0",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
  "ordered-float 4.6.0",
  "ort",
@@ -6663,6 +6665,7 @@ dependencies = [
  "postgres-types",
  "prometheus",
  "prost 0.13.5",
+ "prost 0.14.4",
  "prost-reflect",
  "prost-types 0.13.5",
  "protox",
@@ -6694,6 +6697,8 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tokio-util",
  "tonic 0.13.1",
+ "tonic 0.14.6",
+ "tonic-types",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -11451,6 +11456,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "h2",
  "http 1.5.0",
  "http-body 1.1.0",
@@ -11463,11 +11469,13 @@ dependencies = [
  "socket2 0.6.5",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -11492,6 +11500,17 @@ checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
  "bytes",
  "prost 0.14.4",
+ "tonic 0.14.6",
+]
+
+[[package]]
+name = "tonic-types"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ab1b02061f83d519bba3caa167f88f261ef05720ab8ebc954ade70de3348e8"
+dependencies = [
+ "prost 0.14.4",
+ "prost-types 0.14.4",
  "tonic 0.14.6",
 ]
 

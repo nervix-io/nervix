@@ -12290,6 +12290,16 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             )
         }
         EmitSink::Sentry { client } => format!("SENTRY client={}", client.as_str()),
+        EmitSink::Otel { client, signal, .. } => {
+            let signal = match signal {
+                nervix_models::OtelSignal::Logs => "logs".to_string(),
+                nervix_models::OtelSignal::Traces => "traces".to_string(),
+                nervix_models::OtelSignal::Metric(metric) => {
+                    format!("metric {}", metric.name)
+                }
+            };
+            format!("OTEL client={} signal={signal}", client.as_str())
+        }
         EmitSink::ClickHouse {
             client,
             table,
