@@ -301,6 +301,35 @@ Feature: NSPL transactions
       | 1            |
       | 3            |
 
+  @transaction_batch_preflight
+  Scenario Outline: Queue admission errors retain earlier request outcomes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When this NSPL command request is executed on the leader node
+      """
+      BEGIN;
+      CREATE DOMAIN {{domain}};
+      CREATE DOMAIN {{domain}};
+      COMMIT;
+      """
+    Then the last command error contains
+      """
+      queued command in transaction
+      """
+    And the last command error contains
+      """
+      domain '{{domain}}' already exists
+      """
+    When these NSPL commands fail with "does not exist"
+      """
+      DESCRIBE DOMAIN;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Replicated transaction limits are enforced consistently
     Given the transaction statement limit is configured as 1
     And the transaction source byte limit is configured as 30

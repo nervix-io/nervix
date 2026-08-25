@@ -20310,10 +20310,29 @@ mod tests {
         assert!(!result.success);
         assert_eq!(
             command_transaction_state(&result),
-            Some(ApiTransactionState::Failed)
+            Some(ApiTransactionState::Open)
         );
-        assert!(result.message.contains("created domain 'prod'"));
+        assert!(result.message.contains("transaction started"));
+        assert!(result.message.contains("queued command in transaction"));
         assert!(result.message.contains("already exists"));
+        assert!(
+            service
+                .consensus
+                .current_domain(&Domain::parse("prod").expect("valid domain"))
+                .await
+                .is_none(),
+            "queue preflight failure must not execute the admitted prefix"
+        );
+        let transaction = service
+            .consensus
+            .current_transaction(
+                subscriptions
+                    .transaction_id()
+                    .expect("failed queue preflight must leave the transaction attached"),
+            )
+            .await
+            .expect("open transaction must remain replicated");
+        assert_eq!(transaction.pending_statement_count(), 1);
 
         subscriptions.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);
@@ -20995,6 +21014,7 @@ mod tests {
                     &tx,
                     &mut subscriptions,
                 )
+                
                 .await;
             assert!(
                 result.success,
