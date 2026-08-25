@@ -26,7 +26,7 @@ ARG FLATBUFFERS_SHA256
 ARG SONIC_PARALLELISM
 ARG SONIC_TARGET_CPUS
 ARG KACHE_S3_BUCKET
-ARG KACHE_S3_REGION=us-east-1
+ARG KACHE_S3_REGION
 ARG KACHE_S3_ACCESS_KEY
 ARG KACHE_S3_SECRET_KEY
 
@@ -107,6 +107,7 @@ COPY src ./src
 COPY crates ./crates
 COPY proto ./proto
 COPY tests/scenarios.rs ./tests/scenarios.rs
+COPY scripts/configure_kache_remote.sh ./scripts/configure_kache_remote.sh
 
 ENV CARGO_PROFILE_RELEASE_LTO=fat
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
@@ -116,16 +117,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=cache,target=/root/.cache/kache,sharing=locked \
-    if [ -n "${KACHE_S3_ACCESS_KEY}" ] || [ -n "${KACHE_S3_SECRET_KEY}" ]; then \
-      test -n "${KACHE_S3_BUCKET}" \
-        || { echo "KACHE_S3_BUCKET is required with S3 credentials" >&2; exit 1; }; \
-      test -n "${KACHE_S3_ACCESS_KEY}" \
-        || { echo "KACHE_S3_ACCESS_KEY is required with KACHE_S3_SECRET_KEY" >&2; exit 1; }; \
-      test -n "${KACHE_S3_SECRET_KEY}" \
-        || { echo "KACHE_S3_SECRET_KEY is required with KACHE_S3_ACCESS_KEY" >&2; exit 1; }; \
-    else \
-      unset KACHE_S3_BUCKET KACHE_S3_REGION KACHE_S3_ACCESS_KEY KACHE_S3_SECRET_KEY; \
-    fi \
+    : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}" \
+    && : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}" \
+    && : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required}" \
+    && : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}" \
+    && export KACHE_CONFIG=/tmp/kache.toml \
+    && bash scripts/configure_kache_remote.sh "${KACHE_CONFIG}" \
     && export KACHE_DAEMON_IDLE_TIMEOUT=0 \
     && export KACHE_MANIFEST_KEY="docker-${TARGETARCH}" \
     && export KACHE_NAMESPACE="${KACHE_MANIFEST_KEY}" \
@@ -172,10 +169,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cd /app \
     && cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server \
     && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
-    && if [ -n "${KACHE_S3_ACCESS_KEY:-}" ]; then \
-      kache save-manifest --manifest-key "${KACHE_MANIFEST_KEY}" --namespace "${KACHE_NAMESPACE}" \
-        && kache sync --push; \
-    fi \
+    && kache save-manifest --manifest-key "${KACHE_MANIFEST_KEY}" --namespace "${KACHE_NAMESPACE}" \
+    && kache sync --push \
     && mkdir -p /artifacts \
     && cp "/app/target/sonic/${RUST_TARGET}/release/nervix-server" /artifacts/nervix-server \
     && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix-server.bundle" /artifacts/nervix-server.bundle \
