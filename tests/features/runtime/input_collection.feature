@@ -31,7 +31,7 @@ Feature: Runtime node input collection
       TYPE HTTP;
       CREATE INGESTOR input_collection_source
       FROM ENDPOINT input_collection_ingress MODE NO_ACK SEQUENTIAL
-      DECODE USING notification_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -117,7 +117,7 @@ Feature: Runtime node input collection
       TYPE HTTP;
       CREATE INGESTOR input_collection_source
       FROM ENDPOINT input_collection_ingress MODE NO_ACK SEQUENTIAL
-      DECODE USING notification_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming
         INHERIT ALL
         UNBRANCHED

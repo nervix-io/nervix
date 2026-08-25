@@ -295,7 +295,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE UNPACED DOMAIN {{domain}}_empty;
       """
     And the web console is opened on the leader node
@@ -329,7 +329,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -348,7 +348,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -438,7 +438,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY correlator_errors SCHEMA correlator_error BRANCHED BY by_left_profile_ingestor;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT left_ingress ON edge PATH '/left' TYPE HTTP;
-      CREATE ENDPOINT right_ingress ON edge PATH '/right' TYPE HTTP; CREATE INGESTOR left_profile_ingestor FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL DECODE USING left_profile_codec TO left_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR right_profile_ingestor FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL DECODE USING right_profile_codec TO right_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ENDPOINT right_ingress ON edge PATH '/right' TYPE HTTP; CREATE INGESTOR left_profile_ingestor FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec TO left_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR right_profile_ingestor FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec TO right_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CORRELATOR correlate_profiles
         LEFT FROM left_profiles
         RIGHT FROM right_profiles
@@ -496,7 +496,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -534,7 +534,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -578,7 +578,7 @@ Feature: Web console NSPL REPL
       CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -640,7 +640,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -697,7 +697,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR rust_filter FROM raw_metrics FILTER WHERE input.rust_keep DEDUPLICATE ON input.value MAX TIME 10m UNBRANCHED TO rust_filtered_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR go_filter FROM rust_filtered_metrics FILTER WHERE input.go_keep DEDUPLICATE ON input.value MAX TIME 10m UNBRANCHED TO go_filtered_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
@@ -808,7 +808,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };
       CREATE EMITTER zeromq_notifications FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -842,7 +842,7 @@ Feature: Web console NSPL REPL
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -873,7 +873,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "http_notifications"
     And selector ".graph-hit-layer" contains "notifications"
@@ -924,7 +924,7 @@ Feature: Web console NSPL REPL
         'warehouse' = 's3://nervix-iceberg/warehouse'
       }; CREATE INGESTOR iot_device_activity
         FROM MQTT mqtt_devices TOPIC 'datalake/device_activity' INSTANCES 2 MODE NO_ACK SEQUENTIAL
-        DECODE USING activity_codec
+        ON QUIESCE DROP DECODE USING activity_codec
         TO device_activity_landing
         INHERIT ALL
         BRANCHED BY by_iot_device_activity
@@ -933,7 +933,7 @@ Feature: Web console NSPL REPL
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG; CREATE INGESTOR edge_server_activity
         FROM NATS nats_edge SUBJECT datalake_edge_activity QUEUE GROUP datalake_edge_servers INSTANCES 2 MODE NO_ACK SEQUENTIAL
-        DECODE USING activity_codec
+        ON QUIESCE DROP DECODE USING activity_codec
         TO edge_activity_landing
         INHERIT ALL
         BRANCHED BY by_iot_device_activity
@@ -942,7 +942,7 @@ Feature: Web console NSPL REPL
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG; CREATE INGESTOR auth_server_activity
         FROM KAFKA kafka_auth TOPIC datalake_auth_activity OFFSET BY CONSUMER GROUP datalake_demo_auth INSTANCES 4 MODE NO_ACK PARALLEL
-        DECODE USING activity_codec
+        ON QUIESCE SUSPEND DECODE USING activity_codec
         TO auth_activity_landing
         INHERIT ALL
         BRANCHED BY by_iot_device_activity
@@ -1069,7 +1069,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY telemetry_by_site SCHEMA telemetry BRANCHED BY by_primary_telemetry;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT primary_telemetry_endpoint ON edge PATH '/primary' TYPE HTTP;
-      CREATE INGESTOR primary_telemetry FROM ENDPOINT primary_telemetry_endpoint MODE NO_ACK SEQUENTIAL DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR primary_telemetry FROM ENDPOINT primary_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -1080,7 +1080,7 @@ Feature: Web console NSPL REPL
     When these NSPL commands are executed on the leader node
       """
       CREATE ENDPOINT backup_telemetry_endpoint ON edge PATH '/backup' TYPE HTTP;
-      CREATE INGESTOR backup_telemetry FROM ENDPOINT backup_telemetry_endpoint MODE NO_ACK SEQUENTIAL DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR backup_telemetry FROM ENDPOINT backup_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then selector ".graph-hit-layer" contains "backup_telemetry"
@@ -1115,7 +1115,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY deduped_events SCHEMA event BRANCHED BY by_ingest_events;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT raw_events_endpoint ON edge PATH '/raw' TYPE HTTP;
-      CREATE INGESTOR ingest_events FROM ENDPOINT raw_events_endpoint MODE NO_ACK SEQUENTIAL DECODE USING event_codec TO raw_events INHERIT ALL BRANCHED BY by_ingest_events SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR ingest_events FROM ENDPOINT raw_events_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO raw_events INHERIT ALL BRANCHED BY by_ingest_events SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR dedup_events FROM raw_events DEDUPLICATE ON input.value MAX TIME 10m BRANCHED BY by_ingest_events TO deduped_events INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -1144,7 +1144,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY filtered_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT raw_events_endpoint ON edge PATH '/raw' TYPE HTTP;
-      CREATE INGESTOR ingest_events FROM ENDPOINT raw_events_endpoint MODE NO_ACK SEQUENTIAL DECODE USING event_codec TO raw_events INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR ingest_events FROM ENDPOINT raw_events_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO raw_events INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_events FROM raw_events USING RESOURCE wasm_filter VERSION 1 FILE 'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO filtered_events SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -1187,7 +1187,7 @@ Feature: Web console NSPL REPL
       CREATE ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics' TYPE HTTP;
       CREATE INGESTOR reingestor_metrics_source
         FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_reingestor_metrics_source
@@ -1262,7 +1262,7 @@ Feature: Web console NSPL REPL
       CREATE ENDPOINT telemetry_ingress ON edge PATH '/telemetry' TYPE HTTP;
       CREATE CLIENT redis_alerts TYPE REDIS CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE INGESTOR http_telemetry
         FROM ENDPOINT telemetry_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING telemetry_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TO telemetry_by_site
         INHERIT ALL
         BRANCHED BY by_http_telemetry
@@ -1351,7 +1351,7 @@ Feature: Web console NSPL REPL
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
       CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP; CREATE INGESTOR relay_buffer_source
         FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_relay_buffer_source
@@ -1426,7 +1426,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY ss2 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT source_txns_endpoint ON edge PATH '/source' TYPE HTTP;
-      CREATE INGESTOR source_txns FROM ENDPOINT source_txns_endpoint MODE NO_ACK SEQUENTIAL DECODE USING txn_codec TO ss1 INHERIT ALL BRANCHED BY by_source_txns SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR source_txns FROM ENDPOINT source_txns_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING txn_codec TO ss1 INHERIT ALL BRANCHED BY by_source_txns SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR dedup_txns FROM ss1 DEDUPLICATE ON input.value MAX TIME 10m BRANCHED BY by_source_txns TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "source_txns"
@@ -1438,7 +1438,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY state_txns SCHEMA txn BRANCHED BY by_state_txns_ingestor WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY rr1 SCHEMA txn BRANCHED BY by_state_txns_ingestor;
       CREATE ENDPOINT state_txns_endpoint ON edge PATH '/state' TYPE HTTP;
-      CREATE INGESTOR state_txns_ingestor FROM ENDPOINT state_txns_endpoint MODE NO_ACK SEQUENTIAL DECODE USING txn_codec TO state_txns INHERIT ALL BRANCHED BY by_state_txns_ingestor SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR state_txns_ingestor FROM ENDPOINT state_txns_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING txn_codec TO state_txns INHERIT ALL BRANCHED BY by_state_txns_ingestor SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REINGESTOR fwd FROM ss2 TO rr1 INHERIT ALL BRANCHED BY by_state_txns_ingestor SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "state_txns_ingestor"

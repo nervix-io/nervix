@@ -50,7 +50,7 @@ Feature: Multi-source DAG routing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC dag_kafka_{{test_id}} OFFSET BY CONSUMER GROUP dag_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO kafka_ingress
         INHERIT ALL
         BRANCHED BY by_kafka_notifications
@@ -60,7 +60,7 @@ Feature: Multi-source DAG routing
         ON GENERAL ERROR LOG;
         CREATE INGESTOR rabbit_notifications
         FROM RABBITMQ rabbit_main QUEUE dag_rabbit_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO rabbit_ingress
         INHERIT ALL
         BRANCHED BY by_rabbit_notifications

@@ -42,7 +42,7 @@ Feature: ClickHouse TLS resource mounts
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC tls_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications

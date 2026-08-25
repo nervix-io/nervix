@@ -25,7 +25,7 @@ Feature: Ingestor metrics
         CREATE ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics' TYPE HTTP;
         CREATE INGESTOR ingestor_metrics_source
         FROM ENDPOINT ingestor_metrics_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ingestor_metrics_source
@@ -168,7 +168,7 @@ Feature: Ingestor metrics
       CREATE ENDPOINT payload_size_ingress ON edge PATH '/payload-size' TYPE HTTP;
       CREATE INGESTOR payload_size_source
         FROM ENDPOINT payload_size_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -229,6 +229,7 @@ Feature: Ingestor metrics
         };
         CREATE INGESTOR ingestor_metrics_source
         FROM <source_clause>
+        ON QUIESCE DROP
         DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -302,7 +303,7 @@ Feature: Ingestor metrics
         };
         CREATE INGESTOR immediate_source
         FROM MQTT mqtt_main TOPIC immediate_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_immediate_source
@@ -351,7 +352,7 @@ Feature: Ingestor metrics
         CREATE ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart' TYPE HTTP;
         CREATE INGESTOR ingestor_metrics_source
         FROM ENDPOINT ingestor_metrics_restart_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ingestor_metrics_source
@@ -424,7 +425,7 @@ Feature: Ingestor metrics
         };
         CREATE INGESTOR remote_owner_metrics_source
         FROM REDIS PUBSUB redis_main CHANNEL remote_owner_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_remote_owner_metrics_source

@@ -45,7 +45,7 @@ Feature: JAQ native codec
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -113,7 +113,7 @@ Feature: JAQ native codec
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING json_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -187,7 +187,7 @@ Feature: JAQ native codec
 
       CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING xml_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING xml_notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED

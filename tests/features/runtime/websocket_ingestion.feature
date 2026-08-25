@@ -27,7 +27,7 @@ Feature: Websocket endpoint ingestion
         TYPE WEBSOCKETS;
         CREATE INGESTOR ws_notifications
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ws_notifications
@@ -91,7 +91,7 @@ Feature: Websocket endpoint ingestion
         TYPE WEBSOCKETS;
       CREATE INGESTOR ws_notifications
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ws_notifications

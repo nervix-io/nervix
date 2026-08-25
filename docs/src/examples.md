@@ -55,7 +55,7 @@ CREATE INGESTOR kafka_notifications
   TOPIC notifications
   OFFSET BY CONSUMER GROUP nervix_consumer
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-  DECODE USING notification_codec
+  ON QUIESCE SUSPEND DECODE USING notification_codec
   TO notifications
     INHERIT ALL
     BRANCHED BY by_user SET user_id = message.user_id

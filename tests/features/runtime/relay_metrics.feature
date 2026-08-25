@@ -28,7 +28,7 @@ Feature: Relay metrics
         CREATE ENDPOINT relay_metrics_ingress ON edge PATH '/relay-metrics' TYPE HTTP;
         CREATE INGESTOR relay_metrics_source
         FROM ENDPOINT relay_metrics_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
         INHERIT ALL
@@ -159,7 +159,7 @@ Feature: Relay metrics
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
       CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP; CREATE INGESTOR relay_buffer_source
         FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_relay_buffer_source
@@ -230,7 +230,7 @@ Feature: Relay metrics
         CREATE ENDPOINT relay_metrics_drain_ingress ON edge PATH '/relay-metrics-drain' TYPE HTTP;
         CREATE INGESTOR relay_metrics_drain_source
         FROM ENDPOINT relay_metrics_drain_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
         INHERIT ALL
@@ -304,7 +304,7 @@ Feature: Relay metrics
         CREATE ENDPOINT relay_metrics_restart_ingress ON edge PATH '/relay-metrics-restart' TYPE HTTP;
         CREATE INGESTOR relay_metrics_restart_source
         FROM ENDPOINT relay_metrics_restart_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
         INHERIT ALL

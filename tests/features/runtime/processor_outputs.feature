@@ -37,7 +37,7 @@ Feature: Processor output routing
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR event_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING routed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
         TO source_events
         INHERIT ALL
         UNBRANCHED
@@ -111,7 +111,7 @@ Feature: Processor output routing
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR event_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING routed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
         TO incoming_events
         INHERIT ALL
         UNBRANCHED
@@ -199,7 +199,7 @@ Feature: Processor output routing
 
       CREATE INGESTOR event_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         FILTER WHERE input.active
         TO error_events
           INHERIT id
@@ -275,7 +275,7 @@ Feature: Processor output routing
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR source_events
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING source_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TO projected_events
         INHERIT ALL
         SET amount = 1, amount = amount + 1
@@ -378,7 +378,7 @@ Feature: Processor output routing
         TYPE HTTP;
         CREATE INGESTOR source_logs_a
         FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs_a
         INHERIT ALL
         BRANCHED BY by_source_logs_a
@@ -388,7 +388,7 @@ Feature: Processor output routing
         ON GENERAL ERROR LOG;
         CREATE INGESTOR source_logs_b
         FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs_b
         INHERIT ALL
         BRANCHED BY by_source_logs_a
@@ -502,7 +502,7 @@ Feature: Processor output routing
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
           INHERIT ALL
           BRANCHED BY by_http_notifications
@@ -597,7 +597,7 @@ Feature: Processor output routing
         TYPE HTTP;
         CREATE INGESTOR source_logs
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs
           INHERIT ALL
           BRANCHED BY by_source_logs

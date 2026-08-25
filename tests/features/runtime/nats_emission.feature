@@ -57,7 +57,7 @@ Feature: NATS emission
       CREATE INGESTOR columnar_events_in
         FROM NATS nats_main SUBJECT columnar_in_{{test_id}}
         QUEUE GROUP columnar_in_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
-        DECODE USING columnar_event_codec
+        ON QUIESCE DROP DECODE USING columnar_event_codec
         TO columnar_events
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -141,7 +141,7 @@ Feature: NATS emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -227,7 +227,7 @@ Feature: NATS emission
       CREATE INGESTOR narrow_events_in
         FROM NATS nats_main SUBJECT narrow_in_{{test_id}}
         QUEUE GROUP narrow_in_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
-        DECODE USING narrow_event_codec
+        ON QUIESCE DROP DECODE USING narrow_event_codec
         TO narrow_events
         INHERIT ALL
         UNBRANCHED
@@ -307,7 +307,7 @@ Feature: NATS emission
           OFFSET BY CONSUMER GROUP jetstream_boundary_group_{{test_id}}
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
           INHERIT ALL
           BRANCHED BY by_kafka_notifications

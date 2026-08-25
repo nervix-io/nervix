@@ -39,7 +39,7 @@ Feature: Pulsar TLS resource mounts
         };
         CREATE INGESTOR pulsar_notifications
         FROM PULSAR pulsar_tls TOPIC tls_notifications_{{test_id}} SUBSCRIPTION tls_notifications_group_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_pulsar_notifications

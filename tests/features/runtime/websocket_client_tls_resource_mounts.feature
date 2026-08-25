@@ -39,7 +39,7 @@ Feature: Websocket client TLS resource mounts
         };
         CREATE INGESTOR ws_notifications
         FROM WEBSOCKETS ws_tls MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ws_notifications

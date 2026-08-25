@@ -43,7 +43,7 @@ Feature: Prometheus TLS resource mounts
         };
         CREATE INGESTOR prom_samples
         FROM PROMETHEUS prom_tls QUERY 'label_replace(vector(42.5), "source", "prometheus", "", "")' EVERY 200ms
-        DECODE USING sample_codec
+        ON QUIESCE SUSPEND DECODE USING sample_codec
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples

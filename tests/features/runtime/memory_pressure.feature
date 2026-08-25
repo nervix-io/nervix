@@ -27,9 +27,9 @@ Feature: Memory pressure
         ON edge
         PATH '/memory-pressure'
         TYPE HTTP;
-        CREATE INGESTOR memory_pressure_source
+      CREATE INGESTOR memory_pressure_source
         FROM ENDPOINT memory_pressure_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE REJECT RETRY AFTER 3s DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_memory_pressure_source
@@ -39,8 +39,15 @@ Feature: Memory pressure
         ON GENERAL ERROR LOG;
         START;
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "status: stopped"
+    Then within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "status: quiesced"
+    And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "quiesce: REJECT RETRY AFTER 3s"
+    And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "quiesce state: memory pressure"
     And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "memory-backpressure: active"
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/memory-pressure" and fails
+      """
+      {"user_id":1}
+      """
+    Then within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "nervix_ingestor_quiesce_rejected_total"
 
     Examples:
       | cluster_size |

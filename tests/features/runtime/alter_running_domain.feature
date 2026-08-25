@@ -36,7 +36,7 @@ Feature: Altering schemas on a running domain
 
       CREATE INGESTOR running_event_source
         FROM ENDPOINT running_event_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING running_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING running_event_codec
         TO running_events
         INHERIT ALL
         UNBRANCHED
@@ -123,7 +123,7 @@ Feature: Altering schemas on a running domain
         ON timeout_edge PATH '/alter-timeout' TYPE HTTP;
       CREATE INGESTOR timeout_source
         FROM ENDPOINT timeout_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING timeout_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timeout_event_codec
         TO timeout_events
         INHERIT ALL
         UNBRANCHED
@@ -229,7 +229,7 @@ Feature: Altering schemas on a running domain
 
       CREATE INGESTOR mutable_source
         FROM ENDPOINT mutable_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING mutable_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING mutable_event_codec
         TO mutable_state
         INHERIT ALL
         BRANCHED BY tenant_branch
@@ -239,7 +239,7 @@ Feature: Altering schemas on a running domain
         ON GENERAL ERROR LOG;
       CREATE INGESTOR stable_source
         FROM ENDPOINT stable_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING stable_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stable_event_codec
         TO stable_state
         INHERIT ALL
         BRANCHED BY tenant_branch
@@ -342,7 +342,7 @@ Feature: Altering schemas on a running domain
 
       CREATE INGESTOR rollback_source
         FROM ENDPOINT rollback_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING rollback_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING rollback_event_codec
         TO rollback_events
         INHERIT ALL
         UNBRANCHED

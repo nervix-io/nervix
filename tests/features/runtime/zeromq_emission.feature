@@ -30,7 +30,7 @@ Feature: ZeroMQ emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -114,7 +114,7 @@ Feature: ZeroMQ emission
         TYPE HTTP;
         CREATE INGESTOR state_source
         FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO state_notifications
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -124,7 +124,7 @@ Feature: ZeroMQ emission
         ON GENERAL ERROR LOG;
         CREATE INGESTOR notifications_source
         FROM ENDPOINT notifications_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_state_source

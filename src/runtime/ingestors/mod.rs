@@ -36,6 +36,7 @@ impl IngestorStarter {
         ingestor: CreateIngestor,
         kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
     ) -> Result<(), RuntimeError> {
+        runtime.prepare_ingestor_quiescence(domain, &ingestor);
         match (&source_model, &ingestor.source) {
             (Model::ClientHttp(client), IngestSource::Http { .. }) => {
                 HttpIngestor::start(runtime, domain, client.clone(), ingestor).await

@@ -35,7 +35,7 @@ Feature: Sensitive data
 
       CREATE INGESTOR sensitive_notifications
         FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -110,7 +110,7 @@ Feature: Sensitive data
 
       CREATE INGESTOR sensitive_notifications
         FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -231,7 +231,7 @@ Feature: Sensitive data
 
       CREATE INGESTOR sensitive_notifications
         FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED

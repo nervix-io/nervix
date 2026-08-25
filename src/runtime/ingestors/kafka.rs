@@ -77,6 +77,9 @@ impl KafkaIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled Kafka ingestor must have quiesce control");
         let resolved_client = runtime
             .resolve_client_config(client.mount.as_ref(), &client.config)
             .map_err(|reason| RuntimeError::StartIngestor {
@@ -269,6 +272,8 @@ impl KafkaIngestor {
             let task_branched_senders = branched_runtime.senders.clone();
             let task_kafka_offset_state = kafka_offset_state.clone();
             let task_ack_mode = ack_mode.clone();
+            let task_offset_mode = offset_mode.clone();
+            let task_quiesce = quiesce.clone();
             let task_ack_timeout = ack_timeout;
             let task_retry_policy = retry_policy.unwrap_or(ParsedRetryPolicy {
                 backoff: Duration::ZERO,
@@ -323,6 +328,52 @@ impl KafkaIngestor {
                         break;
                     }
                     if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                        continue;
+                    }
+                    if task_quiesce.should_suspend_intake() {
+                        let _ = task_runtime
+                            .flush_ingest_collector(
+                                &task_domain,
+                                &task_ingestor,
+                                &task_branched_senders,
+                                &mut ingest_collector,
+                            )
+                            .await;
+                        match &task_offset_mode {
+                            KafkaOffsetMode::ConsumerGroup(_) => consumer.unsubscribe(),
+                            KafkaOffsetMode::Domain => {
+                                if let Err(error) = consumer.unassign() {
+                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        "failed to unassign kafka source while quiescing ingestor \
+                                         '{}' in domain '{}': {}",
+                                        task_ingestor.as_str(),
+                                        task_domain.as_str(),
+                                        error
+                                    )));
+                                }
+                                consumer_ready = false;
+                                assignment_refresh_pending = true;
+                            }
+                        }
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                            _ = task_quiesce.wait_until_not_suspended() => {}
+                        }
+                        if let KafkaOffsetMode::ConsumerGroup(_) = &task_offset_mode
+                            && let Err(error) = consumer.subscribe(&[task_topic.as_str()])
+                        {
+                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                "failed to resubscribe kafka source after quiesce for ingestor \
+                                 '{}' in domain '{}': {}",
+                                task_ingestor.as_str(),
+                                task_domain.as_str(),
+                                error
+                            )));
+                        }
                         continue;
                     }
                     if let Some(state) = task_kafka_offset_state.as_ref() {
@@ -416,6 +467,9 @@ impl KafkaIngestor {
                     let flush_at =
                         next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
                     tokio::select! {
+                        _ = task_quiesce.wait_for_change() => {
+                            continue;
+                        }
                         changed = shutdown_rx.changed() => {
                             let _ = task_runtime.flush_ingest_collector(
                                 &task_domain,
@@ -814,6 +868,9 @@ impl KafkaIngestor {
                                             while batch.len() < ack_parallel_limit {
                                                 tokio::task::consume_budget().await;
                                                 tokio::select! {
+                                                    _ = task_quiesce.wait_for_change() => {
+                                                        continue 'ingest;
+                                                    }
                                                     changed = shutdown_rx.changed() => {
                                                         if changed.is_err() || *shutdown_rx.borrow() {
                                                             break 'ingest;

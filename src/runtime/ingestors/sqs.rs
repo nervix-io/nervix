@@ -48,6 +48,9 @@ impl SqsIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled SQS ingestor must have quiesce control");
         let ack_timeout = match &ack_mode {
             SqsIngestMode::AckSequential { timeout, .. } => {
                 Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?
@@ -97,6 +100,7 @@ impl SqsIngestor {
             let task_client = client.clone();
             let task_queue_url = queue_url.clone();
             let task_client_mounts = resolved_client.mounts.clone();
+            let task_quiesce = quiesce.clone();
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 let mut backoff = RuntimeReconnectBackoff::default();
@@ -119,7 +123,19 @@ impl SqsIngestor {
                     if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
                         continue;
                     }
+                    if task_quiesce.should_suspend_intake() {
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                            _ = task_quiesce.wait_until_not_suspended() => {}
+                        }
+                        continue;
+                    }
                     tokio::select! {
+                        _ = task_quiesce.wait_for_change() => {}
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
                                 break;

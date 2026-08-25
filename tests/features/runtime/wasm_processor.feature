@@ -45,7 +45,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR event_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO raw_events
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -128,7 +128,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR wasm_input_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING wasm_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wasm_input_codec
         TO wasm_input_events
         INHERIT ALL
         UNBRANCHED
@@ -200,7 +200,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR required_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING required_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING required_event_codec
         TO required_input
         INHERIT ALL
         UNBRANCHED
@@ -276,7 +276,7 @@ Feature: WASM processor runtime behavior
 
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -380,7 +380,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR buffered_metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING buffered_metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING buffered_metric_codec
         TO raw_buffered_metrics
         INHERIT ALL
         UNBRANCHED
@@ -451,7 +451,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR limited_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING limited_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
         BRANCHED BY by_limited_tenant
@@ -562,7 +562,7 @@ Feature: WASM processor runtime behavior
 
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -663,7 +663,7 @@ Feature: WASM processor runtime behavior
 
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -787,7 +787,7 @@ Feature: WASM processor runtime behavior
 
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -860,7 +860,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -923,7 +923,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -989,7 +989,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -1083,7 +1083,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -1165,7 +1165,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -1229,7 +1229,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -1297,7 +1297,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -1356,7 +1356,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -1415,7 +1415,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -1475,7 +1475,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -1526,7 +1526,7 @@ Feature: WASM processor runtime behavior
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED

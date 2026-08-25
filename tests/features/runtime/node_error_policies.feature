@@ -12,15 +12,15 @@ Feature: Runtime node error policies
       """
 
     Examples:
-      | node             | statement                                                                                                                                                                                                                                                                                  |
-      | ingestor         | CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET user_id = message.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG |
-      | reingestor       | CREATE REINGESTOR repartition FROM notifications TO tenant_notifications INHERIT ALL BRANCHED BY by_repartition SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                           |
-      | junction         | CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                        |
-      | deduplicator     | CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                        |
-      | window processor | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION UNBRANCHED TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency)                                                                                                |
-      | generator        | CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms UNBRANCHED TO alerts SET user_id = relay_state.notifications.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                         |
-      | emitter          | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG                                              |
-      | inferencer       | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE                  |
+      | node             | statement                                                                                                                                                                                                                                                                                                                  |
+      | ingestor         | CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET user_id = message.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG |
+      | reingestor       | CREATE REINGESTOR repartition FROM notifications TO tenant_notifications INHERIT ALL BRANCHED BY by_repartition SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                           |
+      | junction         | CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                                                        |
+      | deduplicator     | CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                                        |
+      | window processor | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION UNBRANCHED TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency)                                                                                                                                |
+      | generator        | CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms UNBRANCHED TO alerts SET user_id = relay_state.notifications.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                         |
+      | emitter          | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG                                                                              |
+      | inferencer       | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE                                                  |
 
   Scenario Outline: Pure runtime processors reject general error policies
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -99,7 +99,7 @@ Feature: Runtime node error policies
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -177,7 +177,7 @@ Feature: Runtime node error policies
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_kafka_notifications

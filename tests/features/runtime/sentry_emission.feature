@@ -30,7 +30,7 @@ Feature: Sentry emission
       TYPE HTTP;
       CREATE INGESTOR error_source
       FROM ENDPOINT error_ingress MODE NO_ACK SEQUENTIAL
-      DECODE USING error_event_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING error_event_codec
       TO errors
       INHERIT ALL
       UNBRANCHED

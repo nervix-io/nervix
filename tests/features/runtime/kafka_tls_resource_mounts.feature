@@ -40,7 +40,7 @@ Feature: Kafka TLS resource mounts
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_tls TOPIC tls_notifications_{{test_id}} OFFSET BY CONSUMER GROUP tls_notifications_group_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_kafka_notifications

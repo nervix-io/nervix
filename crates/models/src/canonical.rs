@@ -2063,6 +2063,9 @@ fn alter_ingestor_operation_to_nspl(
         AlterIngestorOperation::SetSource { source } => {
             Ok(format!("SET FROM {}", ingest_source_to_nspl(source)))
         }
+        AlterIngestorOperation::SetQuiesce { quiesce } => {
+            Ok(format!("SET QUIESCE {}", ingest_quiesce_to_nspl(quiesce)))
+        }
         AlterIngestorOperation::SetDecodeUsing { codec } => {
             Ok(format!("SET DECODE USING {}", codec.as_str()))
         }
@@ -2244,17 +2247,48 @@ fn pulsar_entry_to_nspl(entry: &PulsarConfigEntry) -> Result<String, CanonicalNs
     kafka_entry_to_nspl(entry)
 }
 
+pub fn ingest_quiesce_to_nspl(quiesce: &crate::IngestQuiesceMode) -> String {
+    match quiesce {
+        crate::IngestQuiesceMode::Suspend => "SUSPEND".to_string(),
+        crate::IngestQuiesceMode::Buffer { max_size, overflow } => format!(
+            "BUFFER MAX SIZE {} ON OVERFLOW {}",
+            max_size,
+            match overflow {
+                crate::IngestQuiesceOverflow::DropOldest => "DROP OLDEST",
+                crate::IngestQuiesceOverflow::DropNewest => "DROP NEWEST",
+            }
+        ),
+        crate::IngestQuiesceMode::Drop => "DROP".to_string(),
+        crate::IngestQuiesceMode::Reject { retry_after } => {
+            format!("REJECT RETRY AFTER {retry_after}")
+        }
+        crate::IngestQuiesceMode::EndpointBuffer { max_size } => {
+            format!("BUFFER MAX SIZE {max_size}")
+        }
+    }
+}
+
 fn ingest_source_to_nspl(source: &IngestSource) -> String {
     match source {
-        IngestSource::Http { client, every } => format!("HTTP {} EVERY {}", client.as_str(), every),
+        IngestSource::Http {
+            client,
+            every,
+            quiesce,
+        } => format!(
+            "HTTP {} EVERY {} ON QUIESCE {}",
+            client.as_str(),
+            every,
+            ingest_quiesce_to_nspl(quiesce)
+        ),
         IngestSource::Kafka {
             client,
             topic,
             offset_mode,
             instances,
             mode,
+            quiesce,
         } => format!(
-            "KAFKA {} TOPIC {} OFFSET BY {}{} MODE {}",
+            "KAFKA {} TOPIC {} OFFSET BY {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             topic.as_str(),
             kafka_offset_mode_to_nspl(offset_mode),
@@ -2263,7 +2297,8 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             } else {
                 String::new()
             },
-            kafka_mode_to_nspl(mode)
+            kafka_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::Pulsar {
             client,
@@ -2271,8 +2306,9 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             subscription,
             instances,
             mode,
+            quiesce,
         } => format!(
-            "PULSAR {} TOPIC {} SUBSCRIPTION {}{} MODE {}",
+            "PULSAR {} TOPIC {} SUBSCRIPTION {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             topic.as_str(),
             subscription.as_str(),
@@ -2281,13 +2317,15 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             } else {
                 String::new()
             },
-            pulsar_mode_to_nspl(mode)
+            pulsar_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::Mqtt {
             client,
             topic,
             instances,
             mode,
+            quiesce,
         } => {
             let instances = if *instances > 1 {
                 format!(" INSTANCES {instances}")
@@ -2295,11 +2333,12 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
                 String::new()
             };
             format!(
-                "MQTT {} TOPIC {}{} {}",
+                "MQTT {} TOPIC {}{} {} ON QUIESCE {}",
                 client.as_str(),
                 mqtt_topic_to_nspl(topic).expect("validated canonical MQTT topic"),
                 instances,
-                mqtt_mode_to_nspl(mode)
+                mqtt_mode_to_nspl(mode),
+                ingest_quiesce_to_nspl(quiesce)
             )
         }
         IngestSource::Nats {
@@ -2308,21 +2347,24 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             queue_group,
             instances,
             mode,
+            quiesce,
         } => format!(
-            "NATS {} SUBJECT {} QUEUE GROUP {} INSTANCES {} MODE {}",
+            "NATS {} SUBJECT {} QUEUE GROUP {} INSTANCES {} MODE {} ON QUIESCE {}",
             client.as_str(),
             subject.as_str(),
             queue_group.as_str(),
             instances,
-            nats_mode_to_nspl(mode)
+            nats_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::RabbitMq {
             client,
             queue,
             instances,
             mode,
+            quiesce,
         } => format!(
-            "RABBITMQ {} QUEUE {}{} MODE {}",
+            "RABBITMQ {} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             queue.as_str(),
             if *instances > 1 {
@@ -2330,40 +2372,51 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             } else {
                 String::new()
             },
-            rabbitmq_mode_to_nspl(mode)
+            rabbitmq_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::RedisPubSub {
             client,
             channel,
             mode,
+            quiesce,
         } => format!(
-            "REDIS PUBSUB {} CHANNEL {} MODE {}",
+            "REDIS PUBSUB {} CHANNEL {} MODE {} ON QUIESCE {}",
             client.as_str(),
             channel.as_str(),
-            redis_pubsub_mode_to_nspl(mode)
+            redis_pubsub_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::Prometheus {
             client,
             query,
             every,
+            quiesce,
         } => format!(
-            "PROMETHEUS {} QUERY {} EVERY {}",
+            "PROMETHEUS {} QUERY {} EVERY {} ON QUIESCE {}",
             client.as_str(),
             string_literal(query).expect("validated canonical query string"),
-            every
+            every,
+            ingest_quiesce_to_nspl(quiesce)
         ),
-        IngestSource::ZeroMq { client, mode } => format!(
-            "ZEROMQ {} MODE {}",
+        IngestSource::ZeroMq {
+            client,
+            mode,
+            quiesce,
+        } => format!(
+            "ZEROMQ {} MODE {} ON QUIESCE {}",
             client.as_str(),
-            zeromq_mode_to_nspl(mode)
+            zeromq_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::Sqs {
             client,
             queue,
             instances,
             mode,
+            quiesce,
         } => format!(
-            "SQS {} QUEUE {}{} MODE {}",
+            "SQS {} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             queue.as_str(),
             if *instances > 1 {
@@ -2371,17 +2424,28 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             } else {
                 String::new()
             },
-            sqs_mode_to_nspl(mode)
+            sqs_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
         ),
-        IngestSource::Endpoint { endpoint, mode } => format!(
-            "ENDPOINT {} MODE {}",
+        IngestSource::Endpoint {
+            endpoint,
+            mode,
+            quiesce,
+        } => format!(
+            "ENDPOINT {} MODE {} ON QUIESCE {}",
             endpoint.as_str(),
-            endpoint_mode_to_nspl(mode)
+            endpoint_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
         ),
-        IngestSource::Websockets { client, mode } => format!(
-            "WEBSOCKETS {} MODE {}",
+        IngestSource::Websockets {
+            client,
+            mode,
+            quiesce,
+        } => format!(
+            "WEBSOCKETS {} MODE {} ON QUIESCE {}",
             client.as_str(),
-            websockets_mode_to_nspl(mode)
+            websockets_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
         ),
     }
 }
@@ -4167,6 +4231,7 @@ mod tests {
                     source: IngestSource::Http {
                         client: identifier("http_main"),
                         every: "30s".to_string(),
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4174,9 +4239,9 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR http_ingestor FROM HTTP http_main EVERY 30s DECODE USING \
-                 orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                "CREATE INGESTOR http_ingestor FROM HTTP http_main EVERY 30s ON QUIESCE SUSPEND \
+                 DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE \
+                 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -4195,6 +4260,7 @@ mod tests {
                             timeout: "5s".to_string(),
                             retry_policy: retry.clone(),
                         },
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4204,9 +4270,9 @@ mod tests {
                 .expect("must render"),
                 "CREATE INGESTOR kafka_ingestor FROM KAFKA kafka_main TOPIC orders_topic OFFSET \
                  BY CONSUMER GROUP orders_group INSTANCES 3 MODE ACK PARALLEL MAX 8 BATCH TIMEOUT \
-                 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s DECODE USING orders_codec \
-                 TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
-                 ON GENERAL ERROR LOG;",
+                 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE SUSPEND DECODE \
+                 USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -4222,6 +4288,7 @@ mod tests {
                             session: MqttSession::Clean,
                             qos: MqttQos::AtMostOnce,
                         },
+                        quiesce: crate::IngestQuiesceMode::Drop,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4230,8 +4297,8 @@ mod tests {
                 .to_canonical_nspl()
                 .expect("must render"),
                 "CREATE INGESTOR mqtt_ingestor FROM MQTT mqtt_main TOPIC orders_topic MODE NO_ACK \
-                 SEQUENTIAL DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX \
-                 BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                 SEQUENTIAL ON QUIESCE DROP DECODE USING orders_codec TO orders UNBRANCHED FLUSH \
+                 EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -4245,6 +4312,7 @@ mod tests {
                         queue_group: identifier("orders_workers"),
                         instances: 2,
                         mode: NatsIngestMode::NoAckSequential,
+                        quiesce: crate::IngestQuiesceMode::Drop,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4253,8 +4321,8 @@ mod tests {
                 .to_canonical_nspl()
                 .expect("must render"),
                 "CREATE INGESTOR nats_ingestor FROM NATS nats_main SUBJECT orders_subject QUEUE \
-                 GROUP orders_workers INSTANCES 2 MODE NO_ACK SEQUENTIAL DECODE USING \
-                 orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 GROUP orders_workers INSTANCES 2 MODE NO_ACK SEQUENTIAL ON QUIESCE DROP DECODE \
+                 USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
                  MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
@@ -4271,6 +4339,7 @@ mod tests {
                             timeout: "10s".to_string(),
                             retry_policy: retry.clone(),
                         },
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4279,9 +4348,9 @@ mod tests {
                 .to_canonical_nspl()
                 .expect("must render"),
                 "CREATE INGESTOR rabbit_ingestor FROM RABBITMQ rmq_main QUEUE orders_q INSTANCES \
-                 2 MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 1s MAX 30s DECODE \
-                 USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                 2 MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE \
+                 SUSPEND DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX \
+                 BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -4293,6 +4362,7 @@ mod tests {
                         client: identifier("redis_main"),
                         channel: identifier("orders_channel"),
                         mode: RedisPubSubIngestMode::NoAckSequential,
+                        quiesce: crate::IngestQuiesceMode::Drop,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4301,9 +4371,9 @@ mod tests {
                 .to_canonical_nspl()
                 .expect("must render"),
                 "CREATE INGESTOR redis_ingestor FROM REDIS PUBSUB redis_main CHANNEL \
-                 orders_channel MODE NO_ACK SEQUENTIAL DECODE USING orders_codec TO orders \
-                 UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
-                 ERROR LOG;",
+                 orders_channel MODE NO_ACK SEQUENTIAL ON QUIESCE DROP DECODE USING orders_codec \
+                 TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
+                 ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -4315,6 +4385,7 @@ mod tests {
                         client: identifier("prom_main"),
                         query: "sum(rate(http_requests_total[5m]))".to_string(),
                         every: "15s".to_string(),
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4323,9 +4394,9 @@ mod tests {
                 .to_canonical_nspl()
                 .expect("must render"),
                 "CREATE INGESTOR prom_ingestor FROM PROMETHEUS prom_main QUERY \
-                 'sum(rate(http_requests_total[5m]))' EVERY 15s DECODE USING orders_codec TO \
-                 orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
-                 GENERAL ERROR LOG;",
+                 'sum(rate(http_requests_total[5m]))' EVERY 15s ON QUIESCE SUSPEND DECODE USING \
+                 orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -4336,6 +4407,7 @@ mod tests {
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_main"),
                         mode: ZeroMqIngestMode::NoAckSequential,
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4343,9 +4415,9 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR zmq_ingestor FROM ZEROMQ zmq_main MODE NO_ACK SEQUENTIAL DECODE \
-                 USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                "CREATE INGESTOR zmq_ingestor FROM ZEROMQ zmq_main MODE NO_ACK SEQUENTIAL ON \
+                 QUIESCE SUSPEND DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms \
+                 MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -4361,6 +4433,7 @@ mod tests {
                             timeout: "20s".to_string(),
                             retry_policy: retry.clone(),
                         },
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4369,9 +4442,9 @@ mod tests {
                 .to_canonical_nspl()
                 .expect("must render"),
                 "CREATE INGESTOR sqs_ingestor FROM SQS sqs_main QUEUE orders_queue MODE ACK \
-                 SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s DECODE USING \
-                 orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                 SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE SUSPEND \
+                 DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE \
+                 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -4382,6 +4455,9 @@ mod tests {
                     source: IngestSource::Endpoint {
                         endpoint: identifier("orders_endpoint"),
                         mode: EndpointIngestMode::NoAckSequential,
+                        quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                            max_size: "1MiB".to_string(),
+                        },
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4390,8 +4466,9 @@ mod tests {
                 .to_canonical_nspl()
                 .expect("must render"),
                 "CREATE INGESTOR endpoint_ingestor FROM ENDPOINT orders_endpoint MODE NO_ACK \
-                 SEQUENTIAL DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX \
-                 BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                 SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING orders_codec TO orders \
+                 UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
+                 ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -4402,6 +4479,7 @@ mod tests {
                     source: IngestSource::Websockets {
                         client: identifier("ws_main"),
                         mode: WebsocketsIngestMode::NoAckSequential,
+                        quiesce: crate::IngestQuiesceMode::Drop,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
 
@@ -4409,9 +4487,9 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR ws_ingestor FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL \
-                 DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE \
-                 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                "CREATE INGESTOR ws_ingestor FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON \
+                 QUIESCE DROP DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX \
+                 BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
         ];
 

@@ -136,7 +136,7 @@ CREATE INGESTOR nats_machine_signals
   QUEUE GROUP factory_signal_workers
   INSTANCES 4
   MODE NO_ACK SEQUENTIAL
-  DECODE USING machine_signal_codec
+  ON QUIESCE DROP DECODE USING machine_signal_codec
   TIMESTAMP AT ts
   TO signals_by_site
     INHERIT ALL

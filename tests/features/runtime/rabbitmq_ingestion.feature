@@ -29,7 +29,7 @@ Feature: RabbitMQ ingestion
         };
         CREATE INGESTOR rabbit_notifications
         FROM RABBITMQ rabbit_main QUEUE notifications_{{test_id}} INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_rabbit_notifications
@@ -91,7 +91,7 @@ Feature: RabbitMQ ingestion
         };
         CREATE INGESTOR rabbit_notifications
         FROM RABBITMQ rabbit_main QUEUE notifications_reconnect_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_rabbit_notifications

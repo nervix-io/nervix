@@ -29,7 +29,7 @@ Feature: MQTT ingestion
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -91,7 +91,7 @@ Feature: MQTT ingestion
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_reconnect_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -156,7 +156,7 @@ Feature: MQTT ingestion
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_noack_parallel_{{test_id}} QOS 1 MODE NO_ACK PARALLEL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -215,7 +215,7 @@ Feature: MQTT ingestion
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_client_conflict_{{test_id}} INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -265,7 +265,7 @@ Feature: MQTT ingestion
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_client_template_{{test_id}} INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -326,7 +326,7 @@ Feature: MQTT ingestion
 
       CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_start_failure_{{test_id}} INSTANCES 1 SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT oops RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -399,7 +399,7 @@ Feature: MQTT ingestion
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC notifications_ack_seq_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -474,7 +474,7 @@ Feature: MQTT ingestion
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_ack_parallel_{{test_id}} INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications

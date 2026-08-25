@@ -103,7 +103,7 @@ Feature: Generator node
 
       CREATE INGESTOR left_ingestor
         FROM ENDPOINT left_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO left_notifications
           INHERIT ALL
@@ -185,7 +185,7 @@ Feature: Generator node
 
       CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
           INHERIT ALL
@@ -261,7 +261,7 @@ Feature: Generator node
 
       CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
           INHERIT ALL
@@ -337,7 +337,7 @@ Feature: Generator node
 
       CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
           INHERIT ALL
@@ -409,7 +409,7 @@ Feature: Generator node
       CREATE ENDPOINT generator_source_endpoint ON edge PATH '/values' TYPE HTTP;
       CREATE INGESTOR generator_source
         FROM ENDPOINT generator_source_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING generator_source_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_source_codec
         TIMESTAMP NOW
         TO generator_source_values
           INHERIT ALL
@@ -488,7 +488,7 @@ Feature: Generator node
       CREATE ENDPOINT generator_error_endpoint ON edge PATH '/values' TYPE HTTP;
       CREATE INGESTOR generator_error_ingestor
         FROM ENDPOINT generator_error_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING generator_error_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_error_codec
         TIMESTAMP NOW
         TO generator_error_sources
           INHERIT ALL

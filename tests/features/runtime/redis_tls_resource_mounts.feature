@@ -39,7 +39,7 @@ Feature: Redis TLS resource mounts
         };
         CREATE INGESTOR redis_notifications
         FROM REDIS PUBSUB redis_tls CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_redis_notifications

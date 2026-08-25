@@ -529,7 +529,7 @@ CREATE INGESTOR iot_device_activity
   TOPIC 'datalake/device_activity'
   INSTANCES 2
   MODE NO_ACK SEQUENTIAL
-  DECODE USING device_activity_cbor_codec
+  ON QUIESCE DROP DECODE USING device_activity_cbor_codec
   TIMESTAMP AT ts
   TO device_activity_landing
     INHERIT ALL
@@ -550,7 +550,7 @@ CREATE INGESTOR edge_server_activity
   QUEUE GROUP datalake_edge_servers
   INSTANCES 2
   MODE NO_ACK SEQUENTIAL
-  DECODE USING edge_activity_protobuf_codec
+  ON QUIESCE DROP DECODE USING edge_activity_protobuf_codec
   TIMESTAMP AT ts
   TO edge_activity_landing
     INHERIT ALL
@@ -572,7 +572,7 @@ CREATE INGESTOR auth_server_activity
   OFFSET BY CONSUMER GROUP datalake_demo_auth
   INSTANCES 4
   MODE NO_ACK PARALLEL
-  DECODE USING auth_activity_json_codec
+  ON QUIESCE SUSPEND DECODE USING auth_activity_json_codec
   TIMESTAMP AT ts
   TO auth_activity_landing
     INHERIT ALL

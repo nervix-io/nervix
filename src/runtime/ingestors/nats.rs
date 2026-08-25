@@ -52,6 +52,9 @@ impl NatsIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled NATS ingestor must have quiesce control");
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -70,6 +73,7 @@ impl NatsIngestor {
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
             let task_branched_senders = branched_senders.clone();
+            let task_quiesce = quiesce.clone();
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 let mut backoff = RuntimeReconnectBackoff::default();
@@ -93,6 +97,25 @@ impl NatsIngestor {
                         break;
                     }
                     if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                        continue;
+                    }
+                    if task_quiesce.should_suspend_intake() {
+                        let _ = task_runtime
+                            .flush_ingest_collector(
+                                &task_domain,
+                                &task_ingestor,
+                                &task_branched_senders,
+                                &mut collector,
+                            )
+                            .await;
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                            _ = task_quiesce.wait_until_not_suspended() => {}
+                        }
                         continue;
                     }
                     let task_client = match Self::client_from_config(&task_config).await {
@@ -165,10 +188,49 @@ impl NatsIngestor {
                     backoff.reset();
                     loop {
                         tokio::task::consume_budget().await;
+                        if let Some(payload) = task_quiesce.pop_buffered(instance_idx) {
+                            if let Err(error) = task_runtime
+                                .dispatch_raw_ingest_payload(RawIngestDispatch {
+                                    domain: &task_domain,
+                                    ingestor: &task_ingestor,
+                                    timestamp_source: task_timestamp_source.as_ref(),
+                                    output_routes: &task_output_routes,
+                                    filter_where: task_filter_where.as_ref(),
+                                    branched_senders: &task_branched_senders,
+                                    codec: task_codec.clone(),
+                                    payload: &payload,
+                                    collector: &mut collector,
+                                    flush: false,
+                                })
+                                .await
+                            {
+                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    "failed to dispatch buffered nats payload for ingestor '{}' \
+                                     in domain '{}': {}",
+                                    task_ingestor.as_str(),
+                                    task_domain.as_str(),
+                                    error
+                                )));
+                            }
+                            continue;
+                        }
                         let next_flush = collector.next_flush();
                         let flush_at = next_flush
                             .unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
                         tokio::select! {
+                            _ = task_quiesce.wait_for_change() => {
+                                if task_quiesce.should_suspend_intake() {
+                                    let _ = task_runtime
+                                        .flush_ingest_collector(
+                                            &task_domain,
+                                            &task_ingestor,
+                                            &task_branched_senders,
+                                            &mut collector,
+                                        )
+                                        .await;
+                                    break;
+                                }
+                            }
                             changed = shutdown_rx.changed() => {
                                 if changed.is_err() || *shutdown_rx.borrow() {
                                     let _ = task_runtime
@@ -220,34 +282,35 @@ impl NatsIngestor {
                                             "received nats message"
                                         );
 
-                                        match decode_ingested_payload(task_codec.clone(), payload).await {
-                                            Ok(record) => {
-                                                if let Err(error) = task_runtime
-                                                    .dispatch_ingested_records(IngestGroupDispatch {
-                                                        collector: &mut collector,
-                                                        domain: &task_domain,
-                                                        ingestor: &task_ingestor,
-                                                        timestamp_source: task_timestamp_source.as_ref(),
-                                                        output_routes: &task_output_routes,
-                                                        filter_where: task_filter_where.as_ref(),
-                                                        records: vec![record],
-                                                        metadata: vec![
-                                                            IngestFilterMapMetadata::from_headers(
-                                                                headers.clone(),
-                                                            ),
-                                                        ],
-                                                        ingested_at: current_timestamp(),
-                                                        acks: vec![AckSet::empty()],
-                                                    })
-                                                    .await
-                                                {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                        "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                                                        task_ingestor.as_str(),
-                                                        task_domain.as_str(),
-                                                        error
-                                                    )));
-                                                }
+                                        let payload = BufferedIngestPayload::new(
+                                            payload,
+                                            IngestFilterMapMetadata::from_headers(headers),
+                                        );
+                                        if let IngestorQuiesceIntake::Dispatch(payload) =
+                                            task_quiesce.intake(instance_idx, payload, false)
+                                        {
+                                            if let Err(error) = task_runtime
+                                                .dispatch_raw_ingest_payload(RawIngestDispatch {
+                                                    domain: &task_domain,
+                                                    ingestor: &task_ingestor,
+                                                    timestamp_source: task_timestamp_source.as_ref(),
+                                                    output_routes: &task_output_routes,
+                                                    filter_where: task_filter_where.as_ref(),
+                                                    branched_senders: &task_branched_senders,
+                                                    codec: task_codec.clone(),
+                                                    payload: &payload,
+                                                    collector: &mut collector,
+                                                    flush: false,
+                                                })
+                                                .await
+                                            {
+                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    "failed to dispatch message for ingestor '{}' in domain '{}': {}",
+                                                    task_ingestor.as_str(),
+                                                    task_domain.as_str(),
+                                                    error
+                                                )));
+                                            }
                                                 if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                     && let Err(error) = task_runtime
                                                         .flush_ingest_collector(
@@ -267,22 +330,6 @@ impl NatsIngestor {
                                                         ),
                                                     ));
                                                 }
-                                            }
-                                            Err(error) => {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                    "failed to decode message for ingestor '{}' in domain '{}': {}",
-                                                    task_ingestor.as_str(),
-                                                    task_domain.as_str(),
-                                                    error
-                                                )));
-                                                warn!(
-                                                    domain = task_domain.as_str(),
-                                                    ingestor = task_ingestor.as_str(),
-                                                    instance = instance_idx,
-                                                    error = %error,
-                                                    "failed to decode nats message"
-                                                );
-                                            }
                                         }
                                     }
                                     None => {

@@ -33,7 +33,7 @@ Feature: Prometheus ingestion
         };
         CREATE INGESTOR prom_samples
         FROM PROMETHEUS prom_main QUERY 'label_replace(vector(42.5), "source", "local", "", "")' EVERY 1s
-        DECODE USING sample_codec
+        ON QUIESCE SUSPEND DECODE USING sample_codec
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples
@@ -91,7 +91,7 @@ Feature: Prometheus ingestion
         };
         CREATE INGESTOR prom_samples
         FROM PROMETHEUS prom_main QUERY 'label_replace(vector(43.5), "source", "recover", "", "")' EVERY 1s
-        DECODE USING sample_codec
+        ON QUIESCE SUSPEND DECODE USING sample_codec
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples
@@ -155,7 +155,7 @@ Feature: Prometheus ingestion
         };
         CREATE INGESTOR prom_samples
         FROM PROMETHEUS prom_main QUERY 'label_replace(vector(time()), "source", "local", "", "")' EVERY 1s
-        DECODE USING sample_codec
+        ON QUIESCE SUSPEND DECODE USING sample_codec
         TIMESTAMP NOW
         TO samples
         INHERIT ALL

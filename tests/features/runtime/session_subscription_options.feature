@@ -31,7 +31,7 @@ Feature: Session subscription delivery options
         TYPE HTTP;
         CREATE INGESTOR telemetry_http
         FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING telemetry_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TIMESTAMP NOW
         TO telemetry
         INHERIT ALL
@@ -86,7 +86,7 @@ Feature: Session subscription delivery options
         TYPE HTTP;
         CREATE INGESTOR telemetry_http
         FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING telemetry_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TIMESTAMP NOW
         TO telemetry
         INHERIT ALL

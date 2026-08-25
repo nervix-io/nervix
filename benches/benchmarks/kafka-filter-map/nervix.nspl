@@ -23,7 +23,7 @@ CREATE INGESTOR kafka_in_{{ lane }}
   OFFSET BY CONSUMER GROUP {{ consumer_group }}
   INSTANCES 1
   MODE NO_ACK PARALLEL
-  DECODE USING benchmark_codec
+  ON QUIESCE SUSPEND DECODE USING benchmark_codec
   TO benchmark_ingested_{{ lane }}
     INHERIT ALL
     UNBRANCHED

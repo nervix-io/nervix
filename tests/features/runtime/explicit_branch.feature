@@ -43,7 +43,7 @@ Feature: Explicit branches
 
       CREATE INGESTOR http_notifications
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant

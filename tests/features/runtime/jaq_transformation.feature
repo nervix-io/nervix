@@ -26,7 +26,7 @@ Feature: JAQ transformation
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -82,7 +82,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_kafka_notifications
@@ -139,7 +139,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR rabbit_notifications
         FROM RABBITMQ rabbit_main QUEUE notifications_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_rabbit_notifications
@@ -195,7 +195,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR redis_notifications
         FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_redis_notifications
@@ -251,7 +251,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -306,7 +306,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR nats_notifications
         FROM NATS nats_main SUBJECT notifications_{{test_id}} QUEUE GROUP nats_notifications_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_nats_notifications
@@ -361,7 +361,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR zeromq_notifications
         FROM ZEROMQ zeromq_main MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_zeromq_notifications
@@ -418,7 +418,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR sqs_notifications
         FROM SQS sqs_main QUEUE notifications_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_sqs_notifications
@@ -472,7 +472,7 @@ Feature: JAQ transformation
         TYPE WEBSOCKETS;
         CREATE INGESTOR ws_notifications
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ws_notifications
@@ -529,7 +529,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR http_notifications
         FROM HTTP http_main EVERY 1s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -580,7 +580,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR ws_notifications
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ws_notifications
@@ -633,7 +633,7 @@ Feature: JAQ transformation
         };
         CREATE INGESTOR prom_samples
         FROM PROMETHEUS prom_main QUERY 'label_replace(vector(42.5), "source", "local", "", "")' EVERY 1s
-        DECODE USING sample_codec
+        ON QUIESCE SUSPEND DECODE USING sample_codec
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples

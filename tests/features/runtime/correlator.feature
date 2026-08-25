@@ -72,7 +72,7 @@ Feature: Relay correlation
         TYPE HTTP;
         CREATE INGESTOR left_profile_ingestor
         FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING left_profile_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec
         TO left_profiles
         INHERIT ALL
         BRANCHED BY by_left_profile_ingestor
@@ -82,7 +82,7 @@ Feature: Relay correlation
         ON GENERAL ERROR LOG;
         CREATE INGESTOR left_profile_alias_ingestor
         FROM ENDPOINT left_alias_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING left_profile_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec
         TO left_profile_aliases
         INHERIT ALL
         BRANCHED BY by_left_profile_ingestor
@@ -92,7 +92,7 @@ Feature: Relay correlation
         ON GENERAL ERROR LOG;
         CREATE INGESTOR right_profile_ingestor
         FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING right_profile_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec
         TO right_profiles
         INHERIT ALL
         BRANCHED BY by_left_profile_ingestor
@@ -102,7 +102,7 @@ Feature: Relay correlation
         ON GENERAL ERROR LOG;
         CREATE INGESTOR right_profile_alias_ingestor
         FROM ENDPOINT right_alias_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING right_profile_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec
         TO right_profile_aliases
         INHERIT ALL
         BRANCHED BY by_left_profile_ingestor
