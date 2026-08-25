@@ -66,6 +66,30 @@ Feature: NSPL transactions
       SHOW CREATE SCHEMA reverted_after_failover;
       """
 
+  Scenario Outline: A clean session close reverts its open transaction
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Given client "owner" is connected to the leader node
+    And client "observer" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE DOMAIN {{domain}};
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "owner" closes its session cleanly
+    Then transaction "{{transaction_id}}" eventually has state "REVERTED"
+    When client "observer" fails to attach to transaction "{{transaction_id}}"
+    Then the last command error contains
+      """
+      finished with outcome REVERTED
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: A commit interrupted between steps is completed by the new leader
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -95,6 +119,14 @@ Feature: NSPL transactions
     Then the last command error contains
       """
       finished with outcome COMMITTED
+      """
+    And the last command output contains
+      """
+      created domain '{{domain}}'
+      """
+    And the last command output contains
+      """
+      stored model 'resumed_commit'
       """
     When these NSPL commands are executed on the leader node
       """
@@ -176,7 +208,7 @@ Feature: NSPL transactions
       transaction reverted
       """
 
-  Scenario: Read-only statements are rejected while a transaction is open
+  Scenario Outline: Non-configuration statements are rejected while a transaction is open
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     Given client "owner" is connected to the leader node
@@ -186,12 +218,21 @@ Feature: NSPL transactions
       """
     And client "owner" fails to execute these NSPL commands
       """
-      SHOW TRANSACTIONS;
+      <statement>
       """
     Then the last command error contains
       """
-      cannot be queued in a transaction
+      <error>
       """
+
+    Examples:
+      | statement                                                 | error                                                       |
+      | SHOW TRANSACTIONS;                                        | cannot be queued in a transaction                           |
+      | DESCRIBE DOMAIN;                                          | cannot be queued in a transaction                           |
+      | CREATE SUBSCRIPTION tx_view TO missing_relay;             | session-scoped and client-local statements cannot be queued |
+      | UPLOAD RESOURCE local_bundle VERSION '/tmp/local_bundle'; | client-local commands are not allowed                       |
+      | CORDON NODE node-1;                                       | cannot be queued in a transaction                           |
+      | DROP NODE node-1;                                         | cannot be queued in a transaction                           |
 
   Scenario: Replicated transaction limits are enforced consistently
     Given the transaction statement limit is configured as 1

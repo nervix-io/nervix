@@ -129,9 +129,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
   `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
-- Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, or ClickHouse,
-  put `timeout_ms` in the referenced client CONFIG when the request needs an explicit bound; the
-  emitter's declared retry policy owns pacing after that request fails.
+- Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL, or
+  ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
+  bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
+  must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key.
 - Require `WITH MAX BATCH <positive_n>` for ClickHouse, Postgres, MySQL, and MongoDB emitters. For
   SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.

@@ -559,6 +559,7 @@ Current built-in client transport kinds include:
 - `PULSAR`
 - `HTTP`
 - `SENTRY`
+- `OTEL`
 - `PROMETHEUS`
 - `RABBITMQ`
 - `REDIS`

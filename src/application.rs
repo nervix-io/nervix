@@ -55,8 +55,8 @@ use nervix_consensus::{
     ConsensusSettings, RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR,
     RAFT_INSTALL_SNAPSHOT_PATH, RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH, ReplicatedTransaction,
     SnapshotRelayHeader as RaftSnapshotRelayHeader, TransactionCommandResult,
-    TransactionDiagnostic, TransactionOutcome, TransactionState, TransactionStatement,
-    TransactionStepEffect, TransactionStepResult,
+    TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionState,
+    TransactionStatement, TransactionStepEffect, TransactionStepResult,
     TransferLeaderRequest as RaftTransferLeaderRequest, TypeConfig, UserCredentials,
     VoteRequest as RaftVoteRequest,
 };
@@ -4083,9 +4083,7 @@ impl SessionServiceImpl {
         let Ok(user_name) = Identifier::parse(&credentials.username) else {
             return None;
         };
-        let Some(user) = self.consensus.current_user(&user_name).await else {
-            return None;
-        };
+        let user = self.consensus.current_user(&user_name).await?;
         let auth_rate_limit_key = user_name.as_str().to_string();
         if self
             .failed_auth_rate_limit_keys
@@ -7694,11 +7692,13 @@ impl SessionServiceImpl {
             ));
         }
         if let TransactionState::Finished(finished) = &transaction.state {
+            let recorded = transaction_commit_result(&transaction);
             let mut result = command_error(format!(
                 "transaction '{}' finished with outcome {}",
                 request.id,
                 finished.outcome.as_str()
             ));
+            result.results = recorded.results;
             result.transaction = Some(transaction_status(&transaction));
             return result;
         }
@@ -7785,18 +7785,15 @@ impl SessionServiceImpl {
                 }
                 return result;
             }
+            if !is_batch {
+                return result;
+            }
             append_command_result(&mut results, result);
         }
 
         if results.is_empty() {
             return command_error("empty command".to_string());
         }
-        if !is_batch {
-            return results
-                .pop()
-                .expect("non-empty results must contain the single result");
-        }
-
         CommandResult {
             success: true,
             message: command_results_message(&results),
@@ -8088,13 +8085,13 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn pause_transaction_commit_if_armed(&self, transaction: &ReplicatedTransaction) {
+    async fn pause_transaction_commit_if_armed(&self, _transaction: &ReplicatedTransaction) {
         #[cfg(feature = "testing")]
-        if let TransactionState::Committing(_) = transaction.state {
+        if let TransactionState::Committing(_) = _transaction.state {
             self.runtime
                 .pause_transaction_commit_after_progress_if_armed(
                     self.consensus.local_node_id(),
-                    transaction.completed_statement_count(),
+                    _transaction.completed_statement_count(),
                 )
                 .await;
         }
@@ -8182,19 +8179,19 @@ impl SessionServiceImpl {
         };
         let effect = result.success.then_some(effect).flatten();
         self.consensus
-            .advance_transaction_commit(
-                transaction.id.clone(),
-                first_statement,
+            .advance_transaction_commit(TransactionCommitAdvance {
+                id: transaction.id.clone(),
+                expected_next_statement: first_statement,
                 next_statement,
-                current_timestamp(),
-                TransactionStepResult {
+                at: current_timestamp(),
+                result: TransactionStepResult {
                     first_statement,
                     statement_count,
                     result: replicated_command_result(&result),
                 },
                 effect,
                 completion,
-            )
+            })
             .await
             .map_err(|error| error.to_string())
     }
@@ -13693,6 +13690,16 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             )
         }
         EmitSink::Sentry { client } => format!("SENTRY client={}", client.as_str()),
+        EmitSink::Otel { client, signal, .. } => {
+            let signal = match signal {
+                nervix_models::OtelSignal::Logs => "logs".to_string(),
+                nervix_models::OtelSignal::Traces => "traces".to_string(),
+                nervix_models::OtelSignal::Metric(metric) => {
+                    format!("metric {}", metric.name)
+                }
+            };
+            format!("OTEL client={} signal={signal}", client.as_str())
+        }
         EmitSink::ClickHouse {
             client,
             table,
@@ -20106,6 +20113,73 @@ mod tests {
         assert!(result.message.contains("created domain 'beta'"));
 
         subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn attaching_to_committed_transaction_returns_recorded_statement_results() {
+        let (service, _registry, path) = build_test_service(false).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut owner = SessionSubscriptions::new();
+
+        let committed = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN; CREATE DOMAIN attach_results; CREATE SCHEMA notification ( \
+                            user_id U32 ); COMMIT"
+                        .to_string(),
+                    domain: "attach_results".to_string(),
+                },
+                &tx,
+                &mut owner,
+            )
+            .await;
+        assert!(
+            committed.success,
+            "commit must succeed: {}",
+            committed.message
+        );
+        let transaction_id = committed
+            .transaction
+            .as_ref()
+            .expect("commit result must carry transaction status")
+            .id
+            .clone();
+
+        let mut observer = SessionSubscriptions::new();
+        let attached = service
+            .attach_transaction(
+                proto::AttachTransactionRequest { id: transaction_id },
+                &mut observer,
+            )
+            .await;
+
+        assert!(
+            !attached.success,
+            "finished transaction attach must be terminal"
+        );
+        assert_eq!(
+            attached.transaction.as_ref().map(|status| status.state),
+            Some(ApiTransactionState::Committed as i32)
+        );
+        assert!(attached.message.contains("finished with outcome COMMITTED"));
+        assert!(
+            attached
+                .results
+                .iter()
+                .any(|result| result.message.contains("created domain 'attach_results'")),
+            "attach must return the recorded CREATE DOMAIN result: {attached:?}"
+        );
+        assert!(
+            attached
+                .results
+                .iter()
+                .any(|result| result.message.contains("stored model 'notification'")),
+            "attach must return the recorded CREATE SCHEMA result: {attached:?}"
+        );
+
+        owner.stop_all(&service).await;
+        observer.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);
     }
 

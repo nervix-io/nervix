@@ -437,7 +437,10 @@ impl Runtime {
             events,
             emitter_faults: hooks.emitter_faults,
             ingestor_faults: hooks.ingestor_faults,
+            otel_client_faults: hooks.otel_client_faults,
+            #[cfg(feature = "testing")]
             schedule_publication_faults: hooks.schedule_publication_faults,
+            #[cfg(feature = "testing")]
             transaction_commit_pauses: hooks.transaction_commit_pauses,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
@@ -6220,6 +6223,7 @@ impl Runtime {
                 | Model::ClientPulsar(_)
                 | Model::ClientHttp(_)
                 | Model::ClientSentry(_)
+                | Model::ClientOtel(_)
                 | Model::ClientPrometheus(_)
                 | Model::ClientRabbitMq(_)
                 | Model::ClientRedis(_)
@@ -8656,6 +8660,7 @@ impl Runtime {
                 | Model::ClientPulsar(_)
                 | Model::ClientHttp(_)
                 | Model::ClientSentry(_)
+                | Model::ClientOtel(_)
                 | Model::ClientPrometheus(_)
                 | Model::ClientRabbitMq(_)
                 | Model::ClientRedis(_)

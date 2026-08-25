@@ -5,7 +5,9 @@ use std::{
 
 use ahash::RandomState;
 use dashmap::DashMap;
-use nervix_models::{Domain, Identifier};
+#[cfg(feature = "testing")]
+use nervix_models::Domain;
+use nervix_models::Identifier;
 use tokio::sync::{Notify, broadcast};
 use triomphe::Arc;
 
@@ -17,6 +19,11 @@ pub struct EmitterFaultInjector {
 #[derive(Debug, Default)]
 pub struct IngestorFaultInjector {
     ingestors: DashMap<String, (), RandomState>,
+}
+
+#[derive(Debug, Default)]
+pub struct OtelClientFaultInjector {
+    unavailable_emitters: DashMap<String, (), RandomState>,
 }
 
 /// Fails the next schedule publication for a domain so tests can observe how a committed model
@@ -49,6 +56,7 @@ pub(super) enum EmitterFaultMode {
 pub struct RuntimeTestHooks {
     pub emitter_faults: Arc<EmitterFaultInjector>,
     pub ingestor_faults: Arc<IngestorFaultInjector>,
+    pub otel_client_faults: Arc<OtelClientFaultInjector>,
     pub schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     pub(crate) transaction_commit_pauses: Arc<TransactionCommitPauseInjector>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
@@ -69,6 +77,7 @@ impl Default for RuntimeTestHooks {
         Self {
             emitter_faults: Arc::default(),
             ingestor_faults: Arc::default(),
+            otel_client_faults: Arc::default(),
             schedule_publication_faults: Arc::default(),
             transaction_commit_pauses: Arc::default(),
             branch_instance_expiration_scan_interval: None,
@@ -143,6 +152,7 @@ impl RuntimeTestHooks {
 }
 
 impl TransactionCommitPauseInjector {
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_if_armed(&self, node_id: &str, completed_statements: usize) {
         let key = (node_id.to_string(), completed_statements);
         let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
@@ -183,10 +193,28 @@ impl SchedulePublicationFaultInjector {
 
     /// Consumes an armed fault so the rollback republication that follows a failed publication can
     /// still reach the cluster.
+    #[cfg(feature = "testing")]
     pub(crate) fn take_armed_fault(&self, domain: &Domain) -> bool {
         self.domains
             .remove(&domain.as_str().to_ascii_lowercase())
             .is_some()
+    }
+}
+
+impl OtelClientFaultInjector {
+    pub fn fail_unavailable(&self, emitter: &str) {
+        self.unavailable_emitters
+            .insert(emitter.to_ascii_lowercase(), ());
+    }
+
+    pub fn clear_emitter(&self, emitter: &str) {
+        self.unavailable_emitters
+            .remove(&emitter.to_ascii_lowercase());
+    }
+
+    pub(super) fn is_unavailable(&self, emitter: &Identifier) -> bool {
+        self.unavailable_emitters
+            .contains_key(&emitter.as_str().to_ascii_lowercase())
     }
 }
 

@@ -8,7 +8,8 @@ pub(crate) use nervix_test_environment::{
     CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
     KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR,
     MYSQL_TLS_ADDR, NATS_ADDR, NATS_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
-    PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+    PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT,
+    SQS_TLS_ENDPOINT,
 };
 use nervix_test_environment::{ContainerMode, DependencyEnvironment, configure_process_lifecycle};
 use tokio::sync::Mutex;
@@ -83,6 +84,7 @@ impl TestDependencies {
         start_gcs => "gcs",
         start_azurite => "azurite",
         start_quickwit => "quickwit",
+        start_otel_collector => "otel-collector",
         start_jaeger => "jaeger",
         start_sentry => "sentry",
     }
@@ -95,6 +97,44 @@ impl TestDependencies {
             io::Error::other("Sentry test container is unavailable; add 'Given Sentry is running'")
         })?;
         suite.lock().await.sentry_event(environment).await
+    }
+
+    pub(crate) async fn quickwit_index_contains(
+        &self,
+        index: &str,
+        needle: &str,
+    ) -> io::Result<bool> {
+        let base = self.endpoints.get(QUICKWIT_ADDR)?;
+        let mut url = url::Url::parse(base)
+            .map_err(|error| io::Error::other(format!("invalid Quickwit endpoint: {error}")))?;
+        url.set_path(&format!("/api/v1/{index}/search"));
+        url.query_pairs_mut()
+            .append_pair("query", "*")
+            .append_pair("max_hits", "100");
+        let response = reqwest::get(url)
+            .await
+            .map_err(|error| io::Error::other(format!("Quickwit search failed: {error}")))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|error| io::Error::other(format!("Quickwit search failed: {error}")))?;
+        let body = response
+            .text()
+            .await
+            .map_err(|error| io::Error::other(format!("Quickwit search body failed: {error}")))?;
+        Ok(body.contains(needle))
+    }
+
+    pub(crate) async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
+        let suite = SUITE_DEPENDENCIES.get().ok_or_else(|| {
+            io::Error::other(
+                "OpenTelemetry Collector is unavailable; add 'Given OpenTelemetry Collector is \
+                 running'",
+            )
+        })?;
+        suite.lock().await.otel_collector_contains(needle).await
     }
 
     pub(crate) async fn shutdown_suite() -> Vec<String> {

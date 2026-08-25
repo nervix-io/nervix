@@ -845,10 +845,14 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                                                                 }
                                                             }
                                                         }
-                                                        SessionResponseAction::TransactionAttached => {
+                                                        SessionResponseAction::TransactionAttached {
+                                                            replay_pending,
+                                                        } => {
                                                             state.set(ConsoleConnectionState::Connected);
                                                             waiting_for_transaction_attach = false;
-                                                            if resend_pending_after_connect {
+                                                            if resend_pending_after_connect
+                                                                && replay_pending
+                                                            {
                                                                 resend_pending_after_connect = false;
                                                                 if !send_pending_websocket_commands(
                                                                     &mut socket,
@@ -858,6 +862,8 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                                                                 {
                                                                     break;
                                                                 }
+                                                            } else {
+                                                                resend_pending_after_connect = false;
                                                             }
                                                         }
                                                         SessionResponseAction::TransactionAttachFailed => {
@@ -1015,7 +1021,7 @@ fn web_console_websocket_url_from_base(base_url: &str, auth_token: &str) -> Opti
 
 enum SessionResponseAction {
     Continue,
-    TransactionAttached,
+    TransactionAttached { replay_pending: bool },
     TransactionAttachFailed,
     Reconnect(String),
 }
@@ -1031,6 +1037,19 @@ fn transaction_is_active(status: Option<nervix_proto::TransactionStatus>) -> boo
         current_transaction_state(status),
         Some(nervix_proto::TransactionState::Open | nervix_proto::TransactionState::Committing)
     )
+}
+
+fn transaction_operation_was_observed(
+    previous: Option<&nervix_proto::TransactionStatus>,
+    current: Option<&nervix_proto::TransactionStatus>,
+) -> bool {
+    let (Some(previous), Some(current)) = (previous, current) else {
+        return false;
+    };
+    current_transaction_state(Some(current.clone())) != Some(nervix_proto::TransactionState::Open)
+        || current.pending_count != previous.pending_count
+        || current.completed_count != previous.completed_count
+        || current.total_count != previous.total_count
 }
 
 fn active_domain_graph_missing(
@@ -1071,6 +1090,7 @@ fn handle_session_response(
             if let Some(leader_url) = leader_web_console_redirect_url(&result) {
                 return SessionResponseAction::Reconnect(leader_url);
             }
+            let previous_transaction = transaction_status.get_untracked();
             if let Some(status) = result.transaction.clone() {
                 transaction_status.set(Some(status));
             }
@@ -1085,12 +1105,29 @@ fn handle_session_response(
                         transaction_status.set(None);
                     }
                     pending_requests.clear();
+                    let message = result.message.clone();
+                    let has_recorded_results = !result.results.is_empty();
                     terminal_lines.update(|lines| {
+                        if has_recorded_results {
+                            lines.push(TermLine::error(message));
+                        }
                         lines.extend(command_result_lines(result, "ATTACH TRANSACTION"));
                     });
                     return SessionResponseAction::TransactionAttachFailed;
                 }
-                return SessionResponseAction::TransactionAttached;
+                let operation_was_observed = transaction_operation_was_observed(
+                    previous_transaction.as_ref(),
+                    result.transaction.as_ref(),
+                );
+                if operation_was_observed {
+                    pending_requests.clear();
+                    terminal_lines.update(|lines| {
+                        lines.extend(command_result_lines(result, "ATTACH TRANSACTION"));
+                    });
+                }
+                return SessionResponseAction::TransactionAttached {
+                    replay_pending: !operation_was_observed,
+                };
             }
             if let Some(PendingRequest::ResourceDescribe { resource, .. }) = pending {
                 resource_details.update(|details| {
@@ -6236,6 +6273,38 @@ mod tests {
     use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowEdge, DataflowNode};
 
     use super::*;
+
+    #[test]
+    fn transaction_reconnect_replays_only_when_replicated_progress_is_unchanged() {
+        let previous = nervix_proto::TransactionStatus {
+            id: "tx-1".to_string(),
+            state: nervix_proto::TransactionState::Open as i32,
+            pending_count: 1,
+            completed_count: 0,
+            total_count: 1,
+            error: String::new(),
+            failing_step: None,
+        };
+        assert!(!transaction_operation_was_observed(
+            Some(&previous),
+            Some(&previous)
+        ));
+
+        let mut queued = previous.clone();
+        queued.pending_count = 2;
+        queued.total_count = 2;
+        assert!(transaction_operation_was_observed(
+            Some(&previous),
+            Some(&queued)
+        ));
+
+        let mut committing = previous.clone();
+        committing.state = nervix_proto::TransactionState::Committing as i32;
+        assert!(transaction_operation_was_observed(
+            Some(&previous),
+            Some(&committing)
+        ));
+    }
 
     #[test]
     fn branch_group_uses_callouts_for_initiator_and_finalizers() {

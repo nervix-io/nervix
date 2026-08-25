@@ -43,6 +43,17 @@ pub struct TransactionStepResult {
     pub result: TransactionCommandResult,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionCommitAdvance {
+    pub id: String,
+    pub expected_next_statement: usize,
+    pub next_statement: usize,
+    pub at: Timestamp,
+    pub result: TransactionStepResult,
+    pub effect: Option<TransactionStepEffect>,
+    pub completion: Option<TransactionOutcome>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionCommitProgress {
     pub next_statement: usize,

@@ -2,10 +2,10 @@ use chumsky::prelude::*;
 use nervix_models::{
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq,
-    CreateStatement, KafkaConfigEntry,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
+    CreateClientZeroMq, CreateStatement, KafkaConfigEntry,
 };
 
 use crate::{
@@ -118,6 +118,16 @@ pub fn create_client_sentry_parser<'src>()
             mount,
             config,
         }
+    })
+}
+
+pub fn create_client_otel_parser<'src>()
+-> impl Parser<'src, &'src [Token], CreateStatement<CreateClientOtel>, extra::Err<ParseError<'src>>>
++ Clone {
+    create_client_parser(Identifier::Otel, |name, mount, config| CreateClientOtel {
+        name,
+        mount,
+        config,
     })
 }
 

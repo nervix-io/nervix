@@ -426,6 +426,7 @@ impl Model {
             | (Self::ClientPulsar(_), Self::ClientPulsar(_))
             | (Self::ClientHttp(_), Self::ClientHttp(_))
             | (Self::ClientSentry(_), Self::ClientSentry(_))
+            | (Self::ClientOtel(_), Self::ClientOtel(_))
             | (Self::ClientPrometheus(_), Self::ClientPrometheus(_))
             | (Self::ClientMqtt(_), Self::ClientMqtt(_))
             | (Self::ClientNats(_), Self::ClientNats(_))
@@ -453,6 +454,7 @@ impl Model {
             | (Self::ClientPulsar(_), _)
             | (Self::ClientHttp(_), _)
             | (Self::ClientSentry(_), _)
+            | (Self::ClientOtel(_), _)
             | (Self::ClientPrometheus(_), _)
             | (Self::ClientMqtt(_), _)
             | (Self::ClientNats(_), _)
@@ -1436,6 +1438,30 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
         (EmitSink::ZeroMq { client: _ }, EmitSink::ZeroMq { client: _ })
         | (EmitSink::Sentry { client: _ }, EmitSink::Sentry { client: _ }) => true,
         (
+            EmitSink::Otel {
+                client: _,
+                signal: base_signal,
+                values: base_values,
+                attributes: base_attributes,
+                resource: base_resource,
+                scope: base_scope,
+            },
+            EmitSink::Otel {
+                client: _,
+                signal: candidate_signal,
+                values: candidate_values,
+                attributes: candidate_attributes,
+                resource: candidate_resource,
+                scope: candidate_scope,
+            },
+        ) => {
+            base_signal == candidate_signal
+                && base_values == candidate_values
+                && base_attributes == candidate_attributes
+                && base_resource == candidate_resource
+                && base_scope == candidate_scope
+        }
+        (
             EmitSink::ClickHouse {
                 client: _,
                 table: base_table,
@@ -1568,6 +1594,7 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
             | EmitSink::ZeroMq { .. }
             | EmitSink::Sqs { .. }
             | EmitSink::Sentry { .. }
+            | EmitSink::Otel { .. }
             | EmitSink::ClickHouse { .. }
             | EmitSink::Postgres { .. }
             | EmitSink::MySql { .. }

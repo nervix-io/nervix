@@ -563,6 +563,17 @@ async fn given_quickwit_is_running(world: &mut ScenarioWorld) {
     refresh_dependency_configuration(world);
 }
 
+#[given("OpenTelemetry Collector is running")]
+async fn given_otel_collector_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_otel_collector(&world.test_id)
+        .await
+        .expect("OpenTelemetry Collector test container should start");
+    refresh_dependency_configuration(world);
+}
+
 #[given("Jaeger is running")]
 async fn given_jaeger_is_running(world: &mut ScenarioWorld) {
     initialize_scenario_identity(world);
@@ -2876,6 +2887,26 @@ async fn when_emitter_leaves_fault_mode(world: &mut ScenarioWorld, emitter: Stri
     world.cluster().clear_emitter_fault_on_all_nodes(&emitter);
 }
 
+#[when(expr = "OTEL client for emitter {string} enters unavailable fault mode")]
+async fn when_otel_client_enters_unavailable_fault_mode(
+    world: &mut ScenarioWorld,
+    emitter: String,
+) {
+    let emitter = expand_placeholders(world, &emitter);
+    world
+        .cluster()
+        .fail_otel_client_unavailable_on_all_nodes(&emitter);
+}
+
+#[when(expr = "OTEL client for emitter {string} leaves fault mode")]
+#[then(expr = "OTEL client for emitter {string} leaves fault mode")]
+async fn when_otel_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: String) {
+    let emitter = expand_placeholders(world, &emitter);
+    world
+        .cluster()
+        .clear_otel_client_fault_on_all_nodes(&emitter);
+}
+
 #[when(expr = "ingestor {string} enters fault mode")]
 async fn when_ingestor_enters_fault_mode(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = expand_placeholders(world, &ingestor);
@@ -3836,6 +3867,16 @@ async fn given_named_client_is_connected_to_leader(world: &mut ScenarioWorld, na
     connect_named_client_to_node(world, name, leader).await;
 }
 
+#[when(expr = "client {string} closes its session cleanly")]
+async fn when_named_client_closes_cleanly(world: &mut ScenarioWorld, name: String) {
+    let name = expand_placeholders(world, &name);
+    let client = world
+        .transaction_clients
+        .remove(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"));
+    drop(client);
+}
+
 #[when(expr = "client {string} executes these NSPL commands")]
 async fn when_named_client_executes_commands(
     world: &mut ScenarioWorld,
@@ -3999,6 +4040,14 @@ async fn when_named_client_fails_to_attach_to_transaction(
             assert!(
                 !outcome.success,
                 "client '{name}' unexpectedly attached transaction '{transaction_id}'"
+            );
+            world.last_command_output = Some(
+                outcome
+                    .results
+                    .iter()
+                    .map(|result| result.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             );
             world.last_command_error = Some(outcome.message);
         }
@@ -11119,6 +11168,56 @@ async fn then_sentry_eventually_receives_event(world: &mut ScenarioWorld, #[step
             "timed out waiting for Sentry to receive {expected}"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[then(expr = "Quickwit index {string} eventually contains {string}")]
+async fn then_quickwit_index_eventually_contains(
+    world: &mut ScenarioWorld,
+    index: String,
+    expected: String,
+) {
+    let index = expand_placeholders(world, &index);
+    let expected = expand_placeholders(world, &expected);
+    let deadline = Instant::now() + Duration::from_secs(45);
+
+    loop {
+        tokio::task::consume_budget().await;
+        if world
+            .dependencies
+            .quickwit_index_contains(&index, &expected)
+            .await
+            .expect("Quickwit search must succeed")
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Quickwit index {index:?} to contain {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[then(expr = "OpenTelemetry Collector eventually contains {string}")]
+async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        if world
+            .dependencies
+            .otel_collector_contains(&expected)
+            .await
+            .expect("OpenTelemetry Collector logs must be readable")
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for OpenTelemetry Collector to contain {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

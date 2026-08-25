@@ -47,7 +47,7 @@ use triomphe::Arc;
 mod transaction;
 
 pub use transaction::{
-    FinishedTransaction, ReplicatedTransaction, TransactionCommandResult,
+    FinishedTransaction, ReplicatedTransaction, TransactionCommandResult, TransactionCommitAdvance,
     TransactionCommitProgress, TransactionDiagnostic, TransactionMutationError,
     TransactionMutationResponse, TransactionOutcome, TransactionState, TransactionStatement,
     TransactionStepEffect, TransactionStepResult,
@@ -1076,14 +1076,17 @@ impl ConsensusHandle {
 
     pub async fn advance_transaction_commit(
         &self,
-        id: String,
-        expected_next_statement: usize,
-        next_statement: usize,
-        at: nervix_models::Timestamp,
-        result: TransactionStepResult,
-        effect: Option<TransactionStepEffect>,
-        completion: Option<TransactionOutcome>,
+        advance: TransactionCommitAdvance,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        let TransactionCommitAdvance {
+            id,
+            expected_next_statement,
+            next_statement,
+            at,
+            result,
+            effect,
+            completion,
+        } = advance;
         self.write_transaction(ConsensusCommand::AdvanceTransactionCommit {
             id,
             expected_next_statement,
@@ -2968,6 +2971,7 @@ mod tests {
                 domain_id: domain_id.clone(),
                 expected_start_version: 0,
                 start: DomainStartPoint::Resume,
+                clock: None,
             })),
             completion: None,
         };

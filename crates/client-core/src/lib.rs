@@ -171,6 +171,12 @@ enum PendingResponse {
     Suggest(oneshot::Sender<Vec<AutocompleteSuggestion>>),
 }
 
+enum SessionRecovery {
+    Unavailable,
+    Ready,
+    TransactionObserved(Box<CommandOutcome>),
+}
+
 struct ClientInner {
     domain: Mutex<String>,
     current_server: Mutex<Option<String>>,
@@ -395,12 +401,11 @@ impl Client {
         for _ in 0..=MAX_REDIRECTS {
             let outcome = match self.execute_once(query).await {
                 Ok(outcome) => outcome,
-                Err(ClientError::SessionClosed) => {
-                    if self.recover_session().await? {
-                        continue;
-                    }
-                    return Err(ClientError::SessionClosed);
-                }
+                Err(ClientError::SessionClosed) => match self.recover_session().await? {
+                    SessionRecovery::Ready => continue,
+                    SessionRecovery::TransactionObserved(outcome) => return Ok(*outcome),
+                    SessionRecovery::Unavailable => return Err(ClientError::SessionClosed),
+                },
                 Err(err) => return Err(err),
             };
             if outcome.kind != CommandOutcomeKind::NotLeader {
@@ -411,10 +416,15 @@ impl Client {
             };
             self.remember_known_server(leader_grpc_uri).await;
             match self.reconnect(leader_grpc_uri).await {
-                Ok(()) => self.restore_transaction_binding().await?,
+                Ok(()) => {
+                    if let Some(outcome) = self.restore_transaction_binding().await? {
+                        return Ok(recovered_transaction_outcome(outcome));
+                    }
+                }
                 Err(err) => match self.recover_session().await {
-                    Ok(true) => {}
-                    Ok(false) => return Err(err),
+                    Ok(SessionRecovery::Ready) => {}
+                    Ok(SessionRecovery::TransactionObserved(outcome)) => return Ok(*outcome),
+                    Ok(SessionRecovery::Unavailable) => return Err(err),
                     Err(recover_err) => return Err(recover_err),
                 },
             }
@@ -470,18 +480,26 @@ impl Client {
         rx.await.map_err(|_| ClientError::SessionClosed)
     }
 
-    async fn restore_transaction_binding(&self) -> Result<(), ClientError> {
-        let Some(transaction) = self.active_transaction_status().await else {
-            return Ok(());
+    async fn restore_transaction_binding(&self) -> Result<Option<CommandOutcome>, ClientError> {
+        let Some(previous) = self.active_transaction_status().await else {
+            return Ok(None);
         };
-        let outcome = self
-            .attach_transaction_with_redirects(&transaction.id)
-            .await?;
+        let outcome = self.attach_transaction_with_redirects(&previous.id).await?;
         if let Some(status) = outcome.transaction.clone() {
             *self.inner.transaction.lock().await = Some(status);
         }
         if outcome.success {
-            Ok(())
+            let operation_was_observed = outcome
+                .transaction
+                .as_ref()
+                .is_some_and(|current| transaction_operation_was_observed(&previous, current));
+            Ok(operation_was_observed.then_some(outcome))
+        } else if outcome
+            .transaction
+            .as_ref()
+            .is_some_and(|status| !status.state.is_active())
+        {
+            Ok(Some(outcome))
         } else {
             if outcome.transaction.is_none() {
                 *self.inner.transaction.lock().await = None;
@@ -740,10 +758,15 @@ impl Client {
             };
             self.remember_known_server(leader_grpc_uri).await;
             match self.reconnect(leader_grpc_uri).await {
-                Ok(()) => self.restore_transaction_binding().await?,
+                Ok(()) => {
+                    if let Some(outcome) = self.restore_transaction_binding().await? {
+                        return Ok(recovered_transaction_outcome(outcome));
+                    }
+                }
                 Err(err) => match self.recover_session().await {
-                    Ok(true) => {}
-                    Ok(false) => return Err(err),
+                    Ok(SessionRecovery::Ready) => {}
+                    Ok(SessionRecovery::TransactionObserved(outcome)) => return Ok(*outcome),
+                    Ok(SessionRecovery::Unavailable) => return Err(err),
                     Err(recover_err) => return Err(recover_err),
                 },
             }
@@ -782,12 +805,16 @@ impl Client {
         Ok(())
     }
 
-    async fn recover_session(&self) -> Result<bool, ClientError> {
+    async fn recover_session(&self) -> Result<SessionRecovery, ClientError> {
         if !self.recover_transport().await? {
-            return Ok(false);
+            return Ok(SessionRecovery::Unavailable);
         }
-        self.restore_transaction_binding().await?;
-        Ok(true)
+        match self.restore_transaction_binding().await? {
+            Some(outcome) => Ok(SessionRecovery::TransactionObserved(Box::new(
+                recovered_transaction_outcome(outcome),
+            ))),
+            None => Ok(SessionRecovery::Ready),
+        }
     }
 
     async fn recover_transport(&self) -> Result<bool, ClientError> {
@@ -1105,6 +1132,38 @@ fn command_error_outcome(message: String) -> CommandOutcome {
     }
 }
 
+fn recovered_transaction_outcome(mut outcome: CommandOutcome) -> CommandOutcome {
+    if !outcome.results.is_empty() {
+        outcome.message = outcome
+            .results
+            .iter()
+            .map(|result| result.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        outcome.diagnostics = outcome
+            .results
+            .last()
+            .map(|result| result.diagnostics.clone())
+            .unwrap_or_default();
+    }
+    if outcome.transaction.as_ref().map(|status| status.state) == Some(TransactionState::Committed)
+    {
+        outcome.success = true;
+        outcome.kind = CommandOutcomeKind::Ok;
+    }
+    outcome
+}
+
+fn transaction_operation_was_observed(
+    previous: &TransactionStatus,
+    current: &TransactionStatus,
+) -> bool {
+    current.state != TransactionState::Open
+        || current.pending_count != previous.pending_count
+        || current.completed_count != previous.completed_count
+        || current.total_count != previous.total_count
+}
+
 impl SubscriptionRequest {
     pub fn new(name: impl Into<String>, relay: impl Into<String>) -> Self {
         Self {
@@ -1273,6 +1332,7 @@ mod tests {
         Diagnostic, GrpcConnector, PendingResponse, ServerEvent, ServerEventLevel,
         SubscriptionEvent, SubscriptionRequest, TlsRequirement, TransactionState,
         TransactionStatus, clear_pending_responses, expand_user_path, proto, reconnect_candidates,
+        recovered_transaction_outcome, transaction_operation_was_observed,
     };
 
     fn test_client(domain: &str) -> Client {
@@ -1474,6 +1534,88 @@ mod tests {
                 "http://node-2".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn transaction_restore_detects_replicated_progress_before_replay() {
+        let previous = TransactionStatus {
+            id: "tx-1".to_string(),
+            state: TransactionState::Open,
+            pending_count: 1,
+            completed_count: 0,
+            total_count: 1,
+            error: None,
+            failing_step: None,
+        };
+        assert!(!transaction_operation_was_observed(&previous, &previous));
+
+        let mut queued = previous.clone();
+        queued.pending_count = 2;
+        queued.total_count = 2;
+        assert!(transaction_operation_was_observed(&previous, &queued));
+
+        let mut committing = previous.clone();
+        committing.state = TransactionState::Committing;
+        assert!(transaction_operation_was_observed(&previous, &committing));
+    }
+
+    #[test]
+    fn recovered_committed_transaction_is_returned_as_the_original_command_outcome() {
+        let outcome = recovered_transaction_outcome(CommandOutcome {
+            success: false,
+            kind: CommandOutcomeKind::Error,
+            message: "transaction 'tx-1' finished with outcome COMMITTED".to_string(),
+            diagnostics: vec![Diagnostic {
+                message: "finished".to_string(),
+                span_start: 0,
+                span_end: 0,
+            }],
+            leader: None,
+            leader_grpc_uri: None,
+            already_existed: false,
+            transaction: Some(TransactionStatus {
+                id: "tx-1".to_string(),
+                state: TransactionState::Committed,
+                pending_count: 0,
+                completed_count: 2,
+                total_count: 2,
+                error: None,
+                failing_step: None,
+            }),
+            results: vec![
+                CommandOutcome {
+                    success: true,
+                    kind: CommandOutcomeKind::Ok,
+                    message: "created domain 'prod'".to_string(),
+                    diagnostics: Vec::new(),
+                    leader: None,
+                    leader_grpc_uri: None,
+                    already_existed: false,
+                    transaction: None,
+                    results: Vec::new(),
+                },
+                CommandOutcome {
+                    success: true,
+                    kind: CommandOutcomeKind::Ok,
+                    message: "stored model 'events'".to_string(),
+                    diagnostics: Vec::new(),
+                    leader: None,
+                    leader_grpc_uri: None,
+                    already_existed: false,
+                    transaction: None,
+                    results: Vec::new(),
+                },
+            ],
+        });
+
+        assert!(outcome.success);
+        assert_eq!(outcome.kind, CommandOutcomeKind::Ok);
+        assert_eq!(
+            outcome.message,
+            "created domain 'prod'\nstored model 'events'"
+        );
+        assert!(outcome.diagnostics.is_empty());
+        assert_eq!(outcome.results.len(), 2);
     }
 
     #[tokio::test]

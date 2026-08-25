@@ -121,10 +121,11 @@ nervix[quickstart committing]>
 ```
 
 The transaction id and status are replicated. If the WebSocket closes unexpectedly or leadership
-changes, the console reconnects and attaches that id before replaying a pending command. A second
-session can attach the same owner's transaction and take it over; the displaced console then gets
-an explicit takeover error. A clean console session close reverts an open transaction, while an
-accepted commit continues on the leader without the browser. See
+changes, the console reconnects and attaches that id before replaying a pending command. It does
+not replay when the attached status shows that queue or commit progress was already recorded. A
+second session can attach the same owner's transaction and take it over; the displaced console
+then gets an explicit takeover error. A clean console session close reverts an open transaction,
+while an accepted commit continues on the leader without the browser. See
 [Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
 
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`

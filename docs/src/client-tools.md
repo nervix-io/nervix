@@ -33,7 +33,8 @@ clicking a graph item or an entity — that simply type NSPL for you.
 - **Automatic leader redirects.** A session opened against a follower is redirected to the current
   leader; you do not need to know which node leads.
 - **Automatic transaction attach.** Both interactive clients retain the transaction id and attach
-  it before replaying a command after reconnect or leader failover.
+  it before replaying a command after reconnect or leader failover, and do not repeat an operation
+  whose replicated progress already advanced.
 
 Sessions, subscriptions, sampling, and backpressure are described in [Sessions](sessions.md).
 

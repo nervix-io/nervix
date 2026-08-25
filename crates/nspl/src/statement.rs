@@ -107,6 +107,9 @@ pub fn statement_parser<'src>()
         crate::client::create_client_sentry_parser().map(|create| {
             Statement::Create(create.map_body(Model::ClientSentry).map_body(Box::new))
         }),
+        crate::client::create_client_otel_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientOtel).map_body(Box::new))
+        }),
         crate::client::create_client_prometheus_parser().map(|create| {
             Statement::Create(create.map_body(Model::ClientPrometheus).map_body(Box::new))
         }),
@@ -2407,6 +2410,29 @@ mod tests {
               CONFIG {
                 'endpoint' = 'https://api.example.com/events',
                 'method' = 'POST'
+              };
+        "#;
+
+        let parsed = parse_statement(input).expect("parse should succeed");
+        let Statement::Create(parsed) = parsed else {
+            panic!("expected create statement");
+        };
+        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::Create(parsed), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_otel_client() {
+        let input = r#"
+            CREATE CLIENT otel_main
+              TYPE OTEL
+              CONFIG {
+                'endpoint' = 'https://collector.example.com:4317',
+                'protocol' = 'grpc',
+                'headers' = 'authorization=Bearer token',
+                'compression' = 'gzip',
+                'timeout_ms' = 5000
               };
         "#;
 

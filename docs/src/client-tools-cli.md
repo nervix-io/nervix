@@ -203,6 +203,8 @@ topology: not-a-leader, retry on leader 'node-2' at http://10.0.0.12:47391
 
 Transaction controls follow the same redirect beginning with `BEGIN`. The CLI retains the returned
 transaction id and attaches it on the new connection before retrying any queued statement or
-commit. An open transaction therefore survives an unclean connection loss or leader failover; a
-clean CLI exit reverts it. See
+commit. If the attached progress shows that the cluster already accepted that operation, the CLI
+uses the replicated state or retained commit result instead of submitting it twice. An open
+transaction therefore survives an unclean connection loss or leader failover; a clean CLI exit
+reverts it. See
 [Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
