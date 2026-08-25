@@ -1,6 +1,6 @@
 use nervix_models::{
-    Domain, DomainClockState, DomainSchedule, DomainStartPoint, DomainState, Identifier, Statement,
-    Timestamp,
+    Domain, DomainClockState, DomainSchedule, DomainStartPoint, DomainState, Identifier,
+    QuiesceLevel, Statement, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,13 +33,13 @@ pub struct TransactionCommandResult {
     pub message: String,
     pub diagnostics: Vec<TransactionDiagnostic>,
     pub already_existed: bool,
-    pub results: Vec<TransactionCommandResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionStepResult {
     pub first_statement: usize,
     pub statement_count: usize,
+    pub quiesce_level: Option<QuiesceLevel>,
     pub result: TransactionCommandResult,
 }
 

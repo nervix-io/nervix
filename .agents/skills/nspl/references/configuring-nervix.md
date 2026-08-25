@@ -76,8 +76,9 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    `COMMIT;`. A consecutive one-domain model-mutation run is one atomic candidate-graph update,
    including mixed `CREATE`, supported model `ALTER`, and `DROP`. Each statement is preflighted
    against the queued prefix without applying its effect; a rejection can be corrected before
-   commit. Read-only statements, subscriptions, uploads, and node administration remain outside
-   the transaction.
+   commit. Queued model mutations report their own preflighted quiesce levels, and `COMMIT` reports
+   only the maximum level actually executed. Read-only statements, subscriptions, uploads, and node
+   administration remain outside the transaction.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended.
 
 Within the graph transaction, declare dependencies before consumers:

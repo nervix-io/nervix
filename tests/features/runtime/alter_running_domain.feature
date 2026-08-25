@@ -75,11 +75,7 @@ Feature: Altering schemas on a running domain
         ON GENERAL ERROR LOG;
       COMMIT;
       """
-    Then the last command output contains
-      """
-      altered schema 'running_event'
-      """
-    And the observed broker receives a payload
+    Then the observed broker receives a payload
       """
       "seq":1
       """
@@ -295,11 +291,7 @@ Feature: Altering schemas on a running domain
         ADD FIELD note STRING OPTIONAL;
       COMMIT;
       """
-    Then the last command output contains
-      """
-      altered schema 'mutable_event'
-      """
-    And within "5s" node "node-1" eventually reports materialized state for relay "mutable_state" containing
+    Then within "5s" node "node-1" eventually reports materialized state for relay "mutable_state" containing
       """
       relay 'mutable_state' materialized state is empty
       """

@@ -57,7 +57,7 @@ Feature: Inferencer resources
       """
     Then the last command output contains
       """
-      stored model 'score_model'
+      quiesce level: DYNAMIC
       """
 
     Examples:
@@ -257,7 +257,7 @@ Feature: Inferencer resources
       """
     Then the last command output contains
       """
-      stored model 'fixed_dynamic_axis'
+      quiesce level: DYNAMIC
       """
 
     Examples:

@@ -2836,9 +2836,9 @@ async fn run_command(server: &str, query: &str) -> io::Result<String> {
     Ok(output)
 }
 
-/// Renders a command result as the aggregate message followed by every statement's message. A
-/// transaction reports per-statement outcomes, and the quiesce level lands on the first mutated
-/// statement, so assertions need all of them rather than just the outermost message.
+/// Renders a batched command result as its aggregate message followed by every non-empty nested
+/// message. Transaction queue responses remain nested in a multi-command request, while COMMIT
+/// itself returns only its executed aggregate.
 fn flatten_command_messages(result: &proto::CommandResult) -> String {
     let mut messages = vec![result.message.clone()];
     messages.extend(result.results.iter().map(flatten_command_messages));
