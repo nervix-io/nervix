@@ -294,6 +294,19 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).
 - Preserve unrelated user changes in dirty worktrees.
 
+## Specifications
+
+- Specifications and proposals are product documents. They define externally observable
+  behavior: concepts, states, guarantees, interfaces, limits, failure semantics, and behavior
+  changes. Implementation material — code sketches, type definitions, file or module lists,
+  line references, and change-size estimates — does not belong in a spec.
+- A requested specification is one complete document. Do not split it into implementation
+  phases, milestones, or staged deliveries unless the user asks for phasing.
+- A specification must be correct and fully resolved. Verify its claims against the current
+  system, decide every design question in the document, and do not defer, postpone, or mark
+  anything as future work, a fast-follow, or an open question unless the user requested or
+  agreed to that deferral.
+
 ## Validation and Testing
 
 ### Test-first changes
