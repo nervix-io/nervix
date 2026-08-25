@@ -65,6 +65,9 @@ Queue admission is not a blind append. The leader replays the replicated transac
 side-effect-free candidate, then checks the new statement against that candidate. This catches such
 errors as duplicate configuration, a missing `ALTER` target or field, invalid domain lifecycle,
 invalid external bindings, and invalid UDF or schedule inputs before the statement is replicated.
+A successfully queued model mutation reports the quiesce level contributed by that statement
+against its prefix, even though the mutation has not executed yet. Configuration statements with
+no useful command output return no message instead of a queue acknowledgement.
 A rejected statement does not change the pending count or the transaction's activity time, so the
 client can correct it and continue the same transaction. Limits are checked before this preflight
 and every check is repeated during `COMMIT`, because other sessions may change control-plane state
@@ -88,14 +91,17 @@ not swap the active registry state. This supports coordinated wire-schema, inter
 relay, processor, emitter, ingestor, generator, placement, and dependent-node migrations without
 exposing an invalid intermediate graph.
 
-Other eligible statements apply individually. `COMMIT` records each step's effect and progress in
-one Raft operation and stops at the first failure. A new leader automatically resumes every
+Other eligible statements apply individually. `COMMIT` records each step's effect, executed
+quiesce level, and progress in one Raft operation and stops at the first failure. Its successful
+output is only the highest quiesce level actually executed across the transaction; it does not
+repeat the individual command outputs. A new leader automatically resumes every
 `COMMITTING` transaction from its recorded progress: completed steps are not repeated, and a
 failed remaining step records its statement number and error while preserving the applied prefix.
 Atomicity still does not span the whole transaction.
 
-Finished transactions remain as small tombstones containing the outcome and commit results. During
-retention, attach reports the exact outcome; after removal the id is unknown. `SHOW TRANSACTIONS;`
+Finished transactions remain as small tombstones containing the outcome, step progress, errors,
+and executed quiesce levels. During retention, attach reports the exact outcome and aggregate
+commit output; after removal the id is unknown. `SHOW TRANSACTIONS;`
 can be served by any node from locally applied replicated state and lists the id, owner, state,
 pending count, progress, age, and idle time for live transactions and retained tombstones.
 
@@ -190,8 +196,9 @@ An unchanged candidate contributes no aspect. An all-no-op batch therefore perfo
 write or schedule publication and reports `DYNAMIC`, even when the running domain has work that
 could not currently drain. A `DROP` followed by `CREATE` of the same key in one batch is compared as
 one modification, so recreating a relay with a different schema cannot bypass domain quiescing.
-The first mutated statement's result includes the quiesce level the batch executed. Nervix always
-executes exactly the classified level.
+An immediate model command reports the level it executed. A queued model command reports its own
+preflighted level before execution, while `COMMIT` reports the maximum level actually executed for
+the complete transaction. Nervix always executes exactly the level classified at commit time.
 
 For an immediate model alteration, local registry persistence and schedule publication are
 separate steps. If schedule publication fails, Nervix restores the previous models and republishes

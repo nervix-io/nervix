@@ -581,7 +581,9 @@ async fn execute_and_print(client: &Client, query: String) -> Result<(), StackRe
 
 fn print_command_outcome(result: &nervix_client_core::CommandOutcome, query_source: &str) {
     if result.success {
-        emit_terminal_line(result.message.clone());
+        if !result.message.is_empty() {
+            emit_terminal_line(result.message.clone());
+        }
     } else {
         match result.kind {
             CommandOutcomeKind::NotLeader => {

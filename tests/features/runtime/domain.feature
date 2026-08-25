@@ -14,11 +14,7 @@ Feature: Domain lifecycle
       """
     Then the last command output contains
       """
-      stored model 'notifications'
-      """
-    And the last command output contains
-      """
-      stored model 'notification'
+      quiesce level: DYNAMIC
       """
     When these NSPL commands are executed on the leader node
       """
@@ -59,11 +55,7 @@ Feature: Domain lifecycle
       """
     Then the last command output contains
       """
-      stored model 'zip_code'
-      """
-    And the last command output contains
-      """
-      stored model 'zip_code2'
+      quiesce level: DYNAMIC
       """
 
     Examples:

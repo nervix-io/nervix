@@ -44,6 +44,11 @@ test, not even to assert that the current code rejects it. Defining the historic
 what this rule forbids, and such a test pins a shape the product no longer has. Test the current
 shape only.
 
+Until Nervix adopts an explicit backward-compatibility policy, removing behavior or output also
+removes the assertions that named it. Do not replace a positive assertion for an eliminated form
+with a negative assertion that the old form is absent, rejected, or no longer emitted. Assert the
+current shape and behavior directly, without memorializing the transient form it replaced.
+
 Removing an integration or feature removes all of it in one change: Models, grammar, stored shapes,
 runtime paths, configuration, documentation, and tests. Never leave a placeholder behind so that old
 data still loads.

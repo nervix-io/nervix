@@ -1621,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn recovered_committed_transaction_is_returned_as_the_original_command_outcome() {
+    fn recovered_committed_transaction_returns_the_aggregate_commit_outcome() {
         let outcome = recovered_transaction_outcome(CommandOutcome {
             success: false,
             kind: CommandOutcomeKind::Error,
@@ -1643,40 +1643,24 @@ mod tests {
                 error: None,
                 failing_step: None,
             }),
-            results: vec![
-                CommandOutcome {
-                    success: true,
-                    kind: CommandOutcomeKind::Ok,
-                    message: "created domain 'prod'".to_string(),
-                    diagnostics: Vec::new(),
-                    leader: None,
-                    leader_grpc_uri: None,
-                    already_existed: false,
-                    transaction: None,
-                    results: Vec::new(),
-                },
-                CommandOutcome {
-                    success: true,
-                    kind: CommandOutcomeKind::Ok,
-                    message: "stored model 'events'".to_string(),
-                    diagnostics: Vec::new(),
-                    leader: None,
-                    leader_grpc_uri: None,
-                    already_existed: false,
-                    transaction: None,
-                    results: Vec::new(),
-                },
-            ],
+            results: vec![CommandOutcome {
+                success: true,
+                kind: CommandOutcomeKind::Ok,
+                message: "quiesce level: DOMAIN_PAUSE".to_string(),
+                diagnostics: Vec::new(),
+                leader: None,
+                leader_grpc_uri: None,
+                already_existed: false,
+                transaction: None,
+                results: Vec::new(),
+            }],
         });
 
         assert!(outcome.success);
         assert_eq!(outcome.kind, CommandOutcomeKind::Ok);
-        assert_eq!(
-            outcome.message,
-            "created domain 'prod'\nstored model 'events'"
-        );
+        assert_eq!(outcome.message, "quiesce level: DOMAIN_PAUSE");
         assert!(outcome.diagnostics.is_empty());
-        assert_eq!(outcome.results.len(), 2);
+        assert_eq!(outcome.results.len(), 1);
     }
 
     #[tokio::test]

@@ -22,19 +22,19 @@ use nervix_dataflow_graph::{
 };
 use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
-    AlterReingestor, AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema, Assignment,
-    AssignmentTarget, AvroType, BranchSelection, CborType, ClusterSchedule, CodecEncoding,
-    CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec,
-    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer,
-    CreateIngestor, CreateLookup, CreateMaterializer, CreatePlacement, CreateSchema,
-    CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule,
-    DropModel, EmitSink, EndpointType, Expression, Identifier, IngestSource, IngestTimestampSource,
-    JsonType, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-    ModelChangeAspect, ModelKind, MqttIngestMode, OtelAggregationTemporality, OtelMetricKind,
-    OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule,
-    PlacementPolicy, PlacementRuntimeNode, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
-    RouteConstruction, ScheduledNode, SchemaField, SignalingWireFormat, SqsFifoGroup,
-    WireSchemaDefinition,
+    AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
+    AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchSelection, CborType,
+    ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction,
+    CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreateMaterializer,
+    CreatePlacement, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
+    CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
+    Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind,
+    MqttIngestMode, OtelAggregationTemporality, OtelMetricKind, OtelSignal, OtelValueMapping,
+    OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementPolicy, PlacementRuntimeNode,
+    ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode, SchemaField,
+    SignalingWireFormat, SqsFifoGroup, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -534,7 +534,7 @@ impl Registry {
         &self,
         domain: &Domain,
         mutations: &[RegistryMutation],
-    ) -> Result<Option<PlannedMutations>, Report<RegistryError>> {
+    ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
         self.plan_mutations_named_with_incomplete_candidate(
             domain,
             mutations,
@@ -556,6 +556,7 @@ impl Registry {
                 operation_name,
                 false,
             )?
+            .planned
             .expect("complete mutation planning must return a plan"))
     }
 
@@ -565,7 +566,7 @@ impl Registry {
         mutations: &[RegistryMutation],
         operation_name: &str,
         allow_incomplete_candidate: bool,
-    ) -> Result<Option<PlannedMutations>, Report<RegistryError>> {
+    ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
         let batch_size = mutations.len();
         info!(
             domain = domain.as_str(),
@@ -585,8 +586,10 @@ impl Registry {
             .collect::<HashMap<_, _>>();
         let current_state = self.build_domain_state(domain, &current_models)?;
         let mut candidate = current_models.clone();
+        let mut mutation_quiesce_levels = Vec::with_capacity(mutations.len());
 
         for (mutation_index, mutation) in mutations.iter().enumerate() {
+            let mutation_base = candidate.get(&mutation.target_key()).cloned();
             match mutation {
                 RegistryMutation::Create(model) => {
                     let identifier = model.identifier().clone();
@@ -1053,6 +1056,14 @@ impl Registry {
                     let _ = candidate.remove(&key);
                 }
             }
+            let mutation_candidate = mutation
+                .resulting_key()
+                .as_ref()
+                .and_then(|key| candidate.get(key));
+            mutation_quiesce_levels.push(classify_quiesce_level(
+                mutation_base.as_ref(),
+                mutation_candidate,
+            ));
         }
 
         let drops_in_batch = current_models
@@ -1063,7 +1074,12 @@ impl Registry {
 
         let domain_state = match self.build_domain_state(domain, &candidate) {
             Ok(state) => state,
-            Err(_) if allow_incomplete_candidate => return Ok(None),
+            Err(_) if allow_incomplete_candidate => {
+                return Ok(TransactionMutationPreflight {
+                    planned: None,
+                    mutation_quiesce_levels,
+                });
+            }
             Err(err) => {
                 let active_graph = self.active_graph_snapshot(domain);
                 warn!(
@@ -1105,17 +1121,20 @@ impl Registry {
             )
         };
 
-        Ok(Some(PlannedMutations {
-            domain: domain.clone(),
-            batch_size,
-            operation_name: operation_name.to_string(),
-            base_models: current_models,
-            domain_state,
-            models_to_persist,
-            drops_in_batch,
-            runtime_changes,
-            quiesce,
-        }))
+        Ok(TransactionMutationPreflight {
+            planned: Some(PlannedMutations {
+                domain: domain.clone(),
+                batch_size,
+                operation_name: operation_name.to_string(),
+                base_models: current_models,
+                domain_state,
+                models_to_persist,
+                drops_in_batch,
+                runtime_changes,
+                quiesce,
+            }),
+            mutation_quiesce_levels,
+        })
     }
 
     pub fn commit_planned(
@@ -1386,6 +1405,15 @@ fn classify_quiesce(
     }
 }
 
+fn classify_quiesce_level(base: Option<&Model>, candidate: Option<&Model>) -> QuiesceLevel {
+    match (base, candidate) {
+        (Some(base), Some(candidate)) => base.change_aspects_against(candidate).quiesce_level(),
+        (None, Some(_)) => ModelChangeAspect::EntityCreated.quiesce_level(),
+        (Some(_), None) => ModelChangeAspect::EntityDropped.quiesce_level(),
+        (None, None) => QuiesceLevel::Dynamic,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RegistryMutation {
     Create(Box<Model>),
@@ -1405,6 +1433,72 @@ pub enum RegistryMutation {
     Drop(DropModel),
 }
 
+impl RegistryMutation {
+    fn target_key(&self) -> RegistryKey {
+        match self {
+            Self::Create(model) => RegistryKey::from_model(model),
+            Self::AlterSchema(alter) => RegistryKey::new(ModelKind::Schema, alter.schema.clone()),
+            Self::AlterWireJsonSchema(alter) => {
+                RegistryKey::new(ModelKind::WireJsonSchema, alter.schema.clone())
+            }
+            Self::AlterWireCborSchema(alter) => {
+                RegistryKey::new(ModelKind::WireCborSchema, alter.schema.clone())
+            }
+            Self::AlterWireAvroSchema(alter) => {
+                RegistryKey::new(ModelKind::WireAvroSchema, alter.schema.clone())
+            }
+            Self::AlterRelay(alter) => RegistryKey::new(ModelKind::Relay, alter.relay.clone()),
+            Self::AlterJunction(alter) => {
+                RegistryKey::new(ModelKind::Junction, alter.junction.clone())
+            }
+            Self::AlterDeduplicator(alter) => {
+                RegistryKey::new(ModelKind::Deduplicator, alter.deduplicator.clone())
+            }
+            Self::AlterReorderer(alter) => {
+                RegistryKey::new(ModelKind::Reorderer, alter.reorderer.clone())
+            }
+            Self::AlterEmitter(alter) => {
+                RegistryKey::new(ModelKind::Emitter, alter.emitter.clone())
+            }
+            Self::AlterIngestor(alter) => {
+                RegistryKey::new(ModelKind::Ingestor, alter.ingestor.clone())
+            }
+            Self::AlterReingestor(alter) => {
+                RegistryKey::new(ModelKind::Reingestor, alter.reingestor.clone())
+            }
+            Self::AlterGenerator(alter) => {
+                RegistryKey::new(ModelKind::Generator, alter.generator.clone())
+            }
+            Self::AlterPlacement(alter) => {
+                RegistryKey::new(ModelKind::Placement, alter.placement.clone())
+            }
+            Self::Drop(drop) => RegistryKey::new(drop.kind, drop.name.clone()),
+        }
+    }
+
+    fn resulting_key(&self) -> Option<RegistryKey> {
+        match self {
+            Self::Drop(_) => None,
+            Self::AlterPlacement(alter) => {
+                let identifier = alter
+                    .operations
+                    .iter()
+                    .filter_map(|operation| match operation {
+                        AlterPlacementOperation::RenameTo { name } => Some(name),
+                        AlterPlacementOperation::SetPolicy { .. }
+                        | AlterPlacementOperation::SetRank { .. }
+                        | AlterPlacementOperation::DropRank
+                        | AlterPlacementOperation::SetMembers { .. } => None,
+                    })
+                    .next_back()
+                    .unwrap_or(&alter.placement);
+                Some(RegistryKey::new(ModelKind::Placement, identifier.clone()))
+            }
+            _ => Some(self.target_key()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum RegistryPersistMutation {
     Create(Model),
@@ -1422,6 +1516,22 @@ pub struct PlannedMutations {
     drops_in_batch: HashSet<RegistryKey>,
     runtime_changes: RuntimeChanges,
     quiesce: QuiescePlan,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransactionMutationPreflight {
+    planned: Option<PlannedMutations>,
+    mutation_quiesce_levels: Vec<QuiesceLevel>,
+}
+
+impl TransactionMutationPreflight {
+    pub fn planned(&self) -> Option<&PlannedMutations> {
+        self.planned.as_ref()
+    }
+
+    pub fn mutation_quiesce_levels(&self) -> &[QuiesceLevel] {
+        &self.mutation_quiesce_levels
+    }
 }
 
 impl PlannedMutations {
@@ -12909,6 +13019,60 @@ mod tests {
                 kind: ModelKind::Relay,
                 identifier: identifier("notifications"),
             }]
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn transaction_preflight_classifies_each_mutation_against_its_prefix() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    relay("notifications", "event_schema"),
+                ],
+            )
+            .expect("initial graph should succeed");
+
+        let preflight = registry
+            .preflight_transaction_mutations(
+                &domain,
+                &[
+                    RegistryMutation::AlterSchema(AlterSchema {
+                        schema: identifier("event_schema"),
+                        operations: vec![AlterSchemaOperation::AddField {
+                            field: SchemaField {
+                                name: identifier("note"),
+                                ty: ParseAsType::String,
+                                optional: true,
+                                sensitive: false,
+                            },
+                        }],
+                    }),
+                    RegistryMutation::AlterRelay(AlterRelay {
+                        relay: identifier("notifications"),
+                        operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                    }),
+                ],
+            )
+            .expect("transaction preflight should succeed");
+
+        assert_eq!(
+            preflight.mutation_quiesce_levels(),
+            &[QuiesceLevel::DomainPause, QuiesceLevel::Dynamic]
+        );
+        assert_eq!(
+            preflight
+                .planned()
+                .expect("the candidate graph is complete")
+                .quiesce()
+                .level(),
+            QuiesceLevel::DomainPause
         );
 
         let _ = fs::remove_dir_all(path);

@@ -25,7 +25,7 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      stored model 'after_failover'
+      quiesce level: DYNAMIC
       """
     When these NSPL commands are executed on the leader node
       """
@@ -122,11 +122,7 @@ Feature: NSPL transactions
       """
     And the last command output contains
       """
-      created domain '{{domain}}'
-      """
-    And the last command output contains
-      """
-      stored model 'resumed_commit'
+      quiesce level: DYNAMIC
       """
     When these NSPL commands are executed on the leader node
       """
@@ -314,7 +310,7 @@ Feature: NSPL transactions
       """
     Then the last command error contains
       """
-      queued command in transaction
+      transaction started
       """
     And the last command error contains
       """
@@ -466,7 +462,7 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      stored model 'committed_notification'
+      quiesce level: DYNAMIC
       """
     When these NSPL commands are executed on the leader node
       """
@@ -475,6 +471,65 @@ Feature: NSPL transactions
     Then the last command output contains
       """
       CREATE SCHEMA committed_notification (user_id I64);
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_quiesce_output
+  Scenario Outline: Transaction commands report planned quiescence and COMMIT reports only the executed aggregate
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA transaction_quiesce (
+        value STRING
+      );
+      CREATE RELAY transaction_quiesce_events
+        SCHEMA transaction_quiesce
+        UNBRANCHED
+        CAPACITY 1;
+      START;
+      """
+    Then node "node-1" eventually reports status containing "{{domain}} status=Running"
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      ALTER RELAY transaction_quiesce_events
+        SET CAPACITY 2;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DYNAMIC
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE RELAY transaction_quiesce_events;
+      """
+    Then the last command output contains
+      """
+      CAPACITY 1
+      """
+    When client "owner" executes these NSPL commands
+      """
+      ALTER SCHEMA transaction_quiesce
+        ADD FIELD note STRING OPTIONAL;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
       """
 
     Examples:

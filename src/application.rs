@@ -7692,13 +7692,16 @@ impl SessionServiceImpl {
             ));
         }
         if let TransactionState::Finished(finished) = &transaction.state {
-            let recorded = transaction_commit_result(&transaction);
+            let mut recorded = transaction_commit_result(&transaction);
+            recorded.transaction = None;
             let mut result = command_error(format!(
                 "transaction '{}' finished with outcome {}",
                 request.id,
                 finished.outcome.as_str()
             ));
-            result.results = recorded.results;
+            if !recorded.message.is_empty() {
+                result.results.push(recorded);
+            }
             result.transaction = Some(transaction_status(&transaction));
             return result;
         }
@@ -7858,12 +7861,13 @@ impl SessionServiceImpl {
         ) {
             return command_error(error.to_string());
         }
-        if let Err(error) = self
+        let quiesce_level = match self
             .preflight_transaction_statement(&transaction, &queued)
             .await
         {
-            return command_error(error);
-        }
+            Ok(quiesce_level) => quiesce_level,
+            Err(error) => return command_error(error),
+        };
         match self
             .consensus
             .queue_transaction_statement(
@@ -7877,11 +7881,8 @@ impl SessionServiceImpl {
             .await
         {
             Ok(transaction) => {
-                let mut result = command_ok(format!(
-                    "queued command in transaction '{}' ({} pending)",
-                    transaction.id,
-                    transaction.pending_statement_count()
-                ));
+                let mut result =
+                    command_ok(quiesce_level.map(quiesce_level_message).unwrap_or_default());
                 result.transaction = Some(transaction_status(&transaction));
                 result
             }
@@ -7893,7 +7894,7 @@ impl SessionServiceImpl {
         &self,
         transaction: &ReplicatedTransaction,
         candidate: &TransactionStatement,
-    ) -> Result<(), String> {
+    ) -> Result<Option<QuiesceLevel>, String> {
         let (mut domains, users, resources) = tokio::join!(
             self.consensus.current_domains(),
             self.consensus.current_users(),
@@ -7912,6 +7913,12 @@ impl SessionServiceImpl {
             )
             .collect::<BTreeSet<_>>();
         let mut model_mutations = BTreeMap::<Domain, Vec<RegistryMutation>>::new();
+        let candidate_model_domain = candidate
+            .statement
+            .is_model_mutation()
+            .then_some(candidate.domain.as_ref())
+            .flatten();
+        let mut candidate_quiesce_level = candidate_model_domain.map(|_| QuiesceLevel::Dynamic);
 
         for queued in transaction
             .statements
@@ -8051,19 +8058,22 @@ impl SessionServiceImpl {
 
         for (domain_id, mutations) in model_mutations {
             tokio::task::consume_budget().await;
-            let planned = self
+            let preflight = self
                 .registry
                 .preflight_transaction_mutations(&domain_id, &mutations)
                 .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
-            let Some(planned) = planned else {
+            if candidate_model_domain == Some(&domain_id) {
+                candidate_quiesce_level = preflight.mutation_quiesce_levels().last().copied();
+            }
+            let Some(planned) = preflight.planned() else {
                 continue;
             };
             let domain = domains
                 .get(&domain_id)
                 .expect("model mutation domain was checked while replaying the transaction");
-            self.validate_changed_model_bindings(&domain_id, domain.config.pace, &planned)
+            self.validate_changed_model_bindings(&domain_id, domain.config.pace, planned)
                 .await?;
-            let _ = self.prepare_planned_domain_udfs(&planned).await?;
+            let _ = self.prepare_planned_domain_udfs(planned).await?;
             let _ = self
                 .prepare_domain_schedule(
                     &domain_id,
@@ -8072,7 +8082,7 @@ impl SessionServiceImpl {
                 )
                 .await?;
         }
-        Ok(())
+        Ok(candidate_quiesce_level)
     }
 
     fn transaction_registry_mutation(statement: &Statement) -> RegistryMutation {
@@ -8291,6 +8301,7 @@ impl SessionServiceImpl {
                             statement_count,
                             result,
                             None,
+                            None,
                         )
                         .await?
                     }
@@ -8397,6 +8408,7 @@ impl SessionServiceImpl {
         first_statement: usize,
         statement_count: usize,
         result: CommandResult,
+        quiesce_level: Option<QuiesceLevel>,
         effect: Option<TransactionStepEffect>,
     ) -> Result<ReplicatedTransaction, String> {
         let next_statement = first_statement.saturating_add(statement_count);
@@ -8419,6 +8431,7 @@ impl SessionServiceImpl {
                 result: TransactionStepResult {
                     first_statement,
                     statement_count,
+                    quiesce_level,
                     result: replicated_command_result(&result),
                 },
                 effect,
@@ -8487,6 +8500,7 @@ impl SessionServiceImpl {
                             1,
                             command_error("no active domain selected".to_string()),
                             None,
+                            None,
                         )
                         .await;
                 };
@@ -8500,6 +8514,7 @@ impl SessionServiceImpl {
                                 "domain '{}' does not exist",
                                 domain_id.as_str()
                             )),
+                            None,
                             None,
                         )
                         .await;
@@ -8628,6 +8643,7 @@ impl SessionServiceImpl {
                             1,
                             command_error("no active domain selected".to_string()),
                             None,
+                            None,
                         )
                         .await;
                 };
@@ -8641,6 +8657,7 @@ impl SessionServiceImpl {
                                 "domain '{}' does not exist",
                                 domain_id.as_str()
                             )),
+                            None,
                             None,
                         )
                         .await;
@@ -8720,6 +8737,7 @@ impl SessionServiceImpl {
                             1,
                             command_error("no active domain selected".to_string()),
                             None,
+                            None,
                         )
                         .await;
                 };
@@ -8733,6 +8751,7 @@ impl SessionServiceImpl {
                                 "domain '{}' does not exist",
                                 domain_id.as_str()
                             )),
+                            None,
                             None,
                         )
                         .await;
@@ -8769,7 +8788,7 @@ impl SessionServiceImpl {
 
         let succeeded = result.success;
         let advanced = self
-            .record_transaction_step(transaction, statement_index, 1, result, effect)
+            .record_transaction_step(transaction, statement_index, 1, result, None, effect)
             .await?;
         if succeeded {
             if let Err(error) = self.apply_current_cluster_state().await {
@@ -9053,15 +9072,7 @@ impl SessionServiceImpl {
                     }
 
                     refresh_http_tls |= model_kind == ModelKind::Vhost;
-                    applied.push((
-                        index,
-                        model_id.clone(),
-                        format!(
-                            "stored model '{}' in domain '{}'",
-                            model_id.as_str(),
-                            domain.as_str()
-                        ),
-                    ));
+                    applied.push((index, model_id.clone(), String::new()));
                     mutations.push(RegistryMutation::Create(model));
                 }
                 Statement::AlterSchema(alter) => {
@@ -9428,6 +9439,7 @@ impl SessionServiceImpl {
                             transaction_step.first_statement,
                             transaction_step.statement_count,
                             step_result,
+                            Some(classified_level),
                             Some(effect),
                         )
                         .await
@@ -9585,6 +9597,7 @@ impl SessionServiceImpl {
                     transaction_step.first_statement,
                     transaction_step.statement_count,
                     result.clone(),
+                    Some(QuiesceLevel::Dynamic),
                     None,
                 )
                 .await
@@ -14758,8 +14771,20 @@ fn command_results_message(results: &[CommandResult]) -> String {
     results
         .iter()
         .map(|result| result.message.as_str())
+        .filter(|message| !message.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn append_command_output(message: &mut String, output: &str) {
+    if !message.is_empty() {
+        message.push_str("; ");
+    }
+    message.push_str(output);
+}
+
+fn quiesce_level_message(level: QuiesceLevel) -> String {
+    format!("quiesce level: {}", level.as_str())
 }
 
 fn model_mutation_success_result(
@@ -14773,8 +14798,11 @@ fn model_mutation_success_result(
     for (index, _, base_message) in applied {
         let mut message = base_message.clone();
         if first_applied {
-            message.push_str(&format!("; quiesce level: {}", classified_level.as_str()));
-            message.push_str(&format!("; planned relocations: {planned_relocations}"));
+            append_command_output(&mut message, &quiesce_level_message(classified_level));
+            append_command_output(
+                &mut message,
+                &format!("planned relocations: {planned_relocations}"),
+            );
             first_applied = false;
         }
         results[*index] = Some(CommandResult {
@@ -14856,64 +14884,45 @@ fn replicated_command_result(result: &CommandResult) -> TransactionCommandResult
             })
             .collect(),
         already_existed: result.already_existed,
-        results: result
-            .results
-            .iter()
-            .map(replicated_command_result)
-            .collect(),
-    }
-}
-
-fn command_result_from_replicated(result: &TransactionCommandResult) -> CommandResult {
-    CommandResult {
-        success: result.success,
-        message: result.message.clone(),
-        diagnostics: result
-            .diagnostics
-            .iter()
-            .map(|diagnostic| Diagnostic {
-                message: diagnostic.message.clone(),
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
-            .collect(),
-        kind: if result.success {
-            CommandResultKind::Ok as i32
-        } else {
-            CommandResultKind::Error as i32
-        },
-        already_existed: result.already_existed,
-        results: result
-            .results
-            .iter()
-            .map(command_result_from_replicated)
-            .collect(),
-        ..Default::default()
     }
 }
 
 fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResult {
-    let mut results = Vec::new();
-    for step in transaction.commit_results() {
-        append_command_result(&mut results, command_result_from_replicated(&step.result));
-    }
     let success = matches!(
         transaction.finished_outcome(),
         Some(TransactionOutcome::Committed)
     );
-    let message = if results.is_empty() && success {
-        "transaction committed: 0 commands".to_string()
-    } else if results.is_empty() {
-        transaction
-            .finished_outcome()
-            .map(|outcome| format!("transaction finished with outcome {}", outcome.as_str()))
-            .unwrap_or_else(|| "transaction commit is still in progress".to_string())
-    } else {
-        command_results_message(&results)
+    let quiesce_level = transaction
+        .commit_results()
+        .iter()
+        .filter_map(|step| step.quiesce_level)
+        .max();
+    let mut message = match transaction.finished_outcome() {
+        Some(TransactionOutcome::Committed) => String::new(),
+        Some(TransactionOutcome::Failed { error, .. }) => error.clone(),
+        Some(outcome) => format!("transaction finished with outcome {}", outcome.as_str()),
+        None => "transaction commit is still in progress".to_string(),
     };
-    let diagnostics = results
-        .last()
-        .map(|result| result.diagnostics.clone())
+    if let Some(quiesce_level) = quiesce_level {
+        append_command_output(&mut message, &quiesce_level_message(quiesce_level));
+    }
+    let diagnostics = transaction
+        .commit_results()
+        .iter()
+        .rev()
+        .find(|step| !step.result.success)
+        .or_else(|| transaction.commit_results().last())
+        .map(|step| {
+            step.result
+                .diagnostics
+                .iter()
+                .map(|diagnostic| Diagnostic {
+                    message: diagnostic.message.clone(),
+                    span_start: diagnostic.span_start,
+                    span_end: diagnostic.span_end,
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let mut result = CommandResult {
         success,
@@ -14924,7 +14933,6 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
         } else {
             CommandResultKind::Error as i32
         },
-        results,
         ..Default::default()
     };
     result.transaction = Some(transaction_status(transaction));
@@ -20123,9 +20131,12 @@ mod tests {
             command_transaction_state(&result),
             Some(ApiTransactionState::Committed)
         );
-        assert!(result.message.contains("created domain 'prod'"));
-        assert!(result.message.contains("stored model 'notifications'"));
-        assert!(result.message.contains("stored model 'notification'"));
+        assert!(result.message.contains("quiesce level: DYNAMIC"));
+        let commit = result
+            .results
+            .last()
+            .expect("COMMIT result must be retained");
+        assert_eq!(commit.message, "quiesce level: DYNAMIC");
 
         let schema = registry
             .get(
@@ -20187,14 +20198,7 @@ mod tests {
             )
             .await;
         assert!(queued.success);
-        assert!(
-            queued
-                .message
-                .starts_with("queued command in transaction '")
-                && queued.message.ends_with("' (1 pending)"),
-            "unexpected queue result: {}",
-            queued.message
-        );
+        assert_eq!(queued.message, "quiesce level: DYNAMIC");
         assert_eq!(
             command_transaction_state(&queued),
             Some(ApiTransactionState::Open)
@@ -20313,7 +20317,6 @@ mod tests {
             Some(ApiTransactionState::Open)
         );
         assert!(result.message.contains("transaction started"));
-        assert!(result.message.contains("queued command in transaction"));
         assert!(result.message.contains("already exists"));
         assert!(
             service
@@ -20339,7 +20342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_command_batch_returns_each_domain_create_result() {
+    async fn process_command_batch_commits_domain_creates() {
         let (service, _registry, path) = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
@@ -20360,15 +20363,14 @@ mod tests {
             command_transaction_state(&result),
             Some(ApiTransactionState::Committed)
         );
-        assert!(result.message.contains("created domain 'alpha'"));
-        assert!(result.message.contains("created domain 'beta'"));
+        assert!(result.message.contains("transaction started"));
 
         subscriptions.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
     #[tokio::test]
-    async fn attaching_to_committed_transaction_returns_recorded_statement_results() {
+    async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
         let (service, _registry, path) = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut owner = SessionSubscriptions::new();
@@ -20414,20 +20416,8 @@ mod tests {
             Some(ApiTransactionState::Committed as i32)
         );
         assert!(attached.message.contains("finished with outcome COMMITTED"));
-        assert!(
-            attached
-                .results
-                .iter()
-                .any(|result| result.message.contains("created domain 'attach_results'")),
-            "attach must return the recorded CREATE DOMAIN result: {attached:?}"
-        );
-        assert!(
-            attached
-                .results
-                .iter()
-                .any(|result| result.message.contains("stored model 'notification'")),
-            "attach must return the recorded CREATE SCHEMA result: {attached:?}"
-        );
+        assert_eq!(attached.results.len(), 1);
+        assert_eq!(attached.results[0].message, "quiesce level: DYNAMIC");
 
         owner.stop_all(&service).await;
         observer.stop_all(&service).await;
@@ -20459,7 +20449,6 @@ mod tests {
             command_transaction_state(&result),
             Some(ApiTransactionState::Failed)
         );
-        assert!(result.message.contains("created domain 'prod'"));
 
         let domain = Domain::parse("prod").expect("valid domain");
         let relay = registry
