@@ -66,6 +66,10 @@ if !attached.success {
 }
 ```
 
+While a transaction is open, `execute` first preflights a queueable statement against the
+replicated prefix. An unsuccessful preflight leaves the transaction `Open` with the same pending
+count, so callers may correct the command and continue using the same handle.
+
 The client automatically attaches its active transaction after a leader redirect or transport
 reconnect before retrying a command. It compares the attached status with the status it last saw:
 if replicated queue or commit progress already records the operation, it returns that state instead

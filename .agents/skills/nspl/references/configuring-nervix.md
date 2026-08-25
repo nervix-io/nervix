@@ -74,8 +74,10 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    actions.
 4. **Graph transaction:** wrap multiple queueable configuration statements in `BEGIN;` and
    `COMMIT;`. A consecutive one-domain model-mutation run is one atomic candidate-graph update,
-   including mixed `CREATE`, supported model `ALTER`, and `DROP`. Read-only statements,
-   subscriptions, uploads, and node administration remain outside the transaction.
+   including mixed `CREATE`, supported model `ALTER`, and `DROP`. Each statement is preflighted
+   against the queued prefix without applying its effect; a rejection can be corrected before
+   commit. Read-only statements, subscriptions, uploads, and node administration remain outside
+   the transaction.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended.
 
 Within the graph transaction, declare dependencies before consumers:
