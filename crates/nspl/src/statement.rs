@@ -169,6 +169,7 @@ pub fn statement_parser<'src>()
         crate::drop_stmt::drop_node_parser().map(Statement::DropNode),
         crate::drop_stmt::drop_parser().map(Statement::Drop),
         crate::show_cluster_status::show_cluster_status_parser().map(Statement::ShowClusterStatus),
+        crate::show_transactions::show_transactions_parser().map(Statement::ShowTransactions),
         crate::show_create::show_create_parser().map(Statement::ShowCreate),
         crate::show_stream_state::show_stream_materialized_state_parser()
             .map(Statement::ShowRelayMaterializedState),
@@ -1243,6 +1244,18 @@ mod tests {
     fn a_terminated_statement_offers_no_continuation() {
         let input = "START AT NOW ; ";
         assert!(suggest_statement(input, input.len()).is_empty());
+    }
+
+    #[test]
+    fn show_transactions_completion_stays_in_its_statement_branch() {
+        let input = "SHOW T";
+        assert_eq!(
+            suggest_statement(input, input.len()),
+            vec!["TRANSACTIONS".to_string()]
+        );
+
+        let complete = "SHOW TRANSACTIONS ";
+        assert!(suggest_statement(complete, complete.len()).is_empty());
     }
 
     /// A slot with a real constraint should say what it wants.

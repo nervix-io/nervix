@@ -63,6 +63,7 @@ pub enum Statement {
     ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowClusterStatus(ShowClusterStatus),
+    ShowTransactions(ShowTransactions),
 }
 
 impl Statement {
@@ -115,7 +116,8 @@ impl Statement {
             | Self::ShowUdfs(_)
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
-            | Self::ShowClusterStatus(_) => false,
+            | Self::ShowClusterStatus(_)
+            | Self::ShowTransactions(_) => false,
         }
     }
 }
@@ -268,6 +270,9 @@ pub struct ShowCreate {
 pub struct ShowClusterStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShowTransactions;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShowUdfs;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,14 +395,20 @@ pub struct DomainTick {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainClockState {
+    pub wall_started_at: Timestamp,
+    pub logical_start: Timestamp,
+    pub time_rate: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomainState {
     pub id: DomainId,
     pub config: DomainConfig,
     pub status: DomainStatus,
-    #[serde(default)]
     pub start_version: u64,
-    #[serde(default)]
     pub last_start: DomainStartPoint,
+    pub clock: Option<DomainClockState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

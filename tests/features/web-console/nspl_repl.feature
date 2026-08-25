@@ -126,6 +126,39 @@ Feature: Web console NSPL REPL
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE SCHEMA follower_notification (user_id I64);"
 
+  Scenario: Web console reattaches an open transaction after leader switchover
+    Given a 3 node nervix cluster is started
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When the web console is opened on node "{{old_leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "created domain '{{domain}}'"
+    And selector ".prompt-row" contains "{{domain}}"
+    When selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA before_switchover ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "queued command in transaction (1 pending)"
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
+    And selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA after_switchover ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "queued command in transaction (2 pending)"
+    When selector ".prompt-row input" is filled with "COMMIT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "stored model 'before_switchover'"
+    And selector ".terminal" contains "stored model 'after_switchover'"
+    And selector ".prompt-row" does not contain "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA after_switchover;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "CREATE SCHEMA after_switchover (value I64);"
+
   Scenario: Web console autocompletes NSPL commands
     Given a 3 node nervix cluster is started
     When the web console is opened on the leader node

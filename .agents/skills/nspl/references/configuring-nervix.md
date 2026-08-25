@@ -72,9 +72,10 @@ Use separate execution phases so transaction and active-domain rules stay clear.
 2. **Domain selection:** run `USE <domain>;` as a client-local command outside a transaction.
 3. **Resources:** create resource declarations, then upload local directories as separate client
    actions.
-4. **Graph transaction:** wrap multiple domain-owned server statements in `BEGIN;` and `COMMIT;`.
-   A consecutive one-domain model-mutation run is one atomic candidate-graph update, including
-   mixed `CREATE`, supported model `ALTER`, and `DROP`.
+4. **Graph transaction:** wrap multiple queueable configuration statements in `BEGIN;` and
+   `COMMIT;`. A consecutive one-domain model-mutation run is one atomic candidate-graph update,
+   including mixed `CREATE`, supported model `ALTER`, and `DROP`. Read-only statements,
+   subscriptions, uploads, and node administration remain outside the transaction.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended.
 
 Within the graph transaction, declare dependencies before consumers:
@@ -167,9 +168,9 @@ relay. Do not use them to scan across branches.
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`.
 - Paced ingestors declare their timestamp source.
 - External sensitive values use the required explicit leakage operation.
-- Transactions queue multiple server statements, while only consecutive one-domain model-mutation
-  runs receive atomic candidate-graph validation and persistence; client-local commands are outside
-  the transaction.
+- Transactions queue only replicated configuration statements. Commit progress survives leader
+  failover, while only consecutive one-domain model-mutation runs receive atomic candidate-graph
+  validation and persistence; read-only and session/client-local commands remain outside.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
 - Running-domain schema ALTER quiescing is automatic; do not emit `PAUSE` or `RESUME` syntax.
@@ -197,6 +198,8 @@ Choose checks relevant to the configured graph:
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
+- `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
+  expiry outcomes.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
 public example. For a validation error, trace exact types, declaration order, domain ownership,

@@ -236,9 +236,11 @@ the active domain. Omission means `NEUTRAL`, which preserves ordinary scheduler 
 [Placement Policies](placement.md) for the four policy levels and lifecycle commands.
 
 Multiple NSPL statements in one request must be wrapped in an explicit
-transaction. `BEGIN` starts a session-local transaction, `COMMIT` executes the
-queued statements, and `REVERT` drops the queued statements without applying
-them. Sending multiple statements without `BEGIN` is rejected.
+transaction. `BEGIN` creates a replicated transaction and returns its id,
+`COMMIT` executes the queued statements, and `REVERT` drops them without
+applying them. A transaction survives an unclean disconnect or leader failover;
+the CLI and web console re-attach before sending another command. Sending
+multiple statements without `BEGIN` is rejected.
 
 ```nspl
 BEGIN;
@@ -248,8 +250,13 @@ COMMIT;
 ```
 
 `BEGIN` inside an active transaction is an error. `COMMIT` and `REVERT` also
-require an active transaction. Client-local commands such as `USE` are not
-valid inside a transaction and must be sent separately.
+require an active transaction. Queueable content is limited to model mutations,
+domain creation/configuration/lifecycle, `CREATE USER`, and `CREATE RESOURCE`.
+Read-only statements, subscriptions, resource uploads, and node administration
+are not valid inside a transaction and must be sent separately. Use
+`SHOW TRANSACTIONS;` to inspect live transactions and retained outcomes. See
+[Control Plane](control-plane.md#replicated-nspl-transactions) for attach,
+failover, commit-step, expiry, and limit semantics.
 
 Ingestors, relay-consuming processors, and generated-output processors use optional node-level
 arrival filters and route-local construction. Relay-consuming processors may also attach a

@@ -79,6 +79,7 @@ pub enum Identifier {
     Unpaced,
     Domain,
     Domains,
+    Transactions,
     Placement,
     Placements,
     Rank,

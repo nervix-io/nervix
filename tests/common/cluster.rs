@@ -433,6 +433,11 @@ pub(crate) struct TestClusterConfig {
     #[cfg(feature = "testing")]
     pub scheduler_mode: Option<SchedulerMode>,
     pub state_snapshot_interval: Duration,
+    pub transaction_idle_timeout: Duration,
+    pub transaction_tombstone_retention: Duration,
+    pub transaction_max_statements: usize,
+    pub transaction_max_source_bytes: u64,
+    pub transaction_max_open: usize,
     pub grpc_mode: InternalTransportMode,
     pub cluster_api_mode: InternalTransportMode,
     pub interconnect_mode: InternalTransportMode,
@@ -450,6 +455,11 @@ impl Default for TestClusterConfig {
             #[cfg(feature = "testing")]
             scheduler_mode: None,
             state_snapshot_interval: TEST_STATE_SNAPSHOT_INTERVAL,
+            transaction_idle_timeout: Duration::from_secs(15 * 60),
+            transaction_tombstone_retention: Duration::from_secs(15 * 60),
+            transaction_max_statements: 256,
+            transaction_max_source_bytes: 1024 * 1024,
+            transaction_max_open: 1024,
             grpc_mode: InternalTransportMode::Http,
             cluster_api_mode: InternalTransportMode::Http,
             interconnect_mode: InternalTransportMode::Http,
@@ -1782,6 +1792,11 @@ impl NodeHandle {
         );
         let application = application_builder
             .state_snapshot_interval(self.config.state_snapshot_interval)
+            .transaction_idle_timeout(self.config.transaction_idle_timeout)
+            .transaction_tombstone_retention(self.config.transaction_tombstone_retention)
+            .transaction_max_statements(self.config.transaction_max_statements)
+            .transaction_max_source_bytes(self.config.transaction_max_source_bytes)
+            .transaction_max_open(self.config.transaction_max_open)
             .memory_pressure(self.config.memory_pressure)
             .cluster_bootstrap_host(self.spec.bootstrap_host.clone())
             .db_path(db_path)

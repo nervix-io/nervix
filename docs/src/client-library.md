@@ -6,6 +6,7 @@ Capabilities:
 
 - `Client::connect(...)`
 - `Client::execute(...)`
+- `Client::transaction_status()` and `Client::attach_transaction(...)`
 - `Client::subscribe(...)`
 - `Client::unsubscribe(...)`
 - `Client::next_subscription()`
@@ -39,3 +40,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Transaction Handles And Attach
+
+`CommandOutcome::transaction` replaces the former boolean transaction flag. Its
+`TransactionStatus` contains the transaction id, `Open`/`Committing`/finished state, pending and
+completed counts, total statement count, and any failure error and one-based failing statement.
+Treat the id as the durable transaction handle:
+
+```rust
+let begun = client.execute("BEGIN;").await?;
+let transaction_id = begun
+    .transaction
+    .as_ref()
+    .expect("BEGIN returns transaction status")
+    .id
+    .clone();
+
+client.execute("CREATE DOMAIN production;").await?;
+
+// A different Client authenticated as the same user can take over the transaction.
+let attached = recovered_client.attach_transaction(transaction_id).await?;
+if !attached.success {
+    eprintln!("attach outcome: {}", attached.message);
+}
+```
+
+The client automatically attaches its active transaction after a leader redirect or transport
+reconnect before retrying a command. An explicit attach by another session takes over the binding.
+Attach to a retained tombstone returns an unsuccessful command outcome whose transaction status
+names `Committed`, `Failed`, `Reverted`, or `Expired`; attach to an id removed after retention
+returns an unknown-id outcome. `transaction_status()` keeps the latest structured status so an
+interactive caller can render `Open` and `Committing` differently.

@@ -35,7 +35,31 @@ message CommandResult {
   bool already_existed = 7;
   string leader_web_console_uri = 8;
   repeated CommandResult results = 9;
-  optional bool transaction_active = 10;
+  TransactionStatus transaction = 10;
+}
+
+enum TransactionState {
+  TRANSACTION_STATE_UNSPECIFIED = 0;
+  TRANSACTION_STATE_OPEN = 1;
+  TRANSACTION_STATE_COMMITTING = 2;
+  TRANSACTION_STATE_COMMITTED = 3;
+  TRANSACTION_STATE_FAILED = 4;
+  TRANSACTION_STATE_REVERTED = 5;
+  TRANSACTION_STATE_EXPIRED = 6;
+}
+
+message TransactionStatus {
+  string id = 1;
+  TransactionState state = 2;
+  uint64 pending_count = 3;
+  uint64 completed_count = 4;
+  uint64 total_count = 5;
+  string error = 6;
+  optional uint64 failing_step = 7;
+}
+
+message AttachTransactionRequest {
+  string id = 1;
 }
 
 message SubscriptionEvent {
@@ -140,6 +164,7 @@ message SessionRequest {
     SuggestRequest suggest = 2;
     ListDomainsRequest list_domains = 3;
     SetActiveDomainRequest set_active_domain = 4;
+    AttachTransactionRequest attach_transaction = 5;
   }
 }
 
