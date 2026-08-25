@@ -30,10 +30,11 @@ use nervix_models::{
     CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule,
     DropModel, EmitSink, EndpointType, Expression, Identifier, IngestSource, IngestTimestampSource,
     JsonType, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-    ModelChangeAspect, ModelKind, MqttIngestMode, OutputBranch, ParseAsType,
-    PlacementGroupSchedule, PlacementPolicy, PlacementRuntimeNode, ProcessorOutput,
-    ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode, SchemaField,
-    SignalingWireFormat, SqsFifoGroup, WireSchemaDefinition,
+    ModelChangeAspect, ModelKind, MqttIngestMode, OtelAggregationTemporality, OtelMetricKind,
+    OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule,
+    PlacementPolicy, PlacementRuntimeNode, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
+    RouteConstruction, ScheduledNode, SchemaField, SignalingWireFormat, SqsFifoGroup,
+    WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -1605,6 +1606,7 @@ impl DomainState {
                 | Model::ClientPulsar(_)
                 | Model::ClientHttp(_)
                 | Model::ClientSentry(_)
+                | Model::ClientOtel(_)
                 | Model::ClientPrometheus(_)
                 | Model::ClientRabbitMq(_)
                 | Model::ClientRedis(_)
@@ -4587,18 +4589,7 @@ fn validate_emitter_publishing_contract(
         )));
     }
 
-    let requires_codec = matches!(
-        emitter.sink.as_ref(),
-        EmitSink::Kafka { .. }
-            | EmitSink::Pulsar { .. }
-            | EmitSink::RabbitMq { .. }
-            | EmitSink::Redis { .. }
-            | EmitSink::Mqtt { .. }
-            | EmitSink::Nats { .. }
-            | EmitSink::ZeroMq { .. }
-            | EmitSink::Sqs { .. }
-            | EmitSink::Sentry { .. }
-    );
+    let requires_codec = emitter.sink.requires_codec();
     if requires_codec && emitter.encode_using_codec.is_none() {
         return Err(invalid(format!(
             "{} emitter requires ENCODE USING",
@@ -4705,6 +4696,15 @@ fn validate_emitter_publishing_contract(
                 }
             }
         }
+        EmitSink::Otel {
+            signal,
+            values,
+            attributes,
+            resource,
+            ..
+        } => {
+            validate_otel_mapping_contract(signal, values, attributes, resource).map_err(invalid)?
+        }
         EmitSink::Kafka { .. }
         | EmitSink::Pulsar { .. }
         | EmitSink::RabbitMq { .. }
@@ -4718,6 +4718,114 @@ fn validate_emitter_publishing_contract(
         | EmitSink::Postgres { .. }
         | EmitSink::MySql { .. }
         | EmitSink::MongoDb { .. } => {}
+    }
+
+    Ok(())
+}
+
+fn validate_otel_mapping_contract(
+    signal: &OtelSignal,
+    values: &[OtelValueMapping],
+    attributes: &[OtelValueMapping],
+    resource: &[OtelValueMapping],
+) -> Result<(), String> {
+    let (signal_label, allowed, required, delta) = match signal {
+        OtelSignal::Logs => (
+            "LOGS",
+            &[
+                "time",
+                "severity_text",
+                "severity_number",
+                "body",
+                "trace_id",
+                "span_id",
+            ][..],
+            &["time", "body"][..],
+            false,
+        ),
+        OtelSignal::Traces => (
+            "TRACES",
+            &[
+                "trace_id",
+                "span_id",
+                "parent_span_id",
+                "name",
+                "kind",
+                "start_time",
+                "end_time",
+                "status_code",
+                "status_message",
+            ][..],
+            &["trace_id", "span_id", "name", "start_time", "end_time"][..],
+            false,
+        ),
+        OtelSignal::Metric(metric) => match metric.kind {
+            OtelMetricKind::Gauge => (
+                "METRIC GAUGE",
+                &["time", "start_time", "value"][..],
+                &["time", "value"][..],
+                false,
+            ),
+            OtelMetricKind::Sum { temporality, .. } => (
+                "METRIC SUM",
+                &["time", "start_time", "value"][..],
+                &["time", "value"][..],
+                temporality == OtelAggregationTemporality::Delta,
+            ),
+            OtelMetricKind::Histogram { temporality } => (
+                "METRIC HISTOGRAM",
+                &[
+                    "time",
+                    "start_time",
+                    "count",
+                    "sum",
+                    "bucket_counts",
+                    "explicit_bounds",
+                    "min",
+                    "max",
+                ][..],
+                &["time", "count", "bucket_counts", "explicit_bounds"][..],
+                temporality == OtelAggregationTemporality::Delta,
+            ),
+        },
+    };
+
+    let mut value_keys = HashSet::default();
+    for mapping in values {
+        if !allowed.contains(&mapping.column.as_str()) {
+            return Err(format!(
+                "OTEL {signal_label} VALUES does not support key '{}'",
+                mapping.column
+            ));
+        }
+        if !value_keys.insert(mapping.column.as_str()) {
+            return Err(format!(
+                "OTEL {signal_label} VALUES contains duplicate key '{}'",
+                mapping.column
+            ));
+        }
+    }
+    for key in required {
+        if !value_keys.contains(key) {
+            return Err(format!("OTEL {signal_label} VALUES requires key '{key}'"));
+        }
+    }
+    if delta && !value_keys.contains("start_time") {
+        return Err(format!(
+            "OTEL {signal_label} DELTA VALUES requires key 'start_time'"
+        ));
+    }
+
+    for (label, mappings) in [("ATTRIBUTES", attributes), ("RESOURCE", resource)] {
+        let mut keys = HashSet::default();
+        for mapping in mappings {
+            if !keys.insert(mapping.column.as_str()) {
+                return Err(format!(
+                    "OTEL {label} contains duplicate key '{}'",
+                    mapping.column
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -6904,6 +7012,17 @@ fn visit_model_expressions(model: &Model, visitor: &mut impl FnMut(&Expression))
             for invocation in &model.construction.invocations {
                 for argument in &invocation.arguments {
                     visitor(argument);
+                }
+            }
+            if let EmitSink::Otel {
+                values,
+                attributes,
+                resource,
+                ..
+            } = model.sink.as_ref()
+            {
+                for value in values.iter().chain(attributes).chain(resource) {
+                    visitor(&value.expression);
                 }
             }
             let values = match model.sink.as_ref() {
@@ -11132,10 +11251,12 @@ mod tests {
         IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
         KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
         MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
-        MqttSession, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy, ScheduledNode, SchemaField,
-        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat, SqsFifoGroup, WindowBound, WireSchemaField,
+        MqttSession, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelSignal,
+        OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
+        ScheduledNode, SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect,
+        SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, WindowBound,
+        WireSchemaField,
     };
 
     #[cfg(feature = "testing")]
@@ -12007,6 +12128,69 @@ mod tests {
             format!("{error:#}").contains("CLICKHOUSE WITH MAX BATCH must be greater than zero"),
             "unexpected validation error: {error:#}"
         );
+    }
+
+    fn otel_mapping(key: &str) -> OtelValueMapping {
+        OtelValueMapping {
+            column: key.to_string(),
+            expression: Expression::Literal(nervix_models::Literal::String("value".to_string())),
+        }
+    }
+
+    #[test]
+    fn otel_mapping_contract_validates_signal_keys_before_runtime() {
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        emitter.encode_using_codec = None;
+        emitter.publishing_mode = EmitterPublishingMode::RequestAck {
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        let models = HashMap::default();
+
+        *emitter.sink = EmitSink::Otel {
+            client: identifier("otel_main"),
+            signal: OtelSignal::Logs,
+            values: vec![otel_mapping("time"), otel_mapping("body")],
+            attributes: Vec::new(),
+            resource: Vec::new(),
+            scope: None,
+        };
+        validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect("complete OTEL LOGS mappings must be accepted");
+
+        let EmitSink::Otel { values, .. } = emitter.sink.as_mut() else {
+            unreachable!("test emitter must remain OTEL")
+        };
+        values.push(otel_mapping("body"));
+        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect_err("duplicate OTEL VALUES keys must be rejected");
+        assert!(format!("{error:#}").contains("duplicate key 'body'"));
+
+        *emitter.sink = EmitSink::Otel {
+            client: identifier("otel_main"),
+            signal: OtelSignal::Metric(OtelMetric {
+                name: "requests".to_string(),
+                unit: "1".to_string(),
+                description: None,
+                kind: OtelMetricKind::Sum {
+                    monotonic: true,
+                    temporality: OtelAggregationTemporality::Delta,
+                },
+            }),
+            values: vec![otel_mapping("time"), otel_mapping("value")],
+            attributes: Vec::new(),
+            resource: Vec::new(),
+            scope: None,
+        };
+        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
+            .expect_err("DELTA metric streams without start_time must be rejected");
+        assert!(format!("{error:#}").contains("DELTA VALUES requires key 'start_time'"));
     }
 
     #[test]

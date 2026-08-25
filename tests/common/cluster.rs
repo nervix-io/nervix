@@ -1281,6 +1281,18 @@ impl Cluster {
         }
     }
 
+    pub(crate) fn fail_otel_client_unavailable_on_all_nodes(&self, emitter: &str) {
+        self.runtime_test_hooks
+            .otel_client_faults
+            .fail_unavailable(emitter);
+    }
+
+    pub(crate) fn clear_otel_client_fault_on_all_nodes(&self, emitter: &str) {
+        self.runtime_test_hooks
+            .otel_client_faults
+            .clear_emitter(emitter);
+    }
+
     pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
         for handle in self.nodes.values() {
             handle.fail_next_schedule_publication(domain);

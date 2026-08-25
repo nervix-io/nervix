@@ -16,6 +16,11 @@ pub struct IngestorFaultInjector {
     ingestors: DashMap<String, (), RandomState>,
 }
 
+#[derive(Debug, Default)]
+pub struct OtelClientFaultInjector {
+    unavailable_emitters: DashMap<String, (), RandomState>,
+}
+
 /// Fails the next schedule publication for a domain so tests can observe how a committed model
 /// mutation recovers when the new schedule never reaches the cluster.
 #[derive(Debug, Default)]
@@ -33,6 +38,7 @@ pub(super) enum EmitterFaultMode {
 pub struct RuntimeTestHooks {
     pub emitter_faults: Arc<EmitterFaultInjector>,
     pub ingestor_faults: Arc<IngestorFaultInjector>,
+    pub otel_client_faults: Arc<OtelClientFaultInjector>,
     pub schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
     pub domain_drain_timeout: Option<Duration>,
@@ -52,6 +58,7 @@ impl Default for RuntimeTestHooks {
         Self {
             emitter_faults: Arc::default(),
             ingestor_faults: Arc::default(),
+            otel_client_faults: Arc::default(),
             schedule_publication_faults: Arc::default(),
             branch_instance_expiration_scan_interval: None,
             domain_drain_timeout: None,
@@ -96,6 +103,23 @@ impl SchedulePublicationFaultInjector {
         self.domains
             .remove(&domain.as_str().to_ascii_lowercase())
             .is_some()
+    }
+}
+
+impl OtelClientFaultInjector {
+    pub fn fail_unavailable(&self, emitter: &str) {
+        self.unavailable_emitters
+            .insert(emitter.to_ascii_lowercase(), ());
+    }
+
+    pub fn clear_emitter(&self, emitter: &str) {
+        self.unavailable_emitters
+            .remove(&emitter.to_ascii_lowercase());
+    }
+
+    pub(super) fn is_unavailable(&self, emitter: &Identifier) -> bool {
+        self.unavailable_emitters
+            .contains_key(&emitter.as_str().to_ascii_lowercase())
     }
 }
 

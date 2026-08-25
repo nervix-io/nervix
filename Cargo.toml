@@ -55,6 +55,7 @@ ed25519-dalek = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
+flate2 = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true }
 hdrhistogram = { workspace = true }
@@ -97,6 +98,12 @@ opentelemetry-otlp = { workspace = true, default-features = false, features = [
   "grpc-tonic",
   "trace",
 ] }
+opentelemetry-proto = { workspace = true, features = [
+  "gen-tonic",
+  "logs",
+  "metrics",
+  "trace",
+] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 ordered-float = { workspace = true }
 ort = { workspace = true, features = [
@@ -109,6 +116,9 @@ ort = { workspace = true, features = [
   "tracing",
   "webgpu",
 ] }
+otel-prost = { workspace = true }
+otel-tonic = { workspace = true }
+otel-tonic-types = { workspace = true }
 parking_lot = { workspace = true }
 parquet = { workspace = true }
 petgraph = { workspace = true }
@@ -283,6 +293,7 @@ fastrand = "2.4.1"
 fjall = "3.0.4"
 flatbuffers = "25.12.19"
 flatc-rust = "0.2.0"
+flate2 = "1"
 futures-channel = "0.3"
 futures-util = "0.3"
 gloo-net = "0.7"
@@ -343,9 +354,17 @@ opendal = { version = "0.56.0", features = [
 openraft = { version = "=0.10.0-alpha.33", features = ["serde"] }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", default-features = false }
+opentelemetry-proto = { version = "0.31", default-features = false }
 opentelemetry_sdk = "0.31"
 ordered-float = "4"
 ort = { version = "2.0.0-rc.12", default-features = false }
+otel-prost = { package = "prost", version = "0.14" }
+otel-tonic = { package = "tonic", version = "0.14", features = [
+  "gzip",
+  "tls-aws-lc",
+  "tls-webpki-roots",
+] }
+otel-tonic-types = { package = "tonic-types", version = "0.14" }
 parking_lot = "0.12"
 # Match Iceberg's Arrow 58 major so RecordBatch and writer types are identical.
 parquet = { version = "58", features = ["async"] }

@@ -4,8 +4,8 @@ use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use nervix_models::{
     AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CreateEmitter,
     CreateStatement, EmitSink, EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend,
-    IcebergValueMapping, MongoDbConflictAction, MySqlConflictAction, PostgresConflictAction,
-    SqsFifoGroup,
+    IcebergValueMapping, MongoDbConflictAction, MySqlConflictAction, OtelAggregationTemporality,
+    OtelMetric, OtelMetricKind, OtelScope, OtelSignal, PostgresConflictAction, SqsFifoGroup,
 };
 
 use crate::{
@@ -298,6 +298,133 @@ fn sentry_emit_sink_parser<'src>()
     kw(Identifier::Sentry)
         .ignore_then(client_ref())
         .map(|client| EmitSink::Sentry { client })
+}
+
+fn otel_temporality_parser<'src>()
+-> impl Parser<'src, &'src [Token], OtelAggregationTemporality, extra::Err<ParseError<'src>>> + Clone
+{
+    choice((
+        kw(Identifier::Delta).to(OtelAggregationTemporality::Delta),
+        kw(Identifier::Cumulative).to(OtelAggregationTemporality::Cumulative),
+    ))
+}
+
+fn otel_metric_kind_parser<'src>()
+-> impl Parser<'src, &'src [Token], OtelMetricKind, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw(Identifier::Gauge).to(OtelMetricKind::Gauge),
+        kw(Identifier::Sum)
+            .ignore_then(kw(Identifier::Monotonic).or_not())
+            .then(otel_temporality_parser())
+            .map(|(monotonic, temporality)| OtelMetricKind::Sum {
+                monotonic: monotonic.is_some(),
+                temporality,
+            }),
+        kw(Identifier::Histogram)
+            .ignore_then(otel_temporality_parser())
+            .map(|temporality| OtelMetricKind::Histogram { temporality }),
+    ))
+}
+
+fn otel_signal_parser<'src>()
+-> impl Parser<'src, &'src [Token], OtelSignal, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw(Identifier::Logs).to(OtelSignal::Logs),
+        kw(Identifier::Traces).to(OtelSignal::Traces),
+        kw(Identifier::Metric)
+            .ignore_then(string_lit().labelled("otel_metric_name"))
+            .then_ignore(kw(Identifier::Unit))
+            .then(string_lit().labelled("otel_metric_unit"))
+            .then(
+                kw(Identifier::Description)
+                    .ignore_then(string_lit().labelled("otel_metric_description"))
+                    .or_not(),
+            )
+            .then(otel_metric_kind_parser())
+            .map(|(((name, unit), description), kind)| {
+                OtelSignal::Metric(OtelMetric {
+                    name,
+                    unit,
+                    description,
+                    kind,
+                })
+            }),
+    ))
+}
+
+fn otel_literal_expression(expression: &nervix_models::Expression) -> bool {
+    match expression {
+        nervix_models::Expression::Literal(_) => true,
+        nervix_models::Expression::Array(items) => items.iter().all(otel_literal_expression),
+        nervix_models::Expression::Field(_)
+        | nervix_models::Expression::Unary { .. }
+        | nervix_models::Expression::Binary { .. }
+        | nervix_models::Expression::Cast { .. }
+        | nervix_models::Expression::Call { .. }
+        | nervix_models::Expression::UdfCall { .. }
+        | nervix_models::Expression::If { .. }
+        | nervix_models::Expression::Case { .. } => false,
+    }
+}
+
+fn otel_resource_values<'src>()
+-> impl Parser<'src, &'src [Token], Vec<ClickHouseValueMapping>, extra::Err<ParseError<'src>>> + Clone
+{
+    clickhouse_values().try_map(|values, span| {
+        if values
+            .iter()
+            .all(|mapping| otel_literal_expression(&mapping.expression))
+        {
+            Ok(values)
+        } else {
+            Err(Rich::custom(
+                span,
+                "OTEL RESOURCE values must be literal expressions",
+            ))
+        }
+    })
+}
+
+fn otel_scope_parser<'src>()
+-> impl Parser<'src, &'src [Token], OtelScope, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Scope)
+        .ignore_then(string_lit().labelled("otel_scope_name"))
+        .then(
+            kw(Identifier::Version)
+                .ignore_then(string_lit().labelled("otel_scope_version"))
+                .or_not(),
+        )
+        .map(|(name, version)| OtelScope { name, version })
+}
+
+fn otel_emit_sink_parser<'src>()
+-> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Otel)
+        .ignore_then(client_ref())
+        .then(otel_signal_parser())
+        .then_ignore(kw(Identifier::Values))
+        .then(clickhouse_values())
+        .then(
+            kw(Identifier::Attributes)
+                .ignore_then(clickhouse_values())
+                .or_not(),
+        )
+        .then(
+            kw(Identifier::Resource)
+                .ignore_then(otel_resource_values())
+                .or_not(),
+        )
+        .then(otel_scope_parser().or_not())
+        .map(
+            |(((((client, signal), values), attributes), resource), scope)| EmitSink::Otel {
+                client,
+                signal,
+                values,
+                attributes: attributes.unwrap_or_default(),
+                resource: resource.unwrap_or_default(),
+                scope,
+            },
+        )
 }
 
 fn balanced_value_expression_group<'src>()
@@ -808,6 +935,10 @@ fn emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
         codec_free_sink(sink_with_publishing_mode(
+            otel_emit_sink_parser(),
+            request_ack_publishing_mode(),
+        )),
+        codec_free_sink(sink_with_publishing_mode(
             clickhouse_emit_sink_parser(),
             request_ack_publishing_mode(),
         )),
@@ -872,6 +1003,7 @@ fn emit_sink_parser<'src>()
 fn alter_emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
+        sink_with_publishing_mode(otel_emit_sink_parser(), request_ack_publishing_mode()),
         sink_with_publishing_mode(clickhouse_emit_sink_parser(), request_ack_publishing_mode()),
         sink_with_publishing_mode(postgres_emit_sink_parser(), request_ack_publishing_mode()),
         sink_with_publishing_mode(mysql_emit_sink_parser(), request_ack_publishing_mode()),
@@ -1220,6 +1352,170 @@ mod tests {
             .collect()
     }
 
+    fn otel_emitter(signal: &str, values: &str, tail: &str) -> String {
+        format!(
+            "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main {signal} VALUES \
+             {{{values}}} {tail} MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        )
+    }
+
+    #[test]
+    fn parses_otel_logs_traces_and_metric_shapes() {
+        let logs = parse_create_emitter(&otel_emitter(
+            "LOGS",
+            "'time' = input.event_ts, 'body' = input.message",
+            "ATTRIBUTES {'service.instance.id' = input.instance_id} RESOURCE {'service.name' = \
+             'checkout'} SCOPE 'nervix/audit' VERSION '1.0'",
+        ))
+        .expect("OTEL logs emitter should parse");
+        let EmitSink::Otel {
+            signal,
+            attributes,
+            resource,
+            scope,
+            ..
+        } = logs.sink.as_ref()
+        else {
+            panic!("expected OTEL logs sink");
+        };
+        assert!(matches!(signal, OtelSignal::Logs));
+        assert_eq!(attributes.len(), 1);
+        assert_eq!(resource.len(), 1);
+        assert_eq!(
+            scope.as_ref().map(|scope| scope.name.as_str()),
+            Some("nervix/audit")
+        );
+
+        let traces = parse_create_emitter(&otel_emitter(
+            "TRACES",
+            "'trace_id' = input.trace_id, 'span_id' = input.span_id, 'name' = input.name, \
+             'start_time' = input.started_at, 'end_time' = input.finished_at",
+            "",
+        ))
+        .expect("OTEL traces emitter should parse");
+        assert!(matches!(
+            traces.sink.as_ref(),
+            EmitSink::Otel {
+                signal: OtelSignal::Traces,
+                ..
+            }
+        ));
+
+        let gauge = parse_create_emitter(&otel_emitter(
+            "METRIC 'queue.depth' UNIT '1' DESCRIPTION 'Pending work' GAUGE",
+            "'time' = input.observed_at, 'value' = input.depth",
+            "",
+        ))
+        .expect("OTEL gauge emitter should parse");
+        assert!(matches!(
+            gauge.sink.as_ref(),
+            EmitSink::Otel {
+                signal: OtelSignal::Metric(OtelMetric {
+                    kind: OtelMetricKind::Gauge,
+                    ..
+                }),
+                ..
+            }
+        ));
+
+        let sum = parse_create_emitter(&otel_emitter(
+            "METRIC 'http.requests' UNIT '1' SUM MONOTONIC DELTA",
+            "'time' = input.finished_at, 'start_time' = input.started_at, 'value' = input.count",
+            "",
+        ))
+        .expect("OTEL sum emitter should parse");
+        assert!(matches!(
+            sum.sink.as_ref(),
+            EmitSink::Otel {
+                signal: OtelSignal::Metric(OtelMetric {
+                    kind: OtelMetricKind::Sum {
+                        monotonic: true,
+                        temporality: OtelAggregationTemporality::Delta,
+                    },
+                    ..
+                }),
+                ..
+            }
+        ));
+
+        let histogram = parse_create_emitter(&otel_emitter(
+            "METRIC 'http.duration' UNIT 'ms' HISTOGRAM CUMULATIVE",
+            "'time' = input.observed_at, 'count' = input.count, 'bucket_counts' = \
+             input.bucket_counts, 'explicit_bounds' = input.bounds",
+            "",
+        ))
+        .expect("OTEL histogram emitter should parse");
+        assert!(matches!(
+            histogram.sink.as_ref(),
+            EmitSink::Otel {
+                signal: OtelSignal::Metric(OtelMetric {
+                    kind: OtelMetricKind::Histogram {
+                        temporality: OtelAggregationTemporality::Cumulative,
+                    },
+                    ..
+                }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_otel_sink_clause_surfaces() {
+        assert!(
+            parse_create_emitter(
+                "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main LOGS MODE ACK \
+                 RETRY POLICY BACKOFF 250ms MAX 30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+                 GENERAL ERROR LOG;"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_create_emitter(&otel_emitter(
+                "LOGS",
+                "'time' = input.event_ts, 'body' = input.message",
+                "RESOURCE {'service.name' = input.service_name}",
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_create_emitter(
+                "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main LOGS VALUES \
+                 {'time' = input.event_ts, 'body' = input.message} MODE NO_ACK RETRY POLICY \
+                 BACKOFF 250ms MAX 30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_create_emitter(
+                "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main LOGS VALUES \
+                 {'time' = input.event_ts, 'body' = input.message} MODE ACK RETRY POLICY BACKOFF \
+                 250ms MAX 30s ENCODE USING telemetry_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                 ON GENERAL ERROR LOG;"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn otel_completion_stays_within_the_selected_signal_grammar() {
+        let signal = "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main ";
+        let signal_suggestions = suggest_create_emitter(signal, signal.len());
+        assert!(signal_suggestions.contains(&"LOGS".to_string()));
+        assert!(signal_suggestions.contains(&"TRACES".to_string()));
+        assert!(signal_suggestions.contains(&"METRIC".to_string()));
+        assert!(!signal_suggestions.contains(&"TOPIC".to_string()));
+
+        let after_values = "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main LOGS \
+                            VALUES {'time' = input.event_ts, 'body' = input.message} ";
+        let route_suggestions = suggest_create_emitter(after_values, after_values.len());
+        assert!(route_suggestions.contains(&"ATTRIBUTES".to_string()));
+        assert!(route_suggestions.contains(&"RESOURCE".to_string()));
+        assert!(route_suggestions.contains(&"SCOPE".to_string()));
+        assert!(route_suggestions.contains(&"MODE".to_string()));
+        assert!(!route_suggestions.contains(&"ENCODE USING".to_string()));
+    }
+
     #[test]
     fn parses_alter_emitter_operations_in_written_order() {
         let parsed = parse_alter_emitter(
@@ -1406,6 +1702,16 @@ mod tests {
             "ICEBERG ON S3 store TABLE events VALUES { 'id' = input.id } LOCATION \
              's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY \
              POLICY BACKOFF 250ms MAX 30s",
+            "OTEL otel_main LOGS VALUES { 'time' = input.time, 'body' = input.body } ATTRIBUTES { \
+             'service.instance.id' = input.instance_id } RESOURCE { 'service.name' = 'checkout' } \
+             SCOPE 'nervix/logs' VERSION '1.0' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "OTEL otel_main TRACES VALUES { 'trace_id' = input.trace_id, 'span_id' = \
+             input.span_id, 'name' = input.name, 'start_time' = input.start_time, 'end_time' = \
+             input.end_time } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "OTEL otel_main METRIC 'request.duration' UNIT 'ms' DESCRIPTION 'Request duration' \
+             HISTOGRAM CUMULATIVE VALUES { 'time' = input.time, 'count' = input.count, \
+             'bucket_counts' = input.bucket_counts, 'explicit_bounds' = input.explicit_bounds } \
+             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
         ] {
             let source = format!(
                 "CREATE EMITTER emit FROM p99 TO {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \

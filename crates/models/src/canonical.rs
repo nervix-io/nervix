@@ -10,7 +10,7 @@ use crate::{
     CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecWireFormat,
     CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
     CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
     CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
     CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
     CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
@@ -25,14 +25,14 @@ use crate::{
     KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
     MaterializedStatePolicy, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
     MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
-    NatsConfigEntry, NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
-    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
-    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RetryPolicy,
-    RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
-    UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaDefinition,
-    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    NatsConfigEntry, NatsIngestMode, OtelConfigEntry, OtelMetricKind, OtelSignal, OutputBranch,
+    ParseAsType, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
+    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
+    RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup,
+    SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
+    WireSchemaDefinition, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
@@ -339,6 +339,7 @@ impl Model {
             Self::ClientPulsar(client) => client.to_canonical_nspl(),
             Self::ClientHttp(client) => client.to_canonical_nspl(),
             Self::ClientSentry(client) => client.to_canonical_nspl(),
+            Self::ClientOtel(client) => client.to_canonical_nspl(),
             Self::ClientPrometheus(client) => client.to_canonical_nspl(),
             Self::ClientMqtt(client) => client.to_canonical_nspl(),
             Self::ClientNats(client) => client.to_canonical_nspl(),
@@ -687,6 +688,24 @@ impl CreateClientSentry {
 
         Ok(format!(
             "CREATE CLIENT {} TYPE SENTRY{} CONFIG {{{}}};",
+            self.name.as_str(),
+            client_mount_clause(self.mount.as_ref()),
+            config
+        ))
+    }
+}
+
+impl CreateClientOtel {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let config = self
+            .config
+            .iter()
+            .map(otel_entry_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+
+        Ok(format!(
+            "CREATE CLIENT {} TYPE OTEL{} CONFIG {{{}}};",
             self.name.as_str(),
             client_mount_clause(self.mount.as_ref()),
             config
@@ -2217,6 +2236,10 @@ fn sentry_entry_to_nspl(entry: &SentryConfigEntry) -> Result<String, CanonicalNs
     kafka_entry_to_nspl(entry)
 }
 
+fn otel_entry_to_nspl(entry: &OtelConfigEntry) -> Result<String, CanonicalNsplError> {
+    kafka_entry_to_nspl(entry)
+}
+
 fn pulsar_entry_to_nspl(entry: &PulsarConfigEntry) -> Result<String, CanonicalNsplError> {
     kafka_entry_to_nspl(entry)
 }
@@ -2697,6 +2720,82 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             ))
         }
         EmitSink::Sentry { client } => Ok(format!("SENTRY {}", client.as_str())),
+        EmitSink::Otel {
+            client,
+            signal,
+            values,
+            attributes,
+            resource,
+            scope,
+        } => {
+            let signal = match signal {
+                OtelSignal::Logs => "LOGS".to_string(),
+                OtelSignal::Traces => "TRACES".to_string(),
+                OtelSignal::Metric(metric) => {
+                    let description = metric
+                        .description
+                        .as_ref()
+                        .map(|description| {
+                            Ok(format!(" DESCRIPTION {}", string_literal(description)?))
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+                    let kind = match &metric.kind {
+                        OtelMetricKind::Gauge => "GAUGE".to_string(),
+                        OtelMetricKind::Sum {
+                            monotonic,
+                            temporality,
+                        } => format!(
+                            "SUM{} {}",
+                            if *monotonic { " MONOTONIC" } else { "" },
+                            temporality.as_ref()
+                        ),
+                        OtelMetricKind::Histogram { temporality } => {
+                            format!("HISTOGRAM {}", temporality.as_ref())
+                        }
+                    };
+                    format!(
+                        "METRIC {} UNIT {}{} {}",
+                        string_literal(&metric.name)?,
+                        string_literal(&metric.unit)?,
+                        description,
+                        kind
+                    )
+                }
+            };
+            let attributes = if attributes.is_empty() {
+                String::new()
+            } else {
+                format!(" ATTRIBUTES {{{}}}", value_mappings_to_nspl(attributes)?)
+            };
+            let resource = if resource.is_empty() {
+                String::new()
+            } else {
+                format!(" RESOURCE {{{}}}", value_mappings_to_nspl(resource)?)
+            };
+            let scope = scope
+                .as_ref()
+                .map(|scope| {
+                    let version = scope
+                        .version
+                        .as_ref()
+                        .map(|version| Ok(format!(" VERSION {}", string_literal(version)?)))
+                        .transpose()?
+                        .unwrap_or_default();
+                    Ok(format!(" SCOPE {}{version}", string_literal(&scope.name)?))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            Ok(format!(
+                "OTEL {} {} VALUES {{{}}}{}{}{}",
+                client.as_str(),
+                signal,
+                value_mappings_to_nspl(values)?,
+                attributes,
+                resource,
+                scope
+            ))
+        }
         EmitSink::ClickHouse {
             client,
             table,

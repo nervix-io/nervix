@@ -10,6 +10,7 @@ mod mongodb;
 mod mqtt;
 mod mysql;
 mod nats;
+mod otel;
 mod postgres;
 pub(in crate::runtime) mod pulsar;
 mod rabbitmq;
@@ -28,6 +29,7 @@ use mongodb::MongoDbEmitter;
 use mqtt::MqttEmitter;
 use mysql::MySqlEmitter;
 use nats::NatsEmitter;
+use otel::{OtelEmitter, OtelEmitterInit};
 use postgres::PostgresEmitter;
 use pulsar::PulsarEmitter;
 use rabbitmq::RabbitMqEmitter;
@@ -568,11 +570,14 @@ impl EmitterPublishBatch {
                 "emitter maximum record batch must be at least one",
             ));
         }
-        let row_count = self.batch.batch.batch().num_rows();
-        let pending = (0..row_count)
-            .filter(|row| !self.delivered.get(*row).copied().unwrap_or(false))
-            .collect::<Vec<_>>();
+        let pending = self.pending_record_rows();
         Ok(pending.chunks(max_batch).map(<[usize]>::to_vec).collect())
+    }
+
+    fn pending_record_rows(&self) -> Vec<usize> {
+        (0..self.batch.batch.batch().num_rows())
+            .filter(|row| !self.delivered.get(*row).copied().unwrap_or(false))
+            .collect()
     }
 }
 
@@ -1291,6 +1296,60 @@ async fn sql_mapped_batch_values(
     batch: &RelayRecordBatch,
     execution_now: Timestamp,
 ) -> EmitterRuntimeResult<Vec<Result<Vec<serde_json::Value>, StructuredMessageError>>> {
+    let output = execute_sql_values_program(program, batch, execution_now).await?;
+    let row_count = output.row_count();
+    let mut rows = Vec::with_capacity(row_count);
+    for row in 0..row_count {
+        if let Some(side_error) = output.errors()[row].first() {
+            rows.push(Err(program.structured_side_error(
+                format!(
+                    "{} VALUES side error {}: {} at {}",
+                    program.label,
+                    side_error.code.as_str(),
+                    side_error.message,
+                    side_error.span
+                ),
+                side_error.span,
+            )));
+            continue;
+        }
+        let decoded = match vm_output_row_to_decoded_record(&output, row) {
+            Ok(output) => output,
+            Err(error) => {
+                rows.push(Err(structured_message_error(
+                    MessageErrorCode::Validation,
+                    format!(
+                        "{} VALUES failed to decode output row: {error}",
+                        program.label
+                    ),
+                    MessageErrorOperation::Values,
+                    None,
+                    std::iter::empty(),
+                )));
+                continue;
+            }
+        };
+        rows.push(Ok(mappings
+            .iter()
+            .enumerate()
+            .map(|(index, _mapping)| {
+                let field = format!("c{index}");
+                if let Some(value) = decoded.value(&field) {
+                    runtime_value_to_json(value)
+                } else {
+                    serde_json::Value::Null
+                }
+            })
+            .collect()));
+    }
+    Ok(rows)
+}
+
+async fn execute_sql_values_program(
+    program: &CompiledSqlValuesProgram,
+    batch: &RelayRecordBatch,
+    execution_now: Timestamp,
+) -> EmitterRuntimeResult<VmTypedBatch> {
     let side_inputs = HashMap::default();
     let lookup_columns = HashMap::default();
     let input = project_vm_input_batch(
@@ -1330,51 +1389,7 @@ async fn sql_mapped_batch_values(
             )),
         );
     }
-    let mut rows = Vec::with_capacity(row_count);
-    for row in 0..row_count {
-        if let Some(side_error) = result.batch.errors()[row].first() {
-            rows.push(Err(program.structured_side_error(
-                format!(
-                    "{} VALUES side error {}: {} at {}",
-                    program.label,
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
-                ),
-                side_error.span,
-            )));
-            continue;
-        }
-        let output = match vm_output_row_to_decoded_record(&result.batch, row) {
-            Ok(output) => output,
-            Err(error) => {
-                rows.push(Err(structured_message_error(
-                    MessageErrorCode::Validation,
-                    format!(
-                        "{} VALUES failed to decode output row: {error}",
-                        program.label
-                    ),
-                    MessageErrorOperation::Values,
-                    None,
-                    std::iter::empty(),
-                )));
-                continue;
-            }
-        };
-        rows.push(Ok(mappings
-            .iter()
-            .enumerate()
-            .map(|(index, _mapping)| {
-                let field = format!("c{index}");
-                if let Some(value) = output.value(&field) {
-                    runtime_value_to_json(value)
-                } else {
-                    serde_json::Value::Null
-                }
-            })
-            .collect()));
-    }
-    Ok(rows)
+    Ok(result.batch)
 }
 
 fn runtime_value_to_json(value: &RuntimeValue) -> serde_json::Value {
@@ -1431,6 +1446,15 @@ fn emitter_minimum_retry_delay(error: &Report<EmitterRuntimeError>) -> Duration 
     error
         .downcast_ref::<EmitterMinimumRetryDelay>()
         .map_or(Duration::ZERO, |attachment| attachment.0)
+}
+
+fn emitter_retry_delay(
+    backoff: &mut RuntimeReconnectBackoff,
+    error: &Report<EmitterRuntimeError>,
+) -> Duration {
+    backoff
+        .take_next_delay()
+        .max(emitter_minimum_retry_delay(error))
 }
 
 async fn await_emitter_confirmation<F>(acks: &AckSet, future: F) -> F::Output
@@ -1558,6 +1582,7 @@ enum SinkEmitter {
     ZeroMq(ZeroMqEmitter),
     Sqs(SqsEmitter),
     Sentry(SentryEmitter),
+    Otel(OtelEmitter),
     ClickHouse(ClickHouseEmitter),
     Postgres(PostgresEmitter),
     MySql(MySqlEmitter),
@@ -1706,6 +1731,28 @@ impl SinkEmitter {
                 Self::from_result("sentry", context, SentryEmitter::new(client, resolved))
                     .map(Self::Sentry)
             }
+            (
+                EmitSink::Otel {
+                    signal,
+                    values,
+                    attributes,
+                    resource,
+                    scope,
+                    ..
+                },
+                Some(Model::ClientOtel(client)),
+                _,
+            ) => Self::Otel(OtelEmitter::new(OtelEmitterInit {
+                client,
+                resolved,
+                context,
+                signal,
+                values,
+                attributes,
+                resource,
+                scope: scope.as_ref(),
+                input_schema: input_schema.arrow_schema(),
+            })),
             (EmitSink::ClickHouse { values, .. }, Some(Model::ClientClickHouse(client)), _) => {
                 Self::ClickHouse(ClickHouseEmitter::new(
                     client,
@@ -1946,6 +1993,7 @@ impl SinkEmitter {
             | Self::ZeroMq(_)
             | Self::Sqs(_)
             | Self::Sentry(_)
+            | Self::Otel(_)
             | Self::ClickHouse(_)
             | Self::Postgres(_)
             | Self::MySql(_)
@@ -2148,10 +2196,7 @@ impl SinkEmitter {
                     }
                     Err(error) if emitter_publish_error_is_retryable(&error) => {
                         let reason = emitter_error_message(&error);
-                        let wait = control
-                            .backoff
-                            .take_next_delay()
-                            .max(emitter_minimum_retry_delay(&error));
+                        let wait = emitter_retry_delay(control.backoff, &error);
                         buffer.defer_retry(wait);
                         context.runtime.record_emitter_transient_error_with_backoff(
                             &context.domain,
@@ -2403,6 +2448,35 @@ impl SinkEmitter {
         }
 
         match (&mut *self, sink) {
+            (
+                Self::Otel(emitter),
+                EmitSink::Otel {
+                    signal,
+                    values,
+                    attributes,
+                    ..
+                },
+            ) => {
+                for batch_index in 0..batches.len() {
+                    tokio::task::consume_budget().await;
+                    let outcome = {
+                        let batch = &batches[batch_index];
+                        let pending_rows = batch.pending_record_rows();
+                        emitter
+                            .publish_pending_rows(
+                                batch_index,
+                                signal,
+                                values,
+                                attributes,
+                                &batch.batch,
+                                &pending_rows,
+                            )
+                            .await
+                    };
+                    finish_per_record_publish(context, batches, outcome).await?;
+                }
+                return Ok(());
+            }
             (
                 Self::ClickHouse(emitter),
                 EmitSink::ClickHouse {
@@ -2953,6 +3027,7 @@ impl EmitSinkLabel for EmitSink {
             EmitSink::ZeroMq { .. } => "zeromq",
             EmitSink::Sqs { .. } => "sqs",
             EmitSink::Sentry { .. } => "sentry",
+            EmitSink::Otel { .. } => "otel",
             EmitSink::ClickHouse { .. } => "clickhouse",
             EmitSink::Postgres { .. } => "postgres",
             EmitSink::MySql { .. } => "mysql",
@@ -3394,7 +3469,7 @@ impl EmitterTask {
                             }
                             Err(error) if emitter_publish_error_is_retryable(&error) => {
                                 let reason = emitter_error_message(&error);
-                                let wait = publish_backoff.take_next_delay();
+                                let wait = emitter_retry_delay(&mut publish_backoff, &error);
                                 retry_schedule.schedule(
                                     wait,
                                     sink.pending_acks(&emitter_buffer),
@@ -3564,7 +3639,7 @@ impl EmitterTask {
                             }
                             Err(error) if emitter_publish_error_is_retryable(&error) => {
                                 let reason = emitter_error_message(&error);
-                                let wait = publish_backoff.take_next_delay();
+                                let wait = emitter_retry_delay(&mut publish_backoff, &error);
                                 retry_schedule.schedule(
                                     wait,
                                     sink.pending_acks(&emitter_buffer),
@@ -3742,7 +3817,7 @@ impl EmitterTask {
                             }
                             Err(failure) if emitter_publish_error_is_retryable(&failure.error) => {
                                 let EmitterPublishFailure { error, batch_owner } = failure;
-                                let wait = publish_backoff.take_next_delay();
+                                let wait = emitter_retry_delay(&mut publish_backoff, &error);
                                 if let EmitterPublishBatchOwner::Caller = batch_owner
                                     && let Some(batch) = pending_batch.take()
                                     && let Err(retain_error) = emitter_buffer
@@ -3842,6 +3917,9 @@ fn resolve_emitter_client(
             Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Sentry { .. }, Some(Model::ClientSentry(client))) => {
+            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+        }
+        (EmitSink::Otel { .. }, Some(Model::ClientOtel(client))) => {
             Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
         }
         (EmitSink::ClickHouse { .. }, Some(Model::ClientClickHouse(client))) => {
@@ -4475,6 +4553,24 @@ mod publishing_mode_tests {
         assert_eq!(backoff.next_delay(), Duration::from_millis(4));
         backoff.reset();
         assert_eq!(backoff.next_delay(), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn emitter_retry_delay_honors_the_server_minimum() {
+        let mut backoff = RuntimeReconnectBackoff::from_policy(ParsedRetryPolicy {
+            backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(100),
+        });
+        let error = emitter_publish_error_with_minimum_retry_delay(
+            "receiver requested a longer retry",
+            Duration::from_secs(2),
+        );
+
+        assert_eq!(
+            emitter_retry_delay(&mut backoff, &error),
+            Duration::from_secs(2)
+        );
+        assert_eq!(backoff.next_delay(), Duration::from_millis(20));
     }
 
     #[tokio::test]
@@ -5522,6 +5618,17 @@ mod tests {
                 "sqs",
             ),
             (EmitSink::Sentry { client: id.clone() }, "sentry"),
+            (
+                EmitSink::Otel {
+                    client: id.clone(),
+                    signal: OtelSignal::Logs,
+                    values: Vec::new(),
+                    attributes: Vec::new(),
+                    resource: Vec::new(),
+                    scope: None,
+                },
+                "otel",
+            ),
             (
                 EmitSink::ClickHouse {
                     client: id.clone(),

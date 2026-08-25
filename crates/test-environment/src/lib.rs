@@ -32,12 +32,15 @@ const KAFKA_PLAINTEXT_PORT: ContainerPort = ContainerPort::Tcp(9092);
 const KAFKA_TLS_PORT: ContainerPort = ContainerPort::Tcp(9094);
 const KAFKA_START_SCRIPT: &str = "/opt/kafka/nervix_testcontainers_start.sh";
 const KAFKA_KEYSTORE_PASSWORD: &str = "nervix-test-kafka";
+const OTEL_COLLECTOR_CONFIG: &[u8] =
+    include_bytes!("../../../docker/opentelemetry-collector/config.yaml");
 const DEPENDENCY_CONFIGURATION_SOURCE: &[u8] = include_bytes!("lib.rs");
 const DEPENDENCY_CONFIGURATION_FILES: &[&[u8]] = &[
     include_bytes!("../../../docker/clickhouse/https.xml"),
     include_bytes!("../../../docker/mock-server/Dockerfile"),
     include_bytes!("../../../docker/mock-server/app.py"),
     include_bytes!("../../../docker/nats/nats-tls.conf"),
+    OTEL_COLLECTOR_CONFIG,
     include_bytes!("../../../docker/prometheus/prometheus.yml"),
     include_bytes!("../../../docker/prometheus/web.yml"),
     include_bytes!("../../../docker/rabbitmq/rabbitmq.conf"),
@@ -84,6 +87,8 @@ pub const GCS_ADDR: &str = "gcs_addr";
 pub const AZURITE_ADDR: &str = "azurite_addr";
 pub const QUICKWIT_ADDR: &str = "quickwit_addr";
 pub const OTLP_ADDR: &str = "otlp_addr";
+pub const OTEL_COLLECTOR_GRPC_ADDR: &str = "otel_collector_grpc_addr";
+pub const OTEL_COLLECTOR_HTTP_ADDR: &str = "otel_collector_http_addr";
 pub const JAEGER_ADDR: &str = "jaeger_addr";
 pub const SENTRY_ADDR: &str = "sentry_addr";
 pub const SENTRY_DSN: &str = "sentry_dsn";
@@ -1120,6 +1125,58 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         Ok(())
     }
 
+    pub async fn start_otel_collector(&mut self) -> io::Result<()> {
+        if !self.mark_starting("otel-collector").await? {
+            return Ok(());
+        }
+        let container = self
+            .start_container(
+                "otel-collector",
+                4317.tcp(),
+                "OpenTelemetry Collector",
+                || {
+                    GenericImage::new("otel/opentelemetry-collector", "0.159.0")
+                        .with_exposed_port(4317.tcp())
+                        .with_exposed_port(4318.tcp())
+                        .with_copy_to("/etc/otelcol/config.yaml", OTEL_COLLECTOR_CONFIG.to_vec())
+                        .with_cmd(["--config=/etc/otelcol/config.yaml"])
+                        .with_startup_timeout(STARTUP_TIMEOUT)
+                },
+            )
+            .await?;
+        let grpc_port = mapped_port(&container, 4317, "OpenTelemetry Collector gRPC").await?;
+        let http_port = mapped_port(&container, 4318, "OpenTelemetry Collector HTTP").await?;
+        self.endpoints.insert(
+            OTEL_COLLECTOR_GRPC_ADDR,
+            format!("http://127.0.0.1:{grpc_port}"),
+        );
+        self.endpoints.insert(
+            OTEL_COLLECTOR_HTTP_ADDR,
+            format!("http://127.0.0.1:{http_port}"),
+        );
+        self.containers
+            .push(RunningContainer::OtelCollector(container));
+        Ok(())
+    }
+
+    pub async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
+        let container = self
+            .containers
+            .iter()
+            .find_map(RunningContainer::otel_collector)
+            .ok_or_else(|| io::Error::other("OpenTelemetry Collector is not running"))?;
+        let stdout = container
+            .stdout_to_vec()
+            .await
+            .map_err(testcontainers_error("OpenTelemetry Collector stdout"))?;
+        let stderr = container
+            .stderr_to_vec()
+            .await
+            .map_err(testcontainers_error("OpenTelemetry Collector stderr"))?;
+        Ok(String::from_utf8_lossy(&stdout).contains(needle)
+            || String::from_utf8_lossy(&stderr).contains(needle))
+    }
+
     pub async fn start_jaeger(&mut self) -> io::Result<()> {
         if let Err(error) = self.start_quickwit().await {
             self.running.remove("quickwit");
@@ -1813,10 +1870,19 @@ fn run_openssl(arguments: Vec<OsString>, operation: &str) -> io::Result<()> {
 enum RunningContainer {
     Generic(ContainerAsync<GenericImage>),
     Kafka(ContainerAsync<KafkaImage>),
+    OtelCollector(ContainerAsync<GenericImage>),
     Sentry(ContainerAsync<GenericImage>),
 }
 
 impl RunningContainer {
+    fn otel_collector(&self) -> Option<&ContainerAsync<GenericImage>> {
+        if let Self::OtelCollector(container) = self {
+            Some(container)
+        } else {
+            None
+        }
+    }
+
     fn sentry(&self) -> Option<&ContainerAsync<GenericImage>> {
         if let Self::Sentry(container) = self {
             Some(container)
@@ -1827,14 +1893,18 @@ impl RunningContainer {
 
     fn id(&self) -> String {
         match self {
-            Self::Generic(container) | Self::Sentry(container) => container.id().to_string(),
+            Self::Generic(container) | Self::OtelCollector(container) | Self::Sentry(container) => {
+                container.id().to_string()
+            }
             Self::Kafka(container) => container.id().to_string(),
         }
     }
 
     async fn stop_and_remove(self) -> Result<(), String> {
         match self {
-            Self::Generic(container) | Self::Sentry(container) => stop_and_remove(container).await,
+            Self::Generic(container) | Self::OtelCollector(container) | Self::Sentry(container) => {
+                stop_and_remove(container).await
+            }
             Self::Kafka(container) => stop_and_remove(container).await,
         }
     }

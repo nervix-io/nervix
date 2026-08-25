@@ -128,6 +128,7 @@ Client types that currently support TLS-oriented configuration through mounted r
 - Kafka
 - HTTP
 - Sentry
+- OTEL
 - Prometheus
 - WebSockets
 - MQTT

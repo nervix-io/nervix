@@ -5,26 +5,28 @@ use nervix_models::{
     CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
-    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, EmitSink,
-    EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies,
-    Expression, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, Identifier,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
-    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestSource,
-    IngestTimestampSource, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode,
-    KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
-    OutputFlushPolicy, ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
-    RedisPubSubIngestMode, RelayBranching, RetryPolicy, SchemaField, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource,
-    WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
+    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
+    CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+    CreateWireSchema, EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode,
+    EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog,
+    IcebergStorageBackend, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, IngestSource, IngestTimestampSource, InputCollectPolicy, JsonType,
+    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy,
+    Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+    NameError, NatsIngestMode, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope,
+    OtelSignal, OutputFlushPolicy, ParseAsType, PlacementPolicy, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
+    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, SchemaField,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
+    VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness,
+    ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -40,6 +42,7 @@ pub enum StoredModelVersioned {
     RemovedTransport(StoredRemovedClient),
     TransportHttp(StoredCreateClientHttp),
     TransportSentry(StoredCreateClientSentry),
+    TransportOtel(StoredCreateClientOtel),
     TransportPrometheus(StoredCreateClientPrometheus),
     TransportRabbitMq(StoredCreateClientRabbitMq),
     TransportRedis(StoredCreateClientRedis),
@@ -444,6 +447,13 @@ pub struct StoredCreateClientHttp {
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateClientSentry {
+    pub name: String,
+    pub mount: Option<String>,
+    pub config: Vec<StoredClientConfigEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredCreateClientOtel {
     pub name: String,
     pub mount: Option<String>,
     pub config: Vec<StoredClientConfigEntry>,
@@ -1384,6 +1394,14 @@ pub enum StoredEmitSink {
         max_batch: u64,
         flush_each: String,
     },
+    Otel {
+        client: String,
+        signal: StoredOtelSignal,
+        values: Vec<StoredClickHouseValueMapping>,
+        attributes: Vec<StoredClickHouseValueMapping>,
+        resource: Vec<StoredClickHouseValueMapping>,
+        scope: Option<StoredOtelScope>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1521,6 +1539,45 @@ pub enum StoredMySqlConflictAction {
 pub type StoredMongoDbValueMapping = StoredClickHouseValueMapping;
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredOtelSignal {
+    Logs,
+    Traces,
+    Metric(StoredOtelMetric),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredOtelMetric {
+    pub name: String,
+    pub unit: String,
+    pub description: Option<String>,
+    pub kind: StoredOtelMetricKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredOtelMetricKind {
+    Gauge,
+    Sum {
+        monotonic: bool,
+        temporality: StoredOtelAggregationTemporality,
+    },
+    Histogram {
+        temporality: StoredOtelAggregationTemporality,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredOtelAggregationTemporality {
+    Delta,
+    Cumulative,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredOtelScope {
+    pub name: String,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredMongoDbConflictAction {
     None,
     DoNothing { target: Vec<String> },
@@ -1539,6 +1596,7 @@ impl From<Model> for StoredModelVersioned {
             Model::ClientPulsar(v) => Self::TransportPulsar(v.into()),
             Model::ClientHttp(v) => Self::TransportHttp(v.into()),
             Model::ClientSentry(v) => Self::TransportSentry(v.into()),
+            Model::ClientOtel(v) => Self::TransportOtel(v.into()),
             Model::ClientPrometheus(v) => Self::TransportPrometheus(v.into()),
             Model::ClientRabbitMq(v) => Self::TransportRabbitMq(v.into()),
             Model::ClientRedis(v) => Self::TransportRedis(v.into()),
@@ -1611,6 +1669,7 @@ impl TryFrom<StoredModelVersioned> for Model {
             }
             StoredModelVersioned::TransportHttp(v) => Ok(Model::ClientHttp(convert_stored(v)?)),
             StoredModelVersioned::TransportSentry(v) => Ok(Model::ClientSentry(convert_stored(v)?)),
+            StoredModelVersioned::TransportOtel(v) => Ok(Model::ClientOtel(convert_stored(v)?)),
             StoredModelVersioned::TransportPrometheus(v) => {
                 Ok(Model::ClientPrometheus(convert_stored(v)?))
             }
@@ -2164,6 +2223,31 @@ impl TryFrom<StoredCreateClientSentry> for CreateClientSentry {
     type Error = Report<NameError>;
 
     fn try_from(value: StoredCreateClientSentry) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: Identifier::parse(&value.name)?,
+            mount: value
+                .mount
+                .map(|mount| Identifier::parse(&mount))
+                .transpose()?,
+            config: value.config.into_iter().map(Into::into).collect(),
+        })
+    }
+}
+
+impl From<CreateClientOtel> for StoredCreateClientOtel {
+    fn from(value: CreateClientOtel) -> Self {
+        Self {
+            name: value.name.to_string(),
+            mount: value.mount.map(|mount| mount.to_string()),
+            config: value.config.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<StoredCreateClientOtel> for CreateClientOtel {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredCreateClientOtel) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             mount: value
@@ -4832,6 +4916,21 @@ impl From<EmitSink> for StoredEmitSink {
             EmitSink::Sentry { client } => Self::Sentry {
                 client: client.to_string(),
             },
+            EmitSink::Otel {
+                client,
+                signal,
+                values,
+                attributes,
+                resource,
+                scope,
+            } => Self::Otel {
+                client: client.to_string(),
+                signal: signal.into(),
+                values: values.into_iter().map(Into::into).collect(),
+                attributes: attributes.into_iter().map(Into::into).collect(),
+                resource: resource.into_iter().map(Into::into).collect(),
+                scope: scope.map(Into::into),
+            },
             EmitSink::ClickHouse {
                 client,
                 table,
@@ -4955,6 +5054,21 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 .attach_printable("stored SQS emitter sink has no FIFO group contract")),
             StoredEmitSink::Sentry { client } => Ok(Self::Sentry {
                 client: Identifier::parse(&client)?,
+            }),
+            StoredEmitSink::Otel {
+                client,
+                signal,
+                values,
+                attributes,
+                resource,
+                scope,
+            } => Ok(Self::Otel {
+                client: Identifier::parse(&client)?,
+                signal: signal.into(),
+                values: values.into_iter().map(Into::into).collect(),
+                attributes: attributes.into_iter().map(Into::into).collect(),
+                resource: resource.into_iter().map(Into::into).collect(),
+                scope: scope.map(Into::into),
             }),
             StoredEmitSink::ClickHouse { .. } => Err(Report::new(NameError::Empty)
                 .attach_printable("stored ClickHouse emitter sink has no maximum batch")),
@@ -5111,6 +5225,120 @@ impl From<StoredClickHouseValueMapping> for ClickHouseValueMapping {
     }
 }
 
+impl From<OtelSignal> for StoredOtelSignal {
+    fn from(value: OtelSignal) -> Self {
+        match value {
+            OtelSignal::Logs => Self::Logs,
+            OtelSignal::Traces => Self::Traces,
+            OtelSignal::Metric(metric) => Self::Metric(metric.into()),
+        }
+    }
+}
+
+impl From<StoredOtelSignal> for OtelSignal {
+    fn from(value: StoredOtelSignal) -> Self {
+        match value {
+            StoredOtelSignal::Logs => Self::Logs,
+            StoredOtelSignal::Traces => Self::Traces,
+            StoredOtelSignal::Metric(metric) => Self::Metric(metric.into()),
+        }
+    }
+}
+
+impl From<OtelMetric> for StoredOtelMetric {
+    fn from(value: OtelMetric) -> Self {
+        Self {
+            name: value.name,
+            unit: value.unit,
+            description: value.description,
+            kind: value.kind.into(),
+        }
+    }
+}
+
+impl From<StoredOtelMetric> for OtelMetric {
+    fn from(value: StoredOtelMetric) -> Self {
+        Self {
+            name: value.name,
+            unit: value.unit,
+            description: value.description,
+            kind: value.kind.into(),
+        }
+    }
+}
+
+impl From<OtelMetricKind> for StoredOtelMetricKind {
+    fn from(value: OtelMetricKind) -> Self {
+        match value {
+            OtelMetricKind::Gauge => Self::Gauge,
+            OtelMetricKind::Sum {
+                monotonic,
+                temporality,
+            } => Self::Sum {
+                monotonic,
+                temporality: temporality.into(),
+            },
+            OtelMetricKind::Histogram { temporality } => Self::Histogram {
+                temporality: temporality.into(),
+            },
+        }
+    }
+}
+
+impl From<StoredOtelMetricKind> for OtelMetricKind {
+    fn from(value: StoredOtelMetricKind) -> Self {
+        match value {
+            StoredOtelMetricKind::Gauge => Self::Gauge,
+            StoredOtelMetricKind::Sum {
+                monotonic,
+                temporality,
+            } => Self::Sum {
+                monotonic,
+                temporality: temporality.into(),
+            },
+            StoredOtelMetricKind::Histogram { temporality } => Self::Histogram {
+                temporality: temporality.into(),
+            },
+        }
+    }
+}
+
+impl From<OtelAggregationTemporality> for StoredOtelAggregationTemporality {
+    fn from(value: OtelAggregationTemporality) -> Self {
+        match value {
+            OtelAggregationTemporality::Delta => Self::Delta,
+            OtelAggregationTemporality::Cumulative => Self::Cumulative,
+        }
+    }
+}
+
+impl From<StoredOtelAggregationTemporality> for OtelAggregationTemporality {
+    fn from(value: StoredOtelAggregationTemporality) -> Self {
+        match value {
+            StoredOtelAggregationTemporality::Delta => Self::Delta,
+            StoredOtelAggregationTemporality::Cumulative => Self::Cumulative,
+        }
+    }
+}
+
+impl From<OtelScope> for StoredOtelScope {
+    fn from(value: OtelScope) -> Self {
+        Self {
+            name: value.name,
+            version: value.version,
+        }
+    }
+}
+
+impl From<StoredOtelScope> for OtelScope {
+    fn from(value: StoredOtelScope) -> Self {
+        Self {
+            name: value.name,
+            version: value.version,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5162,6 +5390,22 @@ mod tests {
                     StoredClientConfigEntry {
                         key: "dsn".to_string(),
                         value: "https://key@sentry.example/42".to_string(),
+                    }
+                    .into(),
+                ],
+            }),
+            Model::ClientOtel(CreateClientOtel {
+                name: identifier("otel_client"),
+                mount: None,
+                config: vec![
+                    StoredClientConfigEntry {
+                        key: "endpoint".to_string(),
+                        value: "https://collector.example.com:4317".to_string(),
+                    }
+                    .into(),
+                    StoredClientConfigEntry {
+                        key: "protocol".to_string(),
+                        value: "grpc".to_string(),
                     }
                     .into(),
                 ],
@@ -5351,6 +5595,62 @@ mod tests {
                 mode: AckMode::Detached,
                 error_policies: ErrorPolicies::handled_by_log(),
 
+                construction: nervix_models::RouteConstruction::default(),
+                materialized_state: Vec::new(),
+            }),
+            Model::Emitter(CreateEmitter {
+                name: identifier("otel_metric_emitter"),
+                from: ProcessorInputs::single(identifier("events_stream")),
+                encode_using_codec: None,
+                sink: Box::new(EmitSink::Otel {
+                    client: identifier("otel_client"),
+                    signal: OtelSignal::Metric(OtelMetric {
+                        name: "request.duration".to_string(),
+                        unit: "ms".to_string(),
+                        description: Some("Request duration".to_string()),
+                        kind: OtelMetricKind::Histogram {
+                            temporality: OtelAggregationTemporality::Cumulative,
+                        },
+                    }),
+                    values: [
+                        ("time", "input.occurred_at"),
+                        ("count", "input.count"),
+                        ("bucket_counts", "input.bucket_counts"),
+                        ("explicit_bounds", "input.explicit_bounds"),
+                    ]
+                    .into_iter()
+                    .map(|(column, expression)| ClickHouseValueMapping {
+                        column: column.to_string(),
+                        expression: nervix_nspl::parse_expression(expression)
+                            .expect("OTEL value expression must parse"),
+                    })
+                    .collect(),
+                    attributes: vec![ClickHouseValueMapping {
+                        column: "http.route".to_string(),
+                        expression: nervix_nspl::parse_expression("input.route")
+                            .expect("OTEL attribute expression must parse"),
+                    }],
+                    resource: vec![ClickHouseValueMapping {
+                        column: "service.name".to_string(),
+                        expression: nervix_models::Expression::Literal(
+                            nervix_models::Literal::String("checkout".to_string()),
+                        ),
+                    }],
+                    scope: Some(OtelScope {
+                        name: "nervix/metrics".to_string(),
+                        version: Some("1.0".to_string()),
+                    }),
+                }),
+                publishing_mode: EmitterPublishingMode::RequestAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                flush_each: "100ms".to_string(),
+                max_batch_size: Some("1MiB".to_string()),
+                mode: AckMode::Detached,
+                error_policies: ErrorPolicies::handled_by_log(),
                 construction: nervix_models::RouteConstruction::default(),
                 materialized_state: Vec::new(),
             }),
