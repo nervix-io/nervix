@@ -11,16 +11,21 @@ When code and this document disagree, do not add a compatibility path around the
 Resolve the owning model and invariant directly, and update the public documentation when the
 language or interface changes.
 
-## No Backward Compatibility
+## Alpha Stability and Compatibility
 
-Nervix is pre-alpha and supports exactly one shape of everything: the current one. There is no
-migration, no dual read, no version negotiation, and no deprecation window. When a Model, stored
-shape, NSPL form, protocol message, or public interface changes, the previous form is deleted
-outright in the same change.
+NSPL has reached alpha. Its period of very active language experimentation is over, and large
+backward-incompatible changes are no longer expected. The language will continue to evolve during
+alpha, however, and focused breaking changes may still be made when they materially improve its
+model or correctness.
 
-Previously written data is expected to break. It must fail to load with a clear error and be
-recreated. It must never be reinterpreted, defaulted into the current shape, or routed through a
-second code path.
+Nervix supports exactly one shape of everything: the current one. Until an explicit compatibility
+policy is introduced, there is no migration, dual read, version negotiation, or deprecation window.
+When a Model, stored shape, NSPL form, protocol message, or public interface changes, the previous
+form is deleted outright in the same change.
+
+When a stored shape changes, previously written data using that shape is expected to break. It must
+fail to load with a clear error and be recreated. It must never be reinterpreted, defaulted into the
+current shape, or routed through a second code path.
 
 The following are defects, not style preferences. Treat any of them as a change to reject:
 
@@ -95,7 +100,8 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - Do not introduce a second public parser AST, raw-expression compatibility fields, or runtime
   parser adapters.
 - Persisted Models may break, and previously written data must fail clearly and be recreated. See
-  [No Backward Compatibility](#no-backward-compatibility) for what that forbids in code and tests.
+  [Alpha Stability and Compatibility](#alpha-stability-and-compatibility) for what that forbids in
+  code and tests.
 
 ### Types and sensitivity
 
@@ -284,7 +290,8 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - Do not use `std::mem::forget`, `Closure::forget`, leaked boxes, or equivalent lifetime leaks to
   keep browser callbacks alive. Use explicit ownership and cleanup or a crate-managed abstraction.
 - Do not preserve old syntax, implicit fallbacks, compatibility shims, migration shortcuts, or
-  parallel legacy paths. See [No Backward Compatibility](#no-backward-compatibility).
+  parallel legacy paths. See
+  [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).
 - Preserve unrelated user changes in dirty worktrees.
 
 ## Specifications
@@ -314,7 +321,7 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   that guard against grammar-branch leakage. Composed language phrases require completion coverage.
 - Tests cover the current shape only. Never define a removed Model, stored shape, or wire form in a
   test fixture, including to assert that loading it fails. See
-  [No Backward Compatibility](#no-backward-compatibility).
+  [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).
 
 ### Integration coverage
 
