@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     fs::OpenOptions,
     future::Future,
@@ -7847,6 +7847,23 @@ impl SessionServiceImpl {
             statement,
             domain,
         };
+        let Some(transaction) = self.consensus.current_transaction(id).await else {
+            return command_error(format!("transaction '{id}' is unknown"));
+        };
+        if let Err(error) = transaction.validate_queue_admission(
+            &subscriptions.user,
+            &queued,
+            self.transaction_max_statements,
+            self.transaction_max_source_bytes,
+        ) {
+            return command_error(error.to_string());
+        }
+        if let Err(error) = self
+            .preflight_transaction_statement(&transaction, &queued)
+            .await
+        {
+            return command_error(error);
+        }
         match self
             .consensus
             .queue_transaction_statement(
@@ -7869,6 +7886,221 @@ impl SessionServiceImpl {
                 result
             }
             Err(error) => command_error(error.to_string()),
+        }
+    }
+
+    async fn preflight_transaction_statement(
+        &self,
+        transaction: &ReplicatedTransaction,
+        candidate: &TransactionStatement,
+    ) -> Result<(), String> {
+        let (mut domains, users, resources) = tokio::join!(
+            self.consensus.current_domains(),
+            self.consensus.current_users(),
+            self.consensus.current_resources(),
+        );
+        let mut user_names = users.into_keys().collect::<BTreeSet<_>>();
+        let mut resource_names = resources
+            .next_version_by_identifier
+            .iter()
+            .map(|(identifier, _)| identifier.clone())
+            .chain(
+                resources
+                    .versions
+                    .iter()
+                    .map(|resource| resource.id.identifier.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        let mut model_mutations = BTreeMap::<Domain, Vec<RegistryMutation>>::new();
+
+        for queued in transaction
+            .statements
+            .iter()
+            .chain(std::iter::once(candidate))
+        {
+            match &queued.statement {
+                Statement::CreateDomain(create) => {
+                    if domains.contains_key(&create.id) {
+                        if !create.if_not_exists {
+                            return Err(format!("domain '{}' already exists", create.id.as_str()));
+                        }
+                        continue;
+                    }
+                    validate_domain_config(&create.config)?;
+                    domains.insert(
+                        create.id.clone(),
+                        DomainState {
+                            id: create.id.clone(),
+                            config: create.config.clone(),
+                            status: DomainStatus::Stopped,
+                            start_version: 0,
+                            last_start: DomainStartPoint::Resume,
+                            clock: None,
+                        },
+                    );
+                }
+                Statement::AlterDomain(alter) => {
+                    let domain_id = queued
+                        .domain
+                        .as_ref()
+                        .ok_or_else(|| "no active domain selected".to_string())?;
+                    let domain = domains
+                        .get_mut(domain_id)
+                        .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
+                    if let DomainStatus::Paused = domain.status {
+                        return Err(format!(
+                            "domain '{}' is paused by a model alteration",
+                            domain_id.as_str()
+                        ));
+                    }
+                    domain.config.placement = alter.policy;
+                }
+                Statement::StartDomain(start) => {
+                    let domain_id = queued
+                        .domain
+                        .as_ref()
+                        .ok_or_else(|| "no active domain selected".to_string())?;
+                    let domain = domains
+                        .get_mut(domain_id)
+                        .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
+                    validate_domain_config(&domain.config)?;
+                    if let DomainStatus::Running = domain.status {
+                        return Err(format!(
+                            "domain '{}' is already running",
+                            domain_id.as_str()
+                        ));
+                    }
+                    if let DomainStatus::Paused = domain.status {
+                        return Err(format!(
+                            "domain '{}' is paused for a model alteration",
+                            domain_id.as_str()
+                        ));
+                    }
+                    let _ = parse_start_point(&start.start)?;
+                    domain.status = DomainStatus::Running;
+                    domain.last_start = start.start.clone();
+                    domain.start_version = domain.start_version.saturating_add(1);
+                }
+                Statement::StopDomain(_) => {
+                    let domain_id = queued
+                        .domain
+                        .as_ref()
+                        .ok_or_else(|| "no active domain selected".to_string())?;
+                    let domain = domains
+                        .get_mut(domain_id)
+                        .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
+                    if let DomainStatus::Stopped = domain.status {
+                        return Err(format!(
+                            "domain '{}' is already stopped",
+                            domain_id.as_str()
+                        ));
+                    }
+                    domain.status = DomainStatus::Stopped;
+                    domain.clock = None;
+                }
+                Statement::CreateUser(create) => {
+                    if !user_names.insert(create.name.clone()) && !create.if_not_exists {
+                        return Err(format!("user '{}' already exists", create.name.as_str()));
+                    }
+                }
+                Statement::CreateResource(create) => {
+                    if !resource_names.insert(create.identifier.clone()) && !create.if_not_exists {
+                        return Err(format!(
+                            "resource '{}' already exists",
+                            create.identifier.as_str()
+                        ));
+                    }
+                }
+                statement if statement.is_model_mutation() => {
+                    let domain_id = queued
+                        .domain
+                        .as_ref()
+                        .ok_or_else(|| "no active domain selected".to_string())?;
+                    let domain = domains
+                        .get(domain_id)
+                        .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
+                    if let DomainStatus::Paused = domain.status {
+                        return Err(format!(
+                            "domain '{}' is paused by a model alteration",
+                            domain_id.as_str()
+                        ));
+                    }
+                    if let Statement::Create(create) = statement
+                        && create.if_not_exists
+                        && self
+                            .registry
+                            .get(domain_id, create.body.kind(), create.body.identifier())
+                            .map_err(|error| error.to_string())?
+                            .is_some()
+                    {
+                        continue;
+                    }
+                    model_mutations
+                        .entry(domain_id.clone())
+                        .or_default()
+                        .push(Self::transaction_registry_mutation(statement));
+                }
+                _ => {
+                    return Err(format!(
+                        "{} is not valid transaction content",
+                        transaction_statement_label(&queued.statement)
+                    ));
+                }
+            }
+        }
+
+        for (domain_id, mutations) in model_mutations {
+            tokio::task::consume_budget().await;
+            let planned = self
+                .registry
+                .preflight_transaction_mutations(&domain_id, &mutations)
+                .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
+            let Some(planned) = planned else {
+                continue;
+            };
+            let domain = domains
+                .get(&domain_id)
+                .expect("model mutation domain was checked while replaying the transaction");
+            self.validate_changed_model_bindings(&domain_id, domain.config.pace, &planned)
+                .await?;
+            let _ = self.prepare_planned_domain_udfs(&planned).await?;
+            let _ = self
+                .prepare_domain_schedule(
+                    &domain_id,
+                    planned.candidate_graph(),
+                    domain.config.placement,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn transaction_registry_mutation(statement: &Statement) -> RegistryMutation {
+        match statement {
+            Statement::Create(create) => RegistryMutation::Create(create.body.clone()),
+            Statement::AlterSchema(alter) => RegistryMutation::AlterSchema(alter.clone()),
+            Statement::AlterWireJsonSchema(alter) => {
+                RegistryMutation::AlterWireJsonSchema(alter.clone())
+            }
+            Statement::AlterWireCborSchema(alter) => {
+                RegistryMutation::AlterWireCborSchema(alter.clone())
+            }
+            Statement::AlterWireAvroSchema(alter) => {
+                RegistryMutation::AlterWireAvroSchema(alter.clone())
+            }
+            Statement::AlterRelay(alter) => RegistryMutation::AlterRelay(alter.clone()),
+            Statement::AlterJunction(alter) => RegistryMutation::AlterJunction(alter.clone()),
+            Statement::AlterDeduplicator(alter) => {
+                RegistryMutation::AlterDeduplicator(alter.clone())
+            }
+            Statement::AlterReorderer(alter) => RegistryMutation::AlterReorderer(alter.clone()),
+            Statement::AlterEmitter(alter) => RegistryMutation::AlterEmitter(alter.clone()),
+            Statement::AlterIngestor(alter) => RegistryMutation::AlterIngestor(alter.clone()),
+            Statement::AlterReingestor(alter) => RegistryMutation::AlterReingestor(alter.clone()),
+            Statement::AlterGenerator(alter) => RegistryMutation::AlterGenerator(alter.clone()),
+            Statement::AlterPlacement(alter) => RegistryMutation::AlterPlacement(alter.clone()),
+            Statement::Drop(drop) => RegistryMutation::Drop(drop.clone()),
+            _ => unreachable!("transaction registry mutation requires a model mutation"),
         }
     }
 

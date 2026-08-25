@@ -525,12 +525,47 @@ impl Registry {
         self.plan_mutations_named(domain, mutations, "mixed mutation batch")
     }
 
+    /// Applies every mutation's statement-local checks against the accumulated candidate. If the
+    /// candidate already forms a complete domain graph, it returns the normal plan so callers can
+    /// run boundary validation too. Missing or incompatible cross-model relationships are treated
+    /// as provisionally incomplete because a later statement in the same atomic transaction run
+    /// may repair them.
+    pub fn preflight_transaction_mutations(
+        &self,
+        domain: &Domain,
+        mutations: &[RegistryMutation],
+    ) -> Result<Option<PlannedMutations>, Report<RegistryError>> {
+        self.plan_mutations_named_with_incomplete_candidate(
+            domain,
+            mutations,
+            "transaction queue preflight",
+            true,
+        )
+    }
+
     fn plan_mutations_named(
         &self,
         domain: &Domain,
         mutations: &[RegistryMutation],
         operation_name: &str,
     ) -> Result<PlannedMutations, Report<RegistryError>> {
+        Ok(self
+            .plan_mutations_named_with_incomplete_candidate(
+                domain,
+                mutations,
+                operation_name,
+                false,
+            )?
+            .expect("complete mutation planning must return a plan"))
+    }
+
+    fn plan_mutations_named_with_incomplete_candidate(
+        &self,
+        domain: &Domain,
+        mutations: &[RegistryMutation],
+        operation_name: &str,
+        allow_incomplete_candidate: bool,
+    ) -> Result<Option<PlannedMutations>, Report<RegistryError>> {
         let batch_size = mutations.len();
         info!(
             domain = domain.as_str(),
@@ -1007,7 +1042,7 @@ impl Registry {
                         };
                         RegistryKey::from_model(model) == key
                     });
-                    if !recreated_later {
+                    if !allow_incomplete_candidate && !recreated_later {
                         let candidate_state = self.build_domain_state(domain, &candidate)?;
                         ensure_drop_targets_are_not_in_use(
                             domain,
@@ -1028,6 +1063,7 @@ impl Registry {
 
         let domain_state = match self.build_domain_state(domain, &candidate) {
             Ok(state) => state,
+            Err(_) if allow_incomplete_candidate => return Ok(None),
             Err(err) => {
                 let active_graph = self.active_graph_snapshot(domain);
                 warn!(
@@ -1069,7 +1105,7 @@ impl Registry {
             )
         };
 
-        Ok(PlannedMutations {
+        Ok(Some(PlannedMutations {
             domain: domain.clone(),
             batch_size,
             operation_name: operation_name.to_string(),
@@ -1079,7 +1115,7 @@ impl Registry {
             drops_in_batch,
             runtime_changes,
             quiesce,
-        })
+        }))
     }
 
     pub fn commit_planned(

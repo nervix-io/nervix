@@ -184,11 +184,10 @@ impl ReplicatedTransaction {
         }
     }
 
-    pub(crate) fn queue(
-        &mut self,
+    pub fn validate_queue_admission(
+        &self,
         owner: &Identifier,
-        at: Timestamp,
-        statement: TransactionStatement,
+        statement: &TransactionStatement,
         max_statements: usize,
         max_source_bytes: u64,
     ) -> Result<(), TransactionMutationError> {
@@ -214,6 +213,21 @@ impl ReplicatedTransaction {
                 limit: max_source_bytes,
             });
         }
+        Ok(())
+    }
+
+    pub(crate) fn queue(
+        &mut self,
+        owner: &Identifier,
+        at: Timestamp,
+        statement: TransactionStatement,
+        max_statements: usize,
+        max_source_bytes: u64,
+    ) -> Result<(), TransactionMutationError> {
+        self.validate_queue_admission(owner, &statement, max_statements, max_source_bytes)?;
+        let next_source_bytes = self
+            .queued_source_bytes
+            .saturating_add(statement.source_bytes());
         self.last_activity_at = at;
         self.statement_count = self.statement_count.saturating_add(1);
         self.queued_source_bytes = next_source_bytes;

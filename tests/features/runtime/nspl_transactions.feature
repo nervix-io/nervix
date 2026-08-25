@@ -139,6 +139,7 @@ Feature: NSPL transactions
     When the transaction commit pause on node "{{old_leader}}" after 1 statement is released
     Then the background NSPL execution is discarded
 
+  @transaction_failed_resume
   Scenario: A failing resumed commit records the failing step and preserves its prefix
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -150,9 +151,13 @@ Feature: NSPL transactions
       """
       BEGIN;
       CREATE DOMAIN {{domain}};
-      CREATE DOMAIN {{domain}};
+      CREATE DOMAIN transaction_commit_conflict;
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "observer" executes these NSPL commands
+      """
+      CREATE DOMAIN transaction_commit_conflict;
+      """
     Given transaction commit on node "{{old_leader}}" pauses after 1 statement
     When client "owner" begins executing these NSPL commands in the background
       """
@@ -233,6 +238,68 @@ Feature: NSPL transactions
       | UPLOAD RESOURCE local_bundle VERSION '/tmp/local_bundle'; | client-local commands are not allowed                       |
       | CORDON NODE node-1;                                       | cannot be queued in a transaction                           |
       | DROP NODE node-1;                                         | cannot be queued in a transaction                           |
+
+  @transaction_queue_preflight
+  Scenario Outline: Queued statements are preflighted against the transaction prefix
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    And client "observer" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA queued_preflight (
+        value STRING
+      );
+      """
+    And client "owner" fails to execute these NSPL commands
+      """
+      ALTER SCHEMA queued_preflight
+        DROP FIELD missing;
+      """
+    Then the last command error contains
+      """
+      field `missing` does not exist
+      """
+    When client "owner" fails to execute these NSPL commands
+      """
+      CREATE DOMAIN {{domain}};
+      """
+    Then the last command error contains
+      """
+      domain '{{domain}}' already exists
+      """
+    When client "observer" executes these NSPL commands
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      state=OPEN pending=1
+      """
+    When client "owner" executes these NSPL commands
+      """
+      ALTER SCHEMA queued_preflight
+        ADD FIELD note STRING OPTIONAL;
+      COMMIT;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA queued_preflight;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA queued_preflight (value STRING, note STRING OPTIONAL);
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario: Replicated transaction limits are enforced consistently
     Given the transaction statement limit is configured as 1
@@ -531,7 +598,7 @@ Feature: NSPL transactions
       | 3            |
 
   @mixed_schema_commit
-  Scenario Outline: A failing mixed COMMIT applies none of its mutations
+  Scenario Outline: A failing model queue preflight applies none of its mutations
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """

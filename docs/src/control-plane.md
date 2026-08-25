@@ -32,10 +32,10 @@ This is the part of Nervix where Raft-backed consistency matters. It keeps clust
 ## Replicated NSPL Transactions
 
 NSPL command grouping is explicit. `BEGIN` creates a Raft-replicated control-plane transaction and
-returns its id. Following eligible statements are appended to that transaction in written order;
-`COMMIT` applies them and `REVERT` discards them. `BEGIN` inside an active transaction is rejected,
-as are `COMMIT` and `REVERT` without one. A request containing multiple statements outside an
-explicit transaction is rejected instead of becoming an implicit batch.
+returns its id. Following eligible statements are preflighted and then appended to that transaction
+in written order; `COMMIT` applies them and `REVERT` discards them. `BEGIN` inside an active
+transaction is rejected, as are `COMMIT` and `REVERT` without one. A request containing multiple
+statements outside an explicit transaction is rejected instead of becoming an implicit batch.
 
 The cluster owns the transaction, not the TCP or WebSocket connection. Its owner, timestamps,
 state, structured semantic statements, and commit progress are replicated. The original statement
@@ -60,6 +60,23 @@ Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time
 subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership operations (`CORDON`,
 `UNCORDON`, `DRAIN`, and `DROP NODE`) are also immediate, non-transaction content. Run those
 statements outside `BEGIN`/`COMMIT`.
+
+Queue admission is not a blind append. The leader replays the replicated transaction prefix into a
+side-effect-free candidate, then checks the new statement against that candidate. This catches such
+errors as duplicate configuration, a missing `ALTER` target or field, invalid domain lifecycle,
+invalid external bindings, and invalid UDF or schedule inputs before the statement is replicated.
+A rejected statement does not change the pending count or the transaction's activity time, so the
+client can correct it and continue the same transaction. Limits are checked before this preflight
+and every check is repeated during `COMMIT`, because other sessions may change control-plane state
+after a statement was admitted.
+
+An accumulated model run that already forms a complete graph receives the full registry, binding,
+UDF, and scheduling preflight. Cross-model completeness remains provisional while the run is still
+being assembled: an intermediate schema/codec mismatch or temporarily referenced model may be
+repaired by a later statement in the same atomic run. Statement-local mutations must still be valid
+against the prefix, and `COMMIT` requires the final candidate graph to pass every check. This keeps
+coordinated multi-model migrations possible without letting a malformed `ALTER` or an impossible
+lifecycle transition enter the queue.
 
 Within a transaction, each consecutive run of model mutations for one domain can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
