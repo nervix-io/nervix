@@ -24,14 +24,17 @@ clicking a graph item or an entity — that simply type NSPL for you.
 
 - **The same statement surface.** Domains, schemas, codecs, relays, clients, runtime nodes, and
   emitters are all declared in NSPL ([NSPL Overview](nspl-overview.md)).
-- **Client-local statements.** `USE`, `LIST DOMAINS`, `BEGIN`, `COMMIT`, `REVERT`,
-  `UPLOAD RESOURCE`, `CREATE SUBSCRIPTION`, and `DELETE SUBSCRIPTION` are handled by the client
-  session rather than applied as model changes.
+- **Session and transaction statements.** `USE`, `LIST DOMAINS`, `UPLOAD RESOURCE`,
+  `CREATE SUBSCRIPTION`, and `DELETE SUBSCRIPTION` are session/client operations. `BEGIN`,
+  `COMMIT`, and `REVERT` operate on a leader-owned, replicated transaction.
 - **Server-driven completion.** Suggestions come from the cluster, not from a local copy of the
   grammar, so they include the identifiers that actually exist in the active domain.
 - **HTTP Basic authentication** against a registry user.
 - **Automatic leader redirects.** A session opened against a follower is redirected to the current
   leader; you do not need to know which node leads.
+- **Automatic transaction attach.** Both interactive clients retain the transaction id and attach
+  it before replaying a command after reconnect or leader failover, and do not repeat an operation
+  whose replicated progress already advanced.
 
 Sessions, subscriptions, sampling, and backpressure are described in [Sessions](sessions.md).
 

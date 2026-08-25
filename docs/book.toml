@@ -23,6 +23,7 @@ command = "../scripts/mdbook_llms.py"
 description = "Public NSPL configuration reference for Nervix."
 include = [
   "nspl-overview.md",
+  "control-plane.md",
   "working-message.md",
   "domains-and-time.md",
   "schemas-and-codecs.md",

@@ -82,6 +82,10 @@ transaction is open the prompt says so:
 nervix[quickstart tx]>
 ```
 
+After `COMMIT` is accepted, an in-progress commit is shown as
+`nervix[quickstart committing]>`. The prompt is driven by replicated transaction status rather
+than a local boolean.
+
 ### Completion
 
 `Tab` completes. Suggestions are computed by the server for the exact cursor position, so they
@@ -115,21 +119,23 @@ above it:
 
 `exit`, `quit`, `Ctrl-D`, or `Ctrl-C`.
 
-## Client-Local Statements
+## Session And Transaction Statements
 
-Some statements are handled by the client session rather than applied to the model:
+Some statements affect the client session or replicated transaction state rather than directly
+applying one model change:
 
 | Statement | Effect |
 | --- | --- |
 | `USE <domain>` | switch the session's active domain |
 | `LIST DOMAINS` | list domains with pace and status |
-| `BEGIN` / `COMMIT` / `REVERT` | open, apply, or discard a transaction |
+| `BEGIN` / `COMMIT` / `REVERT` | open, apply, or discard a replicated transaction on the leader |
 | `UPLOAD RESOURCE <name> VERSION '<dir>'` | stream a local directory as a new resource version |
 | `CREATE SUBSCRIPTION` / `DELETE SUBSCRIPTION` | start and stop a read-only relay subscription |
 
 `USE`, `LIST DOMAINS`, and `UPLOAD RESOURCE` must be submitted on their own, and never inside a
-transaction. An upload renders live progress and finishes once the cluster has replicated the
-version:
+transaction. Read-only statements, subscriptions, and node administration are also rejected while
+queueing transaction content. An upload renders live progress and finishes once the cluster has
+replicated the version:
 
 ```text
 upload resource 'order_model' finished: 4.2 MiB sent, replication complete
@@ -194,3 +200,11 @@ the redirect and reconnects on its own, following up to four hops:
 ```text
 topology: not-a-leader, retry on leader 'node-2' at http://10.0.0.12:47391
 ```
+
+Transaction controls follow the same redirect beginning with `BEGIN`. The CLI retains the returned
+transaction id and attaches it on the new connection before retrying any queued statement or
+commit. If the attached progress shows that the cluster already accepted that operation, the CLI
+uses the replicated state or retained commit result instead of submitting it twice. An open
+transaction therefore survives an unclean connection loss or leader failover; a clean CLI exit
+reverts it. See
+[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).

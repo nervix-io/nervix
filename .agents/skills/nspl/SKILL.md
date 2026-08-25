@@ -51,9 +51,12 @@ Build configuration in dependency order:
 7. Define placement rules after every referenced runtime node and materialized relay exists.
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
-Use `BEGIN; ... COMMIT;` when sending multiple server statements in one request. Keep client-local
-commands such as `USE` and resource uploads outside transactions. Do not imply that one undivided
-request can mix those phases.
+Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. Transactions
+and commit progress are replicated and resumable, but their content is deliberately limited to
+model mutations, domain configuration/lifecycle, `CREATE USER`, and `CREATE RESOURCE`. Keep
+read-only statements, subscriptions, `USE`, resource uploads, and node administration outside the
+transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
+verification. Do not imply that one undivided request can mix those phases.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and

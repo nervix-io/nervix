@@ -77,6 +77,10 @@ Important runtime consequences:
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
 
+The lifecycle state and active paced-clock anchor are replicated with the domain. After leader
+failover, reconciliation reconstructs the running clock from that state; a completed transactional
+`START` therefore remains effective without re-executing its commit step.
+
 ## Automatic Model-Alteration Quiescing
 
 Nervix derives a quiesce level from the complete validated model diff. `ALTER SCHEMA`,

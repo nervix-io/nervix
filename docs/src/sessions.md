@@ -27,3 +27,27 @@ Current session behavior:
 - cluster membership updates are also delivered asynchronously
 
 Sessions are runtime-facing protocol interactions, not part of the persisted namespace model.
+
+## Transaction Binding
+
+An NSPL transaction is replicated control-plane state, but its binding to a live session is
+leader-local soft state. A session may bind one transaction, and a transaction may be bound to at
+most one session. The session protocol can attach by transaction id; the authenticated user must
+match the transaction owner. A later attach takes over the binding and the displaced session gets
+an explicit takeover error on its next transaction operation.
+
+The CLI, web console, and Rust client retain the transaction id and automatically attach after a
+redirect or transport reconnect before replaying a command. An unclean transport loss, node loss,
+or leadership change therefore leaves an open transaction intact until attach or idle expiry. A
+client compares the attached progress with the status it last observed and does not repeat an
+operation already recorded by the cluster. During election convergence, a client also retries a
+bounded interval when a peer cannot yet advertise the new leader. A clean end of the session
+preserves the existing interactive behavior by reverting a bound open transaction. Ending a
+session never reverts a transaction whose replicated state is already `COMMITTING`; the leader
+finishes it without a client.
+
+Finished transaction outcomes remain available during tombstone retention. Attach during that
+window reports `COMMITTED`, `FAILED`, `REVERTED`, or `EXPIRED` and includes structured commit
+status plus the retained per-statement results. After retention, attach reports an unknown
+transaction id. See
+[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).

@@ -1157,6 +1157,7 @@ fn paced_domain_state(raw: &str) -> DomainState {
         status: DomainStatus::Running,
         start_version: 0,
         last_start: nervix_models::DomainStartPoint::Resume,
+        clock: None,
     }
 }
 
@@ -2597,6 +2598,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
         status: DomainStatus::Running,
         start_version: 1,
         last_start: nervix_models::DomainStartPoint::Resume,
+        clock: None,
     };
     runtime.sync_domains(&BTreeMap::from([(domain.clone(), running.clone())]));
     let schedule = ClusterSchedule {
@@ -2678,6 +2680,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
             status: DomainStatus::Running,
             start_version: 1,
             last_start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
         },
     )]);
     let schema_node = scheduled_model(
@@ -2755,6 +2758,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
             status: DomainStatus::Running,
             start_version: 0,
             last_start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
         },
     )]));
 
@@ -2901,6 +2905,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
             status: DomainStatus::Running,
             start_version: 0,
             last_start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
         },
     )]));
 
@@ -5518,6 +5523,7 @@ fn sync_domains_clears_ticks_when_paced_domain_stops() {
             status: DomainStatus::Stopped,
             start_version: 0,
             last_start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
         },
     );
     runtime.sync_domains(&domains);
@@ -5591,6 +5597,7 @@ fn stopped_unpaced_domain_rejects_ingestion() {
             status: DomainStatus::Stopped,
             start_version: 0,
             last_start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
         },
     );
     runtime.sync_domains(&domains);

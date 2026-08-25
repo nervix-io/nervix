@@ -438,7 +438,10 @@ impl Runtime {
             emitter_faults: hooks.emitter_faults,
             ingestor_faults: hooks.ingestor_faults,
             otel_client_faults: hooks.otel_client_faults,
+            #[cfg(feature = "testing")]
             schedule_publication_faults: hooks.schedule_publication_faults,
+            #[cfg(feature = "testing")]
+            transaction_commit_pauses: hooks.transaction_commit_pauses,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
             remote_dispatcher: Arc::new(RwLock::new(None)),
@@ -863,6 +866,17 @@ impl Runtime {
     #[cfg(feature = "testing")]
     pub fn take_armed_schedule_publication_fault(&self, domain: &Domain) -> bool {
         self.schedule_publication_faults.take_armed_fault(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub async fn pause_transaction_commit_after_progress_if_armed(
+        &self,
+        node_id: &str,
+        completed_statements: usize,
+    ) {
+        self.transaction_commit_pauses
+            .pause_if_armed(node_id, completed_statements)
+            .await;
     }
 
     pub(in crate::runtime) fn record_ingestor_transient_error(
@@ -4640,7 +4654,7 @@ impl Runtime {
         Ok((start_version, has_assignment))
     }
 
-    pub(in crate::runtime) fn current_paced_domain_time(
+    pub(crate) fn current_paced_domain_time(
         &self,
         domain: &Domain,
     ) -> Result<Option<Timestamp>, String> {

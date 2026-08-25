@@ -1,9 +1,14 @@
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use ahash::RandomState;
 use dashmap::DashMap;
-use nervix_models::{Domain, Identifier};
-use tokio::sync::broadcast;
+#[cfg(feature = "testing")]
+use nervix_models::Domain;
+use nervix_models::Identifier;
+use tokio::sync::{Notify, broadcast};
 use triomphe::Arc;
 
 #[derive(Debug, Default)]
@@ -28,6 +33,19 @@ pub struct SchedulePublicationFaultInjector {
     domains: DashMap<String, (), RandomState>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct TransactionCommitPauseInjector {
+    pauses: DashMap<(String, usize), Arc<TransactionCommitPause>, RandomState>,
+}
+
+#[derive(Debug, Default)]
+struct TransactionCommitPause {
+    reached: AtomicBool,
+    released: AtomicBool,
+    reached_notify: Notify,
+    release_notify: Notify,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EmitterFaultMode {
     Fail,
@@ -40,6 +58,7 @@ pub struct RuntimeTestHooks {
     pub ingestor_faults: Arc<IngestorFaultInjector>,
     pub otel_client_faults: Arc<OtelClientFaultInjector>,
     pub schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
+    pub(crate) transaction_commit_pauses: Arc<TransactionCommitPauseInjector>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
     pub domain_drain_timeout: Option<Duration>,
     pub entity_gate_deadline: Option<Duration>,
@@ -60,6 +79,7 @@ impl Default for RuntimeTestHooks {
             ingestor_faults: Arc::default(),
             otel_client_faults: Arc::default(),
             schedule_publication_faults: Arc::default(),
+            transaction_commit_pauses: Arc::default(),
             branch_instance_expiration_scan_interval: None,
             domain_drain_timeout: None,
             entity_gate_deadline: None,
@@ -74,6 +94,80 @@ impl RuntimeTestHooks {
             from_node_id,
             to_node_id,
         });
+    }
+
+    pub fn pause_transaction_commit_after(
+        &self,
+        node_id: impl Into<String>,
+        completed_statements: usize,
+    ) {
+        self.transaction_commit_pauses.pauses.insert(
+            (node_id.into(), completed_statements),
+            Arc::new(TransactionCommitPause::default()),
+        );
+    }
+
+    pub async fn wait_for_transaction_commit_pause(
+        &self,
+        node_id: &str,
+        completed_statements: usize,
+    ) {
+        let key = (node_id.to_string(), completed_statements);
+        let pause = self
+            .transaction_commit_pauses
+            .pauses
+            .get(&key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "transaction commit pause for node '{node_id}' after {completed_statements} \
+                     statements is not armed"
+                )
+            })
+            .clone();
+        while !pause.reached.load(Ordering::Acquire) {
+            let notified = pause.reached_notify.notified();
+            if pause.reached.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    pub fn release_transaction_commit_pause(&self, node_id: &str, completed_statements: usize) {
+        let key = (node_id.to_string(), completed_statements);
+        let pause = self
+            .transaction_commit_pauses
+            .pauses
+            .get(&key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "transaction commit pause for node '{node_id}' after {completed_statements} \
+                     statements is not armed"
+                )
+            })
+            .clone();
+        pause.released.store(true, Ordering::Release);
+        pause.release_notify.notify_waiters();
+    }
+}
+
+impl TransactionCommitPauseInjector {
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_if_armed(&self, node_id: &str, completed_statements: usize) {
+        let key = (node_id.to_string(), completed_statements);
+        let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
+            return;
+        };
+        pause.reached.store(true, Ordering::Release);
+        pause.reached_notify.notify_waiters();
+        while !pause.released.load(Ordering::Acquire) {
+            let notified = pause.release_notify.notified();
+            if pause.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+        self.pauses.remove(&key);
     }
 }
 
@@ -99,6 +193,7 @@ impl SchedulePublicationFaultInjector {
 
     /// Consumes an armed fault so the rollback republication that follows a failed publication can
     /// still reach the cluster.
+    #[cfg(feature = "testing")]
     pub(crate) fn take_armed_fault(&self, domain: &Domain) -> bool {
         self.domains
             .remove(&domain.as_str().to_ascii_lowercase())

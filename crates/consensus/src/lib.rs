@@ -10,8 +10,9 @@ use std::{
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use futures_util::StreamExt;
 use nervix_models::{
-    ClusterSchedule, Domain, DomainId, DomainSchedule, DomainStartPoint, DomainState, DomainStatus,
-    Identifier, ResourceNodeStatus, ResourceVersion, ResourceVersionStatus,
+    ClusterSchedule, Domain, DomainClockState, DomainId, DomainSchedule, DomainStartPoint,
+    DomainState, DomainStatus, Identifier, ResourceNodeStatus, ResourceVersion,
+    ResourceVersionStatus, Statement,
 };
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
@@ -43,6 +44,15 @@ use tokio::{
 use tracing::info;
 use triomphe::Arc;
 
+mod transaction;
+
+pub use transaction::{
+    FinishedTransaction, ReplicatedTransaction, TransactionCommandResult, TransactionCommitAdvance,
+    TransactionCommitProgress, TransactionDiagnostic, TransactionMutationError,
+    TransactionMutationResponse, TransactionOutcome, TransactionState, TransactionStatement,
+    TransactionStepEffect, TransactionStepResult,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsensusCommand {
     ReplaceDomainSchedule {
@@ -59,6 +69,7 @@ pub enum ConsensusCommand {
     StartDomain {
         domain_id: DomainId,
         start: DomainStartPoint,
+        clock: Option<DomainClockState>,
     },
     StopDomain {
         domain_id: DomainId,
@@ -88,10 +99,61 @@ pub enum ConsensusCommand {
         node_id: String,
         cordoned: bool,
     },
+    OpenTransaction {
+        transaction: Box<ReplicatedTransaction>,
+        max_open_transactions: usize,
+    },
+    QueueTransactionStatement {
+        id: String,
+        owner: Identifier,
+        at: nervix_models::Timestamp,
+        statement: Box<TransactionStatement>,
+        max_statements: usize,
+        max_source_bytes: u64,
+    },
+    TouchTransaction {
+        id: String,
+        owner: Identifier,
+        at: nervix_models::Timestamp,
+    },
+    StartTransactionCommit {
+        id: String,
+        owner: Identifier,
+        at: nervix_models::Timestamp,
+    },
+    AdvanceTransactionCommit {
+        id: String,
+        expected_next_statement: usize,
+        next_statement: usize,
+        at: nervix_models::Timestamp,
+        result: Box<TransactionStepResult>,
+        effect: Option<Box<TransactionStepEffect>>,
+        completion: Option<TransactionOutcome>,
+    },
+    FinishEmptyTransactionCommit {
+        id: String,
+        at: nervix_models::Timestamp,
+    },
+    RevertTransaction {
+        id: String,
+        owner: Identifier,
+        at: nervix_models::Timestamp,
+    },
+    ExpireTransaction {
+        id: String,
+        at: nervix_models::Timestamp,
+        idle_before: nervix_models::Timestamp,
+    },
+    RemoveFinishedTransactions {
+        finished_before: nervix_models::Timestamp,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ConsensusResponse;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConsensusResponse {
+    Applied,
+    Transaction(TransactionMutationResponse),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserCredentials {
@@ -144,13 +206,44 @@ impl std::fmt::Display for ConsensusCommand {
                     write!(f, "uncordon-node:{node_id}")
                 }
             }
+            Self::OpenTransaction { transaction, .. } => {
+                write!(f, "open-transaction:{}", transaction.id)
+            }
+            Self::QueueTransactionStatement { id, .. } => {
+                write!(f, "queue-transaction-statement:{id}")
+            }
+            Self::TouchTransaction { id, .. } => write!(f, "touch-transaction:{id}"),
+            Self::StartTransactionCommit { id, .. } => {
+                write!(f, "start-transaction-commit:{id}")
+            }
+            Self::AdvanceTransactionCommit {
+                id,
+                expected_next_statement,
+                next_statement,
+                ..
+            } => write!(
+                f,
+                "advance-transaction-commit:{id}:{expected_next_statement}-{next_statement}"
+            ),
+            Self::FinishEmptyTransactionCommit { id, .. } => {
+                write!(f, "finish-empty-transaction-commit:{id}")
+            }
+            Self::RevertTransaction { id, .. } => write!(f, "revert-transaction:{id}"),
+            Self::ExpireTransaction { id, .. } => write!(f, "expire-transaction:{id}"),
+            Self::RemoveFinishedTransactions { .. } => f.write_str("remove-finished-transactions"),
         }
     }
 }
 
 impl std::fmt::Display for ConsensusResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ok")
+        match self {
+            Self::Applied => f.write_str("ok"),
+            Self::Transaction(response) => match &response.result {
+                Ok(transaction) => write!(f, "transaction:{}", transaction.id),
+                Err(error) => write!(f, "transaction-error:{error}"),
+            },
+        }
     }
 }
 
@@ -246,6 +339,7 @@ struct StateMachineData {
     resources: ResourceVersionStatus,
     #[serde(default)]
     cordoned_node_ids: BTreeSet<String>,
+    transactions: BTreeMap<String, ReplicatedTransaction>,
 }
 
 impl StateMachineData {
@@ -311,6 +405,16 @@ pub enum ConsensusError {
         operation: String,
         timeout: Duration,
     },
+}
+
+#[derive(Debug, Error)]
+pub enum ConsensusTransactionError {
+    #[error(transparent)]
+    Consensus(#[from] ConsensusError),
+    #[error(transparent)]
+    Mutation(#[from] TransactionMutationError),
+    #[error("raft returned an invalid transaction response")]
+    InvalidResponse,
 }
 
 #[derive(Clone)]
@@ -450,12 +554,39 @@ impl ConsensusHandle {
         self.store.inner.resource_tx.subscribe()
     }
 
+    pub fn subscribe_transactions(
+        &self,
+    ) -> watch::Receiver<BTreeMap<String, ReplicatedTransaction>> {
+        self.store.inner.transaction_tx.subscribe()
+    }
+
     pub async fn current_schedule(&self) -> ClusterSchedule {
         self.store.inner.state_machine.read().await.schedule.clone()
     }
 
     pub async fn current_domains(&self) -> BTreeMap<DomainId, DomainState> {
         self.store.inner.state_machine.read().await.domains.clone()
+    }
+
+    pub async fn current_transactions(&self) -> BTreeMap<String, ReplicatedTransaction> {
+        self.store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .transactions
+            .clone()
+    }
+
+    pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
+        self.store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .transactions
+            .get(id)
+            .cloned()
     }
 
     pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
@@ -752,9 +883,14 @@ impl ConsensusHandle {
         &self,
         domain_id: DomainId,
         start: DomainStartPoint,
+        clock: Option<DomainClockState>,
     ) -> Result<(), ConsensusError> {
         self.raft
-            .client_write(ConsensusCommand::StartDomain { domain_id, start })
+            .client_write(ConsensusCommand::StartDomain {
+                domain_id,
+                start,
+                clock,
+            })
             .await
             .map(|_| ())
             .map_err(Self::map_write_error)
@@ -866,6 +1002,142 @@ impl ConsensusHandle {
     ) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::SetNodeCordoned { node_id, cordoned })
+            .await
+            .map(|_| ())
+            .map_err(Self::map_write_error)
+    }
+
+    async fn write_transaction(
+        &self,
+        command: ConsensusCommand,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        let response = self
+            .raft
+            .client_write(command)
+            .await
+            .map_err(Self::map_write_error)?;
+        let ConsensusResponse::Transaction(response) = response.data else {
+            return Err(ConsensusTransactionError::InvalidResponse);
+        };
+        response.result.map_err(Into::into)
+    }
+
+    pub async fn open_transaction(
+        &self,
+        transaction: ReplicatedTransaction,
+        max_open_transactions: usize,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        self.write_transaction(ConsensusCommand::OpenTransaction {
+            transaction: Box::new(transaction),
+            max_open_transactions,
+        })
+        .await
+    }
+
+    pub async fn queue_transaction_statement(
+        &self,
+        id: String,
+        owner: Identifier,
+        at: nervix_models::Timestamp,
+        statement: TransactionStatement,
+        max_statements: usize,
+        max_source_bytes: u64,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        self.write_transaction(ConsensusCommand::QueueTransactionStatement {
+            id,
+            owner,
+            at,
+            statement: Box::new(statement),
+            max_statements,
+            max_source_bytes,
+        })
+        .await
+    }
+
+    pub async fn touch_transaction(
+        &self,
+        id: String,
+        owner: Identifier,
+        at: nervix_models::Timestamp,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        self.write_transaction(ConsensusCommand::TouchTransaction { id, owner, at })
+            .await
+    }
+
+    pub async fn start_transaction_commit(
+        &self,
+        id: String,
+        owner: Identifier,
+        at: nervix_models::Timestamp,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        self.write_transaction(ConsensusCommand::StartTransactionCommit { id, owner, at })
+            .await
+    }
+
+    pub async fn advance_transaction_commit(
+        &self,
+        advance: TransactionCommitAdvance,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        let TransactionCommitAdvance {
+            id,
+            expected_next_statement,
+            next_statement,
+            at,
+            result,
+            effect,
+            completion,
+        } = advance;
+        self.write_transaction(ConsensusCommand::AdvanceTransactionCommit {
+            id,
+            expected_next_statement,
+            next_statement,
+            at,
+            result: Box::new(result),
+            effect: effect.map(Box::new),
+            completion,
+        })
+        .await
+    }
+
+    pub async fn finish_empty_transaction_commit(
+        &self,
+        id: String,
+        at: nervix_models::Timestamp,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        self.write_transaction(ConsensusCommand::FinishEmptyTransactionCommit { id, at })
+            .await
+    }
+
+    pub async fn revert_transaction(
+        &self,
+        id: String,
+        owner: Identifier,
+        at: nervix_models::Timestamp,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        self.write_transaction(ConsensusCommand::RevertTransaction { id, owner, at })
+            .await
+    }
+
+    pub async fn expire_transaction(
+        &self,
+        id: String,
+        at: nervix_models::Timestamp,
+        idle_before: nervix_models::Timestamp,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        self.write_transaction(ConsensusCommand::ExpireTransaction {
+            id,
+            at,
+            idle_before,
+        })
+        .await
+    }
+
+    pub async fn remove_finished_transactions(
+        &self,
+        finished_before: nervix_models::Timestamp,
+    ) -> Result<(), ConsensusError> {
+        self.raft
+            .client_write(ConsensusCommand::RemoveFinishedTransactions { finished_before })
             .await
             .map(|_| ())
             .map_err(Self::map_write_error)
@@ -1331,6 +1603,7 @@ struct StoreInner {
     schedule_tx: watch::Sender<ClusterSchedule>,
     domain_tx: watch::Sender<BTreeMap<DomainId, DomainState>>,
     resource_tx: watch::Sender<ResourceVersionStatus>,
+    transaction_tx: watch::Sender<BTreeMap<String, ReplicatedTransaction>>,
 }
 
 pub struct FjallStore {
@@ -1366,6 +1639,7 @@ impl FjallStore {
         let (schedule_tx, _) = watch::channel(state_machine.schedule.clone());
         let (domain_tx, _) = watch::channel(state_machine.domains.clone());
         let (resource_tx, _) = watch::channel(state_machine.resources.clone());
+        let (transaction_tx, _) = watch::channel(state_machine.transactions.clone());
 
         Ok(Self {
             inner: Arc::new(StoreInner {
@@ -1380,6 +1654,7 @@ impl FjallStore {
                 schedule_tx,
                 domain_tx,
                 resource_tx,
+                transaction_tx,
             }),
         })
     }
@@ -1574,16 +1849,31 @@ impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
                     StoredMembership::new(Some(entry.log_id.clone()), membership);
             }
             if let EntryPayload::Normal(command) = &entry.payload {
-                apply_consensus_command(&mut state, command);
-                write_key(&self.inner.schedule, KEY_CLUSTER_SCHEDULE, &state.schedule)?;
-                let _ = self.inner.schedule_tx.send(state.schedule.clone());
-                let _ = self.inner.domain_tx.send(state.domains.clone());
-                let _ = self.inner.resource_tx.send(state.resources.clone());
+                let applied = apply_consensus_command(&mut state, command);
+                if applied.schedule_changed {
+                    write_key(&self.inner.schedule, KEY_CLUSTER_SCHEDULE, &state.schedule)?;
+                    let _ = self.inner.schedule_tx.send(state.schedule.clone());
+                }
+                if applied.domains_changed {
+                    let _ = self.inner.domain_tx.send(state.domains.clone());
+                }
+                if applied.resources_changed {
+                    let _ = self.inner.resource_tx.send(state.resources.clone());
+                }
+                if applied.transactions_changed {
+                    let _ = self.inner.transaction_tx.send(state.transactions.clone());
+                }
+                write_key(&self.inner.sm, KEY_STATE_MACHINE, &*state)?;
+                drop(state);
+                if let Some(responder) = responder {
+                    responder.send(applied.response);
+                }
+                continue;
             }
             write_key(&self.inner.sm, KEY_STATE_MACHINE, &*state)?;
             drop(state);
             if let Some(responder) = responder {
-                responder.send(ConsensusResponse);
+                responder.send(ConsensusResponse::Applied);
             }
         }
         Ok(())
@@ -1609,6 +1899,7 @@ impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
         let _ = self.inner.schedule_tx.send(stored.schedule.clone());
         let _ = self.inner.domain_tx.send(stored.domains.clone());
         let _ = self.inner.resource_tx.send(stored.resources.clone());
+        let _ = self.inner.transaction_tx.send(stored.transactions.clone());
         let stored_snapshot = StoredSnapshotData {
             meta: meta.clone(),
             data: bytes,
@@ -1652,30 +1943,88 @@ impl RaftSnapshotBuilder<TypeConfig> for StdArc<FjallStore> {
     }
 }
 
-fn apply_consensus_command(state: &mut StateMachineData, command: &ConsensusCommand) {
+#[derive(Debug, Default)]
+struct StateMachineChanges {
+    schedule_changed: bool,
+    domains_changed: bool,
+    resources_changed: bool,
+    transactions_changed: bool,
+}
+
+#[derive(Debug)]
+struct AppliedConsensusCommand {
+    response: ConsensusResponse,
+    schedule_changed: bool,
+    domains_changed: bool,
+    resources_changed: bool,
+    transactions_changed: bool,
+}
+
+impl AppliedConsensusCommand {
+    fn applied(changes: StateMachineChanges) -> Self {
+        Self {
+            response: ConsensusResponse::Applied,
+            schedule_changed: changes.schedule_changed,
+            domains_changed: changes.domains_changed,
+            resources_changed: changes.resources_changed,
+            transactions_changed: changes.transactions_changed,
+        }
+    }
+
+    fn transaction(
+        result: Result<ReplicatedTransaction, TransactionMutationError>,
+        changes: StateMachineChanges,
+    ) -> Self {
+        Self {
+            response: ConsensusResponse::Transaction(TransactionMutationResponse { result }),
+            schedule_changed: changes.schedule_changed,
+            domains_changed: changes.domains_changed,
+            resources_changed: changes.resources_changed,
+            transactions_changed: changes.transactions_changed,
+        }
+    }
+}
+
+fn apply_consensus_command(
+    state: &mut StateMachineData,
+    command: &ConsensusCommand,
+) -> AppliedConsensusCommand {
+    let mut changes = StateMachineChanges::default();
     match command {
         ConsensusCommand::ReplaceDomainSchedule { domain, schedule } => {
             state.replace_domain_schedule(domain, schedule.as_deref());
+            changes.schedule_changed = true;
         }
         ConsensusCommand::PutDomainAndSchedule { domain, schedule } => {
             state
                 .domains
                 .insert(domain.id.clone(), domain.as_ref().clone());
             state.replace_domain_schedule(&domain.id, schedule.as_deref());
+            changes.domains_changed = true;
+            changes.schedule_changed = true;
         }
         ConsensusCommand::PutDomain { domain } => {
             state.domains.insert(domain.id.clone(), (**domain).clone());
+            changes.domains_changed = true;
         }
-        ConsensusCommand::StartDomain { domain_id, start } => {
+        ConsensusCommand::StartDomain {
+            domain_id,
+            start,
+            clock,
+        } => {
             if let Some(domain) = state.domains.get_mut(domain_id) {
                 domain.status = DomainStatus::Running;
                 domain.start_version = domain.start_version.saturating_add(1);
                 domain.last_start = start.clone();
+                domain.clock = clock.clone();
+                changes.domains_changed = true;
             }
         }
         ConsensusCommand::StopDomain { domain_id } => {
             if let Some(domain) = state.domains.get_mut(domain_id) {
                 domain.status = DomainStatus::Stopped;
+                domain.clock = None;
+                changes.domains_changed = true;
             }
         }
         ConsensusCommand::PauseDomain { domain_id } => {
@@ -1683,6 +2032,7 @@ fn apply_consensus_command(state: &mut StateMachineData, command: &ConsensusComm
                 && let DomainStatus::Running = domain.status
             {
                 domain.status = DomainStatus::Paused;
+                changes.domains_changed = true;
             }
         }
         ConsensusCommand::ResumeDomain { domain_id } => {
@@ -1690,6 +2040,7 @@ fn apply_consensus_command(state: &mut StateMachineData, command: &ConsensusComm
                 && let DomainStatus::Paused = domain.status
             {
                 domain.status = DomainStatus::Running;
+                changes.domains_changed = true;
             }
         }
         ConsensusCommand::CreateUser { user } => {
@@ -1700,15 +2051,19 @@ fn apply_consensus_command(state: &mut StateMachineData, command: &ConsensusComm
         }
         ConsensusCommand::CreateResourceCatalog { identifier } => {
             ensure_resource_catalog(&mut state.resources, identifier);
+            changes.resources_changed = true;
         }
         ConsensusCommand::AdvanceResourceVersion { identifier } => {
             advance_resource_version(&mut state.resources, identifier);
+            changes.resources_changed = true;
         }
         ConsensusCommand::PutResourceVersion { resource } => {
             upsert_resource_version(&mut state.resources, resource.as_ref().clone());
+            changes.resources_changed = true;
         }
         ConsensusCommand::PutResourceReplica { replica } => {
             upsert_resource_replica(&mut state.resources, replica.as_ref().clone());
+            changes.resources_changed = true;
         }
         ConsensusCommand::SetNodeCordoned { node_id, cordoned } => {
             if *cordoned {
@@ -1716,6 +2071,482 @@ fn apply_consensus_command(state: &mut StateMachineData, command: &ConsensusComm
             } else {
                 state.cordoned_node_ids.remove(node_id);
             }
+        }
+        ConsensusCommand::OpenTransaction {
+            transaction,
+            max_open_transactions,
+        } => {
+            let result = if state.transactions.contains_key(&transaction.id) {
+                Err(TransactionMutationError::AlreadyExists {
+                    id: transaction.id.clone(),
+                })
+            } else if state
+                .transactions
+                .values()
+                .filter(|transaction| transaction.state.is_live())
+                .count()
+                >= *max_open_transactions
+            {
+                Err(TransactionMutationError::OpenLimit {
+                    limit: *max_open_transactions,
+                })
+            } else {
+                let transaction = transaction.as_ref().clone();
+                state
+                    .transactions
+                    .insert(transaction.id.clone(), transaction.clone());
+                changes.transactions_changed = true;
+                Ok(transaction)
+            };
+            return AppliedConsensusCommand::transaction(result, changes);
+        }
+        ConsensusCommand::QueueTransactionStatement {
+            id,
+            owner,
+            at,
+            statement,
+            max_statements,
+            max_source_bytes,
+        } => {
+            let result = mutate_transaction(state, id, |transaction| {
+                transaction.queue(
+                    owner,
+                    *at,
+                    statement.as_ref().clone(),
+                    *max_statements,
+                    *max_source_bytes,
+                )
+            });
+            changes.transactions_changed = result.is_ok();
+            return AppliedConsensusCommand::transaction(result, changes);
+        }
+        ConsensusCommand::TouchTransaction { id, owner, at } => {
+            let result = mutate_transaction(state, id, |transaction| transaction.touch(owner, *at));
+            changes.transactions_changed = result.is_ok();
+            return AppliedConsensusCommand::transaction(result, changes);
+        }
+        ConsensusCommand::StartTransactionCommit { id, owner, at } => {
+            let result = mutate_transaction(state, id, |transaction| {
+                transaction.start_commit(owner, *at)
+            });
+            changes.transactions_changed = result.is_ok();
+            return AppliedConsensusCommand::transaction(result, changes);
+        }
+        ConsensusCommand::AdvanceTransactionCommit {
+            id,
+            expected_next_statement,
+            next_statement,
+            at,
+            result,
+            effect,
+            completion,
+        } => {
+            let mut transaction = match state.transactions.get(id).cloned() {
+                Some(transaction) => transaction,
+                None => {
+                    return AppliedConsensusCommand::transaction(
+                        Err(TransactionMutationError::Unknown { id: id.clone() }),
+                        changes,
+                    );
+                }
+            };
+            if let Err(error) = transaction.advance(
+                *expected_next_statement,
+                *next_statement,
+                *at,
+                result.as_ref().clone(),
+                completion.clone(),
+            ) {
+                return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            if let Some(effect) = effect {
+                if let Err(error) = validate_transaction_step_effect(
+                    state,
+                    state
+                        .transactions
+                        .get(id)
+                        .expect("transaction was read from replicated state"),
+                    *expected_next_statement,
+                    *next_statement,
+                    result,
+                    effect,
+                    completion.as_ref(),
+                ) {
+                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                }
+                apply_transaction_step_effect(state, effect, &mut changes);
+            } else if let Err(error) = validate_transaction_step_without_effect(
+                state
+                    .transactions
+                    .get(id)
+                    .expect("transaction was read from replicated state"),
+                *expected_next_statement,
+                *next_statement,
+                result,
+                completion.as_ref(),
+            ) {
+                return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            state.transactions.insert(id.clone(), transaction.clone());
+            changes.transactions_changed = true;
+            return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+        }
+        ConsensusCommand::FinishEmptyTransactionCommit { id, at } => {
+            let result = mutate_transaction(state, id, |transaction| {
+                transaction.finish_empty_commit(*at)
+            });
+            changes.transactions_changed = result.is_ok();
+            return AppliedConsensusCommand::transaction(result, changes);
+        }
+        ConsensusCommand::RevertTransaction { id, owner, at } => {
+            let result =
+                mutate_transaction(state, id, |transaction| transaction.revert(owner, *at));
+            changes.transactions_changed = result.is_ok();
+            return AppliedConsensusCommand::transaction(result, changes);
+        }
+        ConsensusCommand::ExpireTransaction {
+            id,
+            at,
+            idle_before,
+        } => {
+            let Some(mut transaction) = state.transactions.get(id).cloned() else {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::Unknown { id: id.clone() }),
+                    changes,
+                );
+            };
+            match transaction.expire(*at, *idle_before) {
+                Ok(expired) => {
+                    if expired {
+                        state.transactions.insert(id.clone(), transaction.clone());
+                        changes.transactions_changed = true;
+                    }
+                    return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+                }
+                Err(error) => {
+                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                }
+            }
+        }
+        ConsensusCommand::RemoveFinishedTransactions { finished_before } => {
+            let before = state.transactions.len();
+            state.transactions.retain(|_, transaction| {
+                let TransactionState::Finished(finished) = &transaction.state else {
+                    return true;
+                };
+                finished.finished_at > *finished_before
+            });
+            changes.transactions_changed = state.transactions.len() != before;
+        }
+    }
+    AppliedConsensusCommand::applied(changes)
+}
+
+fn mutate_transaction(
+    state: &mut StateMachineData,
+    id: &str,
+    mutation: impl FnOnce(&mut ReplicatedTransaction) -> Result<(), TransactionMutationError>,
+) -> Result<ReplicatedTransaction, TransactionMutationError> {
+    let Some(transaction) = state.transactions.get_mut(id) else {
+        return Err(TransactionMutationError::Unknown { id: id.to_string() });
+    };
+    mutation(transaction)?;
+    Ok(transaction.clone())
+}
+
+fn validate_transaction_step_contract<'a>(
+    transaction: &'a ReplicatedTransaction,
+    first_statement: usize,
+    next_statement: usize,
+    result: &TransactionStepResult,
+    completion: Option<&TransactionOutcome>,
+) -> Result<&'a [TransactionStatement], TransactionMutationError> {
+    let statements = transaction
+        .statements
+        .get(first_statement..next_statement)
+        .ok_or_else(|| TransactionMutationError::EffectMismatch {
+            id: transaction.id.clone(),
+        })?;
+    let success = result.result.success;
+    let completion_matches = match completion {
+        None => success && next_statement < transaction.statements.len(),
+        Some(TransactionOutcome::Committed) => {
+            success && next_statement == transaction.statements.len()
+        }
+        Some(TransactionOutcome::Failed {
+            failing_step,
+            error,
+        }) => !success && *failing_step == first_statement && error == &result.result.message,
+        Some(TransactionOutcome::Reverted | TransactionOutcome::Expired) => false,
+    };
+    if statements.is_empty() || !completion_matches {
+        return Err(TransactionMutationError::EffectMismatch {
+            id: transaction.id.clone(),
+        });
+    }
+    Ok(statements)
+}
+
+fn validate_transaction_step_without_effect(
+    transaction: &ReplicatedTransaction,
+    first_statement: usize,
+    next_statement: usize,
+    result: &TransactionStepResult,
+    completion: Option<&TransactionOutcome>,
+) -> Result<(), TransactionMutationError> {
+    let statements = validate_transaction_step_contract(
+        transaction,
+        first_statement,
+        next_statement,
+        result,
+        completion,
+    )?;
+    if !result.result.success
+        || statements
+            .iter()
+            .all(|statement| statement.statement.is_model_mutation())
+    {
+        return Ok(());
+    }
+    if statements.len() != 1 {
+        return Err(TransactionMutationError::EffectMismatch {
+            id: transaction.id.clone(),
+        });
+    }
+    let statement = &statements[0];
+    let valid_no_effect = match &statement.statement {
+        Statement::CreateDomain(create) => create.if_not_exists && result.result.already_existed,
+        Statement::CreateUser(create) => create.if_not_exists && result.result.already_existed,
+        Statement::CreateResource(create) => create.if_not_exists && result.result.already_existed,
+        Statement::AlterDomain(_) => true,
+        _ => false,
+    };
+    if valid_no_effect {
+        Ok(())
+    } else {
+        Err(TransactionMutationError::EffectMismatch {
+            id: transaction.id.clone(),
+        })
+    }
+}
+
+fn validate_transaction_step_effect(
+    state: &StateMachineData,
+    transaction: &ReplicatedTransaction,
+    first_statement: usize,
+    next_statement: usize,
+    result: &TransactionStepResult,
+    effect: &TransactionStepEffect,
+    completion: Option<&TransactionOutcome>,
+) -> Result<(), TransactionMutationError> {
+    let statements = validate_transaction_step_contract(
+        transaction,
+        first_statement,
+        next_statement,
+        result,
+        completion,
+    )?;
+    if !result.result.success {
+        return Err(TransactionMutationError::EffectMismatch {
+            id: transaction.id.clone(),
+        });
+    }
+    let effect_matches = match effect {
+        TransactionStepEffect::ReplaceDomainSchedule { domain, .. } => {
+            statements.iter().all(|statement| {
+                statement.domain.as_ref() == Some(domain) && statement.statement.is_model_mutation()
+            })
+        }
+        TransactionStepEffect::PutDomainAndSchedule {
+            expected_domain,
+            domain,
+            ..
+        } => {
+            statements.len() == 1
+                && statements[0].domain.as_ref() == Some(&domain.id)
+                && expected_domain.id == domain.id
+                && matches!(statements[0].statement, Statement::AlterDomain(_))
+        }
+        TransactionStepEffect::PutDomain { domain } => {
+            statements.len() == 1
+                && matches!(
+                    &statements[0].statement,
+                    Statement::CreateDomain(create) if create.id == domain.id
+                )
+        }
+        TransactionStepEffect::StartDomain { domain_id, .. } => {
+            statements.len() == 1
+                && statements[0].domain.as_ref() == Some(domain_id)
+                && matches!(statements[0].statement, Statement::StartDomain(_))
+        }
+        TransactionStepEffect::StopDomain { domain_id, .. } => {
+            statements.len() == 1
+                && statements[0].domain.as_ref() == Some(domain_id)
+                && matches!(statements[0].statement, Statement::StopDomain(_))
+        }
+        TransactionStepEffect::CreateUser { user } => {
+            statements.len() == 1
+                && matches!(
+                    &statements[0].statement,
+                    Statement::CreateUser(create) if create.name == user.name
+                )
+        }
+        TransactionStepEffect::CreateResourceCatalog { identifier } => {
+            statements.len() == 1
+                && matches!(
+                    &statements[0].statement,
+                    Statement::CreateResource(create)
+                        if create.identifier.as_str() == identifier
+                )
+        }
+    };
+    if !effect_matches {
+        return Err(TransactionMutationError::EffectMismatch {
+            id: transaction.id.clone(),
+        });
+    }
+
+    let conflict = match effect {
+        TransactionStepEffect::ReplaceDomainSchedule {
+            domain,
+            expected_schedule,
+            ..
+        } => (state.schedule.domain(domain) != expected_schedule.as_deref())
+            .then(|| format!("domain '{}' schedule changed", domain.as_str())),
+        TransactionStepEffect::PutDomainAndSchedule {
+            expected_domain,
+            expected_schedule,
+            ..
+        } => {
+            if state.domains.get(&expected_domain.id) != Some(expected_domain.as_ref()) {
+                Some(format!(
+                    "domain '{}' configuration changed",
+                    expected_domain.id.as_str()
+                ))
+            } else if state.schedule.domain(&expected_domain.id) != expected_schedule.as_deref() {
+                Some(format!(
+                    "domain '{}' schedule changed",
+                    expected_domain.id.as_str()
+                ))
+            } else {
+                None
+            }
+        }
+        TransactionStepEffect::PutDomain { domain } => state
+            .domains
+            .contains_key(&domain.id)
+            .then(|| format!("domain '{}' now exists", domain.id.as_str())),
+        TransactionStepEffect::StartDomain {
+            domain_id,
+            expected_start_version,
+            ..
+        } => match state.domains.get(domain_id) {
+            Some(domain)
+                if matches!(domain.status, DomainStatus::Stopped)
+                    && domain.start_version == *expected_start_version =>
+            {
+                None
+            }
+            Some(_) => Some(format!(
+                "domain '{}' start state changed",
+                domain_id.as_str()
+            )),
+            None => Some(format!("domain '{}' no longer exists", domain_id.as_str())),
+        },
+        TransactionStepEffect::StopDomain {
+            domain_id,
+            expected_start_version,
+        } => match state.domains.get(domain_id) {
+            Some(domain)
+                if !matches!(domain.status, DomainStatus::Stopped)
+                    && domain.start_version == *expected_start_version =>
+            {
+                None
+            }
+            Some(_) => Some(format!(
+                "domain '{}' stop state changed",
+                domain_id.as_str()
+            )),
+            None => Some(format!("domain '{}' no longer exists", domain_id.as_str())),
+        },
+        TransactionStepEffect::CreateUser { user } => state
+            .users
+            .contains_key(&user.name)
+            .then(|| format!("user '{}' now exists", user.name.as_str())),
+        TransactionStepEffect::CreateResourceCatalog { identifier } => state
+            .resources
+            .next_version_by_identifier
+            .iter()
+            .any(|(known, _)| known.as_str() == identifier)
+            .then(|| format!("resource '{identifier}' now exists")),
+    };
+    match conflict {
+        Some(reason) => Err(TransactionMutationError::StepConflict {
+            id: transaction.id.clone(),
+            reason,
+        }),
+        None => Ok(()),
+    }
+}
+
+fn apply_transaction_step_effect(
+    state: &mut StateMachineData,
+    effect: &TransactionStepEffect,
+    changes: &mut StateMachineChanges,
+) {
+    match effect {
+        TransactionStepEffect::ReplaceDomainSchedule {
+            domain, schedule, ..
+        } => {
+            state.replace_domain_schedule(domain, schedule.as_deref());
+            changes.schedule_changed = true;
+        }
+        TransactionStepEffect::PutDomainAndSchedule {
+            domain, schedule, ..
+        } => {
+            state
+                .domains
+                .insert(domain.id.clone(), domain.as_ref().clone());
+            state.replace_domain_schedule(&domain.id, schedule.as_deref());
+            changes.domains_changed = true;
+            changes.schedule_changed = true;
+        }
+        TransactionStepEffect::PutDomain { domain } => {
+            state
+                .domains
+                .insert(domain.id.clone(), domain.as_ref().clone());
+            changes.domains_changed = true;
+        }
+        TransactionStepEffect::StartDomain {
+            domain_id,
+            start,
+            clock,
+            ..
+        } => {
+            if let Some(domain) = state.domains.get_mut(domain_id) {
+                domain.status = DomainStatus::Running;
+                domain.start_version = domain.start_version.saturating_add(1);
+                domain.last_start = start.clone();
+                domain.clock = clock.clone();
+                changes.domains_changed = true;
+            }
+        }
+        TransactionStepEffect::StopDomain { domain_id, .. } => {
+            if let Some(domain) = state.domains.get_mut(domain_id) {
+                domain.status = DomainStatus::Stopped;
+                domain.clock = None;
+                changes.domains_changed = true;
+            }
+        }
+        TransactionStepEffect::CreateUser { user } => {
+            state
+                .users
+                .entry(user.name.clone())
+                .or_insert_with(|| user.as_ref().clone());
+        }
+        TransactionStepEffect::CreateResourceCatalog { identifier } => {
+            ensure_resource_catalog(&mut state.resources, identifier);
+            changes.resources_changed = true;
         }
     }
 }
@@ -1826,7 +2657,7 @@ mod tests {
     use nervix_models::{
         Domain, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
         DomainStatus, Identifier, ResourceId, ResourceNodeState, ResourceNodeStatus,
-        ResourceReplicaKey, ResourceVersion, ResourceVersionStatus,
+        ResourceReplicaKey, ResourceVersion, ResourceVersionStatus, Statement,
     };
     use openraft::{
         SnapshotMeta,
@@ -1837,10 +2668,12 @@ mod tests {
     use super::{
         ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallStore, GossipNode, GossipState,
         KEY_CLUSTER_SCHEDULE, KEY_SNAPSHOT, SnapshotRelayHeader, StateMachineData,
-        StoredMembershipOf, TypeConfig, UserCredentials, apply_consensus_command, decode, encode,
-        encode_stream_frame, io_error, load_value, read_key, write_key,
+        StoredMembershipOf, TransactionCommandResult, TransactionMutationError, TransactionOutcome,
+        TransactionStatement, TransactionStepEffect, TransactionStepResult, TypeConfig,
+        UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame, io_error,
+        load_value, read_key, write_key,
     };
-    use crate::{ConsensusError, VoteOf};
+    use crate::{ConsensusError, ReplicatedTransaction, VoteOf};
 
     fn domain(raw: &str) -> Domain {
         Domain::try_from(raw).expect("valid domain")
@@ -1901,6 +2734,7 @@ mod tests {
             status: DomainStatus::Running,
             start_version: 7,
             last_start: DomainStartPoint::Resume,
+            clock: None,
         }
     }
 
@@ -1939,7 +2773,7 @@ mod tests {
 
         assert_eq!(replace.to_string(), "replace-domain-schedule:tenant");
         assert_eq!(clear.to_string(), "clear-domain-schedule:tenant");
-        assert_eq!(ConsensusResponse.to_string(), "ok");
+        assert_eq!(ConsensusResponse::Applied.to_string(), "ok");
     }
 
     #[test]
@@ -2057,6 +2891,148 @@ mod tests {
 
         assert_eq!(state.domains.get(&domain("tenant")), Some(&domain_state));
         assert_eq!(state.schedule.domain(&domain("tenant")), Some(&schedule));
+    }
+
+    #[test]
+    fn transaction_step_effect_and_progress_are_applied_once() {
+        let owner = Identifier::parse("app_user").expect("valid owner");
+        let domain_id = domain("tenant");
+        let mut stopped = running_domain_state("tenant");
+        stopped.status = DomainStatus::Stopped;
+        stopped.start_version = 0;
+        let mut state = StateMachineData::default();
+        state.domains.insert(domain_id.clone(), stopped);
+
+        let transaction = ReplicatedTransaction::open(
+            "tx-1".to_string(),
+            owner.clone(),
+            nervix_models::Timestamp::from_unix_nanos(1),
+        );
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::OpenTransaction {
+                transaction: Box::new(transaction),
+                max_open_transactions: 4,
+            },
+        );
+        for (at, statement) in [
+            Statement::StartDomain(nervix_models::StartDomain {
+                start: DomainStartPoint::Resume,
+            }),
+            Statement::StopDomain(nervix_models::StopDomain),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            apply_consensus_command(
+                &mut state,
+                &ConsensusCommand::QueueTransactionStatement {
+                    id: "tx-1".to_string(),
+                    owner: owner.clone(),
+                    at: nervix_models::Timestamp::from_unix_nanos(
+                        i64::try_from(at).unwrap_or_default().saturating_add(2),
+                    ),
+                    statement: Box::new(TransactionStatement {
+                        source: "statement".to_string(),
+                        statement,
+                        domain: Some(domain_id.clone()),
+                    }),
+                    max_statements: 4,
+                    max_source_bytes: 1024,
+                },
+            );
+        }
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::StartTransactionCommit {
+                id: "tx-1".to_string(),
+                owner,
+                at: nervix_models::Timestamp::from_unix_nanos(4),
+            },
+        );
+
+        let first_step = ConsensusCommand::AdvanceTransactionCommit {
+            id: "tx-1".to_string(),
+            expected_next_statement: 0,
+            next_statement: 1,
+            at: nervix_models::Timestamp::from_unix_nanos(5),
+            result: Box::new(TransactionStepResult {
+                first_statement: 0,
+                statement_count: 1,
+                result: TransactionCommandResult {
+                    success: true,
+                    message: "started".to_string(),
+                    diagnostics: Vec::new(),
+                    already_existed: false,
+                    results: Vec::new(),
+                },
+            }),
+            effect: Some(Box::new(TransactionStepEffect::StartDomain {
+                domain_id: domain_id.clone(),
+                expected_start_version: 0,
+                start: DomainStartPoint::Resume,
+                clock: None,
+            })),
+            completion: None,
+        };
+        apply_consensus_command(&mut state, &first_step);
+        let running = state.domains.get(&domain_id).expect("domain remains");
+        assert_eq!(running.status, DomainStatus::Running);
+        assert_eq!(running.start_version, 1);
+        let transaction = state.transactions.get("tx-1").expect("transaction remains");
+        assert_eq!(transaction.completed_statement_count(), 1);
+
+        let duplicate = apply_consensus_command(&mut state, &first_step);
+        let ConsensusResponse::Transaction(response) = duplicate.response else {
+            panic!("duplicate transaction step must return a transaction response");
+        };
+        assert!(matches!(
+            response.result,
+            Err(TransactionMutationError::ProgressConflict { .. })
+        ));
+        assert_eq!(
+            state
+                .domains
+                .get(&domain_id)
+                .expect("domain remains")
+                .start_version,
+            1
+        );
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdvanceTransactionCommit {
+                id: "tx-1".to_string(),
+                expected_next_statement: 1,
+                next_statement: 2,
+                at: nervix_models::Timestamp::from_unix_nanos(6),
+                result: Box::new(TransactionStepResult {
+                    first_statement: 1,
+                    statement_count: 1,
+                    result: TransactionCommandResult {
+                        success: false,
+                        message: "validation failed".to_string(),
+                        diagnostics: Vec::new(),
+                        already_existed: false,
+                        results: Vec::new(),
+                    },
+                }),
+                effect: None,
+                completion: Some(TransactionOutcome::Failed {
+                    failing_step: 1,
+                    error: "validation failed".to_string(),
+                }),
+            },
+        );
+        let transaction = state.transactions.get("tx-1").expect("tombstone remains");
+        assert!(matches!(
+            transaction.finished_outcome(),
+            Some(TransactionOutcome::Failed {
+                failing_step: 1,
+                ..
+            })
+        ));
+        assert_eq!(transaction.commit_results().len(), 2);
     }
 
     #[test]

@@ -29,12 +29,37 @@ In practice, the control plane covers:
 
 This is the part of Nervix where Raft-backed consistency matters. It keeps cluster-wide definitions coherent.
 
-NSPL command grouping is explicit. A session starts a control-plane transaction
-with `BEGIN`, queues following NSPL statements, applies them with `COMMIT`, or
-drops them with `REVERT`. `BEGIN` inside an active transaction is rejected, and
-`COMMIT` or `REVERT` without an active transaction is rejected. A request that
-contains multiple statements outside an explicit transaction is rejected instead
-of being treated as an implicit batch.
+## Replicated NSPL Transactions
+
+NSPL command grouping is explicit. `BEGIN` creates a Raft-replicated control-plane transaction and
+returns its id. Following eligible statements are appended to that transaction in written order;
+`COMMIT` applies them and `REVERT` discards them. `BEGIN` inside an active transaction is rejected,
+as are `COMMIT` and `REVERT` without one. A request containing multiple statements outside an
+explicit transaction is rejected instead of becoming an implicit batch.
+
+The cluster owns the transaction, not the TCP or WebSocket connection. Its owner, timestamps,
+state, structured semantic statements, and commit progress are replicated. The original statement
+source is retained for display, but execution never reparses that text. `BEGIN`, queueing,
+`COMMIT`, and `REVERT` are leader operations; clients transparently follow the normal leader
+redirect, including for the initial `BEGIN`.
+
+A transaction is `OPEN`, `COMMITTING`, or finished as `COMMITTED`, `FAILED`, `REVERTED`, or
+`EXPIRED`. A client retains the transaction id and attaches it after reconnecting. Attach is
+restricted to the authenticated owner. Attaching from a second live session takes over the
+transaction, so the displaced session's next transaction operation reports that it was taken over.
+An unclean transport loss or leadership change leaves an open transaction available for attach. A
+clean end of the session reverts a bound open transaction.
+
+Only replicated configuration effects may be queued:
+
+- model `CREATE`, supported model `ALTER`, and model `DROP` statements;
+- `CREATE DOMAIN`, `ALTER DOMAIN`, `START`, and `STOP`;
+- `CREATE USER` and `CREATE RESOURCE`.
+
+Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. Session
+subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership operations (`CORDON`,
+`UNCORDON`, `DRAIN`, and `DROP NODE`) are also immediate, non-transaction content. Run those
+statements outside `BEGIN`/`COMMIT`.
 
 Within a transaction, each consecutive run of model mutations for one domain can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
@@ -46,9 +71,32 @@ not swap the active registry state. This supports coordinated wire-schema, inter
 relay, processor, emitter, ingestor, generator, placement, and dependent-node migrations without
 exposing an invalid intermediate graph.
 
-Transaction control also queues lifecycle and other server statements, but those statements are
-not folded into the registry mutation batch. Data-plane records are likewise outside this
-control-plane atomicity.
+Other eligible statements apply individually. `COMMIT` records each step's effect and progress in
+one Raft operation and stops at the first failure. A new leader automatically resumes every
+`COMMITTING` transaction from its recorded progress: completed steps are not repeated, and a
+failed remaining step records its statement number and error while preserving the applied prefix.
+Atomicity still does not span the whole transaction.
+
+Finished transactions remain as small tombstones containing the outcome and commit results. During
+retention, attach reports the exact outcome; after removal the id is unknown. `SHOW TRANSACTIONS;`
+can be served by any node from locally applied replicated state and lists the id, owner, state,
+pending count, progress, age, and idle time for live transactions and retained tombstones.
+
+An unbound `OPEN` transaction expires after its idle timeout; a bound transaction does not, and a
+`COMMITTING` transaction never expires. Defaults and server settings are:
+
+| Setting | Environment variable | Default |
+| --- | --- | --- |
+| `--transaction-idle-timeout` | `NERVIX_TRANSACTION_IDLE_TIMEOUT` | `15m` |
+| `--transaction-tombstone-retention` | `NERVIX_TRANSACTION_TOMBSTONE_RETENTION` | `15m` |
+| `--transaction-max-statements` | `NERVIX_TRANSACTION_MAX_STATEMENTS` | `256` |
+| `--transaction-max-source-bytes` | `NERVIX_TRANSACTION_MAX_SOURCE_BYTES` | `1048576` |
+| `--transaction-max-open` | `NERVIX_TRANSACTION_MAX_OPEN` | `1024` |
+
+These limits are enforced by replicated state, so every leader observes the same admission result.
+Transaction state changes do not force schedule publication or a runtime barrier.
+
+Data-plane records remain outside this control-plane atomicity.
 
 ## Placement Activation
 
@@ -128,8 +176,11 @@ one modification, so recreating a relay with a different schema cannot bypass do
 The first mutated statement's result includes the quiesce level the batch executed. Nervix always
 executes exactly the classified level.
 
-Persistence and schedule publication are separate steps, so a batch that commits its models but
-fails to publish the resulting schedule restores the previous models and republishes the previous
-schedule at every quiesce level. A domain-paused batch additionally resumes the domain.
+For an immediate model alteration, local registry persistence and schedule publication are
+separate steps. If schedule publication fails, Nervix restores the previous models and republishes
+the previous schedule at every quiesce level; a domain-paused batch additionally resumes the
+domain. During a replicated transaction commit, the new schedule and transaction progress become
+visible in one Raft operation. The leader rolls back an unpublished local registry candidate, and
+every node synchronizes its registry cache from the committed schedule across leadership changes.
 
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.

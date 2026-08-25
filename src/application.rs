@@ -53,8 +53,10 @@ use nervix_client_core::{
 use nervix_consensus::{
     AppendEntriesRequest as RaftAppendEntriesRequest, ConsensusHandle, ConsensusRuntimeState,
     ConsensusSettings, RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR,
-    RAFT_INSTALL_SNAPSHOT_PATH, RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH,
-    SnapshotRelayHeader as RaftSnapshotRelayHeader,
+    RAFT_INSTALL_SNAPSHOT_PATH, RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH, ReplicatedTransaction,
+    SnapshotRelayHeader as RaftSnapshotRelayHeader, TransactionCommandResult,
+    TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionState,
+    TransactionStatement, TransactionStepEffect, TransactionStepResult,
     TransferLeaderRequest as RaftTransferLeaderRequest, TypeConfig, UserCredentials,
     VoteRequest as RaftVoteRequest,
 };
@@ -95,16 +97,16 @@ use nervix_models::{
     CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
     DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
     DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
-    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig, DomainPace,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier,
-    InferencerTensorDimension, InferencerTensorSchema, IngestSource, IngestTimestampSource,
-    KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind, MongoDbConflictAction,
-    MySqlConflictAction, ParseAsType, PlacementGroupSchedule, PlacementPolicy,
-    PlacementRuntimeNode, PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel,
-    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
-    ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp, UploadResource, VhostTlsResource,
-    expression_to_nspl,
+    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainClockState,
+    DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
+    IcebergCatalog, Identifier, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
+    IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind,
+    MongoDbConflictAction, MySqlConflictAction, ParseAsType, PlacementGroupSchedule,
+    PlacementPolicy, PlacementRuntimeNode, PostgresConflictAction, ProcessorInputs,
+    ProcessorOutputs, QuiesceLevel, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
+    UploadResource, VhostTlsResource, expression_to_nspl,
 };
 use nervix_nspl::{
     Token, Word,
@@ -146,7 +148,7 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::{Notify, broadcast, mpsc, oneshot, watch},
+    sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::{Duration, interval, sleep},
 };
@@ -192,6 +194,11 @@ const WEB_CONSOLE_GRAPH_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(500)
 const DEFAULT_USER: &str = "default";
 const BASIC_AUTH_REALM: &str = "Nervix";
 const AUTH_RATE_LIMIT_PER_SECOND: u32 = 10;
+const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_TRANSACTION_TOMBSTONE_RETENTION: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_TRANSACTION_MAX_STATEMENTS: usize = 256;
+const DEFAULT_TRANSACTION_MAX_SOURCE_BYTES: u64 = 1024 * 1024;
+const DEFAULT_TRANSACTION_MAX_OPEN: usize = 1024;
 
 #[derive(Debug, Clone)]
 struct DrainOutstanding {
@@ -539,8 +546,9 @@ use crate::{
         ClusterSummary, CommandRequest, CommandResult, CommandResultKind, Diagnostic,
         DomainEntitySnapshot, DomainInfo, DomainList, DomainSnapshot, ServerEvent,
         ServerEventLevel, SessionRequest, SessionResponse, SetActiveDomainRequest, SuggestRequest,
-        SuggestResponse, Suggestion as ApiSuggestion, SuggestionKind, UploadResourceRequest,
-        UploadResourceResponse,
+        SuggestResponse, Suggestion as ApiSuggestion, SuggestionKind,
+        TransactionState as ApiTransactionState, TransactionStatus as ApiTransactionStatus,
+        UploadResourceRequest, UploadResourceResponse,
         session_service_server::{SessionService, SessionServiceServer},
     },
     resource::{ResourceEntryType, ResourceManifestEntry, ResourceStore},
@@ -579,7 +587,9 @@ struct SubscriptionMatcher {
 
 struct SessionSubscriptions {
     subscriptions: HashMap<Identifier, SessionSubscription>,
-    transaction: SessionCommandTransaction,
+    user: Identifier,
+    session_id: String,
+    transaction_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -587,12 +597,6 @@ struct PendingSessionCommand {
     source: String,
     statement: ClientStatement,
     domain: String,
-}
-
-#[derive(Debug, Default)]
-struct SessionCommandTransaction {
-    active: bool,
-    commands: Vec<PendingSessionCommand>,
 }
 
 #[derive(Debug)]
@@ -616,15 +620,24 @@ struct SessionSubscriptionTaskConfig {
 }
 
 impl SessionSubscriptions {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::for_user(
+            Identifier::parse(DEFAULT_USER).expect("default user identifier must be valid"),
+        )
+    }
+
+    fn for_user(user: Identifier) -> Self {
         Self {
             subscriptions: HashMap::new(),
-            transaction: SessionCommandTransaction::default(),
+            user,
+            session_id: uuid::Uuid::now_v7().to_string(),
+            transaction_id: None,
         }
     }
 
     fn transaction_active(&self) -> bool {
-        self.transaction.is_active()
+        self.transaction_id.is_some()
     }
 
     fn plan_commands(
@@ -632,7 +645,7 @@ impl SessionSubscriptions {
         statements: Vec<ParsedClientStatement>,
         request_domain: &str,
     ) -> Result<Vec<SessionCommandOperation>, String> {
-        let mut transaction_active = self.transaction.is_active();
+        let mut transaction_active = self.transaction_active();
         let multi_statement = statements.len() > 1;
         let mut operations = Vec::with_capacity(statements.len());
 
@@ -679,20 +692,16 @@ impl SessionSubscriptions {
         Ok(operations)
     }
 
-    fn begin_transaction(&mut self) {
-        self.transaction.begin();
+    fn bind_transaction(&mut self, id: String) {
+        self.transaction_id = Some(id);
     }
 
-    fn queue_transaction_command(&mut self, command: PendingSessionCommand) -> usize {
-        self.transaction.push(command)
+    fn transaction_id(&self) -> Option<&str> {
+        self.transaction_id.as_deref()
     }
 
-    fn commit_transaction(&mut self) -> Vec<PendingSessionCommand> {
-        self.transaction.commit()
-    }
-
-    fn revert_transaction(&mut self) -> usize {
-        self.transaction.revert()
+    fn detach_transaction(&mut self) -> Option<String> {
+        self.transaction_id.take()
     }
 
     fn insert(
@@ -926,42 +935,14 @@ impl SessionSubscriptions {
         Some((subscription.domain, subscription.relay))
     }
 
-    async fn stop_all(self, service: &SessionServiceImpl) {
-        for (_, subscription) in self.subscriptions {
+    async fn stop_all(&mut self, service: &SessionServiceImpl) {
+        for (_, subscription) in self.subscriptions.drain() {
             let _ = subscription.stop_tx.send(true);
             let _ = subscription.task.await;
             service
                 .unregister_subscription_interest(&subscription.domain, &subscription.relay)
                 .await;
         }
-    }
-}
-
-impl SessionCommandTransaction {
-    fn is_active(&self) -> bool {
-        self.active
-    }
-
-    fn begin(&mut self) {
-        self.active = true;
-        self.commands.clear();
-    }
-
-    fn push(&mut self, command: PendingSessionCommand) -> usize {
-        self.commands.push(command);
-        self.commands.len()
-    }
-
-    fn commit(&mut self) -> Vec<PendingSessionCommand> {
-        self.active = false;
-        std::mem::take(&mut self.commands)
-    }
-
-    fn revert(&mut self) -> usize {
-        self.active = false;
-        let dropped = self.commands.len();
-        self.commands.clear();
-        dropped
     }
 }
 
@@ -1910,9 +1891,10 @@ async fn handle_web_console_request(
         let Some(credentials) = credentials_from_web_console_request(&request) else {
             return Ok(unauthorized_basic_response());
         };
-        if !service.authenticate_basic_credentials(&credentials).await {
+        let Some(authenticated_user) = service.authenticate_basic_credentials(&credentials).await
+        else {
             return Ok(unauthorized_basic_response());
-        }
+        };
 
         if !is_websocket_upgrade_request(&request) {
             return Ok(response_with_bytes(
@@ -1958,7 +1940,7 @@ async fn handle_web_console_request(
                     let mut websocket =
                         WebSocketStream::from_raw_socket(io, Role::Server, None).await;
                     let (tx, mut response_rx) = mpsc::channel(16);
-                    let mut subscriptions = SessionSubscriptions::new();
+                    let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
                     let mut leadership_check = interval(WEB_CONSOLE_LEADERSHIP_CHECK_INTERVAL);
                     let mut graph_snapshot = interval(WEB_CONSOLE_GRAPH_SNAPSHOT_INTERVAL);
                     let mut domains_rx = service.consensus.subscribe_domains();
@@ -1966,6 +1948,7 @@ async fn handle_web_console_request(
                     graph_snapshot.tick().await;
                     let mut leader_connected = false;
                     let mut active_domain = None::<Domain>;
+                    let mut clean_close = false;
 
                     loop {
                         tokio::task::consume_budget().await;
@@ -2067,7 +2050,10 @@ async fn handle_web_console_request(
                                             break;
                                         }
                                     }
-                                    Ok(Message::Close(_)) => break,
+                                    Ok(Message::Close(_)) => {
+                                        clean_close = true;
+                                        break;
+                                    }
                                     Ok(_) => {}
                                     Err(error) => {
                                         warn!(error = %error, "web console websocket failed");
@@ -2200,6 +2186,11 @@ async fn handle_web_console_request(
                         }
                     }
                     subscriptions.stop_all(&service).await;
+                    if clean_close {
+                        service.clean_close_transaction(&mut subscriptions).await;
+                    } else {
+                        service.release_session_transaction_binding(&mut subscriptions);
+                    }
                 }
                 Err(error) => {
                     warn!(error = %error, "web console websocket upgrade failed");
@@ -2221,7 +2212,11 @@ async fn handle_web_console_request(
         let Some(credentials) = credentials_from_web_console_request(&request) else {
             return Ok(unauthorized_basic_response());
         };
-        if !service.authenticate_basic_credentials(&credentials).await {
+        if service
+            .authenticate_basic_credentials(&credentials)
+            .await
+            .is_none()
+        {
             return Ok(unauthorized_basic_response());
         }
 
@@ -2852,6 +2847,38 @@ pub struct Args {
         value_parser = parse_human_duration
     )]
     pub raft_election_timeout_max: Duration,
+    #[arg(
+        long,
+        env = "NERVIX_TRANSACTION_IDLE_TIMEOUT",
+        default_value = "15m",
+        value_parser = parse_human_duration
+    )]
+    pub transaction_idle_timeout: Duration,
+    #[arg(
+        long,
+        env = "NERVIX_TRANSACTION_TOMBSTONE_RETENTION",
+        default_value = "15m",
+        value_parser = parse_human_duration
+    )]
+    pub transaction_tombstone_retention: Duration,
+    #[arg(
+        long,
+        env = "NERVIX_TRANSACTION_MAX_STATEMENTS",
+        default_value_t = DEFAULT_TRANSACTION_MAX_STATEMENTS
+    )]
+    pub transaction_max_statements: usize,
+    #[arg(
+        long,
+        env = "NERVIX_TRANSACTION_MAX_SOURCE_BYTES",
+        default_value_t = DEFAULT_TRANSACTION_MAX_SOURCE_BYTES
+    )]
+    pub transaction_max_source_bytes: u64,
+    #[arg(
+        long,
+        env = "NERVIX_TRANSACTION_MAX_OPEN",
+        default_value_t = DEFAULT_TRANSACTION_MAX_OPEN
+    )]
+    pub transaction_max_open: usize,
     #[arg(long, env = "NERVIX_REPLICA_COUNT", default_value_t = 0)]
     pub replica_count: usize,
     #[arg(
@@ -3009,6 +3036,7 @@ struct SessionServiceImpl {
     subscription_interest_counts: Arc<DashMap<(Domain, Identifier), usize, RandomState>>,
     interconnect: Arc<Transport>,
     domain_clocks: Arc<DashMap<Domain, DomainClockRuntimeState, RandomState>>,
+    domain_clock_reconciliations: Arc<DashMap<Domain, (u64, bool), RandomState>>,
     domain_clock_events: Arc<Notify>,
     next_cluster_command_correlation_id: Arc<AtomicU64>,
     pending_cluster_commands: PendingClusterCommands,
@@ -3016,6 +3044,32 @@ struct SessionServiceImpl {
     configured_basic_auth: Option<BasicAuthCredentials>,
     auth_rate_limiter: Arc<AuthRateLimiter>,
     failed_auth_rate_limit_keys: Arc<DashMap<String, (), RandomState>>,
+    transaction_idle_timeout: Duration,
+    transaction_tombstone_retention: Duration,
+    transaction_max_statements: usize,
+    transaction_max_source_bytes: u64,
+    transaction_max_open: usize,
+    transaction_bindings: Arc<DashMap<String, String, RandomState>>,
+    transaction_executions: Arc<DashMap<String, (), RandomState>>,
+    transaction_commit_execution: Arc<AsyncMutex<()>>,
+}
+
+struct TransactionExecutionLease {
+    executions: Arc<DashMap<String, (), RandomState>>,
+    id: String,
+}
+
+struct TransactionModelStepContext<'a> {
+    transaction: &'a ReplicatedTransaction,
+    first_statement: usize,
+    statement_count: usize,
+    outcome: &'a ParkingMutex<Option<Result<ReplicatedTransaction, String>>>,
+}
+
+impl Drop for TransactionExecutionLease {
+    fn drop(&mut self) {
+        self.executions.remove(&self.id);
+    }
 }
 
 impl ClusterEntityGate {
@@ -3340,6 +3394,16 @@ pub struct Application {
     pub raft_heartbeat_interval: Duration,
     pub raft_election_timeout_min: Duration,
     pub raft_election_timeout_max: Duration,
+    #[builder(default = DEFAULT_TRANSACTION_IDLE_TIMEOUT)]
+    pub transaction_idle_timeout: Duration,
+    #[builder(default = DEFAULT_TRANSACTION_TOMBSTONE_RETENTION)]
+    pub transaction_tombstone_retention: Duration,
+    #[builder(default = DEFAULT_TRANSACTION_MAX_STATEMENTS)]
+    pub transaction_max_statements: usize,
+    #[builder(default = DEFAULT_TRANSACTION_MAX_SOURCE_BYTES)]
+    pub transaction_max_source_bytes: u64,
+    #[builder(default = DEFAULT_TRANSACTION_MAX_OPEN)]
+    pub transaction_max_open: usize,
     #[builder(default = 0)]
     pub replica_count: usize,
     #[cfg(feature = "testing")]
@@ -3589,6 +3653,11 @@ impl TryFrom<Args> for Application {
             .raft_heartbeat_interval(args.raft_heartbeat_interval)
             .raft_election_timeout_min(args.raft_election_timeout_min)
             .raft_election_timeout_max(args.raft_election_timeout_max)
+            .transaction_idle_timeout(args.transaction_idle_timeout)
+            .transaction_tombstone_retention(args.transaction_tombstone_retention)
+            .transaction_max_statements(args.transaction_max_statements)
+            .transaction_max_source_bytes(args.transaction_max_source_bytes)
+            .transaction_max_open(args.transaction_max_open)
             .replica_count(args.replica_count)
             .state_snapshot_interval(args.state_snapshot_interval)
             .memory_pressure(memory_pressure)
@@ -3608,7 +3677,7 @@ impl SessionService for SessionServiceImpl {
         &self,
         request: Request<tonic::Streaming<SessionRequest>>,
     ) -> Result<Response<Self::SessionStream>, Status> {
-        self.authenticate_grpc_metadata(request.metadata()).await?;
+        let authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
         let mut inbound = request.into_inner();
         let service = self.clone();
         let (tx, rx) = mpsc::channel(16);
@@ -3617,7 +3686,8 @@ impl SessionService for SessionServiceImpl {
 
         let service_tasks = service.service_tasks.clone();
         service_tasks.spawn(async move {
-            let mut subscriptions = SessionSubscriptions::new();
+            let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
+            let mut clean_close = false;
             let shutdown = service.shutdown.clone();
             loop {
                 tokio::task::consume_budget().await;
@@ -3628,6 +3698,7 @@ impl SessionService for SessionServiceImpl {
                     }
                     inbound_request = tokio_stream::StreamExt::next(&mut inbound) => {
                         let Some(request) = inbound_request else {
+                            clean_close = true;
                             break;
                         };
                         let request = match request {
@@ -3635,6 +3706,7 @@ impl SessionService for SessionServiceImpl {
                             Err(status) => {
                                 let _ = tx.send(Err(status)).await;
                                 subscriptions.stop_all(&service).await;
+                                service.release_session_transaction_binding(&mut subscriptions);
                                 return;
                             }
                         };
@@ -3653,6 +3725,7 @@ impl SessionService for SessionServiceImpl {
                                 };
                                 if tx.send(Ok(event)).await.is_err() {
                                     subscriptions.stop_all(&service).await;
+                                    service.release_session_transaction_binding(&mut subscriptions);
                                     return;
                                 }
                             }
@@ -3665,6 +3738,7 @@ impl SessionService for SessionServiceImpl {
                                 };
                                 if tx.send(Ok(event)).await.is_err() {
                                     subscriptions.stop_all(&service).await;
+                                    service.release_session_transaction_binding(&mut subscriptions);
                                     return;
                                 }
                             }
@@ -3672,6 +3746,7 @@ impl SessionService for SessionServiceImpl {
                                 let event = service.domain_list_response(true).await;
                                 if tx.send(Ok(event)).await.is_err() {
                                     subscriptions.stop_all(&service).await;
+                                    service.release_session_transaction_binding(&mut subscriptions);
                                     return;
                                 }
                             }
@@ -3682,7 +3757,21 @@ impl SessionService for SessionServiceImpl {
                                     )))
                                     .await;
                                 subscriptions.stop_all(&service).await;
+                                service.release_session_transaction_binding(&mut subscriptions);
                                 return;
+                            }
+                            Some(proto::session_request::Request::AttachTransaction(request)) => {
+                                let result = service
+                                    .attach_transaction(request, &mut subscriptions)
+                                    .await;
+                                let event = SessionResponse {
+                                    event: Some(proto::session_response::Event::Result(result)),
+                                };
+                                if tx.send(Ok(event)).await.is_err() {
+                                    subscriptions.stop_all(&service).await;
+                                    service.release_session_transaction_binding(&mut subscriptions);
+                                    return;
+                                }
                             }
                             None => {
                                 let _ = tx
@@ -3691,6 +3780,7 @@ impl SessionService for SessionServiceImpl {
                                     )))
                                     .await;
                                 subscriptions.stop_all(&service).await;
+                                service.release_session_transaction_binding(&mut subscriptions);
                                 return;
                             }
                         }
@@ -3703,6 +3793,7 @@ impl SessionService for SessionServiceImpl {
                                 };
                                 if tx.send(Ok(response)).await.is_err() {
                                     subscriptions.stop_all(&service).await;
+                                    service.release_session_transaction_binding(&mut subscriptions);
                                     return;
                                 }
                             }
@@ -3721,6 +3812,7 @@ impl SessionService for SessionServiceImpl {
                                 };
                                 if tx.send(Ok(response)).await.is_err() {
                                     subscriptions.stop_all(&service).await;
+                                    service.release_session_transaction_binding(&mut subscriptions);
                                     return;
                                 }
                             }
@@ -3732,6 +3824,11 @@ impl SessionService for SessionServiceImpl {
             }
 
             subscriptions.stop_all(&service).await;
+            if clean_close {
+                service.clean_close_transaction(&mut subscriptions).await;
+            } else {
+                service.release_session_transaction_binding(&mut subscriptions);
+            }
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -3741,7 +3838,7 @@ impl SessionService for SessionServiceImpl {
         &self,
         request: Request<tonic::Streaming<UploadResourceRequest>>,
     ) -> Result<Response<UploadResourceResponse>, Status> {
-        self.authenticate_grpc_metadata(request.metadata()).await?;
+        let _authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
         let leader = self.consensus.current_leader().await;
         if leader.as_deref() != Some(self.consensus.local_node_id()) {
             let leader_grpc_uri = match leader.as_deref() {
@@ -3970,24 +4067,23 @@ impl SessionServiceImpl {
     async fn authenticate_grpc_metadata(
         &self,
         metadata: &MetadataMap,
-    ) -> Result<(), GrpcAuthenticationError> {
+    ) -> Result<Identifier, GrpcAuthenticationError> {
         let Some(credentials) = credentials_from_metadata(metadata) else {
             return Err(GrpcAuthenticationError::Required);
         };
-        if self.authenticate_basic_credentials(&credentials).await {
-            Ok(())
-        } else {
-            Err(GrpcAuthenticationError::Failed)
-        }
+        self.authenticate_basic_credentials(&credentials)
+            .await
+            .ok_or(GrpcAuthenticationError::Failed)
     }
 
-    async fn authenticate_basic_credentials(&self, credentials: &BasicAuthCredentials) -> bool {
+    async fn authenticate_basic_credentials(
+        &self,
+        credentials: &BasicAuthCredentials,
+    ) -> Option<Identifier> {
         let Ok(user_name) = Identifier::parse(&credentials.username) else {
-            return false;
+            return None;
         };
-        let Some(user) = self.consensus.current_user(&user_name).await else {
-            return false;
-        };
+        let user = self.consensus.current_user(&user_name).await?;
         let auth_rate_limit_key = user_name.as_str().to_string();
         if self
             .failed_auth_rate_limit_keys
@@ -4005,7 +4101,7 @@ impl SessionServiceImpl {
             self.failed_auth_rate_limit_keys
                 .insert(auth_rate_limit_key, ());
         }
-        verified
+        verified.then_some(user_name)
     }
 
     fn next_cluster_command_correlation_id(&self) -> u64 {
@@ -4837,6 +4933,60 @@ impl SessionServiceImpl {
             .await?;
         }
         Ok(())
+    }
+
+    async fn reconcile_domain_clocks_from_state(&self) {
+        let domains = self.consensus.current_domains().await;
+        let known_domains = domains.keys().cloned().collect::<HashSet<_>>();
+        self.domain_clock_reconciliations
+            .retain(|domain, _| known_domains.contains(domain));
+        for (domain_id, domain) in domains {
+            tokio::task::consume_budget().await;
+            if let DomainPace::Unpaced = domain.config.pace {
+                self.domain_clock_reconciliations.remove(&domain_id);
+                continue;
+            }
+            let running = !matches!(domain.status, DomainStatus::Stopped);
+            let observed = (domain.start_version, running);
+            if self
+                .domain_clock_reconciliations
+                .get(&domain_id)
+                .is_some_and(|current| *current.value() == observed)
+            {
+                continue;
+            }
+            let result = if running {
+                match domain.clock {
+                    Some(clock) => {
+                        self.start_domain_clock(
+                            domain_id.clone(),
+                            clock.wall_started_at,
+                            clock.logical_start,
+                            clock.time_rate,
+                        )
+                        .await
+                    }
+                    None => Err(format!(
+                        "paced domain '{}' is running without replicated clock state",
+                        domain_id.as_str()
+                    )),
+                }
+            } else {
+                self.stop_domain_clock(&domain_id).await
+            };
+            match result {
+                Ok(()) => {
+                    self.domain_clock_reconciliations
+                        .insert(domain_id, observed);
+                }
+                Err(error) => {
+                    warn!(
+                        domain = domain_id.as_str(),
+                        error, "failed to reconcile replicated domain clock state"
+                    );
+                }
+            }
+        }
     }
 
     async fn stop_domain_clock(&self, domain_id: &Domain) -> Result<(), String> {
@@ -7386,33 +7536,192 @@ impl SessionServiceImpl {
         let client_statements = match parse_client_statement_sources(&req.query) {
             Ok(statements) => statements,
             Err(ParseFromSourceError::Lex { diagnostics, .. }) => {
-                return command_with_transaction_state(
-                    error_response("lex error", &diagnostics),
-                    subscriptions.transaction_active(),
-                );
+                return self
+                    .command_with_transaction_status(
+                        error_response("lex error", &diagnostics),
+                        subscriptions,
+                    )
+                    .await;
             }
             Err(ParseFromSourceError::Parse { diagnostics, .. }) => {
-                return command_with_transaction_state(
-                    error_response("parse error", &diagnostics),
-                    subscriptions.transaction_active(),
-                );
+                return self
+                    .command_with_transaction_status(
+                        error_response("parse error", &diagnostics),
+                        subscriptions,
+                    )
+                    .await;
             }
         };
+
+        let is_transaction_request = subscriptions.transaction_active()
+            || client_statements.iter().any(|parsed| {
+                matches!(
+                    parsed.statement,
+                    ClientStatement::BeginTransaction
+                        | ClientStatement::CommitTransaction
+                        | ClientStatement::RevertTransaction
+                )
+            });
+        if is_transaction_request {
+            let leader = self.consensus.current_leader().await;
+            if leader.as_deref() != Some(self.consensus.local_node_id()) {
+                return self
+                    .command_with_transaction_status(
+                        self.not_leader_response(&req.query, leader).await,
+                        subscriptions,
+                    )
+                    .await;
+            }
+            if subscriptions.transaction_active()
+                && let Err(message) = self.validate_session_transaction_binding(subscriptions)
+            {
+                return self
+                    .command_with_transaction_status(command_error(message), subscriptions)
+                    .await;
+            }
+        }
 
         let operations = match subscriptions.plan_commands(client_statements, &req.domain) {
             Ok(operations) => operations,
             Err(error) => {
-                return command_with_transaction_state(
-                    command_error(error),
-                    subscriptions.transaction_active(),
-                );
+                return self
+                    .command_with_transaction_status(command_error(error), subscriptions)
+                    .await;
             }
         };
 
         let result = self
             .process_session_command_operations(operations, tx, subscriptions)
             .await;
-        command_with_transaction_state(result, subscriptions.transaction_active())
+        self.command_with_transaction_status(result, subscriptions)
+            .await
+    }
+
+    async fn command_with_transaction_status(
+        &self,
+        mut result: CommandResult,
+        subscriptions: &SessionSubscriptions,
+    ) -> CommandResult {
+        if result.transaction.is_none()
+            && let Some(id) = subscriptions.transaction_id()
+            && let Some(transaction) = self.consensus.current_transaction(id).await
+        {
+            result.transaction = Some(transaction_status(&transaction));
+        }
+        result
+    }
+
+    fn validate_session_transaction_binding(
+        &self,
+        subscriptions: &SessionSubscriptions,
+    ) -> Result<(), String> {
+        let Some(id) = subscriptions.transaction_id() else {
+            return Err("no transaction is attached to this session".to_string());
+        };
+        match self.transaction_bindings.get(id) {
+            Some(binding) if binding.value() == &subscriptions.session_id => Ok(()),
+            Some(_) => Err(format!(
+                "transaction '{id}' was taken over by another session"
+            )),
+            None => Err(format!(
+                "transaction '{id}' is not attached after a leadership change; attach it before \
+                 continuing"
+            )),
+        }
+    }
+
+    fn release_session_transaction_binding(&self, subscriptions: &mut SessionSubscriptions) {
+        let Some(id) = subscriptions.detach_transaction() else {
+            return;
+        };
+        if self
+            .transaction_bindings
+            .get(&id)
+            .is_some_and(|binding| binding.value() == &subscriptions.session_id)
+        {
+            self.transaction_bindings.remove(&id);
+        }
+    }
+
+    async fn clean_close_transaction(&self, subscriptions: &mut SessionSubscriptions) {
+        let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
+            return;
+        };
+        if self.consensus.current_leader().await.as_deref() != Some(self.consensus.local_node_id())
+            || self
+                .transaction_bindings
+                .get(&id)
+                .is_none_or(|binding| binding.value() != &subscriptions.session_id)
+        {
+            return;
+        }
+        if let Some(transaction) = self.consensus.current_transaction(&id).await
+            && matches!(transaction.state, TransactionState::Open)
+            && let Err(error) = self
+                .consensus
+                .revert_transaction(id.clone(), subscriptions.user.clone(), current_timestamp())
+                .await
+        {
+            warn!(
+                transaction_id = id,
+                error = %error,
+                "failed to revert transaction during clean session close"
+            );
+        }
+        self.release_session_transaction_binding(subscriptions);
+    }
+
+    async fn attach_transaction(
+        &self,
+        request: proto::AttachTransactionRequest,
+        subscriptions: &mut SessionSubscriptions,
+    ) -> CommandResult {
+        let leader = self.consensus.current_leader().await;
+        if leader.as_deref() != Some(self.consensus.local_node_id()) {
+            return self
+                .not_leader_response(&format!("ATTACH TRANSACTION {}", request.id), leader)
+                .await;
+        }
+        let Some(transaction) = self.consensus.current_transaction(&request.id).await else {
+            return command_error(format!("transaction '{}' is unknown", request.id));
+        };
+        if transaction.owner != subscriptions.user {
+            return command_error(format!(
+                "transaction '{}' belongs to another user",
+                request.id
+            ));
+        }
+        if let TransactionState::Finished(finished) = &transaction.state {
+            let recorded = transaction_commit_result(&transaction);
+            let mut result = command_error(format!(
+                "transaction '{}' finished with outcome {}",
+                request.id,
+                finished.outcome.as_str()
+            ));
+            result.results = recorded.results;
+            result.transaction = Some(transaction_status(&transaction));
+            return result;
+        }
+
+        let transaction = match self
+            .consensus
+            .touch_transaction(
+                request.id.clone(),
+                subscriptions.user.clone(),
+                current_timestamp(),
+            )
+            .await
+        {
+            Ok(transaction) => transaction,
+            Err(error) => return command_error(error.to_string()),
+        };
+        self.release_session_transaction_binding(subscriptions);
+        self.transaction_bindings
+            .insert(request.id.clone(), subscriptions.session_id.clone());
+        subscriptions.bind_transaction(request.id.clone());
+        let mut result = command_ok(format!("attached transaction '{}'", request.id));
+        result.transaction = Some(transaction_status(&transaction));
+        result
     }
 
     async fn process_session_command_operations(
@@ -7423,31 +7732,42 @@ impl SessionServiceImpl {
     ) -> CommandResult {
         let is_batch = operations.len() > 1;
         let mut results = Vec::new();
+        let mut transaction = None;
 
         for operation in operations {
             let result = match operation {
                 SessionCommandOperation::Begin => {
-                    subscriptions.begin_transaction();
-                    command_ok("transaction started".to_string())
-                }
-                SessionCommandOperation::Queue(command) => {
-                    let pending = subscriptions.queue_transaction_command(command);
-                    command_ok(format!("queued command in transaction ({pending} pending)"))
-                }
-                SessionCommandOperation::Commit => {
-                    let commands = subscriptions.commit_transaction();
-                    if commands.is_empty() {
-                        command_ok("transaction committed: 0 commands".to_string())
-                    } else {
-                        self.process_pending_session_commands(commands, tx, subscriptions, true)
-                            .await
+                    let id = uuid::Uuid::now_v7().to_string();
+                    let transaction = ReplicatedTransaction::open(
+                        id.clone(),
+                        subscriptions.user.clone(),
+                        current_timestamp(),
+                    );
+                    match self
+                        .consensus
+                        .open_transaction(transaction, self.transaction_max_open)
+                        .await
+                    {
+                        Ok(transaction) => {
+                            self.transaction_bindings
+                                .insert(id.clone(), subscriptions.session_id.clone());
+                            subscriptions.bind_transaction(id.clone());
+                            let mut result = command_ok(format!("transaction started: id '{id}'"));
+                            result.transaction = Some(transaction_status(&transaction));
+                            result
+                        }
+                        Err(error) => command_error(error.to_string()),
                     }
                 }
+                SessionCommandOperation::Queue(command) => {
+                    self.queue_transaction_statement(command, subscriptions)
+                        .await
+                }
+                SessionCommandOperation::Commit => {
+                    self.commit_bound_transaction(tx, subscriptions).await
+                }
                 SessionCommandOperation::Revert => {
-                    let dropped = subscriptions.revert_transaction();
-                    command_ok(format!(
-                        "transaction reverted: dropped {dropped} command(s)"
-                    ))
+                    self.revert_bound_transaction(subscriptions).await
                 }
                 SessionCommandOperation::Execute(command) => {
                     self.process_pending_session_commands(vec![command], tx, subscriptions, false)
@@ -7455,8 +7775,18 @@ impl SessionServiceImpl {
                 }
             };
 
+            if result.transaction.is_some() {
+                transaction.clone_from(&result.transaction);
+            }
             if !result.success {
-                return command_batch_result(results, result, is_batch);
+                let mut result = command_batch_result(results, result, is_batch);
+                if result.transaction.is_none() {
+                    result.transaction = transaction;
+                }
+                return result;
+            }
+            if !is_batch {
+                return result;
             }
             append_command_result(&mut results, result);
         }
@@ -7464,19 +7794,862 @@ impl SessionServiceImpl {
         if results.is_empty() {
             return command_error("empty command".to_string());
         }
-        if !is_batch {
-            return results
-                .pop()
-                .expect("non-empty results must contain the single result");
-        }
-
         CommandResult {
             success: true,
             message: command_results_message(&results),
             diagnostics: Vec::new(),
             kind: CommandResultKind::Ok as i32,
             results,
+            transaction,
             ..Default::default()
+        }
+    }
+
+    async fn queue_transaction_statement(
+        &self,
+        command: PendingSessionCommand,
+        subscriptions: &SessionSubscriptions,
+    ) -> CommandResult {
+        if let Err(message) = self.validate_session_transaction_binding(subscriptions) {
+            return command_error(message);
+        }
+        let Some(id) = subscriptions.transaction_id() else {
+            return command_error("no transaction is attached to this session".to_string());
+        };
+        let ClientStatement::Server(statement) = command.statement else {
+            return command_error(
+                "session-scoped and client-local statements cannot be queued in a transaction"
+                    .to_string(),
+            );
+        };
+        if !is_queueable_transaction_statement(&statement) {
+            return command_error(format!(
+                "{} cannot be queued in a transaction; only replicated configuration statements \
+                 are queueable",
+                transaction_statement_label(&statement)
+            ));
+        }
+        let domain = if transaction_statement_requires_domain(&statement) {
+            match parse_request_domain(&command.domain) {
+                Ok(domain) => Some(domain),
+                Err(RequestDomainError::Missing) => {
+                    return command_error("no active domain selected".to_string());
+                }
+                Err(RequestDomainError::Invalid) => {
+                    return command_error("invalid domain".to_string());
+                }
+            }
+        } else {
+            None
+        };
+        let queued = TransactionStatement {
+            source: command.source,
+            statement,
+            domain,
+        };
+        match self
+            .consensus
+            .queue_transaction_statement(
+                id.to_string(),
+                subscriptions.user.clone(),
+                current_timestamp(),
+                queued,
+                self.transaction_max_statements,
+                self.transaction_max_source_bytes,
+            )
+            .await
+        {
+            Ok(transaction) => {
+                let mut result = command_ok(format!(
+                    "queued command in transaction '{}' ({} pending)",
+                    transaction.id,
+                    transaction.pending_statement_count()
+                ));
+                result.transaction = Some(transaction_status(&transaction));
+                result
+            }
+            Err(error) => command_error(error.to_string()),
+        }
+    }
+
+    async fn revert_bound_transaction(
+        &self,
+        subscriptions: &mut SessionSubscriptions,
+    ) -> CommandResult {
+        if let Err(message) = self.validate_session_transaction_binding(subscriptions) {
+            return command_error(message);
+        }
+        let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
+            return command_error("REVERT requires an active transaction".to_string());
+        };
+        let previous = self.consensus.current_transaction(&id).await;
+        match self
+            .consensus
+            .revert_transaction(id.clone(), subscriptions.user.clone(), current_timestamp())
+            .await
+        {
+            Ok(transaction) => {
+                let dropped = previous.map_or(0, |transaction| transaction.statements.len());
+                self.release_session_transaction_binding(subscriptions);
+                let mut result = command_ok(format!(
+                    "transaction reverted: dropped {dropped} command(s); id '{id}'"
+                ));
+                result.transaction = Some(transaction_status(&transaction));
+                result
+            }
+            Err(error) => command_error(error.to_string()),
+        }
+    }
+
+    async fn commit_bound_transaction(
+        &self,
+        _tx: &mpsc::Sender<Result<SessionResponse, Status>>,
+        subscriptions: &mut SessionSubscriptions,
+    ) -> CommandResult {
+        if let Err(message) = self.validate_session_transaction_binding(subscriptions) {
+            return command_error(message);
+        }
+        let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
+            return command_error("COMMIT requires an active transaction".to_string());
+        };
+        let started = match self
+            .consensus
+            .start_transaction_commit(id.clone(), subscriptions.user.clone(), current_timestamp())
+            .await
+        {
+            Ok(transaction) => transaction,
+            Err(error) => return command_error(error.to_string()),
+        };
+        let finished = if started.statements.is_empty() {
+            self.consensus
+                .finish_empty_transaction_commit(id.clone(), current_timestamp())
+                .await
+                .map_err(|error| error.to_string())
+        } else {
+            self.execute_replicated_commit(&id).await
+        };
+        match finished {
+            Ok(transaction) => {
+                if matches!(transaction.state, TransactionState::Finished(_)) {
+                    self.release_session_transaction_binding(subscriptions);
+                }
+                transaction_commit_result(&transaction)
+            }
+            Err(error) => {
+                let mut result = command_error(format!(
+                    "transaction '{id}' commit remains in progress after an execution error: \
+                     {error}"
+                ));
+                if let Some(transaction) = self.consensus.current_transaction(&id).await {
+                    result.transaction = Some(transaction_status(&transaction));
+                }
+                result
+            }
+        }
+    }
+
+    async fn execute_replicated_commit(&self, id: &str) -> Result<ReplicatedTransaction, String> {
+        let _commit_execution = self.transaction_commit_execution.lock().await;
+        let mut wait = interval(Duration::from_millis(100));
+        let lease = loop {
+            tokio::task::consume_budget().await;
+            match self.transaction_executions.entry(id.to_string()) {
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    entry.insert(());
+                    break TransactionExecutionLease {
+                        executions: self.transaction_executions.clone(),
+                        id: id.to_string(),
+                    };
+                }
+                dashmap::mapref::entry::Entry::Occupied(_) => {
+                    if let Some(transaction) = self.consensus.current_transaction(id).await
+                        && matches!(transaction.state, TransactionState::Finished(_))
+                    {
+                        return Ok(transaction);
+                    }
+                    wait.tick().await;
+                }
+            }
+        };
+
+        let result = self.run_replicated_commit(id).await;
+        drop(lease);
+        result
+    }
+
+    async fn run_replicated_commit(&self, id: &str) -> Result<ReplicatedTransaction, String> {
+        self.registry
+            .synchronize_cluster_schedule(&self.consensus.current_schedule().await)
+            .map_err(|error| {
+                format!(
+                    "failed to synchronize registry before resuming transaction '{id}': {error}"
+                )
+            })?;
+        loop {
+            tokio::task::consume_budget().await;
+            if self.consensus.current_leader().await.as_deref()
+                != Some(self.consensus.local_node_id())
+            {
+                return Err("leadership changed while executing the commit".to_string());
+            }
+            let transaction = self
+                .consensus
+                .current_transaction(id)
+                .await
+                .ok_or_else(|| format!("transaction '{id}' is unknown"))?;
+            let progress = match &transaction.state {
+                TransactionState::Committing(progress) => progress,
+                TransactionState::Finished(_) => return Ok(transaction),
+                TransactionState::Open => {
+                    return Err(format!("transaction '{id}' is still open"));
+                }
+            };
+            let first_statement = progress.next_statement;
+            let Some(first) = transaction.statements.get(first_statement) else {
+                return self
+                    .consensus
+                    .finish_empty_transaction_commit(id.to_string(), current_timestamp())
+                    .await
+                    .map_err(|error| error.to_string());
+            };
+            self.recover_transaction_quiescence(&transaction, first_statement)
+                .await?;
+
+            if first.statement.is_model_mutation() {
+                let domain = first.domain.clone().ok_or_else(|| {
+                    format!(
+                        "transaction '{id}' model mutation at statement {} has no domain",
+                        first_statement.saturating_add(1)
+                    )
+                })?;
+                let mut statements = Vec::new();
+                let mut sources = Vec::new();
+                for queued in transaction.statements.iter().skip(first_statement) {
+                    if queued.domain.as_ref() != Some(&domain)
+                        || !queued.statement.is_model_mutation()
+                    {
+                        break;
+                    }
+                    statements.push(queued.statement.clone());
+                    sources.push(queued.source.clone());
+                }
+                let statement_count = statements.len();
+                let outcome = ParkingMutex::new(None);
+                let result = self
+                    .process_model_mutation_batch_with_transaction(
+                        statements,
+                        &sources.join("; "),
+                        domain.as_str(),
+                        Some(TransactionModelStepContext {
+                            transaction: &transaction,
+                            first_statement,
+                            statement_count,
+                            outcome: &outcome,
+                        }),
+                    )
+                    .await;
+                let recorded = outcome.lock().take();
+                let advanced = match recorded {
+                    Some(Ok(transaction)) => transaction,
+                    Some(Err(error)) => return Err(error),
+                    None if !result.success => {
+                        self.record_transaction_step(
+                            &transaction,
+                            first_statement,
+                            statement_count,
+                            result,
+                            None,
+                        )
+                        .await?
+                    }
+                    None => {
+                        return Err(format!(
+                            "transaction '{id}' model step completed without recording progress"
+                        ));
+                    }
+                };
+                self.pause_transaction_commit_if_armed(&advanced).await;
+                if matches!(advanced.state, TransactionState::Finished(_)) {
+                    return Ok(advanced);
+                }
+                continue;
+            }
+
+            let advanced = self
+                .execute_transaction_configuration_step(&transaction, first_statement)
+                .await?;
+            self.pause_transaction_commit_if_armed(&advanced).await;
+            if matches!(advanced.state, TransactionState::Finished(_)) {
+                return Ok(advanced);
+            }
+        }
+    }
+
+    async fn pause_transaction_commit_if_armed(&self, _transaction: &ReplicatedTransaction) {
+        #[cfg(feature = "testing")]
+        if let TransactionState::Committing(_) = _transaction.state {
+            self.runtime
+                .pause_transaction_commit_after_progress_if_armed(
+                    self.consensus.local_node_id(),
+                    _transaction.completed_statement_count(),
+                )
+                .await;
+        }
+    }
+
+    async fn recover_transaction_quiescence(
+        &self,
+        transaction: &ReplicatedTransaction,
+        current_statement: usize,
+    ) -> Result<(), String> {
+        let current_model_domain = transaction
+            .statements
+            .get(current_statement)
+            .filter(|statement| statement.statement.is_model_mutation())
+            .and_then(|statement| statement.domain.as_ref());
+        let mut completed_model_domains = BTreeSet::new();
+        for result in transaction.commit_results() {
+            tokio::task::consume_budget().await;
+            let Some(statements) = transaction.statements.get(
+                result.first_statement
+                    ..result
+                        .first_statement
+                        .saturating_add(result.statement_count),
+            ) else {
+                return Err(format!(
+                    "transaction '{}' has invalid recorded commit progress",
+                    transaction.id
+                ));
+            };
+            let Some(domain) = statements
+                .first()
+                .and_then(|statement| statement.domain.as_ref())
+            else {
+                continue;
+            };
+            if statements.iter().all(|statement| {
+                statement.statement.is_model_mutation() && statement.domain.as_ref() == Some(domain)
+            }) {
+                completed_model_domains.insert(domain.clone());
+            }
+        }
+        if let Some(domain) = current_model_domain {
+            completed_model_domains.remove(domain);
+        }
+        for domain in completed_model_domains {
+            tokio::task::consume_budget().await;
+            let Some(state) = self.consensus.current_domain(&domain).await else {
+                continue;
+            };
+            if let DomainStatus::Paused = state.status {
+                self.apply_current_cluster_state().await.map_err(|error| {
+                    format!(
+                        "failed to adopt transaction-owned pause in domain '{}': {error}",
+                        domain.as_str()
+                    )
+                })?;
+                self.wait_for_paused_domain_drain(&domain)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.resume_domain_after_alter(&domain)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_transaction_step(
+        &self,
+        transaction: &ReplicatedTransaction,
+        first_statement: usize,
+        statement_count: usize,
+        result: CommandResult,
+        effect: Option<TransactionStepEffect>,
+    ) -> Result<ReplicatedTransaction, String> {
+        let next_statement = first_statement.saturating_add(statement_count);
+        let completion = if result.success {
+            (next_statement == transaction.statements.len())
+                .then_some(TransactionOutcome::Committed)
+        } else {
+            Some(TransactionOutcome::Failed {
+                failing_step: first_statement,
+                error: result.message.clone(),
+            })
+        };
+        let effect = result.success.then_some(effect).flatten();
+        self.consensus
+            .advance_transaction_commit(TransactionCommitAdvance {
+                id: transaction.id.clone(),
+                expected_next_statement: first_statement,
+                next_statement,
+                at: current_timestamp(),
+                result: TransactionStepResult {
+                    first_statement,
+                    statement_count,
+                    result: replicated_command_result(&result),
+                },
+                effect,
+                completion,
+            })
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn execute_transaction_configuration_step(
+        &self,
+        transaction: &ReplicatedTransaction,
+        statement_index: usize,
+    ) -> Result<ReplicatedTransaction, String> {
+        let queued = transaction
+            .statements
+            .get(statement_index)
+            .expect("replicated commit progress must point to a statement");
+        let mut start_clock = None;
+        let mut stop_clock = None;
+        let (result, effect) = match &queued.statement {
+            Statement::CreateDomain(create) => {
+                if self.consensus.current_domain(&create.id).await.is_some() {
+                    if create.if_not_exists {
+                        (
+                            command_ok_already_existed(format!(
+                                "domain '{}' already exists",
+                                create.id.as_str()
+                            )),
+                            None,
+                        )
+                    } else {
+                        (
+                            command_error(format!(
+                                "domain '{}' already exists",
+                                create.id.as_str()
+                            )),
+                            None,
+                        )
+                    }
+                } else if let Err(message) = validate_domain_config(&create.config) {
+                    (command_error(message), None)
+                } else {
+                    let state = DomainState {
+                        id: create.id.clone(),
+                        config: create.config.clone(),
+                        status: DomainStatus::Stopped,
+                        start_version: 0,
+                        last_start: DomainStartPoint::Resume,
+                        clock: None,
+                    };
+                    (
+                        command_ok(format!("created domain '{}'", create.id.as_str())),
+                        Some(TransactionStepEffect::PutDomain {
+                            domain: Box::new(state),
+                        }),
+                    )
+                }
+            }
+            Statement::AlterDomain(alter) => {
+                let Some(domain_id) = queued.domain.as_ref() else {
+                    return self
+                        .record_transaction_step(
+                            transaction,
+                            statement_index,
+                            1,
+                            command_error("no active domain selected".to_string()),
+                            None,
+                        )
+                        .await;
+                };
+                let Some(previous) = self.consensus.current_domain(domain_id).await else {
+                    return self
+                        .record_transaction_step(
+                            transaction,
+                            statement_index,
+                            1,
+                            command_error(format!(
+                                "domain '{}' does not exist",
+                                domain_id.as_str()
+                            )),
+                            None,
+                        )
+                        .await;
+                };
+                if let DomainStatus::Paused = previous.status {
+                    (
+                        command_error(format!(
+                            "domain '{}' is paused by a model alteration",
+                            domain_id.as_str()
+                        )),
+                        None,
+                    )
+                } else if previous.config.placement == alter.policy {
+                    (
+                        command_ok(format!(
+                            "domain '{}' placement is already {}; planned relocations: 0",
+                            domain_id.as_str(),
+                            alter.policy.as_ref()
+                        )),
+                        None,
+                    )
+                } else {
+                    let graph = self.registry.active_graph(domain_id);
+                    let expected_schedule = self
+                        .consensus
+                        .current_schedule()
+                        .await
+                        .domain(domain_id)
+                        .cloned();
+                    let (schedule, relocations) = self
+                        .prepare_domain_schedule(domain_id, graph, alter.policy)
+                        .await?;
+                    let mut next = previous.clone();
+                    next.config.placement = alter.policy;
+                    (
+                        command_ok(format!(
+                            "set domain '{}' placement to {}; planned relocations: {relocations}",
+                            domain_id.as_str(),
+                            alter.policy.as_ref()
+                        )),
+                        Some(TransactionStepEffect::PutDomainAndSchedule {
+                            expected_domain: Box::new(previous),
+                            expected_schedule: expected_schedule.map(Box::new),
+                            domain: Box::new(next),
+                            schedule: schedule.map(Box::new),
+                        }),
+                    )
+                }
+            }
+            Statement::CreateUser(create) => {
+                if self.consensus.current_user(&create.name).await.is_some() {
+                    if create.if_not_exists {
+                        (
+                            command_ok_already_existed(format!(
+                                "user '{}' already exists",
+                                create.name.as_str()
+                            )),
+                            None,
+                        )
+                    } else {
+                        (
+                            command_error(format!(
+                                "user '{}' already exists",
+                                create.name.as_str()
+                            )),
+                            None,
+                        )
+                    }
+                } else {
+                    match user_credentials(create.name.clone(), create.password.clone()).await {
+                        Ok(user) => (
+                            command_ok(format!("created user '{}'", create.name.as_str())),
+                            Some(TransactionStepEffect::CreateUser {
+                                user: Box::new(user),
+                            }),
+                        ),
+                        Err(error) => (
+                            command_error(format!(
+                                "failed to hash password for user '{}': {error}",
+                                create.name.as_str()
+                            )),
+                            None,
+                        ),
+                    }
+                }
+            }
+            Statement::CreateResource(create) => {
+                let resources = self.consensus.current_resources().await;
+                if resources
+                    .next_version_by_identifier
+                    .iter()
+                    .any(|(identifier, _)| identifier == &create.identifier)
+                {
+                    if create.if_not_exists {
+                        (
+                            command_ok_already_existed(format!(
+                                "resource '{}' already exists",
+                                create.identifier.as_str()
+                            )),
+                            None,
+                        )
+                    } else {
+                        (
+                            command_error(format!(
+                                "resource '{}' already exists",
+                                create.identifier.as_str()
+                            )),
+                            None,
+                        )
+                    }
+                } else {
+                    (
+                        command_ok(format!("created resource '{}'", create.identifier.as_str())),
+                        Some(TransactionStepEffect::CreateResourceCatalog {
+                            identifier: create.identifier.to_string(),
+                        }),
+                    )
+                }
+            }
+            Statement::StartDomain(start) => {
+                let Some(domain_id) = queued.domain.as_ref() else {
+                    return self
+                        .record_transaction_step(
+                            transaction,
+                            statement_index,
+                            1,
+                            command_error("no active domain selected".to_string()),
+                            None,
+                        )
+                        .await;
+                };
+                let Some(domain) = self.consensus.current_domain(domain_id).await else {
+                    return self
+                        .record_transaction_step(
+                            transaction,
+                            statement_index,
+                            1,
+                            command_error(format!(
+                                "domain '{}' does not exist",
+                                domain_id.as_str()
+                            )),
+                            None,
+                        )
+                        .await;
+                };
+                if let Err(message) = validate_domain_config(&domain.config) {
+                    (command_error(message), None)
+                } else if let DomainStatus::Running = domain.status {
+                    (
+                        command_error(format!(
+                            "domain '{}' is already running",
+                            domain_id.as_str()
+                        )),
+                        None,
+                    )
+                } else if let DomainStatus::Paused = domain.status {
+                    (
+                        command_error(format!(
+                            "domain '{}' is paused for a model alteration",
+                            domain_id.as_str()
+                        )),
+                        None,
+                    )
+                } else {
+                    match parse_start_point(&start.start) {
+                        Ok((mut logical_start, time_rate)) => {
+                            if let DomainPace::Paced = domain.config.pace
+                                && let DomainStartPoint::Resume = &start.start
+                                && let Ok(Some(resume_at)) =
+                                    self.runtime.current_paced_domain_time(domain_id)
+                            {
+                                logical_start = resume_at;
+                            }
+                            let wall_started_at = current_timestamp();
+                            let concrete_start = match &start.start {
+                                DomainStartPoint::Resume => DomainStartPoint::Resume,
+                                DomainStartPoint::Now { .. } => DomainStartPoint::At {
+                                    timestamp: logical_start.as_datetime().to_rfc3339(),
+                                    time_rate: time_rate.clone(),
+                                },
+                                DomainStartPoint::At { .. } => start.start.clone(),
+                            };
+                            if let DomainPace::Paced = domain.config.pace {
+                                start_clock = Some((
+                                    domain_id.clone(),
+                                    wall_started_at,
+                                    logical_start,
+                                    time_rate.clone(),
+                                    domain.start_version.saturating_add(1),
+                                ));
+                            }
+                            (
+                                command_ok(format!("starting domain '{}'", domain_id.as_str())),
+                                Some(TransactionStepEffect::StartDomain {
+                                    domain_id: domain_id.clone(),
+                                    expected_start_version: domain.start_version,
+                                    start: concrete_start,
+                                    clock: matches!(domain.config.pace, DomainPace::Paced).then(
+                                        || DomainClockState {
+                                            wall_started_at,
+                                            logical_start,
+                                            time_rate: time_rate.clone(),
+                                        },
+                                    ),
+                                }),
+                            )
+                        }
+                        Err(message) => (command_error(message), None),
+                    }
+                }
+            }
+            Statement::StopDomain(_) => {
+                let Some(domain_id) = queued.domain.as_ref() else {
+                    return self
+                        .record_transaction_step(
+                            transaction,
+                            statement_index,
+                            1,
+                            command_error("no active domain selected".to_string()),
+                            None,
+                        )
+                        .await;
+                };
+                let Some(domain) = self.consensus.current_domain(domain_id).await else {
+                    return self
+                        .record_transaction_step(
+                            transaction,
+                            statement_index,
+                            1,
+                            command_error(format!(
+                                "domain '{}' does not exist",
+                                domain_id.as_str()
+                            )),
+                            None,
+                        )
+                        .await;
+                };
+                if let DomainStatus::Stopped = domain.status {
+                    (
+                        command_error(format!(
+                            "domain '{}' is already stopped",
+                            domain_id.as_str()
+                        )),
+                        None,
+                    )
+                } else {
+                    if let DomainPace::Paced = domain.config.pace {
+                        stop_clock = Some((domain_id.clone(), domain.start_version));
+                    }
+                    (
+                        command_ok(format!("stopped domain '{}'", domain_id.as_str())),
+                        Some(TransactionStepEffect::StopDomain {
+                            domain_id: domain_id.clone(),
+                            expected_start_version: domain.start_version,
+                        }),
+                    )
+                }
+            }
+            _ => (
+                command_error(format!(
+                    "{} is not valid transaction content",
+                    transaction_statement_label(&queued.statement)
+                )),
+                None,
+            ),
+        };
+
+        let succeeded = result.success;
+        let advanced = self
+            .record_transaction_step(transaction, statement_index, 1, result, effect)
+            .await?;
+        if succeeded {
+            if let Err(error) = self.apply_current_cluster_state().await {
+                self.broadcast_error(format!(
+                    "failed to reconcile runtime after transaction '{}' step {}: {error}",
+                    transaction.id,
+                    statement_index.saturating_add(1)
+                ));
+            }
+            if let Some((domain_id, wall_started_at, logical_start, time_rate, start_version)) =
+                start_clock
+            {
+                self.runtime.handle_domain_clock_start(
+                    &domain_id,
+                    logical_start,
+                    wall_started_at,
+                    &time_rate,
+                );
+                if let Err(error) = self
+                    .start_domain_clock(
+                        domain_id.clone(),
+                        wall_started_at,
+                        logical_start,
+                        time_rate,
+                    )
+                    .await
+                {
+                    self.broadcast_error(error);
+                } else {
+                    self.domain_clock_reconciliations
+                        .insert(domain_id, (start_version, true));
+                }
+            }
+            if let Some((domain_id, start_version)) = stop_clock {
+                if let Err(error) = self.stop_domain_clock(&domain_id).await {
+                    self.broadcast_error(error);
+                } else {
+                    self.domain_clock_reconciliations
+                        .insert(domain_id.clone(), (start_version, false));
+                }
+                self.runtime.handle_domain_clock_stop(&domain_id);
+            }
+        }
+        Ok(advanced)
+    }
+
+    async fn reconcile_transactions_once(&self) {
+        if self.consensus.current_leader().await.as_deref() != Some(self.consensus.local_node_id())
+        {
+            return;
+        }
+        let now = current_timestamp();
+        let idle_before = subtract_timestamp_duration(now, self.transaction_idle_timeout);
+        let finished_before =
+            subtract_timestamp_duration(now, self.transaction_tombstone_retention);
+        let transactions = self.consensus.current_transactions().await;
+
+        for transaction in transactions.values() {
+            tokio::task::consume_budget().await;
+            match &transaction.state {
+                TransactionState::Open
+                    if !self.transaction_bindings.contains_key(&transaction.id)
+                        && transaction.last_activity_at <= idle_before =>
+                {
+                    match self
+                        .consensus
+                        .expire_transaction(transaction.id.clone(), now, idle_before)
+                        .await
+                    {
+                        Ok(expired)
+                            if matches!(
+                                expired.finished_outcome(),
+                                Some(TransactionOutcome::Expired)
+                            ) =>
+                        {
+                            self.transaction_bindings.remove(&transaction.id);
+                            info!(
+                                transaction_id = transaction.id,
+                                owner = transaction.owner.as_str(),
+                                "expired orphaned NSPL transaction"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(
+                                transaction_id = transaction.id,
+                                error = %error,
+                                "failed to expire orphaned NSPL transaction"
+                            );
+                        }
+                    }
+                }
+                TransactionState::Committing(_) => {
+                    if let Err(error) = self.execute_replicated_commit(&transaction.id).await {
+                        warn!(
+                            transaction_id = transaction.id,
+                            error, "failed to resume replicated NSPL commit"
+                        );
+                    }
+                }
+                TransactionState::Finished(_) => {
+                    self.transaction_bindings.remove(&transaction.id);
+                }
+                TransactionState::Open => {}
+            }
+        }
+        if let Err(error) = self
+            .consensus
+            .remove_finished_transactions(finished_before)
+            .await
+        {
+            warn!(error = %error, "failed to remove expired transaction tombstones");
         }
     }
 
@@ -7570,6 +8743,17 @@ impl SessionServiceImpl {
         query: &str,
         request_domain: &str,
     ) -> CommandResult {
+        self.process_model_mutation_batch_with_transaction(statements, query, request_domain, None)
+            .await
+    }
+
+    async fn process_model_mutation_batch_with_transaction(
+        &self,
+        statements: Vec<Statement>,
+        query: &str,
+        request_domain: &str,
+        transaction_step: Option<TransactionModelStepContext<'_>>,
+    ) -> CommandResult {
         let domain = match parse_request_domain(request_domain) {
             Ok(domain) => domain,
             Err(RequestDomainError::Missing) => {
@@ -7599,7 +8783,11 @@ impl SessionServiceImpl {
         let Some(domain_state) = self.consensus.current_domain(&domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
-        if let DomainStatus::Paused = domain_state.status {
+        let adopted_domain_pause =
+            matches!(domain_state.status, DomainStatus::Paused) && transaction_step.is_some();
+        if let DomainStatus::Paused = domain_state.status
+            && !adopted_domain_pause
+        {
             return command_error(format!(
                 "domain '{}' is paused by a model alteration",
                 domain.as_str()
@@ -7831,6 +9019,7 @@ impl SessionServiceImpl {
             }
         }
 
+        let mut completed_result = None;
         if !mutations.is_empty() {
             let error_target = applied
                 .first()
@@ -7867,6 +9056,37 @@ impl SessionServiceImpl {
             let is_noop = planned.is_noop();
             let mut cluster_entity_gate = None;
             let mut planned_relocations = 0usize;
+            let transaction_schedule = if !is_noop && transaction_step.is_some() {
+                #[cfg(feature = "testing")]
+                if self.runtime.take_armed_schedule_publication_fault(&domain) {
+                    return command_error(format!(
+                        "injected schedule publication fault for domain '{}'",
+                        domain.as_str()
+                    ));
+                }
+                let expected_schedule = self
+                    .consensus
+                    .current_schedule()
+                    .await
+                    .domain(&domain)
+                    .cloned();
+                match self
+                    .prepare_domain_schedule(
+                        &domain,
+                        planned.candidate_graph(),
+                        domain_state.config.placement,
+                    )
+                    .await
+                {
+                    Ok((schedule, relocations)) => {
+                        planned_relocations = relocations;
+                        Some((expected_schedule, schedule))
+                    }
+                    Err(error) => return command_error(error),
+                }
+            } else {
+                None
+            };
 
             if is_noop {
                 info!(
@@ -7877,6 +9097,7 @@ impl SessionServiceImpl {
             }
             if !is_noop
                 && requires_domain_pause
+                && !adopted_domain_pause
                 && let Err(error) = self.pause_and_drain_domain_for_alter(&domain).await
             {
                 return command_error(error.to_string());
@@ -7948,7 +9169,73 @@ impl SessionServiceImpl {
                         .install_prepared_domain_udfs(&domain, prepared_udfs);
                 }
 
-                if let Err(err) = self
+                if let Some(transaction_step) = transaction_step.as_ref() {
+                    let step_result = model_mutation_success_result(
+                        &results,
+                        &applied,
+                        classified_level,
+                        planned_relocations,
+                    );
+                    let effect = TransactionStepEffect::ReplaceDomainSchedule {
+                        domain: domain.clone(),
+                        expected_schedule: transaction_schedule
+                            .as_ref()
+                            .expect("transaction model mutation must prepare a schedule")
+                            .0
+                            .clone()
+                            .map(Box::new),
+                        schedule: transaction_schedule
+                            .clone()
+                            .expect("transaction model mutation must prepare a schedule")
+                            .1
+                            .map(Box::new),
+                    };
+                    match self
+                        .record_transaction_step(
+                            transaction_step.transaction,
+                            transaction_step.first_statement,
+                            transaction_step.statement_count,
+                            step_result,
+                            Some(effect),
+                        )
+                        .await
+                    {
+                        Ok(transaction) => {
+                            *transaction_step.outcome.lock() = Some(Ok(transaction));
+                            if let Err(error) = self.apply_current_cluster_state().await {
+                                self.broadcast_error(format!(
+                                    "failed to reconcile committed transaction model step in \
+                                     domain '{}': {error}",
+                                    domain.as_str()
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(gate) = cluster_entity_gate.take() {
+                                self.release_cluster_entity_gates(gate).await;
+                            }
+                            let rollback_error = rollback_plan
+                                .take()
+                                .and_then(|plan| self.registry.rollback_committed(plan).err())
+                                .map(|rollback| rollback.to_string());
+                            if requires_domain_pause {
+                                let _ = self.resume_domain_after_alter(&domain).await;
+                            }
+                            let error = match rollback_error {
+                                Some(rollback) => format!(
+                                    "{error}; local registry rollback also failed: {rollback}"
+                                ),
+                                None => error,
+                            };
+                            *transaction_step.outcome.lock() = Some(Err(error.clone()));
+                            return command_error(format!(
+                                "failed to atomically publish transaction model step for domain \
+                                 '{}': {error}",
+                                domain.as_str()
+                            ));
+                        }
+                    }
+                } else if let Err(err) = self
                     .publish_domain_schedule(&domain, runtime_changes.graph.clone())
                     .await
                     .map(|relocations| planned_relocations = relocations)
@@ -7995,24 +9282,47 @@ impl SessionServiceImpl {
 
                 if requires_domain_pause {
                     if let Err(error) = self.wait_for_paused_domain_drain(&domain).await {
-                        if let Some(rollback_plan) = rollback_plan.take()
-                            && let Err(rollback_error) = self
-                                .rollback_model_alteration(&domain, rollback_plan, classified_level)
-                                .await
-                        {
-                            return command_error(format!("{error}; {rollback_error}"));
+                        if transaction_step.is_some() {
+                            self.broadcast_error(format!(
+                                "committed transaction model step in domain '{}' is waiting for \
+                                 quiescence recovery: {error}",
+                                domain.as_str()
+                            ));
+                        } else {
+                            if let Some(rollback_plan) = rollback_plan.take()
+                                && let Err(rollback_error) = self
+                                    .rollback_model_alteration(
+                                        &domain,
+                                        rollback_plan,
+                                        classified_level,
+                                    )
+                                    .await
+                            {
+                                return command_error(format!("{error}; {rollback_error}"));
+                            }
+                            return command_error(error.to_string());
                         }
-                        return command_error(error.to_string());
                     }
                     if let Err(error) = self.resume_domain_after_alter(&domain).await {
-                        if let Some(rollback_plan) = rollback_plan.take()
-                            && let Err(rollback_error) = self
-                                .rollback_model_alteration(&domain, rollback_plan, classified_level)
-                                .await
-                        {
-                            return command_error(format!("{error}; {rollback_error}"));
+                        if transaction_step.is_some() {
+                            self.broadcast_error(format!(
+                                "failed to release transaction-owned pause in domain '{}': {error}",
+                                domain.as_str()
+                            ));
+                        } else {
+                            if let Some(rollback_plan) = rollback_plan.take()
+                                && let Err(rollback_error) = self
+                                    .rollback_model_alteration(
+                                        &domain,
+                                        rollback_plan,
+                                        classified_level,
+                                    )
+                                    .await
+                            {
+                                return command_error(format!("{error}; {rollback_error}"));
+                            }
+                            return command_error(error.to_string());
                         }
-                        return command_error(error.to_string());
                     }
                 }
             }
@@ -8023,35 +9333,42 @@ impl SessionServiceImpl {
             if refresh_http_tls && let Err(error) = self.refresh_http_tls_server_config().await {
                 self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
             }
-            let mut first_applied = true;
-            for (index, _, mut message) in applied {
-                if first_applied {
-                    message.push_str(&format!("; quiesce level: {}", classified_level.as_str()));
-                    message.push_str(&format!("; planned relocations: {planned_relocations}"));
-                    first_applied = false;
-                }
-                results[index] = Some(CommandResult {
-                    success: true,
-                    message,
-                    diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
-                    ..Default::default()
-                });
-            }
+            completed_result = Some(model_mutation_success_result(
+                &results,
+                &applied,
+                classified_level,
+                planned_relocations,
+            ));
         }
 
-        let results = results
-            .into_iter()
-            .map(|result| result.expect("every mutation statement must produce a command result"))
-            .collect::<Vec<_>>();
-        CommandResult {
-            success: true,
-            message: command_results_message(&results),
-            diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
-            results,
-            ..Default::default()
+        let result = completed_result.unwrap_or_else(|| {
+            model_mutation_success_result(&results, &applied, QuiesceLevel::Dynamic, 0)
+        });
+        if let Some(transaction_step) = transaction_step
+            && transaction_step.outcome.lock().is_none()
+        {
+            match self
+                .record_transaction_step(
+                    transaction_step.transaction,
+                    transaction_step.first_statement,
+                    transaction_step.statement_count,
+                    result.clone(),
+                    None,
+                )
+                .await
+            {
+                Ok(transaction) => {
+                    *transaction_step.outcome.lock() = Some(Ok(transaction));
+                }
+                Err(error) => {
+                    *transaction_step.outcome.lock() = Some(Err(error.clone()));
+                    return command_error(format!(
+                        "failed to record transaction model step progress: {error}"
+                    ));
+                }
+            }
         }
+        result
     }
 
     async fn process_client_statement(
@@ -8350,7 +9667,45 @@ impl SessionServiceImpl {
                 kind: CommandResultKind::Ok as i32,
                 ..Default::default()
             },
+            Statement::ShowTransactions(_) => self.show_transactions().await,
         }
+    }
+
+    async fn show_transactions(&self) -> CommandResult {
+        let now = current_timestamp();
+        let transactions = self.consensus.current_transactions().await;
+        let message = if transactions.is_empty() {
+            "no transactions".to_string()
+        } else {
+            transactions
+                .values()
+                .map(|transaction| {
+                    let age = now
+                        .as_datetime()
+                        .signed_duration_since(*transaction.created_at.as_datetime())
+                        .to_std()
+                        .unwrap_or_default();
+                    let idle = now
+                        .as_datetime()
+                        .signed_duration_since(*transaction.last_activity_at.as_datetime())
+                        .to_std()
+                        .unwrap_or_default();
+                    format!(
+                        "id={} owner={} state={} pending={} progress={}/{} age={} idle={}",
+                        transaction.id,
+                        transaction.owner.as_str(),
+                        transaction.state.as_str(),
+                        transaction.pending_statement_count(),
+                        transaction.completed_statement_count(),
+                        transaction.statement_count,
+                        humantime::format_duration(age),
+                        humantime::format_duration(idle),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        command_ok(message)
     }
 
     async fn handle_web_console_resource_upload(
@@ -8537,6 +9892,12 @@ impl SessionServiceImpl {
                     "active domain requests are handled by the websocket session".to_string(),
                 )
             }
+            Some(proto::session_request::Request::AttachTransaction(request)) => {
+                let result = self.attach_transaction(request, subscriptions).await;
+                SessionResponse {
+                    event: Some(proto::session_response::Event::Result(result)),
+                }
+            }
             None => {
                 web_console_server_error_response("session request payload is missing".to_string())
             }
@@ -8578,10 +9939,14 @@ impl SessionServiceImpl {
                 true
             })
         {
-            return command_with_transaction_state(
-                command_error("UPLOAD RESOURCE is not supported in the web console".to_string()),
-                subscriptions.transaction_active(),
-            );
+            return self
+                .command_with_transaction_status(
+                    command_error(
+                        "UPLOAD RESOURCE is not supported in the web console".to_string(),
+                    ),
+                    subscriptions,
+                )
+                .await;
         }
 
         self.process_command(req, tx, subscriptions).await
@@ -8640,6 +10005,7 @@ impl SessionServiceImpl {
             status: DomainStatus::Stopped,
             start_version: 0,
             last_start: DomainStartPoint::Resume,
+            clock: None,
         };
         match self.consensus.put_domain(state).await {
             Ok(()) => {
@@ -8955,10 +10321,16 @@ impl SessionServiceImpl {
                 domain_id.as_str()
             ));
         }
-        let (logical_start, time_rate) = match parse_start_point(&start.start) {
+        let (mut logical_start, time_rate) = match parse_start_point(&start.start) {
             Ok(value) => value,
             Err(message) => return command_error(message),
         };
+        if let DomainPace::Paced = domain.config.pace
+            && let DomainStartPoint::Resume = &start.start
+            && let Ok(Some(resume_at)) = self.runtime.current_paced_domain_time(domain_id)
+        {
+            logical_start = resume_at;
+        }
         let wall_started_at = current_timestamp();
         let concrete_start = match &start.start {
             DomainStartPoint::Resume => DomainStartPoint::Resume,
@@ -8970,7 +10342,15 @@ impl SessionServiceImpl {
         };
         match self
             .consensus
-            .start_domain(domain_id.clone(), concrete_start)
+            .start_domain(
+                domain_id.clone(),
+                concrete_start,
+                matches!(domain.config.pace, DomainPace::Paced).then(|| DomainClockState {
+                    wall_started_at,
+                    logical_start,
+                    time_rate: time_rate.clone(),
+                }),
+            )
             .await
         {
             Ok(()) => {
@@ -9003,6 +10383,12 @@ impl SessionServiceImpl {
                     let _ = self.consensus.stop_domain(domain_id.clone()).await;
                     return command_error(message);
                 }
+                if let DomainPace::Paced = domain.config.pace {
+                    self.domain_clock_reconciliations.insert(
+                        domain_id.clone(),
+                        (domain.start_version.saturating_add(1), true),
+                    );
+                }
                 command_ok(format!("starting domain '{}'", domain_id.as_str()))
             }
             Err(error) => command_error(format!(
@@ -9029,6 +10415,8 @@ impl SessionServiceImpl {
         }
         if let DomainPace::Paced = domain.config.pace {
             self.runtime.handle_domain_clock_stop(domain_id);
+            self.domain_clock_reconciliations
+                .insert(domain_id.clone(), (domain.start_version, false));
         }
         match self.consensus.stop_domain(domain_id.clone()).await {
             Ok(()) => {
@@ -9495,12 +10883,6 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         }
-        let live_node_ids = self.cluster.live_node_ids().await;
-        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
-        let cluster_nodes = self
-            .consensus
-            .schedulable_live_voter_ids(live_node_ids)
-            .await;
         let default_policy = self
             .consensus
             .current_domain(domain)
@@ -9508,34 +10890,9 @@ impl SessionServiceImpl {
             .ok_or_else(|| format!("domain '{}' does not exist", domain.as_str()))?
             .config
             .placement;
-        let current = self.consensus.current_schedule().await;
-        let schedule = match graph {
-            Some(graph) => {
-                #[cfg(feature = "testing")]
-                let mut schedule = graph.schedule_for_domain_with_mode(
-                    domain,
-                    &cluster_nodes,
-                    self.replica_count,
-                    default_policy,
-                    self.scheduler_mode,
-                );
-                #[cfg(not(feature = "testing"))]
-                let mut schedule = graph.schedule_for_domain(
-                    domain,
-                    &cluster_nodes,
-                    self.replica_count,
-                    default_policy,
-                );
-                Self::merge_existing_schedule_data(
-                    &mut schedule,
-                    current.domain(domain),
-                    &live_voters,
-                );
-                Some(schedule)
-            }
-            None => None,
-        };
-        let relocations = planned_relocation_count(current.domain(domain), schedule.as_ref());
+        let (schedule, relocations) = self
+            .prepare_domain_schedule(domain, graph, default_policy)
+            .await?;
         self.consensus
             .replace_domain_schedule(domain.clone(), schedule)
             .await
@@ -9547,6 +10904,49 @@ impl SessionServiceImpl {
             )
         })?;
         Ok(relocations)
+    }
+
+    async fn prepare_domain_schedule(
+        &self,
+        domain: &Domain,
+        graph: Option<ActiveGraph>,
+        placement: PlacementPolicy,
+    ) -> Result<(Option<nervix_models::DomainSchedule>, usize), String> {
+        let live_node_ids = self.cluster.live_node_ids().await;
+        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+        let cluster_nodes = self
+            .consensus
+            .schedulable_live_voter_ids(live_node_ids)
+            .await;
+        let current = self.consensus.current_schedule().await;
+        let schedule = match graph {
+            Some(graph) => {
+                #[cfg(feature = "testing")]
+                let mut schedule = graph.schedule_for_domain_with_mode(
+                    domain,
+                    &cluster_nodes,
+                    self.replica_count,
+                    placement,
+                    self.scheduler_mode,
+                );
+                #[cfg(not(feature = "testing"))]
+                let mut schedule = graph.schedule_for_domain(
+                    domain,
+                    &cluster_nodes,
+                    self.replica_count,
+                    placement,
+                );
+                Self::merge_existing_schedule_data(
+                    &mut schedule,
+                    current.domain(domain),
+                    &live_voters,
+                );
+                Some(schedule)
+            }
+            None => None,
+        };
+        let relocations = planned_relocation_count(current.domain(domain), schedule.as_ref());
+        Ok((schedule, relocations))
     }
 
     async fn drop_node(&self, node_id: String) -> CommandResult {
@@ -12862,6 +14262,7 @@ fn requires_request_domain(statement: &Statement) -> bool {
             | Statement::CreateUser(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
+            | Statement::ShowTransactions(_)
             | Statement::DropNode(_)
             | Statement::CordonNode(_)
             | Statement::UncordonNode(_)
@@ -12876,6 +14277,7 @@ fn requires_existing_domain(statement: &Statement) -> bool {
             | Statement::CreateUser(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
+            | Statement::ShowTransactions(_)
             | Statement::DropNode(_)
             | Statement::CordonNode(_)
             | Statement::UncordonNode(_)
@@ -12891,6 +14293,7 @@ fn requires_leader(statement: &Statement) -> bool {
     !matches!(
         statement,
         Statement::ShowClusterStatus(_)
+            | Statement::ShowTransactions(_)
             | Statement::DescribeResource(_)
             | Statement::DescribeDomain(_)
             | Statement::DescribeEndpoint(_)
@@ -12958,6 +14361,15 @@ fn parse_start_point(start: &DomainStartPoint) -> Result<(Timestamp, String), St
 
 fn current_timestamp() -> Timestamp {
     Timestamp::now()
+}
+
+fn subtract_timestamp_duration(timestamp: Timestamp, duration: Duration) -> Timestamp {
+    let delta = TimeDelta::from_std(duration).unwrap_or(TimeDelta::MAX);
+    timestamp
+        .into_datetime()
+        .checked_sub_signed(delta)
+        .map(Timestamp::from)
+        .unwrap_or(Timestamp::from_datetime(chrono::DateTime::UNIX_EPOCH))
 }
 
 async fn hash_password(password: String) -> Result<String, String> {
@@ -13086,6 +14498,7 @@ fn command_batch_result(
         return result;
     }
 
+    let transaction = result.transaction.clone();
     append_command_result(&mut previous_results, result);
     let success = previous_results.iter().all(|result| result.success);
     CommandResult {
@@ -13104,6 +14517,7 @@ fn command_batch_result(
                 .unwrap_or(CommandResultKind::Error as i32)
         },
         results: previous_results,
+        transaction,
         ..Default::default()
     }
 }
@@ -13114,6 +14528,43 @@ fn command_results_message(results: &[CommandResult]) -> String {
         .map(|result| result.message.as_str())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn model_mutation_success_result(
+    existing_results: &[Option<CommandResult>],
+    applied: &[(usize, Identifier, String)],
+    classified_level: QuiesceLevel,
+    planned_relocations: usize,
+) -> CommandResult {
+    let mut results = existing_results.to_vec();
+    let mut first_applied = true;
+    for (index, _, base_message) in applied {
+        let mut message = base_message.clone();
+        if first_applied {
+            message.push_str(&format!("; quiesce level: {}", classified_level.as_str()));
+            message.push_str(&format!("; planned relocations: {planned_relocations}"));
+            first_applied = false;
+        }
+        results[*index] = Some(CommandResult {
+            success: true,
+            message,
+            diagnostics: Vec::new(),
+            kind: CommandResultKind::Ok as i32,
+            ..Default::default()
+        });
+    }
+    let results = results
+        .into_iter()
+        .map(|result| result.expect("every mutation statement must produce a command result"))
+        .collect::<Vec<_>>();
+    CommandResult {
+        success: true,
+        message: command_results_message(&results),
+        diagnostics: Vec::new(),
+        kind: CommandResultKind::Ok as i32,
+        results,
+        ..Default::default()
+    }
 }
 
 fn command_error(message: String) -> CommandResult {
@@ -13130,9 +14581,177 @@ fn command_error(message: String) -> CommandResult {
     }
 }
 
-fn command_with_transaction_state(mut result: CommandResult, active: bool) -> CommandResult {
-    result.transaction_active = Some(active);
+fn transaction_status(transaction: &ReplicatedTransaction) -> ApiTransactionStatus {
+    let (state, error, failing_step) = match &transaction.state {
+        TransactionState::Open => (ApiTransactionState::Open, String::new(), None),
+        TransactionState::Committing(_) => (ApiTransactionState::Committing, String::new(), None),
+        TransactionState::Finished(finished) => match &finished.outcome {
+            TransactionOutcome::Committed => (ApiTransactionState::Committed, String::new(), None),
+            TransactionOutcome::Failed {
+                failing_step,
+                error,
+            } => (
+                ApiTransactionState::Failed,
+                error.clone(),
+                u64::try_from(failing_step.saturating_add(1)).ok(),
+            ),
+            TransactionOutcome::Reverted => (ApiTransactionState::Reverted, String::new(), None),
+            TransactionOutcome::Expired => (ApiTransactionState::Expired, String::new(), None),
+        },
+    };
+    ApiTransactionStatus {
+        id: transaction.id.clone(),
+        state: state as i32,
+        pending_count: u64::try_from(transaction.pending_statement_count()).unwrap_or(u64::MAX),
+        completed_count: u64::try_from(transaction.completed_statement_count()).unwrap_or(u64::MAX),
+        total_count: u64::try_from(transaction.statement_count).unwrap_or(u64::MAX),
+        error,
+        failing_step,
+    }
+}
+
+fn replicated_command_result(result: &CommandResult) -> TransactionCommandResult {
+    TransactionCommandResult {
+        success: result.success,
+        message: result.message.clone(),
+        diagnostics: result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| TransactionDiagnostic {
+                message: diagnostic.message.clone(),
+                span_start: diagnostic.span_start,
+                span_end: diagnostic.span_end,
+            })
+            .collect(),
+        already_existed: result.already_existed,
+        results: result
+            .results
+            .iter()
+            .map(replicated_command_result)
+            .collect(),
+    }
+}
+
+fn command_result_from_replicated(result: &TransactionCommandResult) -> CommandResult {
+    CommandResult {
+        success: result.success,
+        message: result.message.clone(),
+        diagnostics: result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| Diagnostic {
+                message: diagnostic.message.clone(),
+                span_start: diagnostic.span_start,
+                span_end: diagnostic.span_end,
+            })
+            .collect(),
+        kind: if result.success {
+            CommandResultKind::Ok as i32
+        } else {
+            CommandResultKind::Error as i32
+        },
+        already_existed: result.already_existed,
+        results: result
+            .results
+            .iter()
+            .map(command_result_from_replicated)
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResult {
+    let mut results = Vec::new();
+    for step in transaction.commit_results() {
+        append_command_result(&mut results, command_result_from_replicated(&step.result));
+    }
+    let success = matches!(
+        transaction.finished_outcome(),
+        Some(TransactionOutcome::Committed)
+    );
+    let message = if results.is_empty() && success {
+        "transaction committed: 0 commands".to_string()
+    } else if results.is_empty() {
+        transaction
+            .finished_outcome()
+            .map(|outcome| format!("transaction finished with outcome {}", outcome.as_str()))
+            .unwrap_or_else(|| "transaction commit is still in progress".to_string())
+    } else {
+        command_results_message(&results)
+    };
+    let diagnostics = results
+        .last()
+        .map(|result| result.diagnostics.clone())
+        .unwrap_or_default();
+    let mut result = CommandResult {
+        success,
+        message,
+        diagnostics,
+        kind: if success {
+            CommandResultKind::Ok as i32
+        } else {
+            CommandResultKind::Error as i32
+        },
+        results,
+        ..Default::default()
+    };
+    result.transaction = Some(transaction_status(transaction));
     result
+}
+
+fn is_queueable_transaction_statement(statement: &Statement) -> bool {
+    statement.is_model_mutation()
+        || matches!(
+            statement,
+            Statement::CreateDomain(_)
+                | Statement::AlterDomain(_)
+                | Statement::StartDomain(_)
+                | Statement::StopDomain(_)
+                | Statement::CreateUser(_)
+                | Statement::CreateResource(_)
+        )
+}
+
+fn transaction_statement_requires_domain(statement: &Statement) -> bool {
+    statement.is_model_mutation()
+        || matches!(
+            statement,
+            Statement::AlterDomain(_) | Statement::StartDomain(_) | Statement::StopDomain(_)
+        )
+}
+
+fn transaction_statement_label(statement: &Statement) -> &'static str {
+    match statement {
+        Statement::UploadResource(_) => "UPLOAD RESOURCE",
+        Statement::DropNode(_) => "DROP NODE",
+        Statement::CordonNode(_) => "CORDON",
+        Statement::UncordonNode(_) => "UNCORDON",
+        Statement::DrainNode(_) => "DRAIN",
+        Statement::LookupQuery(_) => "LOOKUP",
+        Statement::ShowCreate(_)
+        | Statement::ShowUdfs(_)
+        | Statement::ShowPlacements(_)
+        | Statement::ShowRelayMaterializedState(_)
+        | Statement::ShowClusterStatus(_)
+        | Statement::ShowTransactions(_) => "SHOW",
+        Statement::DescribeRelay(_)
+        | Statement::DescribeDomain(_)
+        | Statement::DescribeIngestor(_)
+        | Statement::DescribeResource(_)
+        | Statement::DescribeLookup(_)
+        | Statement::DescribeEndpoint(_)
+        | Statement::DescribeJunction(_)
+        | Statement::DescribeDeduplicator(_)
+        | Statement::DescribeReingestor(_)
+        | Statement::DescribeCorrelator(_)
+        | Statement::DescribeReorderer(_)
+        | Statement::DescribeEmitter(_)
+        | Statement::DescribeWindowProcessor(_)
+        | Statement::DescribeWasmProcessor(_)
+        | Statement::DescribeUdf(_)
+        | Statement::DescribePlacement(_) => "DESCRIBE",
+        _ => "statement",
+    }
 }
 
 async fn fetch_resource_archive(
@@ -14541,6 +16160,11 @@ impl Application {
         let raft_heartbeat_interval = self.raft_heartbeat_interval;
         let raft_election_timeout_min = self.raft_election_timeout_min;
         let raft_election_timeout_max = self.raft_election_timeout_max;
+        let transaction_idle_timeout = self.transaction_idle_timeout;
+        let transaction_tombstone_retention = self.transaction_tombstone_retention;
+        let transaction_max_statements = self.transaction_max_statements;
+        let transaction_max_source_bytes = self.transaction_max_source_bytes;
+        let transaction_max_open = self.transaction_max_open;
         let replica_count = self.replica_count;
         #[cfg(feature = "testing")]
         let scheduler_mode = self.scheduler_mode;
@@ -14953,8 +16577,23 @@ impl Application {
                 if consensus_for_reconcile.current_leader().await.as_deref()
                     == Some(consensus_for_reconcile.local_node_id())
                 {
+                    let committing_domains = consensus_for_reconcile
+                        .current_transactions()
+                        .await
+                        .into_values()
+                        .filter(|transaction| {
+                            matches!(transaction.state, TransactionState::Committing(_))
+                        })
+                        .flat_map(|transaction| {
+                            transaction
+                                .statements
+                                .into_iter()
+                                .filter_map(|statement| statement.domain)
+                        })
+                        .collect::<HashSet<_>>();
                     for (domain, state) in consensus_for_reconcile.current_domains().await {
                         if let DomainStatus::Paused = state.status
+                            && !committing_domains.contains(&domain)
                             && !runtime_for_reconcile.domain_alter_is_active(&domain)
                         {
                             match consensus_for_reconcile.resume_domain(domain.clone()).await {
@@ -15059,7 +16698,9 @@ impl Application {
                         .map(|(domain, _)| domain.clone())
                         .collect::<HashSet<_>>();
                     for domain_schedule in &current_schedule.domains {
-                        if active_domains.contains(&domain_schedule.domain) {
+                        if active_domains.contains(&domain_schedule.domain)
+                            || committing_domains.contains(&domain_schedule.domain)
+                        {
                             continue;
                         }
                         let mut failover_schedule = domain_schedule.clone();
@@ -15103,6 +16744,9 @@ impl Application {
                         }
                     }
                     for (domain, graph) in active_graphs {
+                        if committing_domains.contains(&domain) {
+                            continue;
+                        }
                         let Some(domain_state) =
                             consensus_for_reconcile.current_domain(&domain).await
                         else {
@@ -15375,6 +17019,7 @@ impl Application {
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect: interconnect.clone(),
             domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
+            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
             domain_clock_events: Arc::new(Notify::new()),
             next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
             pending_cluster_commands: Arc::new(DashMap::default()),
@@ -15382,7 +17027,63 @@ impl Application {
             configured_basic_auth,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_idle_timeout,
+            transaction_tombstone_retention,
+            transaction_max_statements,
+            transaction_max_source_bytes,
+            transaction_max_open,
+            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
         };
+
+        let transaction_service = service.clone();
+        let transaction_shutdown = shutdown.clone();
+        background_tasks.push(tokio::spawn(async move {
+            let mut observed_leadership = None;
+            loop {
+                tokio::task::consume_budget().await;
+                let is_leader = transaction_service
+                    .consensus
+                    .current_leader()
+                    .await
+                    .as_deref()
+                    == Some(transaction_service.consensus.local_node_id());
+                if observed_leadership != Some(is_leader) {
+                    transaction_service.transaction_bindings.clear();
+                    transaction_service.domain_clock_reconciliations.clear();
+                    let schedule = transaction_service.consensus.current_schedule().await;
+                    match transaction_service
+                        .registry
+                        .synchronize_cluster_schedule(&schedule)
+                    {
+                        Ok(()) => observed_leadership = Some(is_leader),
+                        Err(error) => {
+                            warn!(
+                                is_leader,
+                                error = %error,
+                                "failed to synchronize registry after leadership state change"
+                            );
+                            tokio::select! {
+                                _ = transaction_shutdown.cancelled() => break,
+                                _ = sleep(Duration::from_millis(250)) => {}
+                            }
+                            continue;
+                        }
+                    }
+                }
+                if is_leader {
+                    transaction_service.reconcile_transactions_once().await;
+                    transaction_service
+                        .reconcile_domain_clocks_from_state()
+                        .await;
+                }
+                tokio::select! {
+                    _ = transaction_shutdown.cancelled() => break,
+                    _ = sleep(Duration::from_millis(250)) => {}
+                }
+            }
+        }));
 
         let runtime_event_service = service.clone();
         let runtime_event_shutdown = shutdown.clone();
@@ -16268,6 +17969,13 @@ mod tests {
         Identifier::try_from(raw).expect("valid identifier")
     }
 
+    fn command_transaction_state(result: &CommandResult) -> Option<ApiTransactionState> {
+        result
+            .transaction
+            .as_ref()
+            .and_then(|status| ApiTransactionState::try_from(status.state).ok())
+    }
+
     #[test]
     fn snapshot_relay_header_framing_leaves_raw_snapshot_payload() {
         let header = RaftSnapshotRelayHeader {
@@ -16557,6 +18265,7 @@ mod tests {
             status: DomainStatus::Stopped,
             start_version: 0,
             last_start: DomainStartPoint::Resume,
+            clock: None,
         };
 
         for attempt in 0..50 {
@@ -16667,6 +18376,7 @@ mod tests {
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
             domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
+            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
             domain_clock_events: Arc::new(Notify::new()),
             next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
             pending_cluster_commands: Arc::new(DashMap::default()),
@@ -16674,6 +18384,14 @@ mod tests {
             configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
+            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
+            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
+            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
+            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
         };
         (service, registry, path)
     }
@@ -18131,7 +19849,7 @@ mod tests {
 
         assert!(!result.success);
         assert_eq!(result.message, "multiple commands require BEGIN");
-        assert_eq!(result.transaction_active, Some(false));
+        assert_eq!(command_transaction_state(&result), None);
         assert!(
             registry
                 .get(
@@ -18169,7 +19887,10 @@ mod tests {
             .await;
 
         assert!(result.success, "command must succeed: {}", result.message);
-        assert_eq!(result.transaction_active, Some(false));
+        assert_eq!(
+            command_transaction_state(&result),
+            Some(ApiTransactionState::Committed)
+        );
         assert!(result.message.contains("created domain 'prod'"));
         assert!(result.message.contains("stored model 'notifications'"));
         assert!(result.message.contains("stored model 'notification'"));
@@ -18218,7 +19939,10 @@ mod tests {
             )
             .await;
         assert!(begin.success);
-        assert_eq!(begin.transaction_active, Some(true));
+        assert_eq!(
+            command_transaction_state(&begin),
+            Some(ApiTransactionState::Open)
+        );
 
         let queued = service
             .process_command(
@@ -18231,8 +19955,18 @@ mod tests {
             )
             .await;
         assert!(queued.success);
-        assert_eq!(queued.message, "queued command in transaction (1 pending)");
-        assert_eq!(queued.transaction_active, Some(true));
+        assert!(
+            queued
+                .message
+                .starts_with("queued command in transaction '")
+                && queued.message.ends_with("' (1 pending)"),
+            "unexpected queue result: {}",
+            queued.message
+        );
+        assert_eq!(
+            command_transaction_state(&queued),
+            Some(ApiTransactionState::Open)
+        );
         assert!(
             registry
                 .get(
@@ -18256,11 +19990,15 @@ mod tests {
             )
             .await;
         assert!(reverted.success);
-        assert_eq!(
-            reverted.message,
-            "transaction reverted: dropped 1 command(s)"
+        assert!(
+            reverted
+                .message
+                .starts_with("transaction reverted: dropped 1 command(s); id '")
         );
-        assert_eq!(reverted.transaction_active, Some(false));
+        assert_eq!(
+            command_transaction_state(&reverted),
+            Some(ApiTransactionState::Reverted)
+        );
         assert!(
             registry
                 .get(
@@ -18294,7 +20032,10 @@ mod tests {
             )
             .await;
         assert!(begin.success);
-        assert_eq!(begin.transaction_active, Some(true));
+        assert_eq!(
+            command_transaction_state(&begin),
+            Some(ApiTransactionState::Open)
+        );
 
         let nested = service
             .process_command(
@@ -18308,7 +20049,10 @@ mod tests {
             .await;
         assert!(!nested.success);
         assert_eq!(nested.message, "transaction is already active");
-        assert_eq!(nested.transaction_active, Some(true));
+        assert_eq!(
+            command_transaction_state(&nested),
+            Some(ApiTransactionState::Open)
+        );
 
         subscriptions.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);
@@ -18332,7 +20076,10 @@ mod tests {
             .await;
 
         assert!(!result.success);
-        assert_eq!(result.transaction_active, Some(false));
+        assert_eq!(
+            command_transaction_state(&result),
+            Some(ApiTransactionState::Failed)
+        );
         assert!(result.message.contains("created domain 'prod'"));
         assert!(result.message.contains("already exists"));
 
@@ -18358,11 +20105,81 @@ mod tests {
             .await;
 
         assert!(result.success, "command must succeed: {}", result.message);
-        assert_eq!(result.transaction_active, Some(false));
+        assert_eq!(
+            command_transaction_state(&result),
+            Some(ApiTransactionState::Committed)
+        );
         assert!(result.message.contains("created domain 'alpha'"));
         assert!(result.message.contains("created domain 'beta'"));
 
         subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn attaching_to_committed_transaction_returns_recorded_statement_results() {
+        let (service, _registry, path) = build_test_service(false).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut owner = SessionSubscriptions::new();
+
+        let committed = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN; CREATE DOMAIN attach_results; CREATE SCHEMA notification ( \
+                            user_id U32 ); COMMIT"
+                        .to_string(),
+                    domain: "attach_results".to_string(),
+                },
+                &tx,
+                &mut owner,
+            )
+            .await;
+        assert!(
+            committed.success,
+            "commit must succeed: {}",
+            committed.message
+        );
+        let transaction_id = committed
+            .transaction
+            .as_ref()
+            .expect("commit result must carry transaction status")
+            .id
+            .clone();
+
+        let mut observer = SessionSubscriptions::new();
+        let attached = service
+            .attach_transaction(
+                proto::AttachTransactionRequest { id: transaction_id },
+                &mut observer,
+            )
+            .await;
+
+        assert!(
+            !attached.success,
+            "finished transaction attach must be terminal"
+        );
+        assert_eq!(
+            attached.transaction.as_ref().map(|status| status.state),
+            Some(ApiTransactionState::Committed as i32)
+        );
+        assert!(attached.message.contains("finished with outcome COMMITTED"));
+        assert!(
+            attached
+                .results
+                .iter()
+                .any(|result| result.message.contains("created domain 'attach_results'")),
+            "attach must return the recorded CREATE DOMAIN result: {attached:?}"
+        );
+        assert!(
+            attached
+                .results
+                .iter()
+                .any(|result| result.message.contains("stored model 'notification'")),
+            "attach must return the recorded CREATE SCHEMA result: {attached:?}"
+        );
+
+        owner.stop_all(&service).await;
+        observer.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -18387,7 +20204,10 @@ mod tests {
             .await;
 
         assert!(!result.success);
-        assert_eq!(result.transaction_active, Some(false));
+        assert_eq!(
+            command_transaction_state(&result),
+            Some(ApiTransactionState::Failed)
+        );
         assert!(result.message.contains("created domain 'prod'"));
 
         let domain = Domain::parse("prod").expect("valid domain");
@@ -18708,6 +20528,7 @@ mod tests {
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
             domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
+            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
             domain_clock_events: Arc::new(Notify::new()),
             next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
             pending_cluster_commands: Arc::new(DashMap::default()),
@@ -18715,6 +20536,14 @@ mod tests {
             configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
+            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
+            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
+            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
+            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
         };
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
@@ -18884,6 +20713,7 @@ mod tests {
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
             domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
+            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
             domain_clock_events: Arc::new(Notify::new()),
             next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
             pending_cluster_commands: Arc::new(DashMap::default()),
@@ -18891,6 +20721,14 @@ mod tests {
             configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
+            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
+            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
+            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
+            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
         };
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
@@ -19055,6 +20893,7 @@ mod tests {
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
             domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
+            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
             domain_clock_events: Arc::new(Notify::new()),
             next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
             pending_cluster_commands: Arc::new(DashMap::default()),
@@ -19062,6 +20901,14 @@ mod tests {
             configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
+            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
+            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
+            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
+            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
         };
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
@@ -19251,6 +21098,7 @@ mod tests {
                 status: DomainStatus::Stopped,
                 start_version: 0,
                 last_start: nervix_models::DomainStartPoint::Resume,
+                clock: None,
             })
             .await
             .expect("domain should persist");
@@ -19304,6 +21152,7 @@ mod tests {
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
             domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
+            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
             domain_clock_events: Arc::new(Notify::new()),
             next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
             pending_cluster_commands: Arc::new(DashMap::default()),
@@ -19311,6 +21160,14 @@ mod tests {
             configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
+            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
+            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
+            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
+            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
         };
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();

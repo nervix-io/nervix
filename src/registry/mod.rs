@@ -1397,6 +1397,10 @@ impl PlannedMutations {
         self.models_to_persist.is_empty() && self.drops_in_batch.is_empty()
     }
 
+    pub fn candidate_graph(&self) -> Option<ActiveGraph> {
+        self.runtime_changes.graph.clone()
+    }
+
     /// Every model the batch would create or replace, ordered by kind and identifier so boundary
     /// validation reports the same model first for the same batch.
     pub fn changed_models(&self) -> Vec<&Model> {

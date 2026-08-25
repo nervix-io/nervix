@@ -2539,7 +2539,10 @@ pub struct Runtime {
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
     otel_client_faults: Arc<OtelClientFaultInjector>,
+    #[cfg(feature = "testing")]
     schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
+    #[cfg(feature = "testing")]
+    transaction_commit_pauses: Arc<test_hooks::TransactionCommitPauseInjector>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,

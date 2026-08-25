@@ -3,6 +3,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
@@ -11,7 +12,7 @@ pub use nervix_models::SubscriptionDeliveryBehavior;
 use nervix_nspl::client_statement::ClientStatement;
 pub use nervix_proto as proto;
 use proto::{
-    CommandRequest, ListDomainsRequest, SessionRequest,
+    AttachTransactionRequest, CommandRequest, ListDomainsRequest, SessionRequest,
     session_service_client::SessionServiceClient,
 };
 use rustls::crypto::aws_lc_rs;
@@ -21,6 +22,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
     sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
+    time::sleep,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
@@ -47,7 +49,7 @@ pub struct CommandOutcome {
     pub leader: Option<String>,
     pub leader_grpc_uri: Option<String>,
     pub already_existed: bool,
-    pub transaction_active: Option<bool>,
+    pub transaction: Option<TransactionStatus>,
     pub results: Vec<CommandOutcome>,
 }
 
@@ -57,6 +59,53 @@ pub enum CommandOutcomeKind {
     Ok,
     Error,
     NotLeader,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaderRouting<'a> {
+    Complete,
+    Redirect(&'a str),
+    AwaitElection,
+}
+
+impl CommandOutcome {
+    fn leader_routing(&self) -> LeaderRouting<'_> {
+        if self.kind != CommandOutcomeKind::NotLeader {
+            LeaderRouting::Complete
+        } else if let Some(uri) = self.leader_grpc_uri.as_deref() {
+            LeaderRouting::Redirect(uri)
+        } else {
+            LeaderRouting::AwaitElection
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionState {
+    Unspecified,
+    Open,
+    Committing,
+    Committed,
+    Failed,
+    Reverted,
+    Expired,
+}
+
+impl TransactionState {
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Open | Self::Committing)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionStatus {
+    pub id: String,
+    pub state: TransactionState,
+    pub pending_count: u64,
+    pub completed_count: u64,
+    pub total_count: u64,
+    pub error: Option<String>,
+    pub failing_step: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +175,8 @@ pub enum ClientError {
     BuildAuthenticationMetadata,
     #[error("session relay closed")]
     SessionClosed,
+    #[error("failed to attach transaction: {0}")]
+    AttachTransaction(String),
     #[error("failed to build upload archive")]
     BuildUploadArchive,
     #[error("upload request failed: {0}")]
@@ -141,6 +192,12 @@ enum PendingResponse {
     Suggest(oneshot::Sender<Vec<AutocompleteSuggestion>>),
 }
 
+enum SessionRecovery {
+    Unavailable,
+    Ready,
+    TransactionObserved(Box<CommandOutcome>),
+}
+
 struct ClientInner {
     domain: Mutex<String>,
     current_server: Mutex<Option<String>>,
@@ -149,7 +206,7 @@ struct ClientInner {
     request_tx: Mutex<mpsc::Sender<SessionRequest>>,
     pending: Arc<Mutex<VecDeque<PendingResponse>>>,
     command_lock: Mutex<()>,
-    transaction_active: Mutex<bool>,
+    transaction: Mutex<Option<TransactionStatus>>,
     response_task: Mutex<Option<JoinHandle<()>>>,
     subscription_tx: mpsc::Sender<SubscriptionEvent>,
     subscription_rx: Mutex<mpsc::Receiver<SubscriptionEvent>>,
@@ -234,6 +291,9 @@ impl GrpcConnector {
 }
 
 impl Client {
+    const MAX_LEADER_ROUTING_ATTEMPTS: usize = 20;
+    const LEADER_ELECTION_RETRY_DELAY: Duration = Duration::from_millis(100);
+
     pub async fn connect(
         server: impl AsRef<str>,
         domain: impl Into<String>,
@@ -284,7 +344,7 @@ impl Client {
             request_tx: Mutex::new(request_tx.0),
             pending,
             command_lock: Mutex::new(()),
-            transaction_active: Mutex::new(false),
+            transaction: Mutex::new(None),
             response_task: Mutex::new(Some(request_tx.1)),
             subscription_tx,
             subscription_rx: Mutex::new(subscription_rx),
@@ -305,16 +365,37 @@ impl Client {
         *self.inner.domain.lock().await = domain.into();
     }
 
-    pub async fn transaction_active(&self) -> bool {
-        *self.inner.transaction_active.lock().await
+    pub async fn transaction_status(&self) -> Option<TransactionStatus> {
+        self.inner.transaction.lock().await.clone()
+    }
+
+    async fn active_transaction_status(&self) -> Option<TransactionStatus> {
+        self.inner
+            .transaction
+            .lock()
+            .await
+            .clone()
+            .filter(|status| status.state.is_active())
     }
 
     pub async fn execute(&self, query: impl Into<String>) -> Result<CommandOutcome, ClientError> {
         let query = query.into();
         let _command_guard = self.inner.command_lock.lock().await;
         let outcome = self.execute_with_redirects(&query).await?;
-        if let Some(active) = outcome.transaction_active {
-            *self.inner.transaction_active.lock().await = active;
+        if let Some(transaction) = outcome.transaction.clone() {
+            *self.inner.transaction.lock().await = Some(transaction);
+        }
+        Ok(outcome)
+    }
+
+    pub async fn attach_transaction(
+        &self,
+        id: impl Into<String>,
+    ) -> Result<CommandOutcome, ClientError> {
+        let _command_guard = self.inner.command_lock.lock().await;
+        let outcome = self.attach_transaction_with_redirects(&id.into()).await?;
+        if let Some(transaction) = outcome.transaction.clone() {
+            *self.inner.transaction.lock().await = Some(transaction);
         }
         Ok(outcome)
     }
@@ -340,35 +421,127 @@ impl Client {
     }
 
     async fn execute_with_redirects(&self, query: &str) -> Result<CommandOutcome, ClientError> {
-        const MAX_REDIRECTS: usize = 4;
-        for _ in 0..=MAX_REDIRECTS {
+        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+            tokio::task::consume_budget().await;
             let outcome = match self.execute_once(query).await {
                 Ok(outcome) => outcome,
-                Err(ClientError::SessionClosed) => {
-                    if self.recover_session().await? {
-                        continue;
-                    }
-                    return Err(ClientError::SessionClosed);
-                }
+                Err(ClientError::SessionClosed) => match self.recover_session().await? {
+                    SessionRecovery::Ready => continue,
+                    SessionRecovery::TransactionObserved(outcome) => return Ok(*outcome),
+                    SessionRecovery::Unavailable => return Err(ClientError::SessionClosed),
+                },
                 Err(err) => return Err(err),
             };
-            if outcome.kind != CommandOutcomeKind::NotLeader {
-                return Ok(outcome);
-            }
-            let Some(leader_grpc_uri) = outcome.leader_grpc_uri.as_deref() else {
-                return Ok(outcome);
+            let leader_grpc_uri = match outcome.leader_routing() {
+                LeaderRouting::Complete => return Ok(outcome),
+                LeaderRouting::Redirect(uri) => uri,
+                LeaderRouting::AwaitElection if self.await_leader_election_retry(attempt).await => {
+                    continue;
+                }
+                LeaderRouting::AwaitElection => return Ok(outcome),
             };
             self.remember_known_server(leader_grpc_uri).await;
             match self.reconnect(leader_grpc_uri).await {
-                Ok(()) => {}
+                Ok(()) => {
+                    if let Some(outcome) = self.restore_transaction_binding().await? {
+                        return Ok(recovered_transaction_outcome(outcome));
+                    }
+                }
                 Err(err) => match self.recover_session().await {
-                    Ok(true) => {}
-                    Ok(false) => return Err(err),
+                    Ok(SessionRecovery::Ready) => {}
+                    Ok(SessionRecovery::TransactionObserved(outcome)) => return Ok(*outcome),
+                    Ok(SessionRecovery::Unavailable) => return Err(err),
                     Err(recover_err) => return Err(recover_err),
                 },
             }
         }
         self.execute_once(query).await
+    }
+
+    async fn attach_transaction_with_redirects(
+        &self,
+        id: &str,
+    ) -> Result<CommandOutcome, ClientError> {
+        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+            tokio::task::consume_budget().await;
+            let outcome = match self.attach_transaction_once(id).await {
+                Ok(outcome) => outcome,
+                Err(ClientError::SessionClosed) => {
+                    if self.recover_transport().await? {
+                        continue;
+                    }
+                    return Err(ClientError::SessionClosed);
+                }
+                Err(error) => return Err(error),
+            };
+            let leader_grpc_uri = match outcome.leader_routing() {
+                LeaderRouting::Complete => return Ok(outcome),
+                LeaderRouting::Redirect(uri) => uri,
+                LeaderRouting::AwaitElection if self.await_leader_election_retry(attempt).await => {
+                    continue;
+                }
+                LeaderRouting::AwaitElection => return Ok(outcome),
+            };
+            self.remember_known_server(leader_grpc_uri).await;
+            self.reconnect(leader_grpc_uri).await?;
+        }
+        self.attach_transaction_once(id).await
+    }
+
+    async fn await_leader_election_retry(&self, attempt: usize) -> bool {
+        if attempt + 1 >= Self::MAX_LEADER_ROUTING_ATTEMPTS {
+            return false;
+        }
+        sleep(Self::LEADER_ELECTION_RETRY_DELAY).await;
+        true
+    }
+
+    async fn attach_transaction_once(&self, id: &str) -> Result<CommandOutcome, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .pending
+            .lock()
+            .await
+            .push_back(PendingResponse::Command(tx));
+        let request = SessionRequest {
+            request: Some(proto::session_request::Request::AttachTransaction(
+                AttachTransactionRequest { id: id.to_string() },
+            )),
+        };
+        let request_tx = self.inner.request_tx.lock().await.clone();
+        if request_tx.send(request).await.is_err() {
+            let _ = self.inner.pending.lock().await.pop_back();
+            return Err(ClientError::SessionClosed);
+        }
+        rx.await.map_err(|_| ClientError::SessionClosed)
+    }
+
+    async fn restore_transaction_binding(&self) -> Result<Option<CommandOutcome>, ClientError> {
+        let Some(previous) = self.active_transaction_status().await else {
+            return Ok(None);
+        };
+        let outcome = self.attach_transaction_with_redirects(&previous.id).await?;
+        if let Some(status) = outcome.transaction.clone() {
+            *self.inner.transaction.lock().await = Some(status);
+        }
+        if outcome.success {
+            let operation_was_observed = outcome
+                .transaction
+                .as_ref()
+                .is_some_and(|current| transaction_operation_was_observed(&previous, current));
+            Ok(operation_was_observed.then_some(outcome))
+        } else if outcome
+            .transaction
+            .as_ref()
+            .is_some_and(|status| !status.state.is_active())
+        {
+            Ok(Some(outcome))
+        } else {
+            if outcome.transaction.is_none() {
+                *self.inner.transaction.lock().await = None;
+            }
+            Err(ClientError::AttachTransaction(outcome.message))
+        }
     }
 
     async fn execute_once(&self, query: &str) -> Result<CommandOutcome, ClientError> {
@@ -382,7 +555,7 @@ impl Client {
                     "client-local commands must be executed separately".to_string(),
                 ));
             }
-            if self.transaction_active().await {
+            if self.active_transaction_status().await.is_some() {
                 return Ok(command_error_outcome(
                     "client-local commands are not allowed while a transaction is active"
                         .to_string(),
@@ -531,13 +704,13 @@ impl Client {
         directory: impl AsRef<Path>,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
     ) -> Result<CommandOutcome, ClientError> {
-        const MAX_REDIRECTS: usize = 4;
         let directory = expand_user_path(directory.as_ref());
         if !directory.is_dir() {
             return Err(ClientError::BuildUploadArchive);
         }
 
-        for _ in 0..=MAX_REDIRECTS {
+        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+            tokio::task::consume_budget().await;
             let current_server = self.inner.current_server.lock().await.clone();
             let server = current_server.ok_or(ClientError::SessionClosed)?;
             let channel = self.inner.grpc_connector.connect(&server).await?;
@@ -610,21 +783,28 @@ impl Client {
                 leader_grpc_uri: (!response.leader_grpc_uri.is_empty())
                     .then_some(response.leader_grpc_uri),
                 already_existed: false,
-                transaction_active: None,
+                transaction: None,
                 results: Vec::new(),
             };
-            if outcome.kind != CommandOutcomeKind::NotLeader {
-                return Ok(outcome);
-            }
-            let Some(leader_grpc_uri) = outcome.leader_grpc_uri.as_deref() else {
-                return Ok(outcome);
+            let leader_grpc_uri = match outcome.leader_routing() {
+                LeaderRouting::Complete => return Ok(outcome),
+                LeaderRouting::Redirect(uri) => uri,
+                LeaderRouting::AwaitElection if self.await_leader_election_retry(attempt).await => {
+                    continue;
+                }
+                LeaderRouting::AwaitElection => return Ok(outcome),
             };
             self.remember_known_server(leader_grpc_uri).await;
             match self.reconnect(leader_grpc_uri).await {
-                Ok(()) => {}
+                Ok(()) => {
+                    if let Some(outcome) = self.restore_transaction_binding().await? {
+                        return Ok(recovered_transaction_outcome(outcome));
+                    }
+                }
                 Err(err) => match self.recover_session().await {
-                    Ok(true) => {}
-                    Ok(false) => return Err(err),
+                    Ok(SessionRecovery::Ready) => {}
+                    Ok(SessionRecovery::TransactionObserved(outcome)) => return Ok(*outcome),
+                    Ok(SessionRecovery::Unavailable) => return Err(err),
                     Err(recover_err) => return Err(recover_err),
                 },
             }
@@ -638,7 +818,7 @@ impl Client {
             leader: None,
             leader_grpc_uri: None,
             already_existed: false,
-            transaction_active: None,
+            transaction: None,
             results: Vec::new(),
         })
     }
@@ -663,7 +843,19 @@ impl Client {
         Ok(())
     }
 
-    async fn recover_session(&self) -> Result<bool, ClientError> {
+    async fn recover_session(&self) -> Result<SessionRecovery, ClientError> {
+        if !self.recover_transport().await? {
+            return Ok(SessionRecovery::Unavailable);
+        }
+        match self.restore_transaction_binding().await? {
+            Some(outcome) => Ok(SessionRecovery::TransactionObserved(Box::new(
+                recovered_transaction_outcome(outcome),
+            ))),
+            None => Ok(SessionRecovery::Ready),
+        }
+    }
+
+    async fn recover_transport(&self) -> Result<bool, ClientError> {
         let current_server = self.inner.current_server.lock().await.clone();
         let known_servers = self.inner.known_servers.lock().await.clone();
         let candidates = reconnect_candidates(&known_servers, current_server.as_deref());
@@ -672,6 +864,7 @@ impl Client {
         }
         let mut last_error = None;
         for server in candidates {
+            tokio::task::consume_budget().await;
             match self.reconnect(&server).await {
                 Ok(()) => return Ok(true),
                 Err(err) => last_error = Some(err),
@@ -959,7 +1152,7 @@ fn command_ok_outcome(message: String) -> CommandOutcome {
         leader: None,
         leader_grpc_uri: None,
         already_existed: false,
-        transaction_active: None,
+        transaction: None,
         results: Vec::new(),
     }
 }
@@ -973,9 +1166,41 @@ fn command_error_outcome(message: String) -> CommandOutcome {
         leader: None,
         leader_grpc_uri: None,
         already_existed: false,
-        transaction_active: None,
+        transaction: None,
         results: Vec::new(),
     }
+}
+
+fn recovered_transaction_outcome(mut outcome: CommandOutcome) -> CommandOutcome {
+    if !outcome.results.is_empty() {
+        outcome.message = outcome
+            .results
+            .iter()
+            .map(|result| result.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        outcome.diagnostics = outcome
+            .results
+            .last()
+            .map(|result| result.diagnostics.clone())
+            .unwrap_or_default();
+    }
+    if outcome.transaction.as_ref().map(|status| status.state) == Some(TransactionState::Committed)
+    {
+        outcome.success = true;
+        outcome.kind = CommandOutcomeKind::Ok;
+    }
+    outcome
+}
+
+fn transaction_operation_was_observed(
+    previous: &TransactionStatus,
+    current: &TransactionStatus,
+) -> bool {
+    current.state != TransactionState::Open
+        || current.pending_count != previous.pending_count
+        || current.completed_count != previous.completed_count
+        || current.total_count != previous.total_count
 }
 
 impl SubscriptionRequest {
@@ -1040,8 +1265,30 @@ impl From<proto::CommandResult> for CommandOutcome {
             leader: (!value.leader.is_empty()).then_some(value.leader),
             leader_grpc_uri: (!value.leader_grpc_uri.is_empty()).then_some(value.leader_grpc_uri),
             already_existed: value.already_existed,
-            transaction_active: value.transaction_active,
+            transaction: value.transaction.map(Into::into),
             results: value.results.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<proto::TransactionStatus> for TransactionStatus {
+    fn from(value: proto::TransactionStatus) -> Self {
+        Self {
+            id: value.id,
+            state: match proto::TransactionState::try_from(value.state) {
+                Ok(proto::TransactionState::Open) => TransactionState::Open,
+                Ok(proto::TransactionState::Committing) => TransactionState::Committing,
+                Ok(proto::TransactionState::Committed) => TransactionState::Committed,
+                Ok(proto::TransactionState::Failed) => TransactionState::Failed,
+                Ok(proto::TransactionState::Reverted) => TransactionState::Reverted,
+                Ok(proto::TransactionState::Expired) => TransactionState::Expired,
+                Ok(proto::TransactionState::Unspecified) | Err(_) => TransactionState::Unspecified,
+            },
+            pending_count: value.pending_count,
+            completed_count: value.completed_count,
+            total_count: value.total_count,
+            error: (!value.error.is_empty()).then_some(value.error),
+            failing_step: value.failing_step,
         }
     }
 }
@@ -1121,9 +1368,10 @@ mod tests {
 
     use super::{
         Client, ClientError, ClientInner, CommandOutcome, CommandOutcomeKind, ConnectOptions,
-        Diagnostic, GrpcConnector, PendingResponse, ServerEvent, ServerEventLevel,
-        SubscriptionEvent, SubscriptionRequest, TlsRequirement, clear_pending_responses,
-        expand_user_path, proto, reconnect_candidates,
+        Diagnostic, GrpcConnector, LeaderRouting, PendingResponse, ServerEvent, ServerEventLevel,
+        SubscriptionEvent, SubscriptionRequest, TlsRequirement, TransactionState,
+        TransactionStatus, clear_pending_responses, expand_user_path, proto, reconnect_candidates,
+        recovered_transaction_outcome, transaction_operation_was_observed,
     };
 
     fn test_client(domain: &str) -> Client {
@@ -1142,7 +1390,7 @@ mod tests {
                 request_tx: Mutex::new(request_tx),
                 pending: Arc::new(Mutex::new(VecDeque::new())),
                 command_lock: Mutex::new(()),
-                transaction_active: Mutex::new(false),
+                transaction: Mutex::new(None),
                 response_task: Mutex::new(None),
                 subscription_tx,
                 subscription_rx: Mutex::new(subscription_rx),
@@ -1244,7 +1492,15 @@ mod tests {
             already_existed: true,
             leader_web_console_uri: String::new(),
             results: Vec::new(),
-            transaction_active: Some(true),
+            transaction: Some(proto::TransactionStatus {
+                id: "tx-1".to_string(),
+                state: proto::TransactionState::Open as i32,
+                pending_count: 2,
+                completed_count: 0,
+                total_count: 2,
+                error: String::new(),
+                failing_step: None,
+            }),
         });
         assert!(!outcome.success);
         assert_eq!(outcome.kind, CommandOutcomeKind::NotLeader);
@@ -1256,7 +1512,18 @@ mod tests {
             Some("http://127.0.0.1:47393")
         );
         assert!(outcome.already_existed);
-        assert_eq!(outcome.transaction_active, Some(true));
+        assert_eq!(
+            outcome.transaction,
+            Some(TransactionStatus {
+                id: "tx-1".to_string(),
+                state: TransactionState::Open,
+                pending_count: 2,
+                completed_count: 0,
+                total_count: 2,
+                error: None,
+                failing_step: None,
+            })
+        );
 
         let subscription = SubscriptionEvent::from(proto::SubscriptionEvent {
             subscription: "sub_orders".to_string(),
@@ -1308,6 +1575,110 @@ mod tests {
         );
     }
 
+    #[test]
+    fn not_leader_without_a_redirect_waits_for_election_convergence() {
+        let mut outcome = CommandOutcome {
+            success: false,
+            kind: CommandOutcomeKind::NotLeader,
+            message: "not-a-leader".to_string(),
+            diagnostics: Vec::new(),
+            leader: None,
+            leader_grpc_uri: None,
+            already_existed: false,
+            transaction: None,
+            results: Vec::new(),
+        };
+        assert_eq!(outcome.leader_routing(), LeaderRouting::AwaitElection);
+
+        outcome.leader_grpc_uri = Some("http://node-2".to_string());
+        assert_eq!(
+            outcome.leader_routing(),
+            LeaderRouting::Redirect("http://node-2")
+        );
+    }
+
+    #[test]
+    fn transaction_restore_detects_replicated_progress_before_replay() {
+        let previous = TransactionStatus {
+            id: "tx-1".to_string(),
+            state: TransactionState::Open,
+            pending_count: 1,
+            completed_count: 0,
+            total_count: 1,
+            error: None,
+            failing_step: None,
+        };
+        assert!(!transaction_operation_was_observed(&previous, &previous));
+
+        let mut queued = previous.clone();
+        queued.pending_count = 2;
+        queued.total_count = 2;
+        assert!(transaction_operation_was_observed(&previous, &queued));
+
+        let mut committing = previous.clone();
+        committing.state = TransactionState::Committing;
+        assert!(transaction_operation_was_observed(&previous, &committing));
+    }
+
+    #[test]
+    fn recovered_committed_transaction_is_returned_as_the_original_command_outcome() {
+        let outcome = recovered_transaction_outcome(CommandOutcome {
+            success: false,
+            kind: CommandOutcomeKind::Error,
+            message: "transaction 'tx-1' finished with outcome COMMITTED".to_string(),
+            diagnostics: vec![Diagnostic {
+                message: "finished".to_string(),
+                span_start: 0,
+                span_end: 0,
+            }],
+            leader: None,
+            leader_grpc_uri: None,
+            already_existed: false,
+            transaction: Some(TransactionStatus {
+                id: "tx-1".to_string(),
+                state: TransactionState::Committed,
+                pending_count: 0,
+                completed_count: 2,
+                total_count: 2,
+                error: None,
+                failing_step: None,
+            }),
+            results: vec![
+                CommandOutcome {
+                    success: true,
+                    kind: CommandOutcomeKind::Ok,
+                    message: "created domain 'prod'".to_string(),
+                    diagnostics: Vec::new(),
+                    leader: None,
+                    leader_grpc_uri: None,
+                    already_existed: false,
+                    transaction: None,
+                    results: Vec::new(),
+                },
+                CommandOutcome {
+                    success: true,
+                    kind: CommandOutcomeKind::Ok,
+                    message: "stored model 'events'".to_string(),
+                    diagnostics: Vec::new(),
+                    leader: None,
+                    leader_grpc_uri: None,
+                    already_existed: false,
+                    transaction: None,
+                    results: Vec::new(),
+                },
+            ],
+        });
+
+        assert!(outcome.success);
+        assert_eq!(outcome.kind, CommandOutcomeKind::Ok);
+        assert_eq!(
+            outcome.message,
+            "created domain 'prod'\nstored model 'events'"
+        );
+        assert!(outcome.diagnostics.is_empty());
+        assert_eq!(outcome.results.len(), 2);
+    }
+
     #[tokio::test]
     async fn clear_pending_responses_drops_waiters() {
         let pending = Arc::new(Mutex::new(VecDeque::new()));
@@ -1349,7 +1720,15 @@ mod tests {
     #[tokio::test]
     async fn execute_rejects_client_local_command_during_transaction() {
         let client = test_client("default");
-        *client.inner.transaction_active.lock().await = true;
+        *client.inner.transaction.lock().await = Some(TransactionStatus {
+            id: "tx-1".to_string(),
+            state: TransactionState::Open,
+            pending_count: 0,
+            completed_count: 0,
+            total_count: 0,
+            error: None,
+            failing_step: None,
+        });
 
         let outcome = client
             .execute("USE prod;")

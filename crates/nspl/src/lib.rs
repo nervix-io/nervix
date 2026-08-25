@@ -45,6 +45,7 @@ pub mod server_statement;
 pub mod show_cluster_status;
 pub mod show_create;
 pub mod show_stream_state;
+pub mod show_transactions;
 pub mod signaling_protocol;
 pub mod statement;
 pub mod subscribe;

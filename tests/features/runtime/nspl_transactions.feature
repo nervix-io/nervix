@@ -1,4 +1,341 @@
 Feature: NSPL transactions
+  Scenario: An open transaction survives leader failover and the client resumes it
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given client "owner" is connected to node "{{old_leader}}"
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE DOMAIN {{domain}};
+      CREATE SCHEMA before_failover (
+        value STRING
+      );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    When client "owner" executes these NSPL commands
+      """
+      CREATE SCHEMA after_failover (
+        value STRING
+      );
+      COMMIT;
+      """
+    Then the last command output contains
+      """
+      stored model 'after_failover'
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA before_failover;
+      SHOW CREATE SCHEMA after_failover;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA after_failover (value STRING);
+      """
+
+  Scenario: REVERT remains available after leader failover
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given client "owner" is connected to node "{{old_leader}}"
+    When client "owner" executes these NSPL commands
+      """
+      CREATE DOMAIN {{domain}};
+      BEGIN;
+      CREATE SCHEMA reverted_after_failover (
+        value STRING
+      );
+      """
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    When client "owner" executes these NSPL commands
+      """
+      REVERT;
+      """
+    Then the last command output contains
+      """
+      transaction reverted
+      """
+    When these NSPL commands fail with "schema 'reverted_after_failover' does not exist"
+      """
+      SHOW CREATE SCHEMA reverted_after_failover;
+      """
+
+  Scenario Outline: A clean session close reverts its open transaction
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Given client "owner" is connected to the leader node
+    And client "observer" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE DOMAIN {{domain}};
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "owner" closes its session cleanly
+    Then transaction "{{transaction_id}}" eventually has state "REVERTED"
+    When client "observer" fails to attach to transaction "{{transaction_id}}"
+    Then the last command error contains
+      """
+      finished with outcome REVERTED
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario: A commit interrupted between steps is completed by the new leader
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given client "owner" is connected to node "{{old_leader}}"
+    And client "observer" is connected to node "{{new_leader}}"
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE DOMAIN {{domain}};
+      CREATE SCHEMA resumed_commit (
+        value STRING
+      );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    Given transaction commit on node "{{old_leader}}" pauses after 1 statement
+    When client "owner" begins executing these NSPL commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "{{old_leader}}" after 1 statement is reached
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    And transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When client "observer" fails to attach to transaction "{{transaction_id}}"
+    Then the last command error contains
+      """
+      finished with outcome COMMITTED
+      """
+    And the last command output contains
+      """
+      created domain '{{domain}}'
+      """
+    And the last command output contains
+      """
+      stored model 'resumed_commit'
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA resumed_commit;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA resumed_commit (value STRING);
+      """
+    When the transaction commit pause on node "{{old_leader}}" after 1 statement is released
+    Then the background NSPL execution is discarded
+
+  Scenario: A failing resumed commit records the failing step and preserves its prefix
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given client "owner" is connected to node "{{old_leader}}"
+    And client "observer" is connected to node "{{new_leader}}"
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE DOMAIN {{domain}};
+      CREATE DOMAIN {{domain}};
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    Given transaction commit on node "{{old_leader}}" pauses after 1 statement
+    When client "owner" begins executing these NSPL commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "{{old_leader}}" after 1 statement is reached
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    And transaction "{{transaction_id}}" eventually has state "FAILED"
+    When client "observer" fails to attach to transaction "{{transaction_id}}"
+    Then client "observer" transaction state is "FAILED" with failing step 2
+    And the last command error contains
+      """
+      finished with outcome FAILED
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      domain: {{domain}}
+      """
+    When the transaction commit pause on node "{{old_leader}}" after 1 statement is released
+    Then the background NSPL execution is discarded
+
+  Scenario: Attaching from a second session takes over an open transaction
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Given client "owner" is connected to the leader node
+    And client "taker" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE DOMAIN {{domain}};
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "taker" attaches to transaction "{{transaction_id}}"
+    And client "owner" fails to execute these NSPL commands
+      """
+      REVERT;
+      """
+    Then the last command error contains
+      """
+      was taken over by another session
+      """
+    When client "taker" executes these NSPL commands
+      """
+      REVERT;
+      """
+    Then the last command output contains
+      """
+      transaction reverted
+      """
+
+  Scenario Outline: Non-configuration statements are rejected while a transaction is open
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      """
+    And client "owner" fails to execute these NSPL commands
+      """
+      <statement>
+      """
+    Then the last command error contains
+      """
+      <error>
+      """
+
+    Examples:
+      | statement                                                 | error                                                       |
+      | SHOW TRANSACTIONS;                                        | cannot be queued in a transaction                           |
+      | DESCRIBE DOMAIN;                                          | cannot be queued in a transaction                           |
+      | CREATE SUBSCRIPTION tx_view TO missing_relay;             | session-scoped and client-local statements cannot be queued |
+      | UPLOAD RESOURCE local_bundle VERSION '/tmp/local_bundle'; | client-local commands are not allowed                       |
+      | CORDON NODE node-1;                                       | cannot be queued in a transaction                           |
+      | DROP NODE node-1;                                         | cannot be queued in a transaction                           |
+
+  Scenario: Replicated transaction limits are enforced consistently
+    Given the transaction statement limit is configured as 1
+    And the transaction source byte limit is configured as 30
+    And the concurrent transaction limit is configured as 1
+    And a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Given client "owner" is connected to the leader node
+    And client "other" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE RESOURCE r;
+      """
+    And client "other" fails to execute these NSPL commands
+      """
+      BEGIN;
+      """
+    Then the last command error contains
+      """
+      concurrent open transaction limit 1 reached
+      """
+    When client "owner" fails to execute these NSPL commands
+      """
+      CREATE SCHEMA exceeds_limit (
+        value STRING
+      );
+      """
+    Then the last command error contains
+      """
+      queued statement limit 1 reached
+      """
+    When client "owner" executes these NSPL commands
+      """
+      REVERT;
+      """
+    And client "other" executes these NSPL commands
+      """
+      BEGIN;
+      """
+    And client "other" fails to execute these NSPL commands
+      """
+      CREATE DOMAIN {{domain}};
+      """
+    Then the last command error contains
+      """
+      queued source byte limit 30 exceeded
+      """
+
+  Scenario: An orphaned transaction expires and retains its outcome
+    Given the transaction idle timeout is configured as "250ms"
+    And the transaction tombstone retention is configured as "1s"
+    And a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given client "owner" is connected to node "{{old_leader}}"
+    And client "observer" is connected to node "{{new_leader}}"
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    And transaction "{{transaction_id}}" eventually has state "EXPIRED"
+    When client "observer" fails to attach to transaction "{{transaction_id}}"
+    Then the last command error contains
+      """
+      finished with outcome EXPIRED
+      """
+    And transaction "{{transaction_id}}" is eventually removed
+    When client "observer" fails to attach to transaction "{{transaction_id}}"
+    Then the last command error contains
+      """
+      is unknown
+      """
+
+  Scenario Outline: Open transactions are visible from replicated state
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      BEGIN;
+      """
+    Then the last command output contains
+      """
+      transaction started
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      state=OPEN
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Implicit multi-command requests are rejected
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"

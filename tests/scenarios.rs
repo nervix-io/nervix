@@ -47,7 +47,7 @@ use mysql_async::{
     Opts as MySqlOpts, OptsBuilder as MySqlOptsBuilder, Pool as MySqlPool, SslOpts as MySqlSslOpts,
     prelude::Queryable as MySqlQueryable,
 };
-use nervix_client_core::Client;
+use nervix_client_core::{Client, TransactionState as ClientTransactionState};
 #[cfg(feature = "testing")]
 use nervix_server::SchedulerMode;
 use nervix_server::{
@@ -102,6 +102,7 @@ struct ScenarioWorld {
     active_session: Option<TestSession>,
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
+    transaction_clients: BTreeMap<String, Client>,
     last_subscription_payload: Option<String>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
@@ -154,6 +155,7 @@ impl fmt::Debug for ScenarioWorld {
                 "active_session_has_subscription",
                 &self.active_session_has_subscription,
             )
+            .field("transaction_client_count", &self.transaction_clients.len())
             .field("last_command_error", &self.last_command_error)
             .field(
                 "last_command_output_bytes",
@@ -1833,6 +1835,60 @@ async fn given_runtime_replication_is_configured(
         .expect("snapshot interval must be a valid duration");
 }
 
+#[given(expr = "the transaction idle timeout is configured as {string}")]
+async fn given_transaction_idle_timeout_is_configured(world: &mut ScenarioWorld, timeout: String) {
+    assert!(
+        world.cluster.is_none(),
+        "transaction idle timeout must be configured before cluster startup"
+    );
+    world.cluster_config.transaction_idle_timeout =
+        humantime::parse_duration(&timeout).expect("transaction idle timeout must be valid");
+}
+
+#[given(expr = "the transaction tombstone retention is configured as {string}")]
+async fn given_transaction_tombstone_retention_is_configured(
+    world: &mut ScenarioWorld,
+    retention: String,
+) {
+    assert!(
+        world.cluster.is_none(),
+        "transaction tombstone retention must be configured before cluster startup"
+    );
+    world.cluster_config.transaction_tombstone_retention = humantime::parse_duration(&retention)
+        .expect("transaction tombstone retention must be valid");
+}
+
+#[given(expr = "the transaction statement limit is configured as {int}")]
+async fn given_transaction_statement_limit_is_configured(world: &mut ScenarioWorld, limit: usize) {
+    assert!(
+        world.cluster.is_none(),
+        "transaction statement limit must be configured before cluster startup"
+    );
+    world.cluster_config.transaction_max_statements = limit;
+}
+
+#[given(expr = "the transaction source byte limit is configured as {int}")]
+async fn given_transaction_source_byte_limit_is_configured(
+    world: &mut ScenarioWorld,
+    limit: usize,
+) {
+    assert!(
+        world.cluster.is_none(),
+        "transaction source byte limit must be configured before cluster startup"
+    );
+    world.cluster_config.transaction_max_source_bytes =
+        u64::try_from(limit).expect("transaction source byte limit must fit u64");
+}
+
+#[given(expr = "the concurrent transaction limit is configured as {int}")]
+async fn given_concurrent_transaction_limit_is_configured(world: &mut ScenarioWorld, limit: usize) {
+    assert!(
+        world.cluster.is_none(),
+        "concurrent transaction limit must be configured before cluster startup"
+    );
+    world.cluster_config.transaction_max_open = limit;
+}
+
 #[cfg(feature = "testing")]
 #[given("the production sticky scheduler is configured")]
 async fn given_production_sticky_scheduler_is_configured(world: &mut ScenarioWorld) {
@@ -2712,6 +2768,47 @@ async fn when_leadership_is_transferred_from_node_to_node(
         .transfer_leadership(&from_node_id, &to_node_id);
 }
 
+#[given(expr = "transaction commit on node {string} pauses after {int} statement")]
+async fn given_transaction_commit_pause(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    completed_statements: usize,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .runtime_test_hooks
+        .pause_transaction_commit_after(node_id, completed_statements);
+}
+
+#[then(expr = "the transaction commit pause on node {string} after {int} statement is reached")]
+async fn then_transaction_commit_pause_is_reached(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    completed_statements: usize,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        world
+            .runtime_test_hooks
+            .wait_for_transaction_commit_pause(&node_id, completed_statements),
+    )
+    .await
+    .expect("transaction commit did not reach the armed pause");
+}
+
+#[when(expr = "the transaction commit pause on node {string} after {int} statement is released")]
+async fn when_transaction_commit_pause_is_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    completed_statements: usize,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .runtime_test_hooks
+        .release_transaction_commit_pause(&node_id, completed_statements);
+}
+
 #[when("the cluster is restarted")]
 async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
     world.active_session = None;
@@ -3409,6 +3506,41 @@ async fn when_these_nspl_commands_begin_executing_in_the_background(
     })));
 }
 
+#[when(expr = "client {string} begins executing these NSPL commands in the background")]
+async fn when_named_client_begins_executing_in_the_background(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_nspl.is_none(),
+        "a background NSPL execution is already active"
+    );
+    let name = expand_placeholders(world, &name);
+    let commands = expand_placeholders(world, docstring(step));
+    let statements = nspl_statements(&commands);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut last_output = String::new();
+        for command in statements {
+            tokio::task::consume_budget().await;
+            let outcome = client
+                .execute(command)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !outcome.success {
+                return Err(outcome.message);
+            }
+            last_output = outcome.message;
+        }
+        Ok(last_output)
+    })));
+}
+
 #[then("the background NSPL execution succeeds")]
 async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) {
     let task = world
@@ -3420,6 +3552,15 @@ async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) 
         .expect("background NSPL task must not panic")
         .expect("background NSPL execution must succeed");
     world.last_command_output = Some(output);
+}
+
+#[then("the background NSPL execution is discarded")]
+async fn then_the_background_nspl_execution_is_discarded(world: &mut ScenarioWorld) {
+    let task = world
+        .background_nspl
+        .take()
+        .expect("a background NSPL execution must be active");
+    drop(task);
 }
 
 fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
@@ -3685,6 +3826,232 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_a_follower_
             outcome.message
         );
         world.last_command_output = Some(outcome.message);
+    }
+}
+
+async fn connect_named_client_to_node(world: &mut ScenarioWorld, name: String, node_id: String) {
+    let name = expand_placeholders(world, &name);
+    let node_id = expand_placeholders(world, &node_id);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .expect("failed to resolve client node gRPC URI");
+    let client = Client::connect_with_options(
+        &grpc_uri,
+        world.domain.clone(),
+        client_connect_options(&grpc_uri).expect("failed to build client tls options"),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("failed to connect client '{name}' to '{node_id}': {error}"));
+    assert!(
+        world
+            .transaction_clients
+            .insert(name.clone(), client)
+            .is_none(),
+        "client '{name}' is already connected"
+    );
+}
+
+#[given(expr = "client {string} is connected to node {string}")]
+async fn given_named_client_is_connected_to_node(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+) {
+    connect_named_client_to_node(world, name, node_id).await;
+}
+
+#[given(expr = "client {string} is connected to the leader node")]
+async fn given_named_client_is_connected_to_leader(world: &mut ScenarioWorld, name: String) {
+    let leader = current_leader_node(world).await;
+    connect_named_client_to_node(world, name, leader).await;
+}
+
+#[when(expr = "client {string} closes its session cleanly")]
+async fn when_named_client_closes_cleanly(world: &mut ScenarioWorld, name: String) {
+    let name = expand_placeholders(world, &name);
+    let client = world
+        .transaction_clients
+        .remove(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"));
+    drop(client);
+}
+
+#[when(expr = "client {string} executes these NSPL commands")]
+async fn when_named_client_executes_commands(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let name = expand_placeholders(world, &name);
+    let commands = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    for command in nspl_statements(&commands) {
+        tokio::task::consume_budget().await;
+        let outcome = client
+            .execute(command.clone())
+            .await
+            .unwrap_or_else(|error| panic!("client '{name}' command failed: {command}: {error}"));
+        assert!(
+            outcome.success,
+            "client '{name}' command must succeed: {command}: {}",
+            outcome.message
+        );
+        world.last_command_output = Some(outcome.message);
+    }
+}
+
+#[when(expr = "client {string} fails to execute these NSPL commands")]
+async fn when_named_client_fails_to_execute_commands(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let name = expand_placeholders(world, &name);
+    let commands = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    for command in nspl_statements(&commands) {
+        tokio::task::consume_budget().await;
+        match client.execute(command.clone()).await {
+            Ok(outcome) if outcome.success => {
+                world.last_command_output = Some(outcome.message);
+            }
+            Ok(outcome) => {
+                world.last_command_error = Some(outcome.message);
+                return;
+            }
+            Err(error) => {
+                world.last_command_error = Some(error.to_string());
+                return;
+            }
+        }
+    }
+    panic!("client '{name}' commands unexpectedly succeeded");
+}
+
+#[then(expr = "client {string} transaction id is saved as placeholder {string}")]
+async fn then_named_client_transaction_id_is_saved(
+    world: &mut ScenarioWorld,
+    name: String,
+    placeholder: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let status = client
+        .transaction_status()
+        .await
+        .unwrap_or_else(|| panic!("client '{name}' does not have a transaction status"));
+    world.placeholders.insert(placeholder, status.id);
+}
+
+#[then(expr = "client {string} transaction state is {string} with failing step {int}")]
+async fn then_named_client_transaction_failed_at_step(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected_state: String,
+    failing_step: u64,
+) {
+    let name = expand_placeholders(world, &name);
+    let expected_state = expand_placeholders(world, &expected_state).to_ascii_uppercase();
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let status = client
+        .transaction_status()
+        .await
+        .unwrap_or_else(|| panic!("client '{name}' does not have a transaction status"));
+    let actual_state = match status.state {
+        ClientTransactionState::Unspecified => "UNSPECIFIED",
+        ClientTransactionState::Open => "OPEN",
+        ClientTransactionState::Committing => "COMMITTING",
+        ClientTransactionState::Committed => "COMMITTED",
+        ClientTransactionState::Failed => "FAILED",
+        ClientTransactionState::Reverted => "REVERTED",
+        ClientTransactionState::Expired => "EXPIRED",
+    };
+    assert_eq!(actual_state, expected_state);
+    assert_eq!(status.failing_step, Some(failing_step));
+}
+
+#[when(expr = "client {string} attaches to transaction {string}")]
+async fn when_named_client_attaches_to_transaction(
+    world: &mut ScenarioWorld,
+    name: String,
+    transaction_id: String,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let name = expand_placeholders(world, &name);
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let outcome = client
+        .attach_transaction(transaction_id.clone())
+        .await
+        .unwrap_or_else(|error| {
+            panic!("client '{name}' failed to attach transaction '{transaction_id}': {error}")
+        });
+    assert!(
+        outcome.success,
+        "client '{name}' must attach transaction '{transaction_id}': {}",
+        outcome.message
+    );
+    world.last_command_output = Some(outcome.message);
+}
+
+#[when(expr = "client {string} fails to attach to transaction {string}")]
+async fn when_named_client_fails_to_attach_to_transaction(
+    world: &mut ScenarioWorld,
+    name: String,
+    transaction_id: String,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let name = expand_placeholders(world, &name);
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    match client.attach_transaction(transaction_id.clone()).await {
+        Ok(outcome) => {
+            assert!(
+                !outcome.success,
+                "client '{name}' unexpectedly attached transaction '{transaction_id}'"
+            );
+            world.last_command_output = Some(
+                outcome
+                    .results
+                    .iter()
+                    .map(|result| result.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            world.last_command_error = Some(outcome.message);
+        }
+        Err(error) => world.last_command_error = Some(error.to_string()),
     }
 }
 
@@ -4001,6 +4368,75 @@ async fn then_current_leader_node_is_saved_as_placeholder(
 ) {
     let leader = current_leader_node(world).await;
     world.placeholders.insert(placeholder, leader);
+}
+
+#[then(expr = "transaction {string} eventually has state {string}")]
+async fn then_transaction_eventually_has_state(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    expected_state: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let expected_state = expand_placeholders(world, &expected_state).to_ascii_uppercase();
+    let leader = current_leader_node(world).await;
+    let expected_id = format!("id={transaction_id}");
+    let expected_state_fragment = format!("state={expected_state}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_output = String::new();
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "transaction '{transaction_id}' did not reach state '{expected_state}'; last output: \
+             {last_output}"
+        );
+        match world
+            .cluster()
+            .run_command(&leader, &world.domain, "SHOW TRANSACTIONS;")
+            .await
+        {
+            Ok(output) => {
+                if output.lines().any(|line| {
+                    line.contains(&expected_id) && line.contains(&expected_state_fragment)
+                }) {
+                    world.last_command_output = Some(output);
+                    return;
+                }
+                last_output = output;
+            }
+            Err(error) => last_output = error.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "transaction {string} is eventually removed")]
+async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, transaction_id: String) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let leader = current_leader_node(world).await;
+    let expected_id = format!("id={transaction_id}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_output = String::new();
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "transaction '{transaction_id}' tombstone was not removed; last output: {last_output}"
+        );
+        match world
+            .cluster()
+            .run_command(&leader, &world.domain, "SHOW TRANSACTIONS;")
+            .await
+        {
+            Ok(output) if !output.lines().any(|line| line.contains(&expected_id)) => {
+                world.last_command_output = Some(output);
+                return;
+            }
+            Ok(output) => last_output = output,
+            Err(error) => last_output = error.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[then(expr = "the leader reported by node {string} is saved as placeholder {string}")]

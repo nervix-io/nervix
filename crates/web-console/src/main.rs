@@ -58,7 +58,7 @@ struct WebConsoleSignals {
     domain_snapshots: RwSignal<Vec<DomainSnapshotView>>,
     cluster_counters: RwSignal<ClusterCounters>,
     active_domain: RwSignal<Option<String>>,
-    transaction_active: RwSignal<bool>,
+    transaction_status: RwSignal<Option<nervix_proto::TransactionStatus>>,
     domains: RwSignal<Vec<DomainView>>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
@@ -102,6 +102,9 @@ struct QueuedCommand {
 
 #[derive(Clone)]
 enum PendingRequest {
+    AttachTransaction {
+        request: nervix_proto::SessionRequest,
+    },
     Command(QueuedCommand),
     SubscriptionStart {
         tab_id: u64,
@@ -132,6 +135,7 @@ impl QueuedRequest {
 impl PendingRequest {
     fn request(&self) -> &nervix_proto::SessionRequest {
         match self {
+            Self::AttachTransaction { request } => request,
             Self::Command(command) => &command.request,
             Self::SubscriptionStart { request, .. } | Self::SubscriptionStop { request, .. } => {
                 request
@@ -255,7 +259,7 @@ fn App() -> impl IntoView {
     let active_theme = RwSignal::new(0_usize);
     let input = RwSignal::new(String::new());
     let terminal_lines = RwSignal::new(Vec::<TermLine>::new());
-    let transaction_active = RwSignal::new(false);
+    let transaction_status = RwSignal::new(None::<nervix_proto::TransactionStatus>);
     let subscription_tabs = RwSignal::new(Vec::<SubscriptionTabView>::new());
     let active_subscription_tab = RwSignal::new(None::<u64>);
     let next_subscription_tab_id = RwSignal::new(1_u64);
@@ -273,7 +277,7 @@ fn App() -> impl IntoView {
         domain_snapshots,
         cluster_counters,
         active_domain,
-        transaction_active,
+        transaction_status,
         domains,
         resource_details,
         subscription_tabs,
@@ -354,7 +358,7 @@ fn App() -> impl IntoView {
         terminal_lines.update(|lines| {
             lines.push(TermLine::prompt(
                 command.clone(),
-                transaction_active.get_untracked(),
+                current_transaction_state(transaction_status.get_untracked()),
             ));
         });
         if command.eq_ignore_ascii_case("clear") {
@@ -363,7 +367,7 @@ fn App() -> impl IntoView {
             return;
         }
         if let Ok(ClientStatement::ListDomains) = parse_client_statement(&command) {
-            if transaction_active.get_untracked() {
+            if transaction_is_active(transaction_status.get_untracked()) {
                 terminal_lines.update(|lines| {
                     lines.push(TermLine::error(
                         "client-local commands are not allowed while a transaction is active",
@@ -388,7 +392,7 @@ fn App() -> impl IntoView {
                 });
             }
         } else if let Ok(domain) = parse_use_domain(&command) {
-            if transaction_active.get_untracked() {
+            if transaction_is_active(transaction_status.get_untracked()) {
                 terminal_lines.update(|lines| {
                     lines.push(TermLine::error(
                         "client-local commands are not allowed while a transaction is active",
@@ -577,7 +581,7 @@ fn App() -> impl IntoView {
                             domain=active_domain_name
                             input=input
                             terminal_lines=terminal_lines
-                            transaction_active=move || transaction_active.get()
+                            transaction_state=move || current_transaction_state(transaction_status.get())
                             subscription_tabs=subscription_tabs
                             active_subscription_tab=active_subscription_tab
                             stop_subscription=stop_subscription
@@ -651,6 +655,7 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
     let WebConsoleSignals {
         terminal_lines,
         active_domain,
+        transaction_status,
         domains_loaded,
         auth_token,
         auth_error,
@@ -723,6 +728,41 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                             break;
                         }
                         let mut resend_pending_after_connect = !pending_requests.is_empty();
+                        let mut waiting_for_transaction_attach = false;
+                        if transaction_is_active(transaction_status.get_untracked()) {
+                            let existing_attach = pending_requests.front().and_then(|pending| {
+                                let PendingRequest::AttachTransaction { request } = pending else {
+                                    return None;
+                                };
+                                Some(request.clone())
+                            });
+                            let had_existing_attach = existing_attach.is_some();
+                            let request = existing_attach.unwrap_or_else(|| {
+                                let id = transaction_status
+                                    .get_untracked()
+                                    .map(|status| status.id)
+                                    .unwrap_or_default();
+                                nervix_proto::SessionRequest {
+                                    request: Some(
+                                        nervix_proto::session_request::Request::AttachTransaction(
+                                            nervix_proto::AttachTransactionRequest { id },
+                                        ),
+                                    ),
+                                }
+                            });
+                            if socket
+                                .send(WebSocketMessage::Bytes(request.encode_to_vec()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            if !had_existing_attach {
+                                pending_requests
+                                    .push_front(PendingRequest::AttachTransaction { request });
+                            }
+                            waiting_for_transaction_attach = true;
+                        }
                         loop {
                             futures_util::select! {
                                 queued = rx.next().fuse() => {
@@ -791,7 +831,9 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                                                     ) {
                                                         SessionResponseAction::Continue => {
                                                             state.set(ConsoleConnectionState::Connected);
-                                                            if resend_pending_after_connect {
+                                                            if resend_pending_after_connect
+                                                                && !waiting_for_transaction_attach
+                                                            {
                                                                 resend_pending_after_connect = false;
                                                                 if !send_pending_websocket_commands(
                                                                     &mut socket,
@@ -802,6 +844,32 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                                                                     break;
                                                                 }
                                                             }
+                                                        }
+                                                        SessionResponseAction::TransactionAttached {
+                                                            replay_pending,
+                                                        } => {
+                                                            state.set(ConsoleConnectionState::Connected);
+                                                            waiting_for_transaction_attach = false;
+                                                            if resend_pending_after_connect
+                                                                && replay_pending
+                                                            {
+                                                                resend_pending_after_connect = false;
+                                                                if !send_pending_websocket_commands(
+                                                                    &mut socket,
+                                                                    &mut pending_requests,
+                                                                )
+                                                                .await
+                                                                {
+                                                                    break;
+                                                                }
+                                                            } else {
+                                                                resend_pending_after_connect = false;
+                                                            }
+                                                        }
+                                                        SessionResponseAction::TransactionAttachFailed => {
+                                                            state.set(ConsoleConnectionState::Connected);
+                                                            waiting_for_transaction_attach = false;
+                                                            resend_pending_after_connect = false;
                                                         }
                                                         SessionResponseAction::Reconnect(next_url) => {
                                                             upload_base_url.set(Some(next_url.clone()));
@@ -953,7 +1021,35 @@ fn web_console_websocket_url_from_base(base_url: &str, auth_token: &str) -> Opti
 
 enum SessionResponseAction {
     Continue,
+    TransactionAttached { replay_pending: bool },
+    TransactionAttachFailed,
     Reconnect(String),
+}
+
+fn current_transaction_state(
+    status: Option<nervix_proto::TransactionStatus>,
+) -> Option<nervix_proto::TransactionState> {
+    status.and_then(|status| nervix_proto::TransactionState::try_from(status.state).ok())
+}
+
+fn transaction_is_active(status: Option<nervix_proto::TransactionStatus>) -> bool {
+    matches!(
+        current_transaction_state(status),
+        Some(nervix_proto::TransactionState::Open | nervix_proto::TransactionState::Committing)
+    )
+}
+
+fn transaction_operation_was_observed(
+    previous: Option<&nervix_proto::TransactionStatus>,
+    current: Option<&nervix_proto::TransactionStatus>,
+) -> bool {
+    let (Some(previous), Some(current)) = (previous, current) else {
+        return false;
+    };
+    current_transaction_state(Some(current.clone())) != Some(nervix_proto::TransactionState::Open)
+        || current.pending_count != previous.pending_count
+        || current.completed_count != previous.completed_count
+        || current.total_count != previous.total_count
 }
 
 fn active_domain_graph_missing(
@@ -980,7 +1076,7 @@ fn handle_session_response(
         domain_snapshots,
         cluster_counters,
         active_domain,
-        transaction_active,
+        transaction_status,
         domains,
         resource_details,
         subscription_tabs,
@@ -994,14 +1090,45 @@ fn handle_session_response(
             if let Some(leader_url) = leader_web_console_redirect_url(&result) {
                 return SessionResponseAction::Reconnect(leader_url);
             }
-            if let Some(active) = result.transaction_active {
-                transaction_active.set(active);
+            let previous_transaction = transaction_status.get_untracked();
+            if let Some(status) = result.transaction.clone() {
+                transaction_status.set(Some(status));
             }
             if result_is_set_active_domain_ack(&result) {
                 terminal_lines.update(|lines| lines.extend(command_result_lines(result, "")));
                 return SessionResponseAction::Continue;
             }
             let pending = pending_requests.pop_front();
+            if let Some(PendingRequest::AttachTransaction { .. }) = pending {
+                if !result.success {
+                    if result.transaction.is_none() {
+                        transaction_status.set(None);
+                    }
+                    pending_requests.clear();
+                    let message = result.message.clone();
+                    let has_recorded_results = !result.results.is_empty();
+                    terminal_lines.update(|lines| {
+                        if has_recorded_results {
+                            lines.push(TermLine::error(message));
+                        }
+                        lines.extend(command_result_lines(result, "ATTACH TRANSACTION"));
+                    });
+                    return SessionResponseAction::TransactionAttachFailed;
+                }
+                let operation_was_observed = transaction_operation_was_observed(
+                    previous_transaction.as_ref(),
+                    result.transaction.as_ref(),
+                );
+                if operation_was_observed {
+                    pending_requests.clear();
+                    terminal_lines.update(|lines| {
+                        lines.extend(command_result_lines(result, "ATTACH TRANSACTION"));
+                    });
+                }
+                return SessionResponseAction::TransactionAttached {
+                    replay_pending: !operation_was_observed,
+                };
+            }
             if let Some(PendingRequest::ResourceDescribe { resource, .. }) = pending {
                 resource_details.update(|details| {
                     details.insert(resource, resource_detail_from_result(result));
@@ -3452,7 +3579,7 @@ fn ReplPanel(
     domain: impl Fn() -> String + Copy + Send + 'static,
     input: RwSignal<String>,
     terminal_lines: RwSignal<Vec<TermLine>>,
-    transaction_active: impl Fn() -> bool + Copy + Send + 'static,
+    transaction_state: impl Fn() -> Option<nervix_proto::TransactionState> + Copy + Send + 'static,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
     active_subscription_tab: RwSignal<Option<u64>>,
     stop_subscription: impl Fn(u64) + Copy + Send + 'static,
@@ -3608,10 +3735,14 @@ fn ReplPanel(
                 run_command(Some(command));
             }>
                 <span>{move || {
-                    if transaction_active() {
-                        format!("nervix[{} tx]>", domain())
-                    } else {
-                        format!("nervix[{}]>", domain())
+                    match transaction_state() {
+                        Some(nervix_proto::TransactionState::Open) => {
+                            format!("nervix[{} tx]>", domain())
+                        }
+                        Some(nervix_proto::TransactionState::Committing) => {
+                            format!("nervix[{} committing]>", domain())
+                        }
+                        _ => format!("nervix[{}]>", domain()),
                     }
                 }}</span>
                 <input
@@ -6081,11 +6212,14 @@ struct TermLine {
 }
 
 impl TermLine {
-    fn prompt(text: impl Into<String>, transaction_active: bool) -> Self {
-        let prompt = if transaction_active {
-            "nervix[tx]>"
-        } else {
-            "nervix>"
+    fn prompt(
+        text: impl Into<String>,
+        transaction_state: Option<nervix_proto::TransactionState>,
+    ) -> Self {
+        let prompt = match transaction_state {
+            Some(nervix_proto::TransactionState::Open) => "nervix[tx]>",
+            Some(nervix_proto::TransactionState::Committing) => "nervix[committing]>",
+            _ => "nervix>",
         };
         Self {
             kind: TermLineKind::Prompt,
@@ -6139,6 +6273,38 @@ mod tests {
     use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowEdge, DataflowNode};
 
     use super::*;
+
+    #[test]
+    fn transaction_reconnect_replays_only_when_replicated_progress_is_unchanged() {
+        let previous = nervix_proto::TransactionStatus {
+            id: "tx-1".to_string(),
+            state: nervix_proto::TransactionState::Open as i32,
+            pending_count: 1,
+            completed_count: 0,
+            total_count: 1,
+            error: String::new(),
+            failing_step: None,
+        };
+        assert!(!transaction_operation_was_observed(
+            Some(&previous),
+            Some(&previous)
+        ));
+
+        let mut queued = previous.clone();
+        queued.pending_count = 2;
+        queued.total_count = 2;
+        assert!(transaction_operation_was_observed(
+            Some(&previous),
+            Some(&queued)
+        ));
+
+        let mut committing = previous.clone();
+        committing.state = nervix_proto::TransactionState::Committing as i32;
+        assert!(transaction_operation_was_observed(
+            Some(&previous),
+            Some(&committing)
+        ));
+    }
 
     #[test]
     fn branch_group_uses_callouts_for_initiator_and_finalizers() {

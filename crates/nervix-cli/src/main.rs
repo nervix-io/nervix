@@ -15,7 +15,7 @@ use error_stack::Report as StackReport;
 use nervix_client_core::{
     AutocompleteSuggestion, Client, ClientError as CoreClientError, CommandOutcomeKind,
     ConnectOptions, Diagnostic, SubscriptionDeliveryBehavior, SubscriptionRequest,
-    SuggestionKind as ClientSuggestionKind, TlsRequirement,
+    SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionState,
 };
 use nervix_nspl::client_statement::{
     parse_client_statements, parse_upload_resource_query, upload_resource_path_fragment,
@@ -290,10 +290,10 @@ async fn main() -> Result<(), StackReport<ClientError>> {
 
     loop {
         let active_domain = client.domain().await;
-        let prompt_domain = if client.transaction_active().await {
-            format!("{active_domain} tx")
-        } else {
-            active_domain
+        let prompt_domain = match client.transaction_status().await.map(|status| status.state) {
+            Some(TransactionState::Open) => format!("{active_domain} tx"),
+            Some(TransactionState::Committing) => format!("{active_domain} committing"),
+            _ => active_domain,
         };
         drain_event_queue(&mut event_receiver);
         let prompt = if buffer.is_empty() {

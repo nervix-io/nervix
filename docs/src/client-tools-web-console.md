@@ -18,8 +18,8 @@ Change the address with `--web-console-listen-addr` or `NERVIX_WEB_CONSOLE_LISTE
 published ports differ by installation method: see [Docker](installation-docker.md) and
 [Kubernetes Operator](installation-kubernetes.md).
 
-Any node works. Opening the console on a follower is supported — the follower proxies the session
-to the current leader and reports which node it reached:
+Any node works. Opening the console on a follower is supported — the console follows the leader
+redirect, reconnects there, and reports which node it reached:
 
 ```text
 connected to leader 'node-2'
@@ -117,7 +117,16 @@ shows the active domain, and marks an open transaction the same way the terminal
 ```text
 nervix[quickstart]>
 nervix[quickstart tx]>
+nervix[quickstart committing]>
 ```
+
+The transaction id and status are replicated. If the WebSocket closes unexpectedly or leadership
+changes, the console reconnects and attaches that id before replaying a pending command. It does
+not replay when the attached status shows that queue or commit progress was already recorded. A
+second session can attach the same owner's transaction and take it over; the displaced console
+then gets an explicit takeover error. A clean console session close reverts an open transaction,
+while an accepted commit continues on the leader without the browser. See
+[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
 
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`
