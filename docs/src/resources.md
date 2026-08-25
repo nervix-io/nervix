@@ -9,6 +9,12 @@ A resource is an uploaded directory tree that is stored and replicated across th
 - CSV lookup tables
 - TLS certificate bundles
 
+## Domain Ownership
+
+A resource belongs to the domain it was created in, like every other entity. `CREATE RESOURCE`, `UPLOAD RESOURCE`, and `DESCRIBE RESOURCE` all act on the session's selected domain, and a model resolves a resource name only against versions uploaded into its own domain.
+
+The same resource name in two domains is two independent resources: they have separate version sequences, separate stored content, and separate replica state. Referring to a name that was never created in the selected domain fails with `resource '<name>' does not exist`, even when another domain has it.
+
 ## Lifecycle
 
 Resources are managed in two phases:
@@ -37,7 +43,7 @@ With `IF NOT EXISTS`, creating an already-registered resource becomes a successf
 
 ## Versioning
 
-Versions are monotonically increasing integers assigned by the cluster leader per resource name.
+Versions are monotonically increasing integers assigned by the cluster leader per domain and resource name.
 
 There is no `latest` keyword in NSPL. If a model omits a version and chooses "latest" behavior, that behavior belongs to the model semantics, not to the resource system itself.
 

@@ -242,19 +242,23 @@ applying them. A transaction survives an unclean disconnect or leader failover;
 the CLI and web console re-attach before sending another command. Sending
 multiple statements without `BEGIN` is rejected.
 
-```nspl
-BEGIN;
+```nspl,ignore
 CREATE DOMAIN production;
+USE production;
+
+BEGIN;
 CREATE SCHEMA notification (user_id I64);
 COMMIT;
 ```
 
-`BEGIN` inside an active transaction is an error. `COMMIT` and `REVERT` also
-require an active transaction. Queueable content is limited to model mutations,
-domain creation/configuration/lifecycle, `CREATE USER`, and `CREATE RESOURCE`.
-Read-only statements, subscriptions, resource uploads, and node administration
-are not valid inside a transaction and must be sent separately. Use
-`SHOW TRANSACTIONS;` to inspect live transactions and retained outcomes. See
+`BEGIN` binds the transaction to the selected domain, which must already exist,
+and every queued statement must select that same domain. `BEGIN` inside an
+active transaction is an error. `COMMIT` and `REVERT` also require an active
+transaction. Queueable content is limited to that domain's model mutations,
+domain configuration and lifecycle, and `CREATE RESOURCE`. `CREATE DOMAIN`,
+`CREATE USER`, read-only statements, subscriptions, resource uploads, and node
+administration are not valid inside a transaction and must be sent separately.
+Use `SHOW TRANSACTIONS;` to inspect live transactions and retained outcomes. See
 [Control Plane](control-plane.md#replicated-nspl-transactions) for attach,
 failover, commit-step, expiry, and limit semantics.
 

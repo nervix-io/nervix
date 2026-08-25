@@ -3893,46 +3893,46 @@ fn resolve_emitter_client(
 ) -> Result<Option<ResolvedClientConfig>, RuntimeError> {
     let resolved = match (sink, client) {
         (EmitSink::Kafka { .. }, Some(Model::ClientKafka(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::Pulsar { .. }, Some(Model::ClientPulsar(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::RabbitMq { .. }, Some(Model::ClientRabbitMq(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::Redis { .. }, Some(Model::ClientRedis(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::Mqtt { .. }, Some(Model::ClientMqtt(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::Nats { .. }, Some(Model::ClientNats(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::ZeroMq { .. }, Some(Model::ClientZeroMq(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::Sentry { .. }, Some(Model::ClientSentry(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::Otel { .. }, Some(Model::ClientOtel(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::ClickHouse { .. }, Some(Model::ClientClickHouse(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::Postgres { .. }, Some(Model::ClientPostgres(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::MySql { .. }, Some(Model::ClientMySql(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (EmitSink::MongoDb { .. }, Some(Model::ClientMongoDb(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
         (
             EmitSink::Iceberg {
@@ -3940,21 +3940,21 @@ fn resolve_emitter_client(
                 ..
             },
             Some(Model::ClientS3(client)),
-        ) => Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config)),
+        ) => Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config)),
         (
             EmitSink::Iceberg {
                 backend: IcebergStorageBackend::Gcs,
                 ..
             },
             Some(Model::ClientGcs(client)),
-        ) => Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config)),
+        ) => Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config)),
         (
             EmitSink::Iceberg {
                 backend: IcebergStorageBackend::AzureBlob,
                 ..
             },
             Some(Model::ClientAzureBlob(client)),
-        ) => Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config)),
+        ) => Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config)),
         _ => None,
     };
     resolved
@@ -3988,7 +3988,7 @@ fn resolve_emitter_catalog_client(
         });
     };
     runtime
-        .resolve_client_config(client.mount.as_ref(), &client.config)
+        .resolve_client_config(domain, client.mount.as_ref(), &client.config)
         .map(Some)
         .map_err(|reason| RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),

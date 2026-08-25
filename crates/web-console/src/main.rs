@@ -427,7 +427,7 @@ fn App() -> impl IntoView {
                 input.set(String::new());
                 return;
             }
-            let request_domain = command_request_domain(&command, active_domain.get_untracked());
+            let request_domain = active_domain.get_untracked().unwrap_or_default();
             let request = nervix_proto::SessionRequest {
                 request: Some(nervix_proto::session_request::Request::Command(
                     nervix_proto::CommandRequest {
@@ -1092,6 +1092,12 @@ fn handle_session_response(
             }
             let previous_transaction = transaction_status.get_untracked();
             if let Some(status) = result.transaction.clone() {
+                if !status.domain.is_empty()
+                    && active_domain.get_untracked().as_deref() != Some(status.domain.as_str())
+                {
+                    user_selected_domain.set(true);
+                    active_domain.set(Some(status.domain.clone()));
+                }
                 transaction_status.set(Some(status));
             }
             if result_is_set_active_domain_ack(&result) {
@@ -1580,12 +1586,6 @@ fn resource_file_summary(file: &ResourceFileView) -> String {
     parts.join(" | ")
 }
 
-fn command_request_domain(command: &str, active_domain: Option<String>) -> String {
-    active_domain
-        .or_else(|| first_created_domain_from_query(command))
-        .unwrap_or_default()
-}
-
 fn first_created_domain_from_query(query: &str) -> Option<String> {
     parse_client_statements(query)
         .ok()?
@@ -1600,8 +1600,7 @@ fn first_created_domain_from_query(query: &str) -> Option<String> {
 
 fn is_domainless_server_command(command: &str) -> bool {
     let normalized = command.trim_start().to_ascii_uppercase();
-    normalized.starts_with("BEGIN")
-        || normalized.starts_with("COMMIT")
+    normalized.starts_with("COMMIT")
         || normalized.starts_with("REVERT")
         || normalized.starts_with("CREATE DOMAIN ")
         || normalized.starts_with("CREATE UNPACED DOMAIN ")
@@ -2162,11 +2161,16 @@ fn ResourceDialog(
     let uploading = RwSignal::new(false);
     let trigger_upload = move |input: web_sys::HtmlInputElement| {
         let resource_name = resource();
+        let Some(upload_domain) = active_domain.get_untracked() else {
+            upload_status.set("no active domain selected".to_string());
+            return;
+        };
         upload_status.set("uploading".to_string());
         uploading.set(true);
         spawn_local(async move {
             let message = upload_resource_files(
                 resource_name.clone(),
+                upload_domain,
                 input,
                 upload_base_url.get_untracked(),
                 auth_token.get_untracked(),
@@ -2326,6 +2330,7 @@ fn event_target_input(event: &ev::Event) -> web_sys::HtmlInputElement {
 
 async fn upload_resource_files(
     resource: String,
+    domain: String,
     input: web_sys::HtmlInputElement,
     upload_base_url: Option<String>,
     auth_token: Option<String>,
@@ -2361,6 +2366,7 @@ async fn upload_resource_files(
     let url = web_console_resource_upload_url(
         upload_base_url.as_deref(),
         &resource,
+        &domain,
         auth_token.as_deref(),
     );
     match gloo_net::http::Request::post(&url).body(form) {
@@ -2385,16 +2391,19 @@ async fn upload_resource_files(
 fn web_console_resource_upload_url(
     base_url: Option<&str>,
     resource: &str,
+    domain: &str,
     auth_token: Option<&str>,
 ) -> String {
     let auth_query = auth_token
         .map(|token| format!("&auth={}", encode_query_component(token)))
         .unwrap_or_default();
-    let path = format!(
-        "/console/resources/upload?resource={}{}",
+    let query = format!(
+        "resource={}&domain={}{}",
         encode_query_component(resource),
+        encode_query_component(domain),
         auth_query
     );
+    let path = format!("/console/resources/upload?{query}");
     let Some(base_url) = base_url else {
         return path;
     };
@@ -2402,11 +2411,7 @@ fn web_console_resource_upload_url(
         return path;
     };
     url.set_path("/console/resources/upload");
-    url.set_query(Some(&format!(
-        "resource={}{}",
-        encode_query_component(resource),
-        auth_query
-    )));
+    url.set_query(Some(&query));
     url.set_fragment(None);
     url.to_string()
 }
@@ -6294,6 +6299,7 @@ mod tests {
     fn transaction_reconnect_replays_only_when_replicated_progress_is_unchanged() {
         let previous = nervix_proto::TransactionStatus {
             id: "tx-1".to_string(),
+            domain: "tenant".to_string(),
             state: nervix_proto::TransactionState::Open as i32,
             pending_count: 1,
             completed_count: 0,

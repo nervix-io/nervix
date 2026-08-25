@@ -68,17 +68,19 @@ keys.
 Use separate execution phases so transaction and active-domain rules stay clear.
 
 1. **Domain bootstrap:** create one paced or unpaced domain, including its optional placement
-   default, as its own server command.
-2. **Domain selection:** run `USE <domain>;` as a client-local command outside a transaction.
+   default, as its own server command. `CREATE DOMAIN` is never transaction content.
+2. **Domain selection:** run `USE <domain>;` as a client-local command outside a transaction. A
+   transaction cannot open until a selected domain exists.
 3. **Resources:** create resource declarations, then upload local directories as separate client
-   actions.
+   actions. Resources are domain-owned, so both act on the selected domain.
 4. **Graph transaction:** wrap multiple queueable configuration statements in `BEGIN;` and
-   `COMMIT;`. A consecutive one-domain model-mutation run is one atomic candidate-graph update,
-   including mixed `CREATE`, supported model `ALTER`, and `DROP`. Each statement is preflighted
-   against the queued prefix without applying its effect; a rejection can be corrected before
-   commit. Queued model mutations report their own preflighted quiesce levels, and `COMMIT` reports
-   only the maximum level actually executed. Read-only statements, subscriptions, uploads, and node
-   administration remain outside the transaction.
+   `COMMIT;`. The transaction is bound to the selected domain and every queued statement must
+   select it. A consecutive model-mutation run is one atomic candidate-graph update, including
+   mixed `CREATE`, supported model `ALTER`, and `DROP`. Each statement is preflighted against the
+   queued prefix without applying its effect; a rejection can be corrected before commit. Queued
+   model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
+   maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, read-only statements,
+   subscriptions, uploads, and node administration remain outside the transaction.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended.
 
 Within the graph transaction, declare dependencies before consumers:
@@ -171,9 +173,10 @@ relay. Do not use them to scan across branches.
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`.
 - Paced ingestors declare their timestamp source.
 - External sensitive values use the required explicit leakage operation.
-- Transactions queue only replicated configuration statements. Commit progress survives leader
-  failover, while only consecutive one-domain model-mutation runs receive atomic candidate-graph
-  validation and persistence; read-only and session/client-local commands remain outside.
+- Transactions queue only the bound domain's replicated configuration statements. Commit progress
+  survives leader failover, while only consecutive model-mutation runs receive atomic
+  candidate-graph validation and persistence; `CREATE DOMAIN`, `CREATE USER`, read-only, and
+  session/client-local commands remain outside.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
 - Running-domain schema ALTER quiescing is automatic; do not emit `PAUSE` or `RESUME` syntax.

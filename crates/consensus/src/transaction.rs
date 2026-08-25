@@ -5,19 +5,24 @@ use nervix_models::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::UserCredentials;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionStatement {
     pub source: String,
     pub statement: Statement,
-    pub domain: Option<Domain>,
 }
 
 impl TransactionStatement {
     pub fn source_bytes(&self) -> u64 {
         u64::try_from(self.source.len()).unwrap_or(u64::MAX)
     }
+}
+
+/// The replicated admission limits a queued statement is checked against. They travel together
+/// because every admission check applies both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionQueueLimits {
+    pub max_statements: usize,
+    pub max_source_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +118,7 @@ impl TransactionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicatedTransaction {
     pub id: String,
+    pub domain: Domain,
     pub owner: Identifier,
     pub created_at: Timestamp,
     pub last_activity_at: Timestamp,
@@ -123,9 +129,10 @@ pub struct ReplicatedTransaction {
 }
 
 impl ReplicatedTransaction {
-    pub fn open(id: String, owner: Identifier, now: Timestamp) -> Self {
+    pub fn open(id: String, domain: Domain, owner: Identifier, now: Timestamp) -> Self {
         Self {
             id,
+            domain,
             owner,
             created_at: now,
             last_activity_at: now,
@@ -184,33 +191,46 @@ impl ReplicatedTransaction {
         }
     }
 
+    pub(crate) fn ensure_domain(&self, domain: &Domain) -> Result<(), TransactionMutationError> {
+        if &self.domain == domain {
+            Ok(())
+        } else {
+            Err(TransactionMutationError::DomainMismatch {
+                id: self.id.clone(),
+                expected: self.domain.clone(),
+                requested: domain.clone(),
+            })
+        }
+    }
+
     pub fn validate_queue_admission(
         &self,
         owner: &Identifier,
+        domain: &Domain,
         statement: &TransactionStatement,
-        max_statements: usize,
-        max_source_bytes: u64,
+        limits: TransactionQueueLimits,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
+        self.ensure_domain(domain)?;
         if !matches!(self.state, TransactionState::Open) {
             return Err(TransactionMutationError::NotOpen {
                 id: self.id.clone(),
                 state: self.state.as_str().to_string(),
             });
         }
-        if self.statements.len() >= max_statements {
+        if self.statements.len() >= limits.max_statements {
             return Err(TransactionMutationError::StatementLimit {
                 id: self.id.clone(),
-                limit: max_statements,
+                limit: limits.max_statements,
             });
         }
         let next_source_bytes = self
             .queued_source_bytes
             .saturating_add(statement.source_bytes());
-        if next_source_bytes > max_source_bytes {
+        if next_source_bytes > limits.max_source_bytes {
             return Err(TransactionMutationError::SourceByteLimit {
                 id: self.id.clone(),
-                limit: max_source_bytes,
+                limit: limits.max_source_bytes,
             });
         }
         Ok(())
@@ -219,12 +239,12 @@ impl ReplicatedTransaction {
     pub(crate) fn queue(
         &mut self,
         owner: &Identifier,
+        domain: &Domain,
         at: Timestamp,
         statement: TransactionStatement,
-        max_statements: usize,
-        max_source_bytes: u64,
+        limits: TransactionQueueLimits,
     ) -> Result<(), TransactionMutationError> {
-        self.validate_queue_admission(owner, &statement, max_statements, max_source_bytes)?;
+        self.validate_queue_admission(owner, domain, &statement, limits)?;
         let next_source_bytes = self
             .queued_source_bytes
             .saturating_add(statement.source_bytes());
@@ -400,9 +420,6 @@ pub enum TransactionStepEffect {
         domain: Box<DomainState>,
         schedule: Option<Box<DomainSchedule>>,
     },
-    PutDomain {
-        domain: Box<DomainState>,
-    },
     StartDomain {
         domain_id: Domain,
         expected_start_version: u64,
@@ -413,11 +430,8 @@ pub enum TransactionStepEffect {
         domain_id: Domain,
         expected_start_version: u64,
     },
-    CreateUser {
-        user: Box<UserCredentials>,
-    },
     CreateResourceCatalog {
-        identifier: String,
+        identifier: Identifier,
     },
 }
 
@@ -434,6 +448,15 @@ pub enum TransactionMutationError {
     Unknown { id: String },
     #[error("transaction '{id}' belongs to another user")]
     OwnerMismatch { id: String },
+    #[error(
+        "transaction '{id}' is bound to domain '{expected}'; the statement selected domain \
+         '{requested}'"
+    )]
+    DomainMismatch {
+        id: String,
+        expected: Domain,
+        requested: Domain,
+    },
     #[error("transaction '{id}' is not open (state {state})")]
     NotOpen { id: String, state: String },
     #[error("transaction '{id}' is not committing (state {state})")]

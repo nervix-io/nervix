@@ -6311,11 +6311,11 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
     let ca_path = source_root.path().join("ca.pem");
     std::fs::write(&ca_path, "test-ca").expect("ca file should be written");
 
+    let mount_domain = Domain::parse("tenant").expect("valid domain");
     let store = ResourceStore::open(store_root.path()).expect("resource store should open");
     store
         .install_from_directory(
-            identifier("dev_tls"),
-            1,
+            ResourceId::new(mount_domain.clone(), identifier("dev_tls"), 1),
             source_root.path(),
             "node-1",
             Timestamp::from_unix_nanos(0),
@@ -6327,9 +6327,13 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
     runtime.attach_resources(
         Arc::new(store),
         ResourceVersionStatus {
-            next_version_by_identifier: SortedVec::from_unsorted(vec![(identifier("dev_tls"), 2)]),
+            next_version_by_resource: SortedVec::from_unsorted(vec![(
+                mount_domain.clone(),
+                identifier("dev_tls"),
+                2,
+            )]),
             versions: SortedVec::from_unsorted(vec![ResourceVersion {
-                id: ResourceId::new(identifier("dev_tls"), 1),
+                id: ResourceId::new(mount_domain.clone(), identifier("dev_tls"), 1),
                 root_checksum: "root".to_string(),
                 manifest_checksum: "manifest".to_string(),
                 file_count: 1,
@@ -6343,6 +6347,7 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
 
     let resolved = runtime
         .resolve_client_config(
+            &mount_domain,
             Some(&identifier("dev_tls")),
             &[ClientConfigEntry {
                 key: "tls_ca_file".to_string(),
@@ -6359,6 +6364,22 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
         std::fs::read_to_string(&mounted_ca).expect("mounted ca should be readable"),
         "test-ca"
     );
+
+    let other_domain = Domain::parse("other").expect("valid domain");
+    let error = runtime
+        .resolve_client_config(
+            &other_domain,
+            Some(&identifier("dev_tls")),
+            &[ClientConfigEntry {
+                key: "tls_ca_file".to_string(),
+                value: "{{ dev_tls }}/ca.pem".to_string(),
+            }],
+        )
+        .expect_err("another domain must not see this domain's resource");
+    assert!(
+        error.contains("has no installed versions in domain 'other'"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -6366,6 +6387,7 @@ fn client_resource_mounts_reject_unknown_placeholders() {
     let runtime = super::Runtime::new();
     let error = runtime
         .resolve_client_config(
+            &Domain::parse("tenant").expect("valid domain"),
             None,
             &[ClientConfigEntry {
                 key: "tls_ca_file".to_string(),
@@ -6381,6 +6403,7 @@ fn client_config_instance_placeholder_renders_for_concrete_instance() {
     let runtime = super::Runtime::new();
     let resolved = runtime
         .resolve_client_config_with_instance(
+            &Domain::parse("tenant").expect("valid domain"),
             None,
             &[ClientConfigEntry {
                 key: "client_id".to_string(),

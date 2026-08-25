@@ -36,6 +36,10 @@ most one session. The session protocol can attach by transaction id; the authent
 match the transaction owner. A later attach takes over the binding and the displaced session gets
 an explicit takeover error on its next transaction operation.
 
+A transaction also carries the domain it is bound to. Attaching adopts that domain as the session's
+selected domain, so a session can never queue a statement for a different domain than the
+transaction it holds. `USE` remains unavailable while a transaction is active.
+
 The CLI, web console, and Rust client retain the transaction id and automatically attach after a
 redirect or transport reconnect before replaying a command. An unclean transport loss, node loss,
 or leadership change therefore leaves an open transaction intact until attach or idle expiry. A

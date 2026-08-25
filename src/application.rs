@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     convert::Infallible,
     fs::OpenOptions,
     future::Future,
@@ -55,8 +55,8 @@ use nervix_consensus::{
     ConsensusSettings, RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR,
     RAFT_INSTALL_SNAPSHOT_PATH, RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH, ReplicatedTransaction,
     SnapshotRelayHeader as RaftSnapshotRelayHeader, TransactionCommandResult,
-    TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionState,
-    TransactionStatement, TransactionStepEffect, TransactionStepResult,
+    TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionQueueLimits,
+    TransactionState, TransactionStatement, TransactionStepEffect, TransactionStepResult,
     TransferLeaderRequest as RaftTransferLeaderRequest, TypeConfig, UserCredentials,
     VoteRequest as RaftVoteRequest,
 };
@@ -103,9 +103,9 @@ use nervix_models::{
     IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind,
     MongoDbConflictAction, MySqlConflictAction, ParseAsType, PlacementGroupSchedule,
     PlacementPolicy, PlacementRuntimeNode, PostgresConflictAction, ProcessorInputs,
-    ProcessorOutputs, QuiesceLevel, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
-    ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
+    ProcessorOutputs, QuiesceLevel, ResourceId, ResourceNodeState, ResourceNodeStatus,
+    ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement,
+    StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
     UploadResource, VhostTlsResource, expression_to_nspl,
 };
 use nervix_nspl::{
@@ -601,7 +601,7 @@ struct PendingSessionCommand {
 
 #[derive(Debug)]
 enum SessionCommandOperation {
-    Begin,
+    Begin { domain: String },
     Queue(PendingSessionCommand),
     Commit,
     Revert,
@@ -656,7 +656,9 @@ impl SessionSubscriptions {
                         return Err("transaction is already active".to_string());
                     }
                     transaction_active = true;
-                    operations.push(SessionCommandOperation::Begin);
+                    operations.push(SessionCommandOperation::Begin {
+                        domain: request_domain.to_string(),
+                    });
                 }
                 ClientStatement::CommitTransaction => {
                     if !transaction_active {
@@ -1615,15 +1617,16 @@ async fn read_cbor_request_body<T: serde::de::DeserializeOwned>(
     })
 }
 
-fn parse_resource_archive_request_path(path: &str) -> Option<(Identifier, u64)> {
+fn parse_resource_archive_request_path(path: &str) -> Option<ResourceId> {
     let suffix = path.strip_prefix(RESOURCE_ARCHIVE_PATH_PREFIX)?;
     let mut parts = suffix.split('/');
+    let domain = Domain::parse(parts.next()?).ok()?;
     let identifier = Identifier::parse(parts.next()?).ok()?;
     let version = parts.next()?.parse::<u64>().ok()?;
     if parts.next()? != "archive" || parts.next().is_some() {
         return None;
     }
-    Some((identifier, version))
+    Some(ResourceId::new(domain, identifier, version))
 }
 
 async fn handle_cluster_api_request(
@@ -1633,9 +1636,8 @@ async fn handle_cluster_api_request(
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
     let response = match (request.method(), request.uri().path()) {
         (&Method::GET, path) if parse_resource_archive_request_path(path).is_some() => {
-            let (identifier, version) =
-                parse_resource_archive_request_path(path).expect("path checked above");
-            match resource_store.read_archive_bytes(&identifier, version) {
+            let id = parse_resource_archive_request_path(path).expect("path checked above");
+            match resource_store.read_archive_bytes(&id) {
                 Ok(bytes) => response_with_bytes(StatusCode::OK, bytes, "application/x-tar"),
                 Err(_) => text_response(StatusCode::NOT_FOUND, "resource archive not found"),
             }
@@ -3877,13 +3879,20 @@ impl SessionService for SessionServiceImpl {
         };
         let identifier = Identifier::parse(&start.name)
             .map_err(|_| Status::invalid_argument("upload resource name is invalid"))?;
+        let domain = match parse_request_domain(&start.domain) {
+            Ok(domain) => domain,
+            Err(RequestDomainError::Missing) => {
+                return Err(Status::invalid_argument("no active domain selected"));
+            }
+            Err(RequestDomainError::Invalid) => {
+                return Err(Status::invalid_argument(
+                    "upload resource domain is invalid",
+                ));
+            }
+        };
 
         let resources = self.consensus.current_resources().await;
-        if !resources
-            .next_version_by_identifier
-            .iter()
-            .any(|(known_identifier, _)| known_identifier == &identifier)
-        {
+        if !resources.is_declared(&domain, &identifier) {
             return Ok(Response::new(UploadResourceResponse {
                 success: false,
                 message: format!("resource '{}' does not exist", identifier.as_str()),
@@ -3942,6 +3951,7 @@ impl SessionService for SessionServiceImpl {
         };
         match self
             .install_uploaded_resource_archive(
+                &domain,
                 identifier,
                 <TempPath as AsRef<std::path::Path>>::as_ref(&temp_path),
                 root_checksum,
@@ -4145,7 +4155,7 @@ impl SessionServiceImpl {
                 }
                 Model::Vhost(vhost) => {
                     if let Some(tls) = vhost.tls.as_ref() {
-                        self.validate_vhost_tls_binding(tls)
+                        self.validate_vhost_tls_binding(domain, tls)
                             .await
                             .map_err(|error| {
                                 format!(
@@ -4156,14 +4166,14 @@ impl SessionServiceImpl {
                     }
                 }
                 Model::Lookup(lookup) => {
-                    self.validate_lookup_binding(lookup)
+                    self.validate_lookup_binding(domain, lookup)
                         .await
                         .map_err(|error| {
                             format!("invalid HASH MAP '{}': {error}", lookup.name.as_str())
                         })?;
                 }
                 Model::Inferencer(processor) => {
-                    self.validate_inferencer_binding(processor)
+                    self.validate_inferencer_binding(domain, processor)
                         .await
                         .map_err(|error| {
                             format!("invalid INFERENCER '{}': {error}", processor.name.as_str())
@@ -4208,25 +4218,34 @@ impl SessionServiceImpl {
             .map_err(|error| format!("invalid UDF '{}': {error}", changed_udfs.join(", ")))
     }
 
-    async fn validate_vhost_tls_binding(&self, tls: &VhostTlsResource) -> Result<(), String> {
+    async fn validate_vhost_tls_binding(
+        &self,
+        domain: &Domain,
+        tls: &VhostTlsResource,
+    ) -> Result<(), String> {
         let resources = self.consensus.current_resources().await;
-        let version = resolve_vhost_tls_resource_version(&resources, tls)?;
-        load_vhost_tls_materials(&self.resource_store, &tls.resource, version).await?;
+        let id = resolve_resource_id(&resources, domain, &tls.resource, tls.version)?;
+        load_vhost_tls_materials(&self.resource_store, &id).await?;
         Ok(())
     }
 
-    async fn validate_lookup_binding(&self, lookup: &CreateLookup) -> Result<(), String> {
+    async fn validate_lookup_binding(
+        &self,
+        domain: &Domain,
+        lookup: &CreateLookup,
+    ) -> Result<(), String> {
         let resources = self.consensus.current_resources().await;
-        let version = resolve_latest_resource_version(&resources, &lookup.resource)?;
+        let id = resolve_resource_id(&resources, domain, &lookup.resource, None)?;
         let path = self
             .resource_store
-            .resolve_content_path(&lookup.resource, version, &lookup.path)
+            .resolve_content_path(&id, &lookup.path)
             .map_err(|error| error.to_string())?;
         ensure_file_exists(&path, "lookup").await
     }
 
     async fn validate_inferencer_binding(
         &self,
+        domain: &Domain,
         processor: &CreateInferencer,
     ) -> Result<(), String> {
         processor.execution_mode().map_err(|error| {
@@ -4237,11 +4256,15 @@ impl SessionServiceImpl {
             )
         })?;
         let resources = self.consensus.current_resources().await;
-        let version =
-            resolve_resource_version(&resources, &processor.resource, processor.resource_version)?;
+        let id = resolve_resource_id(
+            &resources,
+            domain,
+            &processor.resource,
+            processor.resource_version,
+        )?;
         let path = self
             .resource_store
-            .resolve_content_path(&processor.resource, version, &processor.file)
+            .resolve_content_path(&id, &processor.file)
             .map_err(|error| error.to_string())?;
         ensure_file_exists(&path, "ONNX model").await?;
         if path.extension().and_then(|extension| extension.to_str()) != Some("onnx") {
@@ -4406,36 +4429,36 @@ impl SessionServiceImpl {
                     continue;
                 };
 
-                let version = match resolve_vhost_tls_resource_version(&resources, tls) {
-                    Ok(version) => version,
-                    Err(error) => {
-                        warn!(
-                            domain = domain_id.as_str(),
-                            vhost = vhost.name.as_str(),
-                            resource = tls.resource.as_str(),
-                            error,
-                            "failed to resolve VHOST TLS resource version"
-                        );
-                        continue;
-                    }
-                };
-                let certified_key =
-                    match load_vhost_tls_materials(&self.resource_store, &tls.resource, version)
-                        .await
-                    {
-                        Ok(materials) => materials.certified_key,
+                let id =
+                    match resolve_resource_id(&resources, domain_id, &tls.resource, tls.version) {
+                        Ok(id) => id,
                         Err(error) => {
                             warn!(
                                 domain = domain_id.as_str(),
                                 vhost = vhost.name.as_str(),
                                 resource = tls.resource.as_str(),
-                                version,
                                 error,
-                                "failed to load VHOST TLS materials"
+                                "failed to resolve VHOST TLS resource version"
                             );
                             continue;
                         }
                     };
+                let version = id.version;
+                let certified_key = match load_vhost_tls_materials(&self.resource_store, &id).await
+                {
+                    Ok(materials) => materials.certified_key,
+                    Err(error) => {
+                        warn!(
+                            domain = domain_id.as_str(),
+                            vhost = vhost.name.as_str(),
+                            resource = tls.resource.as_str(),
+                            version,
+                            error,
+                            "failed to load VHOST TLS materials"
+                        );
+                        continue;
+                    }
+                };
 
                 let mut applied_hostname = false;
                 for hostname in &vhost.hostnames {
@@ -4512,14 +4535,16 @@ impl SessionServiceImpl {
         for resource in resources.versions.iter().cloned() {
             tokio::task::consume_budget().await;
 
+            let local_key = ResourceReplicaKey::new(
+                resource.id.domain.clone(),
+                resource.id.identifier.clone(),
+                resource.id.version,
+                local_node_id.clone(),
+            );
             let local_replica = resources
                 .replicas
                 .iter()
-                .find(|replica| {
-                    replica.key.identifier == resource.id.identifier
-                        && replica.key.version == resource.id.version
-                        && replica.key.node_id == local_node_id
-                })
+                .find(|replica| replica.key == local_key)
                 .cloned();
             if local_replica.as_ref().is_some_and(|replica| {
                 replica.state == ResourceNodeState::Ready
@@ -4531,8 +4556,7 @@ impl SessionServiceImpl {
             let Some(source_node) = live_nodes.iter().find(|node| {
                 node.node_id != local_node_id
                     && resources.replicas.iter().any(|replica| {
-                        replica.key.identifier == resource.id.identifier
-                            && replica.key.version == resource.id.version
+                        replica.key.version_key().resource_id() == resource.id
                             && replica.key.node_id == node.node_id
                             && replica.state == ResourceNodeState::Ready
                             && replica.root_checksum.as_deref()
@@ -4542,29 +4566,27 @@ impl SessionServiceImpl {
                 continue;
             };
 
+            let failed_replica =
+                |root_checksum: Option<String>, error: String| ResourceNodeStatus {
+                    key: local_key.clone(),
+                    state: ResourceNodeState::Failed,
+                    root_checksum,
+                    last_verified_at: None,
+                    source_node_id: Some(source_node.node_id.clone()),
+                    error: Some(error),
+                };
+
             let archive = match fetch_resource_archive(
                 self.cluster_api_clients.as_ref(),
                 &source_node.cluster_api_advertise_addr,
-                &resource.id.identifier,
-                resource.id.version,
+                &resource.id,
             )
             .await
             {
                 Ok(archive) => archive,
                 Err(error) => {
                     if let Err(publish_error) = self
-                        .publish_resource_replica(ResourceNodeStatus {
-                            key: ResourceReplicaKey::new(
-                                resource.id.identifier.clone(),
-                                resource.id.version,
-                                local_node_id.clone(),
-                            ),
-                            state: ResourceNodeState::Failed,
-                            root_checksum: None,
-                            last_verified_at: None,
-                            source_node_id: Some(source_node.node_id.clone()),
-                            error: Some(error),
-                        })
+                        .publish_resource_replica(failed_replica(None, error))
                         .await
                     {
                         self.broadcast_error(publish_error);
@@ -4575,21 +4597,13 @@ impl SessionServiceImpl {
 
             if archive.root_checksum != resource.root_checksum {
                 if let Err(error) = self
-                    .publish_resource_replica(ResourceNodeStatus {
-                        key: ResourceReplicaKey::new(
-                            resource.id.identifier.clone(),
-                            resource.id.version,
-                            local_node_id.clone(),
-                        ),
-                        state: ResourceNodeState::Failed,
-                        root_checksum: Some(archive.root_checksum.clone()),
-                        last_verified_at: None,
-                        source_node_id: Some(source_node.node_id.clone()),
-                        error: Some(format!(
+                    .publish_resource_replica(failed_replica(
+                        Some(archive.root_checksum.clone()),
+                        format!(
                             "resource checksum mismatch: expected {}, got {}",
                             resource.root_checksum, archive.root_checksum
-                        )),
-                    })
+                        ),
+                    ))
                     .await
                 {
                     self.broadcast_error(error);
@@ -4600,8 +4614,7 @@ impl SessionServiceImpl {
             let manifest = match self
                 .resource_store
                 .install_from_archive_path(
-                    resource.id.identifier.clone(),
-                    resource.id.version,
+                    resource.id.clone(),
                     <TempPath as AsRef<std::path::Path>>::as_ref(&archive.path),
                     archive.root_checksum.clone(),
                     resource.created_by_node.clone(),
@@ -4612,18 +4625,7 @@ impl SessionServiceImpl {
                 Ok(manifest) => manifest,
                 Err(error) => {
                     if let Err(publish_error) = self
-                        .publish_resource_replica(ResourceNodeStatus {
-                            key: ResourceReplicaKey::new(
-                                resource.id.identifier.clone(),
-                                resource.id.version,
-                                local_node_id.clone(),
-                            ),
-                            state: ResourceNodeState::Failed,
-                            root_checksum: None,
-                            last_verified_at: None,
-                            source_node_id: Some(source_node.node_id.clone()),
-                            error: Some(error.to_string()),
-                        })
+                        .publish_resource_replica(failed_replica(None, error.to_string()))
                         .await
                     {
                         self.broadcast_error(publish_error);
@@ -4635,21 +4637,13 @@ impl SessionServiceImpl {
             if manifest.resource.root_checksum != resource.root_checksum {
                 let actual_checksum = manifest.resource.root_checksum.clone();
                 if let Err(error) = self
-                    .publish_resource_replica(ResourceNodeStatus {
-                        key: ResourceReplicaKey::new(
-                            resource.id.identifier.clone(),
-                            resource.id.version,
-                            local_node_id.clone(),
-                        ),
-                        state: ResourceNodeState::Failed,
-                        root_checksum: Some(actual_checksum.clone()),
-                        last_verified_at: None,
-                        source_node_id: Some(source_node.node_id.clone()),
-                        error: Some(format!(
+                    .publish_resource_replica(failed_replica(
+                        Some(actual_checksum.clone()),
+                        format!(
                             "resource checksum mismatch: expected {}, got {}",
                             resource.root_checksum, actual_checksum
-                        )),
-                    })
+                        ),
+                    ))
                     .await
                 {
                     self.broadcast_error(error);
@@ -4659,11 +4653,7 @@ impl SessionServiceImpl {
 
             if let Err(error) = self
                 .publish_resource_replica(ResourceNodeStatus {
-                    key: ResourceReplicaKey::new(
-                        resource.id.identifier.clone(),
-                        resource.id.version,
-                        local_node_id.clone(),
-                    ),
+                    key: local_key,
                     state: ResourceNodeState::Ready,
                     root_checksum: Some(resource.root_checksum.clone()),
                     last_verified_at: Some(current_timestamp()),
@@ -7471,23 +7461,21 @@ impl SessionServiceImpl {
             ));
         }
 
-        if expects_resource_ref {
+        if let Some(domain) = &domain
+            && (expects_resource_ref || requested_resource_versions.is_some())
+        {
             let resources = self.consensus.current_resources().await;
-            suggestions.extend(resource_ref_suggestions(&resources, &prefix));
+            if expects_resource_ref {
+                suggestions.extend(resource_ref_suggestions(&resources, domain, &prefix));
+            }
             if let Some(resource_identifier) = requested_resource_versions.as_ref() {
                 suggestions.extend(resource_version_suggestions(
                     &resources,
+                    domain,
                     resource_identifier,
                     &prefix,
                 ));
             }
-        } else if let Some(resource_identifier) = requested_resource_versions.as_ref() {
-            let resources = self.consensus.current_resources().await;
-            suggestions.extend(resource_version_suggestions(
-                &resources,
-                resource_identifier,
-                &prefix,
-            ));
         }
 
         if grammar_input.contains("DOMAIN")
@@ -7739,27 +7727,34 @@ impl SessionServiceImpl {
 
         for operation in operations {
             let result = match operation {
-                SessionCommandOperation::Begin => {
-                    let id = uuid::Uuid::now_v7().to_string();
-                    let transaction = ReplicatedTransaction::open(
-                        id.clone(),
-                        subscriptions.user.clone(),
-                        current_timestamp(),
-                    );
-                    match self
-                        .consensus
-                        .open_transaction(transaction, self.transaction_max_open)
-                        .await
-                    {
-                        Ok(transaction) => {
-                            self.transaction_bindings
-                                .insert(id.clone(), subscriptions.session_id.clone());
-                            subscriptions.bind_transaction(id.clone());
-                            let mut result = command_ok(format!("transaction started: id '{id}'"));
-                            result.transaction = Some(transaction_status(&transaction));
-                            result
+                SessionCommandOperation::Begin { domain } => {
+                    match self.resolve_transaction_domain(&domain).await {
+                        Err(message) => command_error(message),
+                        Ok(domain) => {
+                            let id = uuid::Uuid::now_v7().to_string();
+                            let transaction = ReplicatedTransaction::open(
+                                id.clone(),
+                                domain,
+                                subscriptions.user.clone(),
+                                current_timestamp(),
+                            );
+                            match self
+                                .consensus
+                                .open_transaction(transaction, self.transaction_max_open)
+                                .await
+                            {
+                                Ok(transaction) => {
+                                    self.transaction_bindings
+                                        .insert(id.clone(), subscriptions.session_id.clone());
+                                    subscriptions.bind_transaction(id.clone());
+                                    let mut result =
+                                        command_ok(format!("transaction started: id '{id}'"));
+                                    result.transaction = Some(transaction_status(&transaction));
+                                    result
+                                }
+                                Err(error) => command_error(error.to_string()),
+                            }
                         }
-                        Err(error) => command_error(error.to_string()),
                     }
                 }
                 SessionCommandOperation::Queue(command) => {
@@ -7808,6 +7803,22 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Resolves the domain a `BEGIN` binds its transaction to. The domain must already exist,
+    /// because a transaction can no longer create one and every statement it queues belongs to it.
+    async fn resolve_transaction_domain(&self, request_domain: &str) -> Result<Domain, String> {
+        let domain = match parse_request_domain(request_domain) {
+            Ok(domain) => domain,
+            Err(RequestDomainError::Missing) => {
+                return Err("no active domain selected".to_string());
+            }
+            Err(RequestDomainError::Invalid) => return Err("invalid domain".to_string()),
+        };
+        if self.consensus.current_domain(&domain).await.is_none() {
+            return Err(format!("domain '{}' does not exist", domain.as_str()));
+        }
+        Ok(domain)
+    }
+
     async fn queue_transaction_statement(
         &self,
         command: PendingSessionCommand,
@@ -7827,38 +7838,34 @@ impl SessionServiceImpl {
         };
         if !is_queueable_transaction_statement(&statement) {
             return command_error(format!(
-                "{} cannot be queued in a transaction; only replicated configuration statements \
-                 are queueable",
+                "{} cannot be queued in a transaction; a transaction applies to one existing \
+                 domain and queues only that domain's configuration statements",
                 transaction_statement_label(&statement)
             ));
         }
-        let domain = if transaction_statement_requires_domain(&statement) {
-            match parse_request_domain(&command.domain) {
-                Ok(domain) => Some(domain),
-                Err(RequestDomainError::Missing) => {
-                    return command_error("no active domain selected".to_string());
-                }
-                Err(RequestDomainError::Invalid) => {
-                    return command_error("invalid domain".to_string());
-                }
+        let domain = match parse_request_domain(&command.domain) {
+            Ok(domain) => domain,
+            Err(RequestDomainError::Missing) => {
+                return command_error("no active domain selected".to_string());
             }
-        } else {
-            None
+            Err(RequestDomainError::Invalid) => {
+                return command_error("invalid domain".to_string());
+            }
         };
         let queued = TransactionStatement {
             source: command.source,
             statement,
-            domain,
         };
         let Some(transaction) = self.consensus.current_transaction(id).await else {
             return command_error(format!("transaction '{id}' is unknown"));
         };
-        if let Err(error) = transaction.validate_queue_admission(
-            &subscriptions.user,
-            &queued,
-            self.transaction_max_statements,
-            self.transaction_max_source_bytes,
-        ) {
+        let limits = TransactionQueueLimits {
+            max_statements: self.transaction_max_statements,
+            max_source_bytes: self.transaction_max_source_bytes,
+        };
+        if let Err(error) =
+            transaction.validate_queue_admission(&subscriptions.user, &domain, &queued, limits)
+        {
             return command_error(error.to_string());
         }
         let quiesce_level = match self
@@ -7873,10 +7880,10 @@ impl SessionServiceImpl {
             .queue_transaction_statement(
                 id.to_string(),
                 subscriptions.user.clone(),
+                domain,
                 current_timestamp(),
                 queued,
-                self.transaction_max_statements,
-                self.transaction_max_source_bytes,
+                limits,
             )
             .await
         {
@@ -7895,30 +7902,21 @@ impl SessionServiceImpl {
         transaction: &ReplicatedTransaction,
         candidate: &TransactionStatement,
     ) -> Result<Option<QuiesceLevel>, String> {
-        let (mut domains, users, resources) = tokio::join!(
+        let (mut domains, resources) = tokio::join!(
             self.consensus.current_domains(),
-            self.consensus.current_users(),
             self.consensus.current_resources(),
         );
-        let mut user_names = users.into_keys().collect::<BTreeSet<_>>();
         let mut resource_names = resources
-            .next_version_by_identifier
+            .next_version_by_resource
             .iter()
-            .map(|(identifier, _)| identifier.clone())
-            .chain(
-                resources
-                    .versions
-                    .iter()
-                    .map(|resource| resource.id.identifier.clone()),
-            )
+            .filter(|(domain, _, _)| domain == &transaction.domain)
+            .map(|(_, identifier, _)| identifier.clone())
             .collect::<BTreeSet<_>>();
-        let mut model_mutations = BTreeMap::<Domain, Vec<RegistryMutation>>::new();
-        let candidate_model_domain = candidate
-            .statement
-            .is_model_mutation()
-            .then_some(candidate.domain.as_ref())
-            .flatten();
-        let mut candidate_quiesce_level = candidate_model_domain.map(|_| QuiesceLevel::Dynamic);
+        let domain_id = &transaction.domain;
+        let mut model_mutations = Vec::<RegistryMutation>::new();
+        let candidate_is_model_mutation = candidate.statement.is_model_mutation();
+        let mut candidate_quiesce_level =
+            candidate_is_model_mutation.then_some(QuiesceLevel::Dynamic);
 
         for queued in transaction
             .statements
@@ -7926,31 +7924,7 @@ impl SessionServiceImpl {
             .chain(std::iter::once(candidate))
         {
             match &queued.statement {
-                Statement::CreateDomain(create) => {
-                    if domains.contains_key(&create.id) {
-                        if !create.if_not_exists {
-                            return Err(format!("domain '{}' already exists", create.id.as_str()));
-                        }
-                        continue;
-                    }
-                    validate_domain_config(&create.config)?;
-                    domains.insert(
-                        create.id.clone(),
-                        DomainState {
-                            id: create.id.clone(),
-                            config: create.config.clone(),
-                            status: DomainStatus::Stopped,
-                            start_version: 0,
-                            last_start: DomainStartPoint::Resume,
-                            clock: None,
-                        },
-                    );
-                }
                 Statement::AlterDomain(alter) => {
-                    let domain_id = queued
-                        .domain
-                        .as_ref()
-                        .ok_or_else(|| "no active domain selected".to_string())?;
                     let domain = domains
                         .get_mut(domain_id)
                         .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
@@ -7963,10 +7937,6 @@ impl SessionServiceImpl {
                     domain.config.placement = alter.policy;
                 }
                 Statement::StartDomain(start) => {
-                    let domain_id = queued
-                        .domain
-                        .as_ref()
-                        .ok_or_else(|| "no active domain selected".to_string())?;
                     let domain = domains
                         .get_mut(domain_id)
                         .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
@@ -7989,10 +7959,6 @@ impl SessionServiceImpl {
                     domain.start_version = domain.start_version.saturating_add(1);
                 }
                 Statement::StopDomain(_) => {
-                    let domain_id = queued
-                        .domain
-                        .as_ref()
-                        .ok_or_else(|| "no active domain selected".to_string())?;
                     let domain = domains
                         .get_mut(domain_id)
                         .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
@@ -8005,11 +7971,6 @@ impl SessionServiceImpl {
                     domain.status = DomainStatus::Stopped;
                     domain.clock = None;
                 }
-                Statement::CreateUser(create) => {
-                    if !user_names.insert(create.name.clone()) && !create.if_not_exists {
-                        return Err(format!("user '{}' already exists", create.name.as_str()));
-                    }
-                }
                 Statement::CreateResource(create) => {
                     if !resource_names.insert(create.identifier.clone()) && !create.if_not_exists {
                         return Err(format!(
@@ -8019,10 +7980,6 @@ impl SessionServiceImpl {
                     }
                 }
                 statement if statement.is_model_mutation() => {
-                    let domain_id = queued
-                        .domain
-                        .as_ref()
-                        .ok_or_else(|| "no active domain selected".to_string())?;
                     let domain = domains
                         .get(domain_id)
                         .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
@@ -8042,10 +7999,7 @@ impl SessionServiceImpl {
                     {
                         continue;
                     }
-                    model_mutations
-                        .entry(domain_id.clone())
-                        .or_default()
-                        .push(Self::transaction_registry_mutation(statement));
+                    model_mutations.push(Self::transaction_registry_mutation(statement));
                 }
                 _ => {
                     return Err(format!(
@@ -8056,32 +8010,33 @@ impl SessionServiceImpl {
             }
         }
 
-        for (domain_id, mutations) in model_mutations {
-            tokio::task::consume_budget().await;
-            let preflight = self
-                .registry
-                .preflight_transaction_mutations(&domain_id, &mutations)
-                .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
-            if candidate_model_domain == Some(&domain_id) {
-                candidate_quiesce_level = preflight.mutation_quiesce_levels().last().copied();
-            }
-            let Some(planned) = preflight.planned() else {
-                continue;
-            };
-            let domain = domains
-                .get(&domain_id)
-                .expect("model mutation domain was checked while replaying the transaction");
-            self.validate_changed_model_bindings(&domain_id, domain.config.pace, planned)
-                .await?;
-            let _ = self.prepare_planned_domain_udfs(planned).await?;
-            let _ = self
-                .prepare_domain_schedule(
-                    &domain_id,
-                    planned.candidate_graph(),
-                    domain.config.placement,
-                )
-                .await?;
+        if model_mutations.is_empty() {
+            return Ok(candidate_quiesce_level);
         }
+        tokio::task::consume_budget().await;
+        let preflight = self
+            .registry
+            .preflight_transaction_mutations(domain_id, &model_mutations)
+            .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
+        if candidate_is_model_mutation {
+            candidate_quiesce_level = preflight.mutation_quiesce_levels().last().copied();
+        }
+        let Some(planned) = preflight.planned() else {
+            return Ok(candidate_quiesce_level);
+        };
+        let domain = domains
+            .get(domain_id)
+            .expect("the transaction domain was checked while replaying the transaction");
+        self.validate_changed_model_bindings(domain_id, domain.config.pace, planned)
+            .await?;
+        let _ = self.prepare_planned_domain_udfs(planned).await?;
+        let _ = self
+            .prepare_domain_schedule(
+                domain_id,
+                planned.candidate_graph(),
+                domain.config.placement,
+            )
+            .await?;
         Ok(candidate_quiesce_level)
     }
 
@@ -8258,18 +8213,11 @@ impl SessionServiceImpl {
                 .await?;
 
             if first.statement.is_model_mutation() {
-                let domain = first.domain.clone().ok_or_else(|| {
-                    format!(
-                        "transaction '{id}' model mutation at statement {} has no domain",
-                        first_statement.saturating_add(1)
-                    )
-                })?;
+                let domain = transaction.domain.clone();
                 let mut statements = Vec::new();
                 let mut sources = Vec::new();
                 for queued in transaction.statements.iter().skip(first_statement) {
-                    if queued.domain.as_ref() != Some(&domain)
-                        || !queued.statement.is_model_mutation()
-                    {
+                    if !queued.statement.is_model_mutation() {
                         break;
                     }
                     statements.push(queued.statement.clone());
@@ -8340,17 +8288,22 @@ impl SessionServiceImpl {
         }
     }
 
+    /// A model-mutation step pauses the transaction's domain and resumes it once the step
+    /// finishes. When a new leader adopts a commit mid-flight, that pause may still be recorded in
+    /// replicated state; resume it unless the step about to run needs it held.
     async fn recover_transaction_quiescence(
         &self,
         transaction: &ReplicatedTransaction,
         current_statement: usize,
     ) -> Result<(), String> {
-        let current_model_domain = transaction
+        if transaction
             .statements
             .get(current_statement)
-            .filter(|statement| statement.statement.is_model_mutation())
-            .and_then(|statement| statement.domain.as_ref());
-        let mut completed_model_domains = BTreeSet::new();
+            .is_some_and(|statement| statement.statement.is_model_mutation())
+        {
+            return Ok(());
+        }
+        let mut completed_model_mutation = false;
         for result in transaction.commit_results() {
             tokio::task::consume_budget().await;
             let Some(statements) = transaction.statements.get(
@@ -8364,40 +8317,35 @@ impl SessionServiceImpl {
                     transaction.id
                 ));
             };
-            let Some(domain) = statements
-                .first()
-                .and_then(|statement| statement.domain.as_ref())
-            else {
-                continue;
-            };
-            if statements.iter().all(|statement| {
-                statement.statement.is_model_mutation() && statement.domain.as_ref() == Some(domain)
-            }) {
-                completed_model_domains.insert(domain.clone());
+            if !statements.is_empty()
+                && statements
+                    .iter()
+                    .all(|statement| statement.statement.is_model_mutation())
+            {
+                completed_model_mutation = true;
+                break;
             }
         }
-        if let Some(domain) = current_model_domain {
-            completed_model_domains.remove(domain);
+        if !completed_model_mutation {
+            return Ok(());
         }
-        for domain in completed_model_domains {
-            tokio::task::consume_budget().await;
-            let Some(state) = self.consensus.current_domain(&domain).await else {
-                continue;
-            };
-            if let DomainStatus::Paused = state.status {
-                self.apply_current_cluster_state().await.map_err(|error| {
-                    format!(
-                        "failed to adopt transaction-owned pause in domain '{}': {error}",
-                        domain.as_str()
-                    )
-                })?;
-                self.wait_for_paused_domain_drain(&domain)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                self.resume_domain_after_alter(&domain)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
+        let domain = &transaction.domain;
+        let Some(state) = self.consensus.current_domain(domain).await else {
+            return Ok(());
+        };
+        if let DomainStatus::Paused = state.status {
+            self.apply_current_cluster_state().await.map_err(|error| {
+                format!(
+                    "failed to adopt transaction-owned pause in domain '{}': {error}",
+                    domain.as_str()
+                )
+            })?;
+            self.wait_for_paused_domain_drain(domain)
+                .await
+                .map_err(|error| error.to_string())?;
+            self.resume_domain_after_alter(domain)
+                .await
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -8452,58 +8400,9 @@ impl SessionServiceImpl {
             .expect("replicated commit progress must point to a statement");
         let mut start_clock = None;
         let mut stop_clock = None;
+        let domain_id = &transaction.domain;
         let (result, effect) = match &queued.statement {
-            Statement::CreateDomain(create) => {
-                if self.consensus.current_domain(&create.id).await.is_some() {
-                    if create.if_not_exists {
-                        (
-                            command_ok_already_existed(format!(
-                                "domain '{}' already exists",
-                                create.id.as_str()
-                            )),
-                            None,
-                        )
-                    } else {
-                        (
-                            command_error(format!(
-                                "domain '{}' already exists",
-                                create.id.as_str()
-                            )),
-                            None,
-                        )
-                    }
-                } else if let Err(message) = validate_domain_config(&create.config) {
-                    (command_error(message), None)
-                } else {
-                    let state = DomainState {
-                        id: create.id.clone(),
-                        config: create.config.clone(),
-                        status: DomainStatus::Stopped,
-                        start_version: 0,
-                        last_start: DomainStartPoint::Resume,
-                        clock: None,
-                    };
-                    (
-                        command_ok(format!("created domain '{}'", create.id.as_str())),
-                        Some(TransactionStepEffect::PutDomain {
-                            domain: Box::new(state),
-                        }),
-                    )
-                }
-            }
             Statement::AlterDomain(alter) => {
-                let Some(domain_id) = queued.domain.as_ref() else {
-                    return self
-                        .record_transaction_step(
-                            transaction,
-                            statement_index,
-                            1,
-                            command_error("no active domain selected".to_string()),
-                            None,
-                            None,
-                        )
-                        .await;
-                };
                 let Some(previous) = self.consensus.current_domain(domain_id).await else {
                     return self
                         .record_transaction_step(
@@ -8564,50 +8463,9 @@ impl SessionServiceImpl {
                     )
                 }
             }
-            Statement::CreateUser(create) => {
-                if self.consensus.current_user(&create.name).await.is_some() {
-                    if create.if_not_exists {
-                        (
-                            command_ok_already_existed(format!(
-                                "user '{}' already exists",
-                                create.name.as_str()
-                            )),
-                            None,
-                        )
-                    } else {
-                        (
-                            command_error(format!(
-                                "user '{}' already exists",
-                                create.name.as_str()
-                            )),
-                            None,
-                        )
-                    }
-                } else {
-                    match user_credentials(create.name.clone(), create.password.clone()).await {
-                        Ok(user) => (
-                            command_ok(format!("created user '{}'", create.name.as_str())),
-                            Some(TransactionStepEffect::CreateUser {
-                                user: Box::new(user),
-                            }),
-                        ),
-                        Err(error) => (
-                            command_error(format!(
-                                "failed to hash password for user '{}': {error}",
-                                create.name.as_str()
-                            )),
-                            None,
-                        ),
-                    }
-                }
-            }
             Statement::CreateResource(create) => {
                 let resources = self.consensus.current_resources().await;
-                if resources
-                    .next_version_by_identifier
-                    .iter()
-                    .any(|(identifier, _)| identifier == &create.identifier)
-                {
+                if resources.is_declared(domain_id, &create.identifier) {
                     if create.if_not_exists {
                         (
                             command_ok_already_existed(format!(
@@ -8629,24 +8487,12 @@ impl SessionServiceImpl {
                     (
                         command_ok(format!("created resource '{}'", create.identifier.as_str())),
                         Some(TransactionStepEffect::CreateResourceCatalog {
-                            identifier: create.identifier.to_string(),
+                            identifier: create.identifier.clone(),
                         }),
                     )
                 }
             }
             Statement::StartDomain(start) => {
-                let Some(domain_id) = queued.domain.as_ref() else {
-                    return self
-                        .record_transaction_step(
-                            transaction,
-                            statement_index,
-                            1,
-                            command_error("no active domain selected".to_string()),
-                            None,
-                            None,
-                        )
-                        .await;
-                };
                 let Some(domain) = self.consensus.current_domain(domain_id).await else {
                     return self
                         .record_transaction_step(
@@ -8729,18 +8575,6 @@ impl SessionServiceImpl {
                 }
             }
             Statement::StopDomain(_) => {
-                let Some(domain_id) = queued.domain.as_ref() else {
-                    return self
-                        .record_transaction_step(
-                            transaction,
-                            statement_index,
-                            1,
-                            command_error("no active domain selected".to_string()),
-                            None,
-                            None,
-                        )
-                        .await;
-                };
                 let Some(domain) = self.consensus.current_domain(domain_id).await else {
                     return self
                         .record_transaction_step(
@@ -9726,7 +9560,10 @@ impl SessionServiceImpl {
                 self.alter_domain(domain, alter).await
             }
             Statement::CreateUser(create) => self.create_user(create).await,
-            Statement::CreateResource(create) => self.create_resource(create).await,
+            Statement::CreateResource(create) => {
+                self.create_resource(domain.as_ref().expect("domain required"), create)
+                    .await
+            }
             Statement::UploadResource(upload) => self.upload_resource_command(upload).await,
             Statement::StartDomain(start) => {
                 let domain = domain.as_ref().expect("domain required");
@@ -9819,7 +9656,10 @@ impl SessionServiceImpl {
                 let domain = domain.as_ref().expect("domain required");
                 self.describe_placement(domain, describe).await
             }
-            Statement::DescribeResource(describe) => self.describe_resource(describe).await,
+            Statement::DescribeResource(describe) => {
+                self.describe_resource(domain.as_ref().expect("domain required"), describe)
+                    .await
+            }
             Statement::LookupQuery(query) => {
                 let domain = domain.as_ref().expect("domain required");
                 self.lookup_query(domain, query).await
@@ -9936,9 +9776,11 @@ impl SessionServiceImpl {
                         .to_std()
                         .unwrap_or_default();
                     format!(
-                        "id={} owner={} state={} pending={} progress={}/{} age={} idle={}",
+                        "id={} owner={} domain={} state={} pending={} progress={}/{} age={} \
+                         idle={}",
                         transaction.id,
                         transaction.owner.as_str(),
+                        transaction.domain.as_str(),
                         transaction.state.as_str(),
                         transaction.pending_statement_count(),
                         transaction.completed_statement_count(),
@@ -9972,6 +9814,21 @@ impl SessionServiceImpl {
                 );
             }
         };
+        let Some(domain_name) = web_console_query_param(request.uri().query(), "domain") else {
+            return web_console_upload_text_response(
+                StatusCode::BAD_REQUEST,
+                "missing domain query parameter",
+            );
+        };
+        let domain = match Domain::parse(domain_name.trim()) {
+            Ok(domain) => domain,
+            Err(_) => {
+                return web_console_upload_text_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid domain name",
+                );
+            }
+        };
         let leader = self.consensus.current_leader().await;
         if leader.as_deref() != Some(self.consensus.local_node_id()) {
             return web_console_upload_text_response(
@@ -9980,11 +9837,7 @@ impl SessionServiceImpl {
             );
         }
         let resources = self.consensus.current_resources().await;
-        if !resources
-            .next_version_by_identifier
-            .iter()
-            .any(|(known_identifier, _)| known_identifier == &identifier)
-        {
+        if !resources.is_declared(&domain, &identifier) {
             return web_console_upload_text_response(
                 StatusCode::NOT_FOUND,
                 format!("resource '{}' does not exist", identifier.as_str()),
@@ -10015,7 +9868,12 @@ impl SessionServiceImpl {
             .await
         {
             Ok((archive_path, root_checksum)) => match self
-                .install_uploaded_resource_archive(identifier, &archive_path, root_checksum)
+                .install_uploaded_resource_archive(
+                    &domain,
+                    identifier,
+                    &archive_path,
+                    root_checksum,
+                )
                 .await
             {
                 Ok(version) => web_console_upload_text_response(
@@ -10407,13 +10265,13 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn create_resource(&self, create: CreateStatement<CreateResource>) -> CommandResult {
+    async fn create_resource(
+        &self,
+        domain: &Domain,
+        create: CreateStatement<CreateResource>,
+    ) -> CommandResult {
         let resources = self.consensus.current_resources().await;
-        if resources
-            .next_version_by_identifier
-            .iter()
-            .any(|(identifier, _)| identifier == &create.identifier)
-        {
+        if resources.is_declared(domain, &create.identifier) {
             if create.if_not_exists {
                 return command_ok_already_existed(format!(
                     "resource '{}' already exists",
@@ -10427,7 +10285,7 @@ impl SessionServiceImpl {
         }
         match self
             .consensus
-            .create_resource_catalog(create.identifier.as_str())
+            .create_resource_catalog(domain, &create.identifier)
             .await
         {
             Ok(()) => command_ok(format!("created resource '{}'", create.identifier.as_str())),
@@ -10449,6 +10307,7 @@ impl SessionServiceImpl {
 
     async fn install_uploaded_resource_archive(
         &self,
+        domain: &Domain,
         identifier: Identifier,
         archive_path: &Path,
         root_checksum: String,
@@ -10456,7 +10315,7 @@ impl SessionServiceImpl {
         let created_at = current_timestamp();
         let version = match self
             .consensus
-            .allocate_resource_version(identifier.as_str())
+            .allocate_resource_version(domain, &identifier)
             .await
         {
             Ok(version) => version,
@@ -10467,12 +10326,12 @@ impl SessionServiceImpl {
                 ));
             }
         };
+        let id = ResourceId::new(domain.clone(), identifier.clone(), version);
 
         let manifest = match self
             .resource_store
             .install_from_archive_path(
-                identifier.clone(),
-                version,
+                id.clone(),
                 archive_path,
                 root_checksum,
                 self.consensus.local_node_id(),
@@ -10495,10 +10354,7 @@ impl SessionServiceImpl {
             .put_resource_version(manifest.resource.clone())
             .await
         {
-            let cleanup_suffix = match self.resource_store.remove_version(
-                &manifest.resource.id.identifier,
-                manifest.resource.id.version,
-            ) {
+            let cleanup_suffix = match self.resource_store.remove_version(&manifest.resource.id) {
                 Ok(()) => String::new(),
                 Err(cleanup_error) => {
                     format!("; local cleanup also failed: {cleanup_error}")
@@ -10515,6 +10371,7 @@ impl SessionServiceImpl {
             .consensus
             .put_resource_replica(ResourceNodeStatus {
                 key: ResourceReplicaKey::new(
+                    manifest.resource.id.domain.clone(),
                     manifest.resource.id.identifier.clone(),
                     manifest.resource.id.version,
                     self.consensus.local_node_id(),
@@ -10534,11 +10391,8 @@ impl SessionServiceImpl {
             ));
         }
 
-        self.wait_for_resource_cluster_ready(
-            &manifest.resource.id.identifier,
-            manifest.resource.id.version,
-        )
-        .await?;
+        self.wait_for_resource_cluster_ready(&manifest.resource.id)
+            .await?;
         self.runtime
             .sync_resource_versions(&self.consensus.current_resources().await);
         if let Err(error) = self.refresh_http_tls_server_config().await {
@@ -10832,18 +10686,14 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn describe_resource(&self, describe: DescribeResource) -> CommandResult {
+    async fn describe_resource(
+        &self,
+        domain: &Domain,
+        describe: DescribeResource,
+    ) -> CommandResult {
         if describe.version.is_none() {
             let resources = self.consensus.current_resources().await;
-            let exists = resources
-                .next_version_by_identifier
-                .iter()
-                .any(|(identifier, _)| identifier == &describe.identifier)
-                || resources
-                    .versions
-                    .iter()
-                    .any(|resource| resource.id.identifier == describe.identifier);
-            if !exists {
+            if !resources.is_declared(domain, &describe.identifier) {
                 return command_error(format!(
                     "resource '{}' does not exist",
                     describe.identifier.as_str()
@@ -10852,7 +10702,9 @@ impl SessionServiceImpl {
             let versions = resources
                 .versions
                 .iter()
-                .filter(|resource| resource.id.identifier == describe.identifier)
+                .filter(|resource| {
+                    resource.id.domain == *domain && resource.id.identifier == describe.identifier
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             let version_numbers = if versions.is_empty() {
@@ -10884,13 +10736,12 @@ impl SessionServiceImpl {
         }
 
         let version = describe.version.expect("checked above");
+        let id = ResourceId::new(domain.clone(), describe.identifier.clone(), version);
         let resources = self.consensus.current_resources().await;
         let Some(resource) = resources
             .versions
             .iter()
-            .find(|resource| {
-                resource.id.identifier == describe.identifier && resource.id.version == version
-            })
+            .find(|resource| resource.id == id)
             .cloned()
         else {
             return command_error(format!(
@@ -10903,9 +10754,7 @@ impl SessionServiceImpl {
         let replicas = resources
             .replicas
             .iter()
-            .filter(|replica| {
-                replica.key.identifier == describe.identifier && replica.key.version == version
-            })
+            .filter(|replica| replica.key.version_key().resource_id() == id)
             .cloned()
             .collect::<Vec<_>>();
         let gossip = self.cluster.gossip_state().await;
@@ -11043,10 +10892,7 @@ impl SessionServiceImpl {
         &self,
         resource: &nervix_models::ResourceVersion,
     ) -> Vec<String> {
-        match self
-            .resource_store
-            .read_manifest(&resource.id.identifier, resource.id.version)
-        {
+        match self.resource_store.read_manifest(&resource.id) {
             Ok(manifest) if manifest.entries.is_empty() => vec!["  - none".to_string()],
             Ok(manifest) => manifest
                 .entries
@@ -11073,11 +10919,7 @@ impl SessionServiceImpl {
         )
     }
 
-    async fn wait_for_resource_cluster_ready(
-        &self,
-        identifier: &Identifier,
-        version: u64,
-    ) -> Result<(), String> {
+    async fn wait_for_resource_cluster_ready(&self, id: &ResourceId) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             tokio::task::consume_budget().await;
@@ -11085,9 +10927,7 @@ impl SessionServiceImpl {
             let replicas = resources
                 .replicas
                 .iter()
-                .filter(|replica| {
-                    replica.key.identifier == *identifier && replica.key.version == version
-                })
+                .filter(|replica| replica.key.version_key().resource_id() == *id)
                 .collect::<Vec<_>>();
             let gossip = self.cluster.gossip_state().await;
             let live_node_ids = gossip
@@ -11108,8 +10948,8 @@ impl SessionServiceImpl {
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
                     "timed out waiting for resource '{}@{}' to finish replicating",
-                    identifier.as_str(),
-                    version
+                    id.identifier.as_str(),
+                    id.version
                 ));
             }
             sleep(Duration::from_millis(100)).await;
@@ -12355,6 +12195,7 @@ impl SessionServiceImpl {
             let spec_for_task = spec.clone();
             let handle = tokio::spawn(async move {
                 let resolved = match service.runtime.resolve_client_config(
+                    &spec_for_task.domain,
                     spec_for_task.client.mount.as_ref(),
                     &spec_for_task.client.config,
                 ) {
@@ -14861,6 +14702,7 @@ fn transaction_status(transaction: &ReplicatedTransaction) -> ApiTransactionStat
     };
     ApiTransactionStatus {
         id: transaction.id.clone(),
+        domain: transaction.domain.to_string(),
         state: state as i32,
         pending_count: u64::try_from(transaction.pending_statement_count()).unwrap_or(u64::MAX),
         completed_count: u64::try_from(transaction.completed_statement_count()).unwrap_or(u64::MAX),
@@ -14943,25 +14785,17 @@ fn is_queueable_transaction_statement(statement: &Statement) -> bool {
     statement.is_model_mutation()
         || matches!(
             statement,
-            Statement::CreateDomain(_)
-                | Statement::AlterDomain(_)
+            Statement::AlterDomain(_)
                 | Statement::StartDomain(_)
                 | Statement::StopDomain(_)
-                | Statement::CreateUser(_)
                 | Statement::CreateResource(_)
-        )
-}
-
-fn transaction_statement_requires_domain(statement: &Statement) -> bool {
-    statement.is_model_mutation()
-        || matches!(
-            statement,
-            Statement::AlterDomain(_) | Statement::StartDomain(_) | Statement::StopDomain(_)
         )
 }
 
 fn transaction_statement_label(statement: &Statement) -> &'static str {
     match statement {
+        Statement::CreateDomain(_) => "CREATE DOMAIN",
+        Statement::CreateUser(_) => "CREATE USER",
         Statement::UploadResource(_) => "UPLOAD RESOURCE",
         Statement::DropNode(_) => "DROP NODE",
         Statement::CordonNode(_) => "CORDON",
@@ -14997,12 +14831,13 @@ fn transaction_statement_label(statement: &Statement) -> &'static str {
 async fn fetch_resource_archive(
     cluster_api_clients: &ClusterApiClients,
     cluster_api_advertise_addr: &str,
-    identifier: &Identifier,
-    version: u64,
+    id: &ResourceId,
 ) -> Result<DownloadedResourceArchive, String> {
     let path = format!(
-        "{RESOURCE_ARCHIVE_PATH_PREFIX}{}/{version}/archive",
-        identifier.as_str()
+        "{RESOURCE_ARCHIVE_PATH_PREFIX}{}/{}/{}/archive",
+        id.domain.as_str(),
+        id.identifier.as_str(),
+        id.version
     );
     let response = cluster_api_clients
         .for_url(cluster_api_advertise_addr)
@@ -15155,9 +14990,10 @@ impl SessionServiceImpl {
         let resources = self.consensus.current_resources().await;
         let domains = self.consensus.current_domains().await;
         let resource_entities = resources
-            .next_version_by_identifier
+            .next_version_by_resource
             .iter()
-            .map(|(identifier, next_version)| DomainEntitySnapshot {
+            .filter(|(domain, _, _)| Some(domain) == active_domain)
+            .map(|(_, identifier, next_version)| DomainEntitySnapshot {
                 kind: "resource".to_string(),
                 identifier: identifier.as_str().to_string(),
                 detail: if *next_version > 1 {
@@ -15588,91 +15424,55 @@ async fn load_grpc_tls_server_config() -> Result<ServerTlsConfig, Report<AppErro
     Ok(ServerTlsConfig::new().identity(TonicIdentity::from_pem(cert_pem, key_pem)))
 }
 
-fn resolve_vhost_tls_resource_version(
+/// Resolves a model's resource reference to the concrete version it binds to. Resources are
+/// domain-owned, so a name only resolves against versions uploaded into the referencing domain.
+fn resolve_resource_id(
     resources: &nervix_models::ResourceVersionStatus,
-    tls: &VhostTlsResource,
-) -> Result<u64, String> {
-    if let Some(version) = tls.version {
-        let exists = resources.versions.iter().any(|resource| {
-            resource.id.identifier == tls.resource && resource.id.version == version
-        });
-        if exists {
-            return Ok(version);
-        }
-        return Err(format!(
-            "resource '{}@{}' does not exist",
-            tls.resource.as_str(),
-            version
-        ));
-    }
-
-    resources
-        .versions
-        .iter()
-        .filter(|resource| resource.id.identifier == tls.resource)
-        .map(|resource| resource.id.version)
-        .max()
-        .ok_or_else(|| {
-            format!(
-                "resource '{}' has no uploaded versions",
-                tls.resource.as_str()
-            )
-        })
-}
-
-fn resolve_latest_resource_version(
-    resources: &nervix_models::ResourceVersionStatus,
-    identifier: &Identifier,
-) -> Result<u64, String> {
-    resources
-        .versions
-        .iter()
-        .filter(|resource| resource.id.identifier == *identifier)
-        .map(|resource| resource.id.version)
-        .max()
-        .ok_or_else(|| {
-            format!(
-                "resource '{}' has no uploaded versions",
-                identifier.as_str()
-            )
-        })
-}
-
-fn resolve_resource_version(
-    resources: &nervix_models::ResourceVersionStatus,
+    domain: &Domain,
     identifier: &Identifier,
     requested_version: Option<u64>,
-) -> Result<u64, String> {
+) -> Result<ResourceId, String> {
     if let Some(version) = requested_version {
-        let exists = resources.versions.iter().any(|resource| {
-            resource.id.identifier == *identifier && resource.id.version == version
-        });
-        if exists {
-            return Ok(version);
+        let id = ResourceId::new(domain.clone(), identifier.clone(), version);
+        if resources.versions.iter().any(|resource| resource.id == id) {
+            return Ok(id);
         }
         return Err(format!(
-            "resource '{}@{}' does not exist",
+            "resource '{}@{}' does not exist in domain '{}'",
             identifier.as_str(),
-            version
+            version,
+            domain.as_str()
         ));
     }
 
-    resolve_latest_resource_version(resources, identifier)
+    resources
+        .versions
+        .iter()
+        .filter(|resource| resource.id.domain == *domain && resource.id.identifier == *identifier)
+        .map(|resource| resource.id.version)
+        .max()
+        .map(|version| ResourceId::new(domain.clone(), identifier.clone(), version))
+        .ok_or_else(|| {
+            format!(
+                "resource '{}' has no uploaded versions in domain '{}'",
+                identifier.as_str(),
+                domain.as_str()
+            )
+        })
 }
 
 async fn load_vhost_tls_materials(
     resource_store: &ResourceStore,
-    identifier: &Identifier,
-    version: u64,
+    id: &ResourceId,
 ) -> Result<VhostTlsMaterials, String> {
     let cert_path = resource_store
-        .resolve_content_path(identifier, version, VHOST_TLS_CERT_PATH)
+        .resolve_content_path(id, VHOST_TLS_CERT_PATH)
         .map_err(|error| error.to_string())?;
     let key_path = resource_store
-        .resolve_content_path(identifier, version, VHOST_TLS_KEY_PATH)
+        .resolve_content_path(id, VHOST_TLS_KEY_PATH)
         .map_err(|error| error.to_string())?;
     let ca_path = resource_store
-        .resolve_content_path(identifier, version, VHOST_TLS_CA_PATH)
+        .resolve_content_path(id, VHOST_TLS_CA_PATH)
         .map_err(|error| error.to_string())?;
 
     ensure_file_exists(&cert_path, "tls certificate").await?;
@@ -15734,13 +15534,16 @@ fn map_pem_error_to_string(error: PemError) -> String {
 
 fn resource_ref_suggestions(
     resources: &nervix_models::ResourceVersionStatus,
+    domain: &Domain,
     prefix: &str,
 ) -> Vec<String> {
     resources
-        .next_version_by_identifier
+        .next_version_by_resource
         .iter()
-        .filter_map(|(identifier, _)| {
-            if prefix.is_empty() || identifier.as_str().starts_with(prefix) {
+        .filter_map(|(known_domain, identifier, _)| {
+            if known_domain == domain
+                && (prefix.is_empty() || identifier.as_str().starts_with(prefix))
+            {
                 Some(identifier.to_string())
             } else {
                 None
@@ -15751,13 +15554,14 @@ fn resource_ref_suggestions(
 
 fn resource_version_suggestions(
     resources: &nervix_models::ResourceVersionStatus,
+    domain: &Domain,
     identifier: &Identifier,
     prefix: &str,
 ) -> Vec<String> {
     resources
         .versions
         .iter()
-        .filter(|resource| resource.id.identifier == *identifier)
+        .filter(|resource| resource.id.domain == *domain && resource.id.identifier == *identifier)
         .filter_map(|resource| {
             let version = resource.id.version.to_string();
             if prefix.is_empty() || version.starts_with(prefix) {
@@ -16824,12 +16628,7 @@ impl Application {
                         .filter(|transaction| {
                             matches!(transaction.state, TransactionState::Committing(_))
                         })
-                        .flat_map(|transaction| {
-                            transaction
-                                .statements
-                                .into_iter()
-                                .filter_map(|statement| statement.domain)
-                        })
+                        .map(|transaction| transaction.domain)
                         .collect::<HashSet<_>>();
                     for (domain, state) in consensus_for_reconcile.current_domains().await {
                         if let DomainStatus::Paused = state.status
@@ -19416,31 +19215,40 @@ mod tests {
     }
 
     #[test]
-    fn resource_ref_suggestions_expand_known_resource_names() {
+    fn resource_ref_suggestions_expand_known_resource_names_in_the_active_domain() {
+        let tenant = Domain::parse("tenant").expect("valid domain");
+        let other = Domain::parse("other").expect("valid domain");
         let resources = ResourceVersionStatus {
-            next_version_by_identifier: SortedVec::from_unsorted(vec![
-                (identifier("fraud_model"), 2),
-                (identifier("proto"), 1),
+            next_version_by_resource: SortedVec::from_unsorted(vec![
+                (tenant.clone(), identifier("fraud_model"), 2),
+                (tenant.clone(), identifier("proto"), 1),
+                (other.clone(), identifier("promo_model"), 1),
             ]),
             ..Default::default()
         };
 
         assert_eq!(
-            resource_ref_suggestions(&resources, "pr"),
+            resource_ref_suggestions(&resources, &tenant, "pr"),
             vec!["proto".to_string()]
         );
         assert_eq!(
-            resource_ref_suggestions(&resources, ""),
+            resource_ref_suggestions(&resources, &tenant, ""),
             vec!["fraud_model".to_string(), "proto".to_string()]
+        );
+        assert_eq!(
+            resource_ref_suggestions(&resources, &other, ""),
+            vec!["promo_model".to_string()]
         );
     }
 
     #[test]
     fn resource_version_suggestions_expand_known_versions() {
+        let tenant = Domain::parse("tenant").expect("valid domain");
+        let other = Domain::parse("other").expect("valid domain");
         let resources = ResourceVersionStatus {
             versions: SortedVec::from_unsorted(vec![
                 ResourceVersion {
-                    id: nervix_models::ResourceId::new(identifier("proto"), 1),
+                    id: nervix_models::ResourceId::new(tenant.clone(), identifier("proto"), 1),
                     root_checksum: "a".to_string(),
                     manifest_checksum: "a".to_string(),
                     file_count: 1,
@@ -19449,7 +19257,7 @@ mod tests {
                     created_by_node: "node-1".to_string(),
                 },
                 ResourceVersion {
-                    id: nervix_models::ResourceId::new(identifier("proto"), 12),
+                    id: nervix_models::ResourceId::new(tenant.clone(), identifier("proto"), 12),
                     root_checksum: "b".to_string(),
                     manifest_checksum: "b".to_string(),
                     file_count: 1,
@@ -19462,12 +19270,16 @@ mod tests {
         };
 
         assert_eq!(
-            resource_version_suggestions(&resources, &identifier("proto"), ""),
+            resource_version_suggestions(&resources, &tenant, &identifier("proto"), ""),
             vec!["1".to_string(), "12".to_string()]
         );
         assert_eq!(
-            resource_version_suggestions(&resources, &identifier("proto"), "1"),
+            resource_version_suggestions(&resources, &tenant, &identifier("proto"), "1"),
             vec!["1".to_string(), "12".to_string()]
+        );
+        assert!(
+            resource_version_suggestions(&resources, &other, &identifier("proto"), "").is_empty(),
+            "another domain must not see this domain's resource versions"
         );
         assert_eq!(
             requested_resource_versions(
@@ -19990,30 +19802,57 @@ mod tests {
 
     #[tokio::test]
     async fn create_resource_if_not_exists_returns_already_existed() {
-        let (service, _registry, path) = build_test_service(false).await;
+        let (service, _registry, path) = build_test_service(true).await;
+        let default = Domain::parse("default").expect("valid domain");
+        create_test_domain(&service.consensus, "other").await;
+        let other = Domain::parse("other").expect("valid domain");
 
         let first = service
-            .create_resource(CreateStatement::new(
-                CreateResource {
-                    identifier: identifier("fraud_model"),
-                },
-                false,
-            ))
+            .create_resource(
+                &default,
+                CreateStatement::new(
+                    CreateResource {
+                        identifier: identifier("fraud_model"),
+                    },
+                    false,
+                ),
+            )
             .await;
         assert!(first.success);
         assert!(!first.already_existed);
 
         let duplicate = service
-            .create_resource(CreateStatement::new(
-                CreateResource {
-                    identifier: identifier("fraud_model"),
-                },
-                true,
-            ))
+            .create_resource(
+                &default,
+                CreateStatement::new(
+                    CreateResource {
+                        identifier: identifier("fraud_model"),
+                    },
+                    true,
+                ),
+            )
             .await;
         assert!(duplicate.success);
         assert!(duplicate.already_existed);
         assert!(duplicate.message.contains("already exists"));
+
+        let same_name_other_domain = service
+            .create_resource(
+                &other,
+                CreateStatement::new(
+                    CreateResource {
+                        identifier: identifier("fraud_model"),
+                    },
+                    false,
+                ),
+            )
+            .await;
+        assert!(
+            same_name_other_domain.success,
+            "resources are domain-owned: {}",
+            same_name_other_domain.message
+        );
+        assert!(!same_name_other_domain.already_existed);
 
         let _ = std::fs::remove_dir_all(&path);
     }
@@ -20109,15 +19948,15 @@ mod tests {
     #[tokio::test]
     async fn process_command_commits_explicit_transaction_without_trailing_semicolon() {
         let (service, registry, path) = build_test_service(false).await;
+        create_test_domain(&service.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
             .process_command(
                 CommandRequest {
-                    query: "BEGIN; CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA \
-                            notification UNBRANCHED; CREATE SCHEMA notification ( user_id U32 ); \
-                            COMMIT"
+                    query: "BEGIN; CREATE RELAY notifications SCHEMA notification UNBRANCHED; \
+                            CREATE SCHEMA notification ( user_id U32 ); COMMIT"
                         .to_string(),
                     domain: "prod".to_string(),
                 },
@@ -20296,14 +20135,17 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_batch_returns_prior_successes_before_error() {
-        let (service, _registry, path) = build_test_service(false).await;
+        let (service, registry, path) = build_test_service(false).await;
+        create_test_domain(&service.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
             .process_command(
                 CommandRequest {
-                    query: "BEGIN; CREATE DOMAIN prod; CREATE DOMAIN prod; COMMIT".to_string(),
+                    query: "BEGIN; CREATE SCHEMA duplicated ( user_id U32 ); CREATE SCHEMA \
+                            duplicated ( user_id U32 ); COMMIT"
+                        .to_string(),
                     domain: "prod".to_string(),
                 },
                 &tx,
@@ -20319,10 +20161,13 @@ mod tests {
         assert!(result.message.contains("transaction started"));
         assert!(result.message.contains("already exists"));
         assert!(
-            service
-                .consensus
-                .current_domain(&Domain::parse("prod").expect("valid domain"))
-                .await
+            registry
+                .get(
+                    &Domain::parse("prod").expect("valid domain"),
+                    ModelKind::Schema,
+                    &identifier("duplicated"),
+                )
+                .expect("registry get should succeed")
                 .is_none(),
             "queue preflight failure must not execute the admitted prefix"
         );
@@ -20342,28 +20187,153 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_command_batch_commits_domain_creates() {
+    async fn process_command_rejects_domain_and_user_creation_inside_a_transaction() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+
+        for query in [
+            "BEGIN; CREATE DOMAIN alpha; COMMIT",
+            "BEGIN; CREATE USER alpha WITH PASSWORD 'secret'; COMMIT",
+        ] {
+            let result = service
+                .process_command(
+                    CommandRequest {
+                        query: query.to_string(),
+                        domain: "default".to_string(),
+                    },
+                    &tx,
+                    &mut subscriptions,
+                )
+                .await;
+
+            assert!(!result.success, "'{query}' must be rejected");
+            assert!(
+                result.message.contains("cannot be queued in a transaction"),
+                "'{query}' produced: {}",
+                result.message
+            );
+
+            let reverted = service
+                .process_command(
+                    CommandRequest {
+                        query: "REVERT;".to_string(),
+                        domain: "default".to_string(),
+                    },
+                    &tx,
+                    &mut subscriptions,
+                )
+                .await;
+            assert!(
+                reverted.success,
+                "revert must succeed: {}",
+                reverted.message
+            );
+        }
+
+        assert!(
+            service
+                .consensus
+                .current_domain(&Domain::parse("alpha").expect("valid domain"))
+                .await
+                .is_none(),
+            "a rejected CREATE DOMAIN must not reach the control plane"
+        );
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn process_command_rejects_begin_without_an_existing_domain() {
         let (service, _registry, path) = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
-        let result = service
+        let missing = service
             .process_command(
                 CommandRequest {
-                    query: "BEGIN; CREATE DOMAIN alpha; CREATE DOMAIN beta; COMMIT".to_string(),
+                    query: "BEGIN;".to_string(),
+                    domain: "absent".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(!missing.success);
+        assert_eq!(missing.message, "domain 'absent' does not exist");
+        assert!(!subscriptions.transaction_active());
+
+        let unselected = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN;".to_string(),
+                    domain: String::new(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(!unselected.success);
+        assert_eq!(unselected.message, "no active domain selected");
+        assert!(!subscriptions.transaction_active());
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn process_command_rejects_statements_selecting_another_domain() {
+        let (service, _registry, path) = build_test_service(true).await;
+        create_test_domain(&service.consensus, "other").await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+
+        let begin = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN;".to_string(),
                     domain: "default".to_string(),
                 },
                 &tx,
                 &mut subscriptions,
             )
             .await;
-
-        assert!(result.success, "command must succeed: {}", result.message);
+        assert!(begin.success, "begin must succeed: {}", begin.message);
         assert_eq!(
-            command_transaction_state(&result),
-            Some(ApiTransactionState::Committed)
+            begin
+                .transaction
+                .as_ref()
+                .map(|status| status.domain.as_str()),
+            Some("default")
         );
-        assert!(result.message.contains("transaction started"));
+
+        let foreign = service
+            .process_command(
+                CommandRequest {
+                    query: "CREATE SCHEMA foreign_event ( user_id U32 );".to_string(),
+                    domain: "other".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(!foreign.success);
+        assert!(
+            foreign.message.contains("is bound to domain 'default'"),
+            "unexpected message: {}",
+            foreign.message
+        );
+        let transaction = service
+            .consensus
+            .current_transaction(
+                subscriptions
+                    .transaction_id()
+                    .expect("the transaction must stay attached"),
+            )
+            .await
+            .expect("open transaction must remain replicated");
+        assert_eq!(transaction.pending_statement_count(), 0);
 
         subscriptions.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);
@@ -20372,15 +20342,14 @@ mod tests {
     #[tokio::test]
     async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
         let (service, _registry, path) = build_test_service(false).await;
+        create_test_domain(&service.consensus, "attach_results").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut owner = SessionSubscriptions::new();
 
         let committed = service
             .process_command(
                 CommandRequest {
-                    query: "BEGIN; CREATE DOMAIN attach_results; CREATE SCHEMA notification ( \
-                            user_id U32 ); COMMIT"
-                        .to_string(),
+                    query: "BEGIN; CREATE SCHEMA notification ( user_id U32 ); COMMIT".to_string(),
                     domain: "attach_results".to_string(),
                 },
                 &tx,
@@ -20427,15 +20396,15 @@ mod tests {
     #[tokio::test]
     async fn process_command_model_create_batch_is_atomic_on_registry_failure() {
         let (service, registry, path) = build_test_service(false).await;
+        create_test_domain(&service.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
             .process_command(
                 CommandRequest {
-                    query: "BEGIN; CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA \
-                            missing_schema UNBRANCHED; CREATE SCHEMA notification ( user_id U32 \
-                            ); COMMIT"
+                    query: "BEGIN; CREATE RELAY notifications SCHEMA missing_schema UNBRANCHED; \
+                            CREATE SCHEMA notification ( user_id U32 ); COMMIT"
                         .to_string(),
                     domain: "prod".to_string(),
                 },
@@ -21279,10 +21248,14 @@ mod tests {
             .expect("test resource file should write");
         std::fs::write(source_v1.join("nested").join("beta.txt"), "beta")
             .expect("test resource file should write");
+        let resource_domain = Domain::parse("default").expect("valid domain");
         let manifest_v1 = resource_store
             .install_from_directory(
-                identifier("fraud_model"),
-                1,
+                nervix_models::ResourceId::new(
+                    resource_domain.clone(),
+                    identifier("fraud_model"),
+                    1,
+                ),
                 &source_v1,
                 expected_leader.clone(),
                 Timestamp::from_unix_nanos(77),
@@ -21295,14 +21268,21 @@ mod tests {
             .expect("test resource file should write");
         let manifest_v2 = resource_store
             .install_from_directory(
-                identifier("fraud_model"),
-                2,
+                nervix_models::ResourceId::new(
+                    resource_domain.clone(),
+                    identifier("fraud_model"),
+                    2,
+                ),
                 &source_v2,
                 expected_leader.clone(),
                 Timestamp::from_unix_nanos(79),
             )
             .await
             .expect("resource version should install");
+        consensus
+            .create_resource_catalog(&resource_domain, &identifier("fraud_model"))
+            .await
+            .expect("resource catalog should persist");
         consensus
             .put_resource_version(manifest_v1.resource.clone())
             .await
@@ -21314,6 +21294,7 @@ mod tests {
         consensus
             .put_resource_replica(nervix_models::ResourceNodeStatus {
                 key: nervix_models::ResourceReplicaKey::new(
+                    resource_domain.clone(),
                     identifier("fraud_model"),
                     1,
                     expected_leader.clone(),

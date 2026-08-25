@@ -56,6 +56,7 @@ message TransactionStatus {
   uint64 total_count = 5;
   string error = 6;
   optional uint64 failing_step = 7;
+  string domain = 8;
 }
 
 message AttachTransactionRequest {
@@ -139,6 +140,7 @@ message ClusterSummary {
 message UploadResourceStart {
   string name = 1;
   uint64 total_bytes = 2;
+  string domain = 3;
 }
 
 message UploadResourceRequest {

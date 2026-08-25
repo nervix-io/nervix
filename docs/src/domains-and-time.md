@@ -10,6 +10,10 @@ Nervix currently supports:
 
 `CREATE DOMAIN <id>` is the short spelling for `CREATE UNPACED DOMAIN <id>`.
 
+Domain creation is never transaction content. A transaction is bound to one already-existing
+domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is rejected. See
+[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+
 ## Paced Domains
 
 Paced domains maintain a domain clock.

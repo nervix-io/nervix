@@ -100,6 +100,7 @@ impl TransactionState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionStatus {
     pub id: String,
+    pub domain: String,
     pub state: TransactionState,
     pub pending_count: u64,
     pub completed_count: u64,
@@ -369,6 +370,16 @@ impl Client {
         self.inner.transaction.lock().await.clone()
     }
 
+    /// Records the transaction the server reports and adopts the domain it is bound to. A session
+    /// that attaches or reconnects must follow the transaction's domain, because `USE` is rejected
+    /// while a transaction is active and every queued statement must select that domain.
+    async fn adopt_transaction_status(&self, status: TransactionStatus) {
+        if !status.domain.is_empty() {
+            self.set_domain(status.domain.clone()).await;
+        }
+        *self.inner.transaction.lock().await = Some(status);
+    }
+
     async fn active_transaction_status(&self) -> Option<TransactionStatus> {
         self.inner
             .transaction
@@ -383,7 +394,7 @@ impl Client {
         let _command_guard = self.inner.command_lock.lock().await;
         let outcome = self.execute_with_redirects(&query).await?;
         if let Some(transaction) = outcome.transaction.clone() {
-            *self.inner.transaction.lock().await = Some(transaction);
+            self.adopt_transaction_status(transaction).await;
         }
         Ok(outcome)
     }
@@ -395,7 +406,7 @@ impl Client {
         let _command_guard = self.inner.command_lock.lock().await;
         let outcome = self.attach_transaction_with_redirects(&id.into()).await?;
         if let Some(transaction) = outcome.transaction.clone() {
-            *self.inner.transaction.lock().await = Some(transaction);
+            self.adopt_transaction_status(transaction).await;
         }
         Ok(outcome)
     }
@@ -522,7 +533,7 @@ impl Client {
         };
         let outcome = self.attach_transaction_with_redirects(&previous.id).await?;
         if let Some(status) = outcome.transaction.clone() {
-            *self.inner.transaction.lock().await = Some(status);
+            self.adopt_transaction_status(status).await;
         }
         if outcome.success {
             let operation_was_observed = outcome
@@ -717,6 +728,7 @@ impl Client {
             let mut client = SessionServiceClient::new(channel);
             let (tx, rx) = mpsc::channel(8);
             let request_identifier = identifier.to_string();
+            let request_domain = self.domain().await;
             let request_directory = directory.clone();
             let progress_callback = on_progress.clone();
             tokio::spawn(async move {
@@ -730,6 +742,7 @@ impl Client {
                             proto::UploadResourceStart {
                                 name: request_identifier,
                                 total_bytes: 0,
+                                domain: request_domain,
                             },
                         )),
                     })
@@ -1275,6 +1288,7 @@ impl From<proto::TransactionStatus> for TransactionStatus {
     fn from(value: proto::TransactionStatus) -> Self {
         Self {
             id: value.id,
+            domain: value.domain,
             state: match proto::TransactionState::try_from(value.state) {
                 Ok(proto::TransactionState::Open) => TransactionState::Open,
                 Ok(proto::TransactionState::Committing) => TransactionState::Committing,
@@ -1494,6 +1508,7 @@ mod tests {
             results: Vec::new(),
             transaction: Some(proto::TransactionStatus {
                 id: "tx-1".to_string(),
+                domain: "tenant".to_string(),
                 state: proto::TransactionState::Open as i32,
                 pending_count: 2,
                 completed_count: 0,
@@ -1516,6 +1531,7 @@ mod tests {
             outcome.transaction,
             Some(TransactionStatus {
                 id: "tx-1".to_string(),
+                domain: "tenant".to_string(),
                 state: TransactionState::Open,
                 pending_count: 2,
                 completed_count: 0,
@@ -1601,6 +1617,7 @@ mod tests {
     fn transaction_restore_detects_replicated_progress_before_replay() {
         let previous = TransactionStatus {
             id: "tx-1".to_string(),
+            domain: "tenant".to_string(),
             state: TransactionState::Open,
             pending_count: 1,
             completed_count: 0,
@@ -1636,6 +1653,7 @@ mod tests {
             already_existed: false,
             transaction: Some(TransactionStatus {
                 id: "tx-1".to_string(),
+                domain: "tenant".to_string(),
                 state: TransactionState::Committed,
                 pending_count: 0,
                 completed_count: 2,
@@ -1706,6 +1724,7 @@ mod tests {
         let client = test_client("default");
         *client.inner.transaction.lock().await = Some(TransactionStatus {
             id: "tx-1".to_string(),
+            domain: "tenant".to_string(),
             state: TransactionState::Open,
             pending_count: 0,
             completed_count: 0,
