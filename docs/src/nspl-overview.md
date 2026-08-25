@@ -2,6 +2,13 @@
 
 NSPL is the language used to define the Nervix graph.
 
+## Language Stability
+
+NSPL has reached alpha. Its period of rapid, broad experimentation is over, and large
+backward-incompatible changes are no longer expected. The language is more stable, but alpha is
+not a promise of backward compatibility: NSPL will continue to evolve, and focused breaking
+changes may still be made when they materially improve the language model or correctness.
+
 AI coding agents can use the portable [NSPL Agent Skill](nspl-agent-skill.md) to design, explain,
 review, and troubleshoot Nervix configurations. The guide explains installation without cloning
 this repository, skill invocation, useful request details, expected output, and updates.

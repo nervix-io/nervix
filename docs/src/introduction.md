@@ -17,6 +17,11 @@ Nervix stream processing Language (NSPL) is used to declare the schemas, connect
 - vhosts
 - endpoints
 
+NSPL has reached alpha. Its period of rapid, broad experimentation is over, so large
+backward-incompatible language changes are no longer expected. The language will continue to
+evolve, however, and focused breaking changes may still occur. See
+[Language Stability](./nspl-overview.md#language-stability) for the current compatibility policy.
+
 The core runtime model is a graph of connected nodes:
 
 - ingestors bring data into the system
