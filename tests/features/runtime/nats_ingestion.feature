@@ -28,7 +28,7 @@ Feature: NATS ingestion
         };
         CREATE INGESTOR nats_notifications
         FROM NATS nats_main SUBJECT notifications_{{test_id}} QUEUE GROUP nats_notifications_group_{{test_id}} INSTANCES <instances> MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_nats_notifications
@@ -89,7 +89,7 @@ Feature: NATS ingestion
         };
         CREATE INGESTOR nats_notifications
         FROM NATS nats_main SUBJECT notifications_reconnect_{{test_id}} QUEUE GROUP nats_notifications_reconnect_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_nats_notifications

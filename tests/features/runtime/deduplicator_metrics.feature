@@ -28,7 +28,7 @@ Feature: Deduplicator metrics
         CREATE ENDPOINT dedup_metrics_ingress ON edge PATH '/dedup-metrics' TYPE HTTP;
         CREATE INGESTOR dedup_metrics_source
         FROM ENDPOINT dedup_metrics_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO raw_txns
         INHERIT ALL
         BRANCHED BY by_dedup_metrics_source

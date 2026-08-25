@@ -58,7 +58,7 @@ CREATE ENDPOINT replay_ingress ON replay_edge PATH '/events' TYPE HTTP;
 
 CREATE INGESTOR replay_source
   FROM ENDPOINT replay_ingress MODE NO_ACK SEQUENTIAL
-  DECODE USING order_event_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_event_codec
   TIMESTAMP AT occurred_at
   TO replay_orders
     INHERIT ALL

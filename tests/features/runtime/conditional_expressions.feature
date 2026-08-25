@@ -32,7 +32,7 @@ Feature: Conditional expressions
       CREATE ENDPOINT ingress ON edge PATH '/calculations' TYPE HTTP;
       CREATE INGESTOR calculation_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING calculation_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations
         INHERIT ALL
         UNBRANCHED
@@ -103,7 +103,7 @@ Feature: Conditional expressions
       CREATE ENDPOINT ingress ON edge PATH '/conditional-window' TYPE HTTP;
       CREATE INGESTOR conditional_sample_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING conditional_sample_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_sample_codec
         TO conditional_samples
         INHERIT ALL
         UNBRANCHED
@@ -182,7 +182,7 @@ Feature: Conditional expressions
       CREATE ENDPOINT ingress ON edge PATH '/conditional-forms' TYPE HTTP;
       CREATE INGESTOR conditional_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING conditional_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_input_codec
         TO conditional_inputs
         INHERIT ALL
         UNBRANCHED

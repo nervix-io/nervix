@@ -27,7 +27,7 @@ CREATE ENDPOINT orders_ingress
 
 CREATE INGESTOR http_orders
   FROM ENDPOINT orders_ingress MODE NO_ACK SEQUENTIAL
-  DECODE USING order_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
   TO orders_http
     INHERIT ALL
     UNBRANCHED

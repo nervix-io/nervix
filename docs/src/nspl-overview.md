@@ -417,7 +417,7 @@ CREATE BRANCH by_tenant
 
 CREATE INGESTOR notifications_in
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-  DECODE USING notification_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
   FILTER WHERE input.active
   TO notifications
     INHERIT ALL EXCEPT raw

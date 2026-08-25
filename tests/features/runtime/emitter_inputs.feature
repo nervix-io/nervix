@@ -33,7 +33,7 @@ Feature: Emitter relay inputs
       CREATE ENDPOINT source_b_ingress ON edge PATH '/b' TYPE HTTP;
       CREATE INGESTOR source_a
         FROM ENDPOINT source_a_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO source_a_events
           INHERIT ALL
           BRANCHED BY by_source_a
@@ -43,7 +43,7 @@ Feature: Emitter relay inputs
         ON GENERAL ERROR LOG;
       CREATE INGESTOR source_b
         FROM ENDPOINT source_b_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO source_b_events
           INHERIT ALL
           BRANCHED BY by_source_b

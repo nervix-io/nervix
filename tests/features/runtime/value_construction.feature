@@ -35,7 +35,7 @@ Feature: Route-local value construction
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR event_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING source_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TO source_events
           INHERIT ALL
           UNBRANCHED
@@ -113,7 +113,7 @@ Feature: Route-local value construction
       CREATE ENDPOINT header_calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
       CREATE INGESTOR header_calculation_source
         FROM ENDPOINT header_calculation_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING header_calculation_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING header_calculation_codec
         TO header_calculation_results
           SET id = input.id,
               result = input.numerator / input.denominator
@@ -183,7 +183,7 @@ Feature: Route-local value construction
       CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
       CREATE INGESTOR calculation_source
         FROM ENDPOINT calculation_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING calculation_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations
           INHERIT ALL
           UNBRANCHED

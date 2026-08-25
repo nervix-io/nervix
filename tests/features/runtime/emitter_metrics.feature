@@ -26,7 +26,7 @@ Feature: Emitter metrics
         CREATE ENDPOINT emitter_metrics_ingress ON edge PATH '/emitter-metrics' TYPE HTTP;
         CREATE INGESTOR emitter_metrics_source
         FROM ENDPOINT emitter_metrics_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_emitter_metrics_source

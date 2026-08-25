@@ -50,7 +50,7 @@ Feature: Branch namespace
         FROM MQTT mqtt_main
         TOPIC branch_namespace_{{test_id}}
         MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
           INHERIT ALL
           BRANCHED BY by_mqtt_notifications
@@ -134,7 +134,7 @@ Feature: Branch namespace
         PATH '/ingest'
         TYPE HTTP; CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

@@ -39,7 +39,20 @@ pub(crate) struct TransactionCommitPauseInjector {
 }
 
 #[derive(Debug, Default)]
+pub(crate) struct EntityGatePauseInjector {
+    pauses: DashMap<String, Arc<EntityGatePause>, RandomState>,
+}
+
+#[derive(Debug, Default)]
 struct TransactionCommitPause {
+    reached: AtomicBool,
+    released: AtomicBool,
+    reached_notify: Notify,
+    release_notify: Notify,
+}
+
+#[derive(Debug, Default)]
+struct EntityGatePause {
     reached: AtomicBool,
     released: AtomicBool,
     reached_notify: Notify,
@@ -59,6 +72,7 @@ pub struct RuntimeTestHooks {
     pub otel_client_faults: Arc<OtelClientFaultInjector>,
     pub schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     pub(crate) transaction_commit_pauses: Arc<TransactionCommitPauseInjector>,
+    pub(crate) entity_gate_pauses: Arc<EntityGatePauseInjector>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
     pub domain_drain_timeout: Option<Duration>,
     pub entity_gate_deadline: Option<Duration>,
@@ -80,6 +94,7 @@ impl Default for RuntimeTestHooks {
             otel_client_faults: Arc::default(),
             schedule_publication_faults: Arc::default(),
             transaction_commit_pauses: Arc::default(),
+            entity_gate_pauses: Arc::default(),
             branch_instance_expiration_scan_interval: None,
             domain_drain_timeout: None,
             entity_gate_deadline: None,
@@ -107,6 +122,43 @@ impl RuntimeTestHooks {
         );
     }
 
+    pub fn pause_entity_gate(&self, domain: impl Into<String>) {
+        self.entity_gate_pauses.pauses.insert(
+            domain.into().to_ascii_lowercase(),
+            Arc::new(EntityGatePause::default()),
+        );
+    }
+
+    pub async fn wait_for_entity_gate_pause(&self, domain: &str) {
+        let key = domain.to_ascii_lowercase();
+        let pause = self
+            .entity_gate_pauses
+            .pauses
+            .get(&key)
+            .unwrap_or_else(|| panic!("entity gate pause for domain '{domain}' is not armed"))
+            .clone();
+        while !pause.reached.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = pause.reached_notify.notified();
+            if pause.reached.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    pub fn release_entity_gate_pause(&self, domain: &str) {
+        let key = domain.to_ascii_lowercase();
+        let pause = self
+            .entity_gate_pauses
+            .pauses
+            .get(&key)
+            .unwrap_or_else(|| panic!("entity gate pause for domain '{domain}' is not armed"))
+            .clone();
+        pause.released.store(true, Ordering::Release);
+        pause.release_notify.notify_waiters();
+    }
+
     pub async fn wait_for_transaction_commit_pause(
         &self,
         node_id: &str,
@@ -125,6 +177,7 @@ impl RuntimeTestHooks {
             })
             .clone();
         while !pause.reached.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
             let notified = pause.reached_notify.notified();
             if pause.reached.load(Ordering::Acquire) {
                 break;
@@ -161,6 +214,28 @@ impl TransactionCommitPauseInjector {
         pause.reached.store(true, Ordering::Release);
         pause.reached_notify.notify_waiters();
         while !pause.released.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = pause.release_notify.notified();
+            if pause.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+        self.pauses.remove(&key);
+    }
+}
+
+impl EntityGatePauseInjector {
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_if_armed(&self, domain: &Domain) {
+        let key = domain.as_str().to_ascii_lowercase();
+        let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
+            return;
+        };
+        pause.reached.store(true, Ordering::Release);
+        pause.reached_notify.notify_waiters();
+        while !pause.released.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
             let notified = pause.release_notify.notified();
             if pause.released.load(Ordering::Acquire) {
                 break;

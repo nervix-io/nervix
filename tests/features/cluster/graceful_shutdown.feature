@@ -51,7 +51,7 @@ Feature: Graceful shutdown
 
       CREATE INGESTOR source_txns
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_source_txns

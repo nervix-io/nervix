@@ -1762,6 +1762,9 @@ mod tests {
             source: IngestSource::Endpoint {
                 endpoint: identifier("ingress_a"),
                 mode: EndpointIngestMode::NoAckSequential,
+                quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
             },
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
@@ -2150,9 +2153,25 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
+                    candidate
+                        .source
+                        .set_quiesce(crate::IngestQuiesceMode::Reject {
+                            retry_after: "7s".to_string(),
+                        })
+                        .expect("endpoint must accept REJECT quiesce mode");
+                    candidate
+                },
+                ModelChangeAspect::IngestorSource,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
                     candidate.source = IngestSource::Endpoint {
                         endpoint: identifier("ingress_b"),
                         mode: EndpointIngestMode::NoAckSequential,
+                        quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                            max_size: "1MiB".to_string(),
+                        },
                     };
                     candidate
                 },

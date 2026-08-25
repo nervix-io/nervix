@@ -27,7 +27,7 @@ Feature: HTTP endpoint ingestion
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -86,7 +86,7 @@ Feature: HTTP endpoint ingestion
 
       CREATE INGESTOR raw_metrics_source
         FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
         UNBRANCHED
@@ -164,7 +164,7 @@ Feature: HTTP endpoint ingestion
         TYPE HTTP;
       CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

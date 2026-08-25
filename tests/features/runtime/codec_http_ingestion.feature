@@ -29,7 +29,7 @@ Feature: HTTP codec ingestion
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -91,7 +91,7 @@ Feature: HTTP codec ingestion
         TYPE HTTP;
         CREATE INGESTOR metrics_ingestor
         FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING metrics_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
         TO metrics_stream
         INHERIT ALL
         BRANCHED BY by_metrics_ingestor
@@ -149,7 +149,7 @@ Feature: HTTP codec ingestion
         TYPE HTTP;
       CREATE INGESTOR shaped_metrics_ingestor
         FROM ENDPOINT shaped_metrics_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING shaped_metrics_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shaped_metrics_codec
         TO shaped_metrics_stream
         INHERIT ALL
         UNBRANCHED
@@ -222,7 +222,7 @@ Feature: HTTP codec ingestion
 
       CREATE INGESTOR strict_notifications_source
         FROM ENDPOINT strict_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING strict_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING strict_notification_codec
         TO strict_notifications
         INHERIT ALL
         UNBRANCHED
@@ -232,7 +232,7 @@ Feature: HTTP codec ingestion
 
       CREATE INGESTOR loose_notifications_source
         FROM ENDPOINT loose_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING loose_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING loose_notification_codec
         TO loose_notifications
         INHERIT ALL
         UNBRANCHED
@@ -294,7 +294,7 @@ Feature: HTTP codec ingestion
         TYPE HTTP;
         CREATE INGESTOR metrics_ingestor
         FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING metrics_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
         TO metrics_stream
         INHERIT ALL
         BRANCHED BY by_metrics_ingestor
@@ -347,7 +347,7 @@ Feature: HTTP codec ingestion
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

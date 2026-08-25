@@ -29,7 +29,7 @@ Feature: Kafka ingestor domain pacing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -86,7 +86,7 @@ Feature: Kafka ingestor domain pacing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -150,7 +150,7 @@ Feature: Kafka ingestor domain pacing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
         INHERIT ALL
@@ -210,7 +210,7 @@ Feature: Kafka ingestor domain pacing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
         INHERIT ALL
@@ -271,7 +271,7 @@ Feature: Kafka ingestor domain pacing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -346,7 +346,7 @@ Feature: Kafka ingestor domain pacing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -425,7 +425,7 @@ Feature: Kafka ingestor domain pacing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -508,7 +508,7 @@ Feature: Kafka ingestor domain pacing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -593,7 +593,7 @@ Feature: Kafka ingestor domain pacing
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL

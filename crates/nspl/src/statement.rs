@@ -265,13 +265,13 @@ mod tests {
         CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, DescribeRelay,
         DrainNode, DropModel, DropNode, EmitSink, EmitterPublishingMode, EndpointIngestMode,
         EndpointType, ErrorPolicies, GeneralErrorPolicy, Identifier as ModelIdentifier,
-        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Model,
-        ModelKind, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, OutputBranch, ParseAsType,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
-        RedisPubSubIngestMode, RetryPolicy, SchemaField, SignalingProtobufConfig,
-        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-        SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
-        WireSchemaField, ZeroMqIngestMode,
+        IngestQuiesceMode, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
+        OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SchemaField,
+        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral,
+        UncordonNode, WireSchemaField, ZeroMqIngestMode,
     };
 
     use super::*;
@@ -574,6 +574,7 @@ mod tests {
                                 offset_mode: KafkaOffsetMode::ConsumerGroup(g.ident()),
                                 instances: 1,
                                 mode,
+                                quiesce: IngestQuiesceMode::Suspend,
                             },
                             general_error_policy: GeneralErrorPolicy::Log,
                             filter_where: None,
@@ -612,6 +613,7 @@ mod tests {
                                         PulsarIngestMode::NoAckParallel
                                     }
                                 },
+                                quiesce: IngestQuiesceMode::Suspend,
                             },
                             general_error_policy: GeneralErrorPolicy::Log,
                             filter_where: None,
@@ -634,6 +636,7 @@ mod tests {
                                     max_backoff: format!("{}s", g.bounded_u64(1, 300)),
                                 },
                             },
+                            quiesce: IngestQuiesceMode::Suspend,
                         },
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
@@ -718,6 +721,7 @@ mod tests {
                     client: g.ident(),
                     channel: g.ident(),
                     mode: RedisPubSubIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::Drop,
                 },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
@@ -737,6 +741,7 @@ mod tests {
                                 session: MqttSession::Clean,
                                 qos: MqttQos::AtMostOnce,
                             },
+                            quiesce: IngestQuiesceMode::Drop,
                         },
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
@@ -752,6 +757,7 @@ mod tests {
                             query: r#"label_replace(vector(42.5), "source", "local", "", "")"#
                                 .to_string(),
                             every: "15s".to_string(),
+                            quiesce: IngestQuiesceMode::Suspend,
                         },
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
@@ -870,6 +876,7 @@ mod tests {
                 source: IngestSource::ZeroMq {
                     client: g.ident(),
                     mode: ZeroMqIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::Suspend,
                 },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
@@ -905,6 +912,7 @@ mod tests {
                     queue_group: g.ident(),
                     instances: g.bounded_u64(1, 10),
                     mode: NatsIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::Drop,
                 },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
@@ -1060,6 +1068,9 @@ mod tests {
                     IngestSource::Endpoint {
                         endpoint: g.ident(),
                         mode: EndpointIngestMode::NoAckSequential,
+                        quiesce: IngestQuiesceMode::EndpointBuffer {
+                            max_size: "1MiB".to_string(),
+                        },
                     }
                 } else {
                     IngestSource::Sqs {
@@ -1073,6 +1084,7 @@ mod tests {
                                 max_backoff: format!("{}s", g.bounded_u64(1, 300)),
                             },
                         },
+                        quiesce: IngestQuiesceMode::Suspend,
                     }
                 },
                 general_error_policy: GeneralErrorPolicy::Log,
@@ -1194,8 +1206,8 @@ mod tests {
     /// Contexts that accept only `SET` must not offer the clauses they will reject.
     #[test]
     fn set_only_route_contexts_offer_only_set() {
-        let input = "CREATE INGESTOR i FROM ENDPOINT e MODE NO_ACK SEQUENTIAL DECODE USING c TO s \
-                     BRANCHED BY b ";
+        let input = "CREATE INGESTOR i FROM ENDPOINT e MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+                     MAX SIZE 1MiB DECODE USING c TO s BRANCHED BY b ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"SET".to_string()));
         for rejected in ["INHERIT", "INVOKE", "WHERE"] {
@@ -1333,8 +1345,8 @@ mod tests {
 
     #[test]
     fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
-        let input =
-            "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL DECODE USING sch TO s ";
+        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
+                     MAX SIZE 1MiB DECODE USING sch TO s ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"UNBRANCHED".to_string()));
         assert!(suggestions.contains(&"BRANCHED BY".to_string()));
@@ -1974,9 +1986,9 @@ mod tests {
             (
                 "ingestor",
                 "CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint \
-                 MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications BRANCHED \
-                 BY user_id_branch SET user_id = message.user_id FLUSH EACH 100ms MAX BATCH SIZE \
-                 1MiB ON MESSAGE ERROR LOG",
+                 MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING \
+                 notification_codec TO notifications BRANCHED BY user_id_branch SET user_id = \
+                 message.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG",
                 " ON GENERAL ERROR LOG;",
             ),
             (
@@ -2333,10 +2345,10 @@ mod tests {
     #[test]
     fn canonical_roundtrip_alter_ingestor() {
         let parsed = parse_statement(
-            "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL, SET \
-             DECODE USING event_codec_v2, SET TIMESTAMP AT occurred_at, SET FILTER WHERE \
-             input.active, REPLACE ROUTE TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON \
-             MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
+            "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON \
+             QUIESCE BUFFER MAX SIZE 1MiB, SET DECODE USING event_codec_v2, SET TIMESTAMP AT \
+             occurred_at, SET FILTER WHERE input.active, REPLACE ROUTE TO events INHERIT ALL \
+             UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
         )
         .expect("parse should succeed");
         let Statement::AlterIngestor(alter) = parsed else {
@@ -2604,7 +2616,7 @@ mod tests {
                     TOPIC notifications
                     OFFSET BY CONSUMER GROUP nervix_consumer
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-                DECODE USING notification_kafka_message
+                ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications
                     BRANCHED BY user_id_kind_branch
                     SET user_id = message.user_id, kind = message.kind
@@ -2629,7 +2641,7 @@ mod tests {
                 FROM PROMETHEUS prom_main
                 QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
                 EVERY 15s
-                DECODE USING sample_codec
+                ON QUIESCE SUSPEND DECODE USING sample_codec
                 TO samples
                     BRANCHED BY source_branch SET source = message.source
                     FLUSH EACH 100ms MAX BATCH SIZE 1MiB

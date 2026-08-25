@@ -123,7 +123,7 @@ Feature: Cluster leader failover
         };
       CREATE INGESTOR notification_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_notification_source
@@ -133,7 +133,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR notifications_a_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications_a
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -143,7 +143,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR notifications_b_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications_b
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -153,7 +153,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR transaction_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_transaction_source
@@ -163,7 +163,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_source
@@ -173,7 +173,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR feature_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
         INHERIT ALL
         BRANCHED BY by_feature_source
@@ -191,15 +191,15 @@ Feature: Cluster leader failover
     And within "20s" node "{{expected_promoted_replica}}" eventually reports scheduled "<node_kind>" "<node_name>" owner equals placeholder "expected_promoted_replica"
 
     Examples:
-      | node_kind        | node_name           | vector_type   | score_type    | create_statement                                                                                                                                                                                                                                                                                                                                                      |
-      | ingestor         | source_ingestor     | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INGESTOR source_ingestor FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s DECODE USING notification_codec TO source_only INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG |
-      | reingestor       | tenant_partition    | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE REINGESTOR tenant_partition FROM notifications TO tenant_notifications INHERIT ALL BRANCHED BY by_tenant_partition SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                       |
-      | junction         | join_streams        | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE JUNCTION join_streams FROM notifications_a, notifications_b BRANCHED BY by_notifications_a_source TO notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                   |
-      | deduplicator     | dedup_txns          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m BRANCHED BY by_transaction_source TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                       |
-      | window_processor | latency_window      | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION BRANCHED BY by_metric_source TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency) ON MESSAGE ERROR LOG                                                                                                                                    |
-      | generator        | synth_notifications | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE GENERATOR synth_notifications USING MATERIALIZED STATE notifications EACH 100ms BRANCHED BY by_notification_source TO generated_notifications SET user_id = relay_state.notifications.user_id, tenant = relay_state.notifications.tenant, level = relay_state.notifications.level FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                         |
-      | inferencer       | score_model         | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } BRANCHED BY by_feature_source TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                              |
-      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG                                                                                                    |
+      | node_kind        | node_name           | vector_type   | score_type    | create_statement                                                                                                                                                                                                                                                                                                                                                                         |
+      | ingestor         | source_ingestor     | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INGESTOR source_ingestor FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND DECODE USING notification_codec TO source_only INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG |
+      | reingestor       | tenant_partition    | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE REINGESTOR tenant_partition FROM notifications TO tenant_notifications INHERIT ALL BRANCHED BY by_tenant_partition SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                          |
+      | junction         | join_streams        | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE JUNCTION join_streams FROM notifications_a, notifications_b BRANCHED BY by_notifications_a_source TO notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                                      |
+      | deduplicator     | dedup_txns          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m BRANCHED BY by_transaction_source TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                          |
+      | window_processor | latency_window      | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION BRANCHED BY by_metric_source TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency) ON MESSAGE ERROR LOG                                                                                                                                                       |
+      | generator        | synth_notifications | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE GENERATOR synth_notifications USING MATERIALIZED STATE notifications EACH 100ms BRANCHED BY by_notification_source TO generated_notifications SET user_id = relay_state.notifications.user_id, tenant = relay_state.notifications.tenant, level = relay_state.notifications.level FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                            |
+      | inferencer       | score_model         | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } BRANCHED BY by_feature_source TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                                 |
+      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG                                                                                                                       |
 
   Scenario Outline: Dead scheduled node primary failover falls back to another live node without a replica
     Given Kafka is running
@@ -309,7 +309,7 @@ Feature: Cluster leader failover
         };
       CREATE INGESTOR notification_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_notification_source
@@ -319,7 +319,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR notifications_a_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications_a
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -329,7 +329,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR notifications_b_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications_b
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -339,7 +339,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR transaction_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_transaction_source
@@ -349,7 +349,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR metric_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_source
@@ -359,7 +359,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE INGESTOR feature_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
         INHERIT ALL
         BRANCHED BY by_feature_source
@@ -377,12 +377,12 @@ Feature: Cluster leader failover
     And within "20s" node "{{query_node}}" eventually reports scheduled "<node_kind>" "<node_name>" owner different from placeholder "failed_primary_node"
 
     Examples:
-      | node_kind        | node_name           | vector_type   | score_type    | create_statement                                                                                                                                                                                                                                                                                                                                                      |
-      | ingestor         | source_ingestor     | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INGESTOR source_ingestor FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s DECODE USING notification_codec TO source_only INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG |
-      | reingestor       | tenant_partition    | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE REINGESTOR tenant_partition FROM notifications TO tenant_notifications INHERIT ALL BRANCHED BY by_tenant_partition SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                       |
-      | junction         | join_streams        | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE JUNCTION join_streams FROM notifications_a, notifications_b BRANCHED BY by_notifications_a_source TO notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                   |
-      | deduplicator     | dedup_txns          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m BRANCHED BY by_transaction_source TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                       |
-      | window_processor | latency_window      | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION BRANCHED BY by_metric_source TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency) ON MESSAGE ERROR LOG                                                                                                                                    |
-      | generator        | synth_notifications | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE GENERATOR synth_notifications USING MATERIALIZED STATE notifications EACH 100ms BRANCHED BY by_notification_source TO generated_notifications SET user_id = relay_state.notifications.user_id, tenant = relay_state.notifications.tenant, level = relay_state.notifications.level FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                         |
-      | inferencer       | score_model         | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } BRANCHED BY by_feature_source TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                              |
-      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG                                                                                                    |
+      | node_kind        | node_name           | vector_type   | score_type    | create_statement                                                                                                                                                                                                                                                                                                                                                                         |
+      | ingestor         | source_ingestor     | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INGESTOR source_ingestor FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND DECODE USING notification_codec TO source_only INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG |
+      | reingestor       | tenant_partition    | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE REINGESTOR tenant_partition FROM notifications TO tenant_notifications INHERIT ALL BRANCHED BY by_tenant_partition SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                          |
+      | junction         | join_streams        | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE JUNCTION join_streams FROM notifications_a, notifications_b BRANCHED BY by_notifications_a_source TO notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                                      |
+      | deduplicator     | dedup_txns          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m BRANCHED BY by_transaction_source TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                          |
+      | window_processor | latency_window      | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION BRANCHED BY by_metric_source TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency) ON MESSAGE ERROR LOG                                                                                                                                                       |
+      | generator        | synth_notifications | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE GENERATOR synth_notifications USING MATERIALIZED STATE notifications EACH 100ms BRANCHED BY by_notification_source TO generated_notifications SET user_id = relay_state.notifications.user_id, tenant = relay_state.notifications.tenant, level = relay_state.notifications.level FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                            |
+      | inferencer       | score_model         | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } BRANCHED BY by_feature_source TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                                 |
+      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG                                                                                                                       |

@@ -38,7 +38,7 @@ Feature: Roto user-defined functions
       CREATE ENDPOINT udf_ingress ON edge PATH '/udf' TYPE HTTP;
       CREATE INGESTOR udf_source
         FROM ENDPOINT udf_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING udf_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING udf_input_codec
         TO udf_inputs
           INHERIT ALL
           UNBRANCHED
@@ -153,7 +153,7 @@ Feature: Roto user-defined functions
       CREATE ENDPOINT card_ingress ON card_edge PATH '/cards' TYPE HTTP;
       CREATE INGESTOR card_source
         FROM ENDPOINT card_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING card_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING card_event_codec
         TO card_events
           INHERIT ALL
           UNBRANCHED

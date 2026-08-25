@@ -70,7 +70,7 @@ Feature: Relay capacity
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity' TYPE HTTP; CREATE INGESTOR relay_capacity_source
         FROM ENDPOINT relay_capacity_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -172,7 +172,7 @@ Feature: Relay capacity
 
       CREATE INGESTOR relay_capacity_shrink_source
         FROM ENDPOINT relay_capacity_shrink_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED

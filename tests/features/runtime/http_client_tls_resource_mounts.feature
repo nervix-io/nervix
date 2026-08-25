@@ -41,7 +41,7 @@ Feature: HTTP client TLS resource mounts
         };
         CREATE INGESTOR http_notifications
         FROM HTTP http_tls EVERY 1s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

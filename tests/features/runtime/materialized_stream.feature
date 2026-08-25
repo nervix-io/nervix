@@ -41,7 +41,7 @@ Feature: Materialized relay state
         TYPE HTTP;
         CREATE INGESTOR state_notifications
         FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_state_notifications
@@ -51,7 +51,7 @@ Feature: Materialized relay state
         ON GENERAL ERROR LOG;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_notifications
         INHERIT ALL
         BRANCHED BY by_state_notifications
@@ -146,7 +146,7 @@ Feature: Materialized relay state
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -223,7 +223,7 @@ Feature: Materialized relay state
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -290,7 +290,7 @@ Feature: Materialized relay state
         TYPE HTTP;
         CREATE INGESTOR http_notifications
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

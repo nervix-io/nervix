@@ -204,6 +204,9 @@ mod tests {
                     source: IngestSource::Endpoint {
                         endpoint: identifier(endpoint),
                         mode: EndpointIngestMode::NoAckSequential,
+                        quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                            max_size: "1MiB".to_string(),
+                        },
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,

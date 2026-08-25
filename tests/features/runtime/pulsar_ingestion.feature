@@ -28,7 +28,7 @@ Feature: Pulsar ingestion
         };
         CREATE INGESTOR pulsar_notifications
         FROM PULSAR pulsar_main TOPIC notifications_{{test_id}} SUBSCRIPTION nervix_cucumber_{{test_id}} INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_pulsar_notifications
@@ -88,7 +88,7 @@ Feature: Pulsar ingestion
         };
         CREATE INGESTOR pulsar_notifications
         FROM PULSAR pulsar_main TOPIC notifications_reconnect_{{test_id}} SUBSCRIPTION nervix_cucumber_reconnect_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_pulsar_notifications

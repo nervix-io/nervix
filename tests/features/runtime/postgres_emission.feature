@@ -33,7 +33,7 @@ Feature: Postgres emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC postgres_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -112,7 +112,7 @@ Feature: Postgres emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC postgres_conflict_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -195,7 +195,7 @@ Feature: Postgres emission
       };
       CREATE INGESTOR mqtt_notifications
       FROM MQTT mqtt_ingress TOPIC postgres_poison_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-      DECODE USING notification_codec
+      ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
       UNBRANCHED
@@ -293,7 +293,7 @@ Feature: Postgres emission
       };
       CREATE INGESTOR mqtt_notifications
       FROM MQTT mqtt_ingress TOPIC postgres_values_error_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-      DECODE USING notification_codec
+      ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
       UNBRANCHED
@@ -375,7 +375,7 @@ Feature: Postgres emission
       };
       CREATE INGESTOR mqtt_notifications
       FROM MQTT mqtt_ingress TOPIC postgres_batch_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-      DECODE USING notification_codec
+      ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
       UNBRANCHED

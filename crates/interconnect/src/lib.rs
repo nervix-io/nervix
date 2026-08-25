@@ -251,6 +251,11 @@ pub struct KafkaDomainOffsetDescribeEnvelope {
 pub struct IngestorDescribeEnvelope {
     pub running: bool,
     pub ready: bool,
+    pub quiesce_state: Option<String>,
+    pub quiesce_buffered_records: u64,
+    pub quiesce_buffered_bytes: u64,
+    pub quiesce_dropped_total: u64,
+    pub quiesce_rejected_total: u64,
     pub memory_backpressure_paused: bool,
     pub transient_error: Option<String>,
     pub reconnect_backoff: Option<String>,

@@ -96,7 +96,7 @@ CREATE INGESTOR mqtt_telemetry
   TOPIC factory_telemetry
   INSTANCES 4
   MODE NO_ACK PARALLEL
-  DECODE USING iot_telemetry_codec
+  ON QUIESCE DROP DECODE USING iot_telemetry_codec
   TIMESTAMP AT ts
   TO telemetry_by_site
     INHERIT ALL

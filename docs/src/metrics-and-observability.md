@@ -75,6 +75,13 @@ Nervix records these raw metric families:
   physical node
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
+- `nervix_ingestor_quiesce_buffered_records`: raw payloads currently retained in an ingestor's
+  per-instance quiesce buffers
+- `nervix_ingestor_quiesce_buffered_bytes`: raw payload bytes currently retained in those buffers
+- `nervix_ingestor_quiesce_dropped_total`: payloads deliberately discarded by `DROP`, buffer
+  overflow, memory-pressure zero-capacity behavior, or an interrupting termination
+- `nervix_ingestor_quiesce_rejected_total`: endpoint requests or connections refused while an
+  ingestor cannot accept them
 - `nervix_jemalloc_active_bytes`: bytes in active allocator pages
 - `nervix_jemalloc_allocated_bytes`: bytes allocated by the process
 - `nervix_jemalloc_mapped_bytes`: bytes mapped by active allocator extents
@@ -89,6 +96,10 @@ Histograms follow Prometheus conventions and include `_bucket`, `_sum`, and `_co
 - relay buffer length: `1`, `2`, `4`, `8`, `16`, `32`, `64`, `128`, `256`, `512`, `1024`, `2048`, `+Inf`
 
 Prometheus receives raw values only. The `/metrics` endpoint is encoded by the Prometheus client registry, not by Nervix internal summary state. Prometheus should compute external queries, alerts, and dashboards with normal PromQL aggregation.
+
+The four ingestor-quiesce families use `domain`, `ingestor`, and `physical_node_id` labels. Buffer
+families are gauges; dropped and rejected families are monotonic counters. They are process-local:
+quiesce buffers do not migrate during termination or failover.
 
 ## DESCRIBE Metrics
 
@@ -110,6 +121,11 @@ DESCRIBE DOMAIN;
 `input_output` section aggregates ingestor and emitter metrics. Its `processed`
 section aggregates metrics for all runtime nodes in the domain, including
 processing nodes.
+
+`DESCRIBE INGESTOR` also reports the declared `quiesce:` policy, current `quiesce state:`, and all
+four quiesce values using their Prometheus family names. A connected ingestor in any active mode is
+reported as `status: quiesced`, not `stopped`. Per-payload activity remains at debug or trace log
+levels and payload values are never logged.
 
 Counter summaries include:
 

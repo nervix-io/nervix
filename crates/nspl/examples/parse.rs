@@ -148,10 +148,10 @@ fn main() -> ExitCode {
          ICEBERG_REST|WEBSOCKETS CONFIG {{ 'k' = 'v', ... }} [;]"
     );
     println!(
-        "  CREATE INGESTOR <name> [FILTER WHERE <expr>] TO <relay> ... ON MESSAGE ERROR LOG \
-         DECODE USING <codec> ... FROM \
+        "  CREATE INGESTOR <name> FROM \
          HTTP|KAFKA|PULSAR|PROMETHEUS|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS|ENDPOINT|WEBSOCKETS ... \
-         [ ON GENERAL ERROR LOG;]"
+         ON QUIESCE <transport-specific mode> DECODE USING <codec> [FILTER WHERE <expr>] TO \
+         <relay> ... ON MESSAGE ERROR LOG [ON GENERAL ERROR LOG;]"
     );
     println!(
         "  CREATE EMITTER <name> FROM <s> TO KAFKA|PULSAR|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS ... \

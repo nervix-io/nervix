@@ -43,7 +43,7 @@ Feature: Relay junction
         TYPE HTTP;
       CREATE INGESTOR source_one
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
           INHERIT ALL
           BRANCHED BY by_source_one
@@ -53,7 +53,7 @@ Feature: Relay junction
         ON GENERAL ERROR LOG;
       CREATE INGESTOR source_two
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
           INHERIT ALL
           BRANCHED BY by_source_one
@@ -143,7 +143,7 @@ Feature: Relay junction
         TYPE HTTP;
         CREATE INGESTOR source_one
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_one
@@ -153,7 +153,7 @@ Feature: Relay junction
         ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
         INHERIT ALL
         BRANCHED BY by_source_one
@@ -244,7 +244,7 @@ Feature: Relay junction
         TYPE HTTP;
         CREATE INGESTOR state_source
         FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO state_notifications
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -254,7 +254,7 @@ Feature: Relay junction
         ON GENERAL ERROR LOG;
         CREATE INGESTOR source_one
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -264,7 +264,7 @@ Feature: Relay junction
         ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
         INHERIT ALL
         BRANCHED BY by_state_source

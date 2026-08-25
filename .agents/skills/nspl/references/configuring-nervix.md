@@ -161,6 +161,10 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- Every ingestor source ends with its documented `ON QUIESCE` body immediately before `DECODE
+  USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint `RETRY
+  AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT QOS 1`.
+  Do not mix mode bodies between source types or infer a default.
 - Treat Kafka emitter success as local librdkafka producer-queue admission. Even in `ATTACHED`
   mode, Nervix does not wait for a broker delivery receipt before completing its ACK share.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
@@ -175,7 +179,9 @@ relay. Do not use them to scan across branches.
   validation and persistence; read-only and session/client-local commands remain outside.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
-- Running-domain schema ALTER quiescing is automatic; do not emit `PAUSE` or `RESUME` syntax.
+- Entity holds, domain pauses, and memory-pressure quiescing automatically consult the ingestor's
+  mode. Stop, drop, drain/cordon relocation, failover, and shutdown terminate the source session.
+  Do not emit `PAUSE` or `RESUME` syntax.
 - External entities and resource contents are provisioned before the graph is started.
 
 ## Verification and troubleshooting

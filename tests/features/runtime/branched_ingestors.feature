@@ -50,7 +50,7 @@ Feature: Ingestor branch consistency
           'addr' = '{{redis_addr}}'
         }; CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -61,7 +61,7 @@ Feature: Ingestor branch consistency
 
       CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_branch TTL 5m; CREATE INGESTOR redis_notifications
         FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_redis_notifications
@@ -126,7 +126,7 @@ Feature: Ingestor branch consistency
 
       CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m; CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_a_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -135,7 +135,7 @@ Feature: Ingestor branch consistency
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG; CREATE INGESTOR mqtt_notifications_secondary
         FROM MQTT mqtt_secondary TOPIC notifications_b_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications_secondary

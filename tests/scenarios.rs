@@ -847,6 +847,14 @@ impl IngestorLogicTransportFixture {
         }
     }
 
+    fn quiesce_fragment(self) -> &'static str {
+        match self {
+            Self::HttpEndpoint | Self::WebsocketEndpoint => "BUFFER MAX SIZE 1MiB",
+            Self::Kafka | Self::ZeroMq => "SUSPEND",
+            Self::Mqtt | Self::Nats => "DROP",
+        }
+    }
+
     async fn deliver(self, world: &mut ScenarioWorld, payload: &str) {
         match self {
             Self::HttpEndpoint => {
@@ -1546,6 +1554,7 @@ fn build_ingestor_logic_commands(
       {}
       CREATE INGESTOR logic_ingestor
         {}
+        ON QUIESCE {}
         DECODE USING {}
         {}
         TO logic_notifications
@@ -1560,6 +1569,7 @@ fn build_ingestor_logic_commands(
         output_schema.schema_name(),
         transport.setup_fragment(),
         transport.source_fragment(),
+        transport.quiesce_fragment(),
         output_schema.input_codec_name(),
         timestamp_clause,
         logic_program,
@@ -2778,6 +2788,29 @@ async fn given_transaction_commit_pause(
     world
         .runtime_test_hooks
         .pause_transaction_commit_after(node_id, completed_statements);
+}
+
+#[given(expr = "the entity gate for domain {string} pauses after engagement")]
+async fn given_entity_gate_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.runtime_test_hooks.pause_entity_gate(domain);
+}
+
+#[then(expr = "the entity gate pause for domain {string} is reached")]
+async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        world.runtime_test_hooks.wait_for_entity_gate_pause(&domain),
+    )
+    .await
+    .expect("entity gate did not reach the armed pause");
+}
+
+#[when(expr = "the entity gate pause for domain {string} is released")]
+async fn when_entity_gate_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.runtime_test_hooks.release_entity_gate_pause(&domain);
 }
 
 #[then(expr = "the transaction commit pause on node {string} after {int} statement is reached")]

@@ -92,7 +92,7 @@ Feature: Iceberg emission
       };
       CREATE INGESTOR mqtt_notifications
       FROM MQTT mqtt_ingress TOPIC iceberg_values_error_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-      DECODE USING notification_codec
+      ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
       UNBRANCHED
@@ -254,7 +254,7 @@ Feature: Iceberg emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC iceberg_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -340,7 +340,7 @@ Feature: Iceberg emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC iceberg_missing_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -440,7 +440,7 @@ Feature: Iceberg emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC iceberg_namespace_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -546,7 +546,7 @@ Feature: Iceberg emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC iceberg_temp_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -635,7 +635,7 @@ Feature: Iceberg emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC iceberg_shutdown_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -717,7 +717,7 @@ Feature: Iceberg emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC iceberg_init_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -817,7 +817,7 @@ Feature: Iceberg emission
         };
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC iceberg_ack_notifications_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
-        DECODE USING notification_codec
+        ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications

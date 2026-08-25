@@ -40,7 +40,7 @@ Feature: RabbitMQ TLS resource mounts
         };
         CREATE INGESTOR rabbit_notifications
         FROM RABBITMQ rabbit_tls QUEUE notifications_{{test_id}} INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_rabbit_notifications

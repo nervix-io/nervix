@@ -36,7 +36,7 @@ Feature: Inferencer resources
         TYPE HTTP;
       CREATE INGESTOR feature_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
         INHERIT ALL
         BRANCHED BY by_feature_source
@@ -102,7 +102,7 @@ Feature: Inferencer resources
         TYPE HTTP;
       CREATE INGESTOR feature_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
         INHERIT ALL
         BRANCHED BY by_feature_source
@@ -286,7 +286,7 @@ Feature: Inferencer resources
       CREATE ENDPOINT ingress ON edge PATH '/matrix' TYPE HTTP;
       CREATE INGESTOR matrix_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING matrices_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING matrices_codec
         TO matrices
         INHERIT ALL
         UNBRANCHED
@@ -345,7 +345,7 @@ Feature: Inferencer resources
       CREATE ENDPOINT ingress ON edge PATH '/sequence' TYPE HTTP;
       CREATE INGESTOR sequence_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING sequences_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sequences_codec
         TO sequences
         INHERIT ALL
         UNBRANCHED
@@ -404,7 +404,7 @@ Feature: Inferencer resources
       CREATE ENDPOINT ingress ON edge PATH '/sequence' TYPE HTTP;
       CREATE INGESTOR sequence_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING sequences_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sequences_codec
         TO sequences
         INHERIT ALL
         UNBRANCHED
@@ -475,7 +475,7 @@ Feature: Inferencer resources
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
       CREATE INGESTOR feature_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
         INHERIT ALL
         UNBRANCHED
@@ -558,7 +558,7 @@ Feature: Inferencer resources
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
       CREATE INGESTOR feature_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
         INHERIT ALL
         UNBRANCHED
@@ -637,7 +637,7 @@ Feature: Inferencer resources
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
       CREATE INGESTOR feature_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
         INHERIT ALL
         BRANCHED BY by_tenant

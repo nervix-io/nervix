@@ -60,7 +60,7 @@ Feature: Altering junctions
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR event_source
         FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -126,7 +126,7 @@ Feature: Altering junctions
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR event_source
         FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

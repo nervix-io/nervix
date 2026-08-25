@@ -55,6 +55,9 @@ impl RabbitMqIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .expect("scheduled RabbitMQ ingestor must have quiesce control");
         let ack_timeout = match &ack_mode {
             RabbitMqIngestMode::AckSequential { timeout, .. } => {
                 Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?
@@ -81,6 +84,7 @@ impl RabbitMqIngestor {
             let task_ack_mode = ack_mode.clone();
             let task_config = resolved_client.entries.clone();
             let task_client_mounts = resolved_client.mounts.clone();
+            let task_quiesce = quiesce.clone();
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 let mut backoff = RuntimeReconnectBackoff::default();
@@ -102,6 +106,17 @@ impl RabbitMqIngestor {
                         break;
                     }
                     if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                        continue;
+                    }
+                    if task_quiesce.should_suspend_intake() {
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                            _ = task_quiesce.wait_until_not_suspended() => {}
+                        }
                         continue;
                     }
                     let connection = match Self::connection_from_config(&task_config).await {
@@ -194,6 +209,11 @@ impl RabbitMqIngestor {
                     loop {
                         tokio::task::consume_budget().await;
                         tokio::select! {
+                            _ = task_quiesce.wait_for_change() => {
+                                if task_quiesce.should_suspend_intake() {
+                                    break;
+                                }
+                            }
                             changed = shutdown_rx.changed() => {
                                 if changed.is_err() || *shutdown_rx.borrow() {
                                     break 'outer;
@@ -363,6 +383,9 @@ impl RabbitMqIngestor {
                     }
                     drop(channel);
                     drop(connection);
+                    if task_quiesce.should_suspend_intake() {
+                        continue;
+                    }
                     if !backoff.wait(&mut shutdown_rx).await {
                         break;
                     }

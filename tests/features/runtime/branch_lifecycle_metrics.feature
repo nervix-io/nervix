@@ -42,7 +42,7 @@ Feature: Branch lifecycle metrics
 
       CREATE INGESTOR branch_metrics_source
         FROM ENDPOINT branch_metrics_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_metric_users

@@ -534,7 +534,7 @@ Feature: Placement policies
       CREATE ENDPOINT placement_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR endpoint_source
         FROM ENDPOINT placement_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING placement_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING placement_event_codec
         TO placement_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED

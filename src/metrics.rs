@@ -28,6 +28,10 @@ const DELIVERY_LATENCY_SECONDS: &str = "delivery_latency_seconds";
 const RELAY_BUFFER_LEN: &str = "relay_buffer_len";
 const BRANCH_INSTANCES: &str = "branch_instances";
 const BRANCH_EVICTIONS_TOTAL: &str = "branch_evictions_total";
+const INGESTOR_QUIESCE_BUFFERED_RECORDS: &str = "ingestor_quiesce_buffered_records";
+const INGESTOR_QUIESCE_BUFFERED_BYTES: &str = "ingestor_quiesce_buffered_bytes";
+const INGESTOR_QUIESCE_DROPPED_TOTAL: &str = "ingestor_quiesce_dropped_total";
+const INGESTOR_QUIESCE_REJECTED_TOTAL: &str = "ingestor_quiesce_rejected_total";
 const JEMALLOC_SUBSYSTEM: &str = "jemalloc";
 const DOMAIN_TARGET_KIND: &str = "DOMAIN";
 const DOMAIN_INPUT_OUTPUT_TARGET: &str = "input_output";
@@ -57,6 +61,7 @@ const PROMETHEUS_LABELS: &[&str] = &[
 const BRANCH_PROMETHEUS_LABELS: &[&str] = &["domain", "branch", "physical_node_id"];
 const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
     &["domain", "branch", "physical_node_id", "reason"];
+const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor", "physical_node_id"];
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
 const ONE_MINUTE_SECONDS: f64 = 60.0;
@@ -1178,6 +1183,27 @@ struct PrometheusMetrics {
     relay_buffer_len: HistogramVec,
     branch_instances: IntGaugeVec,
     branch_evictions_total: IntCounterVec,
+    ingestor_quiesce_buffered_records: IntGaugeVec,
+    ingestor_quiesce_buffered_bytes: IntGaugeVec,
+    ingestor_quiesce_dropped_total: IntCounterVec,
+    ingestor_quiesce_rejected_total: IntCounterVec,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IngestorQuiesceMetricLabels {
+    domain: String,
+    ingestor: String,
+    physical_node_id: String,
+}
+
+impl IngestorQuiesceMetricLabels {
+    fn values(&self) -> [&str; 3] {
+        [
+            self.domain.as_str(),
+            self.ingestor.as_str(),
+            self.physical_node_id.as_str(),
+        ]
+    }
 }
 
 struct JemallocMetricsCollector {
@@ -1288,6 +1314,42 @@ impl PrometheusMetrics {
             BRANCH_EVICTION_PROMETHEUS_LABELS,
         )
         .expect("valid branch_evictions_total prometheus counter");
+        let ingestor_quiesce_buffered_records = IntGaugeVec::new(
+            Opts::new(
+                INGESTOR_QUIESCE_BUFFERED_RECORDS,
+                "Current raw source payloads buffered while an ingestor is quiesced.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .expect("valid ingestor quiesce buffered records prometheus gauge");
+        let ingestor_quiesce_buffered_bytes = IntGaugeVec::new(
+            Opts::new(
+                INGESTOR_QUIESCE_BUFFERED_BYTES,
+                "Current raw source payload bytes buffered while an ingestor is quiesced.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .expect("valid ingestor quiesce buffered bytes prometheus gauge");
+        let ingestor_quiesce_dropped_total = IntCounterVec::new(
+            Opts::new(
+                INGESTOR_QUIESCE_DROPPED_TOTAL,
+                "Total source payloads discarded under an ingestor quiesce contract.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .expect("valid ingestor quiesce dropped prometheus counter");
+        let ingestor_quiesce_rejected_total = IntCounterVec::new(
+            Opts::new(
+                INGESTOR_QUIESCE_REJECTED_TOTAL,
+                "Total endpoint requests rejected while an ingestor is quiesced.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .expect("valid ingestor quiesce rejected prometheus counter");
 
         registry
             .register(Box::new(messages_total.clone()))
@@ -1314,6 +1376,18 @@ impl PrometheusMetrics {
             .register(Box::new(branch_evictions_total.clone()))
             .expect("branch_evictions_total registered once");
         registry
+            .register(Box::new(ingestor_quiesce_buffered_records.clone()))
+            .expect("ingestor_quiesce_buffered_records registered once");
+        registry
+            .register(Box::new(ingestor_quiesce_buffered_bytes.clone()))
+            .expect("ingestor_quiesce_buffered_bytes registered once");
+        registry
+            .register(Box::new(ingestor_quiesce_dropped_total.clone()))
+            .expect("ingestor_quiesce_dropped_total registered once");
+        registry
+            .register(Box::new(ingestor_quiesce_rejected_total.clone()))
+            .expect("ingestor_quiesce_rejected_total registered once");
+        registry
             .register(Box::new(JemallocMetricsCollector::new()))
             .expect("jemalloc metrics registered once");
 
@@ -1327,6 +1401,10 @@ impl PrometheusMetrics {
             relay_buffer_len,
             branch_instances,
             branch_evictions_total,
+            ingestor_quiesce_buffered_records,
+            ingestor_quiesce_buffered_bytes,
+            ingestor_quiesce_dropped_total,
+            ingestor_quiesce_rejected_total,
         }
     }
 
@@ -1604,6 +1682,74 @@ pub struct NodeLatencyObservation<'a> {
 }
 
 impl RuntimeMetrics {
+    pub(crate) fn register_ingestor_quiesce(
+        &self,
+        domain: &Domain,
+        ingestor: &Identifier,
+        physical_node_id: Option<&str>,
+    ) -> IngestorQuiesceMetricLabels {
+        let labels = IngestorQuiesceMetricLabels {
+            domain: domain.as_str().to_string(),
+            ingestor: ingestor.as_str().to_string(),
+            physical_node_id: physical_node_id.unwrap_or("-").to_string(),
+        };
+        let values = labels.values();
+        self.prometheus
+            .ingestor_quiesce_buffered_records
+            .with_label_values(&values)
+            .set(0);
+        self.prometheus
+            .ingestor_quiesce_buffered_bytes
+            .with_label_values(&values)
+            .set(0);
+        self.prometheus
+            .ingestor_quiesce_dropped_total
+            .with_label_values(&values);
+        self.prometheus
+            .ingestor_quiesce_rejected_total
+            .with_label_values(&values);
+        labels
+    }
+
+    pub(crate) fn set_ingestor_quiesce_buffered(
+        &self,
+        labels: &IngestorQuiesceMetricLabels,
+        records: usize,
+        bytes: usize,
+    ) {
+        let values = labels.values();
+        self.prometheus
+            .ingestor_quiesce_buffered_records
+            .with_label_values(&values)
+            .set(i64::try_from(records).unwrap_or(i64::MAX));
+        self.prometheus
+            .ingestor_quiesce_buffered_bytes
+            .with_label_values(&values)
+            .set(i64::try_from(bytes).unwrap_or(i64::MAX));
+    }
+
+    pub(crate) fn increment_ingestor_quiesce_dropped(
+        &self,
+        labels: &IngestorQuiesceMetricLabels,
+        count: u64,
+    ) {
+        self.prometheus
+            .ingestor_quiesce_dropped_total
+            .with_label_values(&labels.values())
+            .inc_by(count);
+    }
+
+    pub(crate) fn increment_ingestor_quiesce_rejected(
+        &self,
+        labels: &IngestorQuiesceMetricLabels,
+        count: u64,
+    ) {
+        self.prometheus
+            .ingestor_quiesce_rejected_total
+            .with_label_values(&labels.values())
+            .inc_by(count);
+    }
+
     pub(crate) fn register_branch(
         &self,
         domain: &Domain,

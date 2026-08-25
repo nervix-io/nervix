@@ -41,7 +41,7 @@ Feature: OTEL emission
       TYPE HTTP;
       CREATE INGESTOR audit_source
       FROM ENDPOINT audit_ingress MODE NO_ACK SEQUENTIAL
-      DECODE USING audit_event_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING audit_event_codec
       TO audit_events
       INHERIT ALL
       UNBRANCHED
@@ -172,7 +172,7 @@ Feature: OTEL emission
       TYPE HTTP;
       CREATE INGESTOR metric_source
       FROM ENDPOINT metric_ingress MODE NO_ACK SEQUENTIAL
-      DECODE USING request_count_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_count_codec
       TO request_counts
       INHERIT ALL
       UNBRANCHED

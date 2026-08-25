@@ -38,8 +38,8 @@ use hyper::{
     body::{Bytes, Incoming as HyperIncoming},
     header::{
         ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-        AUTHORIZATION, CONNECTION, HOST, LOCATION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY,
-        SEC_WEBSOCKET_VERSION, UPGRADE, WWW_AUTHENTICATE,
+        AUTHORIZATION, CONNECTION, HOST, LOCATION, RETRY_AFTER, SEC_WEBSOCKET_ACCEPT,
+        SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE, WWW_AUTHENTICATE,
     },
     server::conn::http1,
     service::service_fn,
@@ -106,7 +106,7 @@ use nervix_models::{
     ProcessorOutputs, QuiesceLevel, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
     ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
     SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
-    UploadResource, VhostTlsResource, expression_to_nspl,
+    UploadResource, VhostTlsResource, expression_to_nspl, ingest_quiesce_to_nspl,
 };
 use nervix_nspl::{
     Token, Word,
@@ -156,7 +156,11 @@ use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{
     WebSocketStream,
-    tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
+    tungstenite::{
+        Message,
+        handshake::derive_accept_key,
+        protocol::{CloseFrame, Role, frame::coding::CloseCode},
+    },
 };
 
 #[cfg(feature = "testing")]
@@ -1214,6 +1218,19 @@ fn response_with_status(status: StatusCode) -> HyperResponse<Empty<Bytes>> {
         .expect("empty response must build")
 }
 
+fn endpoint_rejection_response(retry_after: Option<Duration>) -> HyperResponse<Empty<Bytes>> {
+    let mut response = HyperResponse::builder().status(StatusCode::SERVICE_UNAVAILABLE);
+    if let Some(retry_after) = retry_after {
+        let seconds = retry_after
+            .as_secs()
+            .saturating_add(u64::from(retry_after.subsec_nanos() > 0));
+        response = response.header(RETRY_AFTER, seconds.to_string());
+    }
+    response
+        .body(empty_body())
+        .expect("endpoint rejection response must build")
+}
+
 fn response_with_bytes(
     status: StatusCode,
     body: impl Into<Bytes>,
@@ -1341,6 +1358,10 @@ async fn handle_http_request(
         if !is_websocket_upgrade_request(&request) {
             return Ok(response_with_status(StatusCode::UPGRADE_REQUIRED));
         }
+        let admission = runtime.websocket_endpoint_admission(&host, &path).await;
+        if !admission.is_accepted() {
+            return Ok(endpoint_rejection_response(admission.retry_after));
+        }
         let headers = ingest_headers_from_hyper(request.headers());
 
         let Some(sec_websocket_key) = request
@@ -1411,7 +1432,7 @@ async fn handle_http_request(
                         };
                         match message {
                             Ok(Message::Text(payload)) => {
-                                runtime
+                                let outcome = runtime
                                     .dispatch_websocket_payload(
                                         &host,
                                         &path,
@@ -1419,9 +1440,18 @@ async fn handle_http_request(
                                         headers.clone(),
                                     )
                                     .await;
+                                if !outcome.is_accepted() {
+                                    let _ = websocket
+                                        .send(Message::Close(Some(CloseFrame {
+                                            code: CloseCode::Again,
+                                            reason: "Try Again Later".into(),
+                                        })))
+                                        .await;
+                                    break;
+                                }
                             }
                             Ok(Message::Binary(payload)) => {
-                                runtime
+                                let outcome = runtime
                                     .dispatch_websocket_payload(
                                         &host,
                                         &path,
@@ -1429,6 +1459,15 @@ async fn handle_http_request(
                                         headers.clone(),
                                     )
                                     .await;
+                                if !outcome.is_accepted() {
+                                    let _ = websocket
+                                        .send(Message::Close(Some(CloseFrame {
+                                            code: CloseCode::Again,
+                                            reason: "Try Again Later".into(),
+                                        })))
+                                        .await;
+                                    break;
+                                }
                             }
                             Ok(Message::Ping(payload)) => {
                                 if websocket.send(Message::Pong(payload)).await.is_err() {
@@ -1467,10 +1506,14 @@ async fn handle_http_request(
             }
         };
 
-        runtime
+        let outcome = runtime
             .dispatch_http_payload(&host, &path, body.as_ref(), headers)
             .await;
-        return Ok(response_with_status(StatusCode::ACCEPTED));
+        return Ok(if outcome.is_accepted() {
+            response_with_status(StatusCode::ACCEPTED)
+        } else {
+            endpoint_rejection_response(outcome.retry_after)
+        });
     }
 
     Ok(response_with_status(StatusCode::NOT_FOUND))
@@ -5634,6 +5677,8 @@ impl SessionServiceImpl {
                 RuntimeIngestorDescribe {
                     running: false,
                     ready: false,
+                    quiesce_state: None,
+                    quiesce_counters: Default::default(),
                     memory_backpressure_paused: self.runtime.ingestors_paused_for_memory_pressure(),
                     transient_error: None,
                     reconnect_backoff: None,
@@ -9346,6 +9391,8 @@ impl SessionServiceImpl {
                     Ok(gate) => gate,
                     Err(error) => return command_error(error.to_string()),
                 };
+                #[cfg(feature = "testing")]
+                self.runtime.pause_entity_gate_if_armed(&domain).await;
                 if let Err(error) = self
                     .wait_for_cluster_entity_drain(
                         &domain,
@@ -13204,6 +13251,13 @@ fn runtime_ingestor_describe_to_envelope(
     IngestorDescribeEnvelope {
         running: summary.running,
         ready: summary.ready,
+        quiesce_state: summary.quiesce_state,
+        quiesce_buffered_records: u64::try_from(summary.quiesce_counters.buffered_records)
+            .unwrap_or(u64::MAX),
+        quiesce_buffered_bytes: u64::try_from(summary.quiesce_counters.buffered_bytes)
+            .unwrap_or(u64::MAX),
+        quiesce_dropped_total: summary.quiesce_counters.dropped_total,
+        quiesce_rejected_total: summary.quiesce_counters.rejected_total,
         memory_backpressure_paused: summary.memory_backpressure_paused,
         transient_error: summary.transient_error,
         reconnect_backoff: summary.reconnect_backoff,
@@ -13228,6 +13282,15 @@ fn runtime_ingestor_describe_from_envelope(
         RuntimeIngestorDescribe {
             running: summary.running,
             ready: summary.ready,
+            quiesce_state: summary.quiesce_state,
+            quiesce_counters: crate::runtime::IngestorQuiesceCounters {
+                buffered_records: usize::try_from(summary.quiesce_buffered_records)
+                    .unwrap_or(usize::MAX),
+                buffered_bytes: usize::try_from(summary.quiesce_buffered_bytes)
+                    .unwrap_or(usize::MAX),
+                dropped_total: summary.quiesce_dropped_total,
+                rejected_total: summary.quiesce_rejected_total,
+            },
             memory_backpressure_paused: summary.memory_backpressure_paused,
             transient_error: summary.transient_error,
             reconnect_backoff: summary.reconnect_backoff,
@@ -13353,13 +13416,39 @@ fn format_ingestor_describe_output(
         ),
         format!(
             "status: {}",
-            if summary.running {
+            if summary.quiesce_state.is_some() {
+                "quiesced"
+            } else if summary.running {
                 "running"
             } else {
                 "stopped"
             }
         ),
         format!("ready: {}", if summary.ready { "true" } else { "false" }),
+        format!(
+            "quiesce: {}",
+            ingest_quiesce_to_nspl(ingestor.source.quiesce())
+        ),
+        format!(
+            "quiesce state: {}",
+            summary.quiesce_state.as_deref().unwrap_or("none")
+        ),
+        format!(
+            "nervix_ingestor_quiesce_buffered_records: {}",
+            summary.quiesce_counters.buffered_records
+        ),
+        format!(
+            "nervix_ingestor_quiesce_buffered_bytes: {}",
+            summary.quiesce_counters.buffered_bytes
+        ),
+        format!(
+            "nervix_ingestor_quiesce_dropped_total: {}",
+            summary.quiesce_counters.dropped_total
+        ),
+        format!(
+            "nervix_ingestor_quiesce_rejected_total: {}",
+            summary.quiesce_counters.rejected_total
+        ),
     ];
     lines.extend(format_processor_output_lines(&ingestor.output_routes));
     let memory_backpressure_state = if summary.memory_backpressure_paused {
@@ -20808,9 +20897,10 @@ mod tests {
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR notifications_ingestor FROM KAFKA kafka_main TOPIC notifications \
-             OFFSET BY CONSUMER GROUP notifications_group MODE NO_ACK PARALLEL DECODE USING \
-             notification_codec TIMESTAMP NOW TO notifications INHERIT ALL UNBRANCHED FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             OFFSET BY CONSUMER GROUP notifications_group MODE NO_ACK PARALLEL ON QUIESCE SUSPEND \
+             DECODE USING notification_codec TIMESTAMP NOW TO notifications INHERIT ALL \
+             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
+             ERROR LOG;",
             "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications DEDUPLICATE ON \
              input.user_id MAX TIME 10m UNBRANCHED TO forwarded_notifications INHERIT ALL FLUSH \
              EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
@@ -20994,13 +21084,13 @@ mod tests {
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR ingest_a FROM KAFKA kafka_main TOPIC notifications_a OFFSET BY \
-             CONSUMER GROUP notifications_a_group MODE NO_ACK PARALLEL DECODE USING \
-             notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             CONSUMER GROUP notifications_a_group MODE NO_ACK PARALLEL ON QUIESCE SUSPEND DECODE \
+             USING notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE INGESTOR ingest_b FROM KAFKA kafka_main TOPIC notifications_b OFFSET BY \
-             CONSUMER GROUP notifications_b_group MODE NO_ACK PARALLEL DECODE USING \
-             notification_codec TIMESTAMP NOW TO notifications_b INHERIT ALL UNBRANCHED FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             CONSUMER GROUP notifications_b_group MODE NO_ACK PARALLEL ON QUIESCE SUSPEND DECODE \
+             USING notification_codec TIMESTAMP NOW TO notifications_b INHERIT ALL UNBRANCHED \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO \
              notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
              LOG;",
@@ -21174,9 +21264,9 @@ mod tests {
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR inbound_ingestor FROM KAFKA kafka_main TOPIC inbound OFFSET BY \
-             CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL DECODE USING transaction_codec \
-             TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL ON QUIESCE SUSPEND DECODE USING \
+             transaction_codec TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms \
+             MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX \
              TIME 10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
              MESSAGE ERROR LOG;",

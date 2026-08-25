@@ -29,7 +29,7 @@ Feature: Domain metrics
         CREATE ENDPOINT domain_metrics_ingress ON edge PATH '/domain-metrics' TYPE HTTP;
         CREATE INGESTOR domain_metrics_source
         FROM ENDPOINT domain_metrics_ingress MODE NO_ACK SEQUENTIAL
-        DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO domain_metrics_raw
         INHERIT ALL
         BRANCHED BY by_domain_metrics_source

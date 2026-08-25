@@ -13,7 +13,7 @@ Feature: Schema type strictness
       CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP strict_types MODE NO_ACK PARALLEL
-        DECODE USING notification_codec
+        ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_kafka_notifications
