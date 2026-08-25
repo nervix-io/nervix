@@ -71,6 +71,8 @@ reconnect before retrying a command. It compares the attached status with the st
 if replicated queue or commit progress already records the operation, it returns that state instead
 of repeating the operation. A recovered committed operation is returned as a successful aggregate
 `CommandOutcome` with its retained per-statement `results`.
+If a peer briefly has no leader address while an election converges, the client retries that
+bounded interval instead of returning the transient `not-a-leader` outcome.
 
 An explicit attach by another session takes over the binding. Attach to a retained tombstone
 returns an unsuccessful command outcome whose transaction status names `Committed`, `Failed`,

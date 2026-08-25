@@ -40,10 +40,11 @@ The CLI, web console, and Rust client retain the transaction id and automaticall
 redirect or transport reconnect before replaying a command. An unclean transport loss, node loss,
 or leadership change therefore leaves an open transaction intact until attach or idle expiry. A
 client compares the attached progress with the status it last observed and does not repeat an
-operation already recorded by the cluster. A clean end of the session preserves the existing
-interactive behavior by reverting a bound open transaction. Ending a session never reverts a
-transaction whose replicated state is already `COMMITTING`; the leader finishes it without a
-client.
+operation already recorded by the cluster. During election convergence, a client also retries a
+bounded interval when a peer cannot yet advertise the new leader. A clean end of the session
+preserves the existing interactive behavior by reverting a bound open transaction. Ending a
+session never reverts a transaction whose replicated state is already `COMMITTING`; the leader
+finishes it without a client.
 
 Finished transaction outcomes remain available during tombstone retention. Attach during that
 window reports `COMMITTED`, `FAILED`, `REVERTED`, or `EXPIRED` and includes structured commit

@@ -3,6 +3,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
@@ -21,6 +22,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
     sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
+    time::sleep,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
@@ -57,6 +59,25 @@ pub enum CommandOutcomeKind {
     Ok,
     Error,
     NotLeader,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaderRouting<'a> {
+    Complete,
+    Redirect(&'a str),
+    AwaitElection,
+}
+
+impl CommandOutcome {
+    fn leader_routing(&self) -> LeaderRouting<'_> {
+        if self.kind != CommandOutcomeKind::NotLeader {
+            LeaderRouting::Complete
+        } else if let Some(uri) = self.leader_grpc_uri.as_deref() {
+            LeaderRouting::Redirect(uri)
+        } else {
+            LeaderRouting::AwaitElection
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +291,9 @@ impl GrpcConnector {
 }
 
 impl Client {
+    const MAX_LEADER_ROUTING_ATTEMPTS: usize = 20;
+    const LEADER_ELECTION_RETRY_DELAY: Duration = Duration::from_millis(100);
+
     pub async fn connect(
         server: impl AsRef<str>,
         domain: impl Into<String>,
@@ -397,8 +421,8 @@ impl Client {
     }
 
     async fn execute_with_redirects(&self, query: &str) -> Result<CommandOutcome, ClientError> {
-        const MAX_REDIRECTS: usize = 4;
-        for _ in 0..=MAX_REDIRECTS {
+        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+            tokio::task::consume_budget().await;
             let outcome = match self.execute_once(query).await {
                 Ok(outcome) => outcome,
                 Err(ClientError::SessionClosed) => match self.recover_session().await? {
@@ -408,11 +432,13 @@ impl Client {
                 },
                 Err(err) => return Err(err),
             };
-            if outcome.kind != CommandOutcomeKind::NotLeader {
-                return Ok(outcome);
-            }
-            let Some(leader_grpc_uri) = outcome.leader_grpc_uri.as_deref() else {
-                return Ok(outcome);
+            let leader_grpc_uri = match outcome.leader_routing() {
+                LeaderRouting::Complete => return Ok(outcome),
+                LeaderRouting::Redirect(uri) => uri,
+                LeaderRouting::AwaitElection if self.await_leader_election_retry(attempt).await => {
+                    continue;
+                }
+                LeaderRouting::AwaitElection => return Ok(outcome),
             };
             self.remember_known_server(leader_grpc_uri).await;
             match self.reconnect(leader_grpc_uri).await {
@@ -436,8 +462,8 @@ impl Client {
         &self,
         id: &str,
     ) -> Result<CommandOutcome, ClientError> {
-        const MAX_REDIRECTS: usize = 4;
-        for _ in 0..=MAX_REDIRECTS {
+        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+            tokio::task::consume_budget().await;
             let outcome = match self.attach_transaction_once(id).await {
                 Ok(outcome) => outcome,
                 Err(ClientError::SessionClosed) => {
@@ -448,16 +474,26 @@ impl Client {
                 }
                 Err(error) => return Err(error),
             };
-            if outcome.kind != CommandOutcomeKind::NotLeader {
-                return Ok(outcome);
-            }
-            let Some(leader_grpc_uri) = outcome.leader_grpc_uri.as_deref() else {
-                return Ok(outcome);
+            let leader_grpc_uri = match outcome.leader_routing() {
+                LeaderRouting::Complete => return Ok(outcome),
+                LeaderRouting::Redirect(uri) => uri,
+                LeaderRouting::AwaitElection if self.await_leader_election_retry(attempt).await => {
+                    continue;
+                }
+                LeaderRouting::AwaitElection => return Ok(outcome),
             };
             self.remember_known_server(leader_grpc_uri).await;
             self.reconnect(leader_grpc_uri).await?;
         }
         self.attach_transaction_once(id).await
+    }
+
+    async fn await_leader_election_retry(&self, attempt: usize) -> bool {
+        if attempt + 1 >= Self::MAX_LEADER_ROUTING_ATTEMPTS {
+            return false;
+        }
+        sleep(Self::LEADER_ELECTION_RETRY_DELAY).await;
+        true
     }
 
     async fn attach_transaction_once(&self, id: &str) -> Result<CommandOutcome, ClientError> {
@@ -668,13 +704,13 @@ impl Client {
         directory: impl AsRef<Path>,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
     ) -> Result<CommandOutcome, ClientError> {
-        const MAX_REDIRECTS: usize = 4;
         let directory = expand_user_path(directory.as_ref());
         if !directory.is_dir() {
             return Err(ClientError::BuildUploadArchive);
         }
 
-        for _ in 0..=MAX_REDIRECTS {
+        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+            tokio::task::consume_budget().await;
             let current_server = self.inner.current_server.lock().await.clone();
             let server = current_server.ok_or(ClientError::SessionClosed)?;
             let channel = self.inner.grpc_connector.connect(&server).await?;
@@ -750,11 +786,13 @@ impl Client {
                 transaction: None,
                 results: Vec::new(),
             };
-            if outcome.kind != CommandOutcomeKind::NotLeader {
-                return Ok(outcome);
-            }
-            let Some(leader_grpc_uri) = outcome.leader_grpc_uri.as_deref() else {
-                return Ok(outcome);
+            let leader_grpc_uri = match outcome.leader_routing() {
+                LeaderRouting::Complete => return Ok(outcome),
+                LeaderRouting::Redirect(uri) => uri,
+                LeaderRouting::AwaitElection if self.await_leader_election_retry(attempt).await => {
+                    continue;
+                }
+                LeaderRouting::AwaitElection => return Ok(outcome),
             };
             self.remember_known_server(leader_grpc_uri).await;
             match self.reconnect(leader_grpc_uri).await {
@@ -826,6 +864,7 @@ impl Client {
         }
         let mut last_error = None;
         for server in candidates {
+            tokio::task::consume_budget().await;
             match self.reconnect(&server).await {
                 Ok(()) => return Ok(true),
                 Err(err) => last_error = Some(err),
@@ -1329,7 +1368,7 @@ mod tests {
 
     use super::{
         Client, ClientError, ClientInner, CommandOutcome, CommandOutcomeKind, ConnectOptions,
-        Diagnostic, GrpcConnector, PendingResponse, ServerEvent, ServerEventLevel,
+        Diagnostic, GrpcConnector, LeaderRouting, PendingResponse, ServerEvent, ServerEventLevel,
         SubscriptionEvent, SubscriptionRequest, TlsRequirement, TransactionState,
         TransactionStatus, clear_pending_responses, expand_user_path, proto, reconnect_candidates,
         recovered_transaction_outcome, transaction_operation_was_observed,
@@ -1533,6 +1572,28 @@ mod tests {
                 "http://node-3".to_string(),
                 "http://node-2".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn not_leader_without_a_redirect_waits_for_election_convergence() {
+        let mut outcome = CommandOutcome {
+            success: false,
+            kind: CommandOutcomeKind::NotLeader,
+            message: "not-a-leader".to_string(),
+            diagnostics: Vec::new(),
+            leader: None,
+            leader_grpc_uri: None,
+            already_existed: false,
+            transaction: None,
+            results: Vec::new(),
+        };
+        assert_eq!(outcome.leader_routing(), LeaderRouting::AwaitElection);
+
+        outcome.leader_grpc_uri = Some("http://node-2".to_string());
+        assert_eq!(
+            outcome.leader_routing(),
+            LeaderRouting::Redirect("http://node-2")
         );
     }
 
