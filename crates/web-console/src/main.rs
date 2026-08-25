@@ -1262,7 +1262,9 @@ fn command_result_lines(result: nervix_proto::CommandResult, query: &str) -> Vec
 
     let mut lines = Vec::new();
     if result.success {
-        lines.push(TermLine::output(result.message));
+        if !result.message.is_empty() {
+            lines.push(TermLine::output(result.message));
+        }
         return lines;
     }
 
@@ -6273,6 +6275,20 @@ mod tests {
     use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowEdge, DataflowNode};
 
     use super::*;
+
+    #[test]
+    fn successful_commands_without_output_add_no_terminal_line() {
+        let lines = command_result_lines(
+            nervix_proto::CommandResult {
+                success: true,
+                kind: nervix_proto::CommandResultKind::Ok as i32,
+                ..Default::default()
+            },
+            "CREATE DOMAIN quiet",
+        );
+
+        assert!(lines.is_empty());
+    }
 
     #[test]
     fn transaction_reconnect_replays_only_when_replicated_progress_is_unchanged() {

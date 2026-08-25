@@ -57,8 +57,10 @@ model mutations, domain configuration/lifecycle, `CREATE USER`, and `CREATE RESO
 read-only statements, subscriptions, `USE`, resource uploads, and node administration outside the
 transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Queue admission preflights each statement against the replicated prefix without
-applying effects; correct a rejected statement and continue the same transaction. Do not imply that
-one undivided request can mix those phases.
+applying effects; a queued model mutation reports its statement-local quiesce level, while
+`COMMIT` reports only the maximum level actually executed and does not repeat statement outputs.
+Correct a rejected statement and continue the same transaction. Do not imply that one undivided
+request can mix those phases.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and
