@@ -120,6 +120,9 @@ nervix[quickstart tx]>
 nervix[quickstart committing]>
 ```
 
+`BEGIN` requires a selected domain that already exists and binds the transaction to it. The
+console follows the transaction's domain, so attaching switches the domain selector to it.
+
 The transaction id and status are replicated. If the WebSocket closes unexpectedly or leadership
 changes, the console reconnects and attaches that id before replaying a pending command. It does
 not replay when the attached status shows that queue or commit progress was already recorded. A
@@ -137,8 +140,9 @@ empties the scrollback.
 ![The resource dialog after uploading a version](images/console-resource-dialog.png)
 
 Selecting a resource in the sidebar opens its version list. Files or a whole directory can be
-uploaded from the browser as a new version, which is then replicated across the cluster. Version
-contents and how nodes consume them are covered in [Resources](resources.md).
+uploaded from the browser as a new version of that resource in the selected domain, which is then
+replicated across the cluster. Version contents and how nodes consume them are covered in
+[Resources](resources.md).
 
 ## Domain Lifecycle
 

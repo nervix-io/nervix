@@ -42,8 +42,10 @@ Run the control plane with `nervix-server` and submit configuration through the 
 
 Build configuration in dependency order:
 
-1. Create the domain, then select it with `USE <domain>;` as a separate client command.
+1. Create the domain, then select it with `USE <domain>;` as a separate client command. `BEGIN`
+   is rejected until a selected domain exists.
 2. Register and upload resources before statements that reference their versions or mounted files.
+   Resources are domain-owned, so declare and upload them in the domain that references them.
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
 4. Define clients, signaling protocols, virtual hosts/endpoints, lookup models, and trusted Roto
    UDFs as needed.
@@ -52,10 +54,12 @@ Build configuration in dependency order:
 7. Define placement rules after every referenced runtime node and materialized relay exists.
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
-Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. Transactions
-and commit progress are replicated and resumable, but their content is deliberately limited to
-model mutations, domain configuration/lifecycle, `CREATE USER`, and `CREATE RESOURCE`. Keep
-read-only statements, subscriptions, `USE`, resource uploads, and node administration outside the
+Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
+belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued
+statement must select that same domain. Transactions and commit progress are replicated and
+resumable, but their content is deliberately limited to that domain's model mutations, domain
+configuration/lifecycle, and `CREATE RESOURCE`. Keep `CREATE DOMAIN`, `CREATE USER`, read-only
+statements, subscriptions, `USE`, resource uploads, and node administration outside the
 transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Queue admission preflights each statement against the replicated prefix without
 applying effects; a queued model mutation reports its statement-local quiesce level, while

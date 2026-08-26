@@ -8,7 +8,7 @@ use async_tar::{
     Archive as AsyncTarArchive, Builder as AsyncTarBuilder, EntryType, Header, HeaderMode,
 };
 use blake3::Hasher;
-use nervix_models::{Identifier, ResourceId, ResourceVersion, Timestamp};
+use nervix_models::{ResourceId, ResourceVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
@@ -39,8 +39,7 @@ pub struct ResourceStore {
 
 #[derive(Debug)]
 struct PendingInstall {
-    identifier: Identifier,
-    version: u64,
+    id: ResourceId,
     install_root: PathBuf,
     staging_root: PathBuf,
     content_root: PathBuf,
@@ -93,8 +92,7 @@ impl ResourceStore {
 
     pub async fn install_from_directory(
         &self,
-        identifier: Identifier,
-        version: u64,
+        id: ResourceId,
         source_dir: impl AsRef<Path>,
         created_by_node: impl Into<String>,
         created_at: Timestamp,
@@ -108,63 +106,48 @@ impl ResourceStore {
         }
 
         let install = self
-            .prepare_install(identifier, version, created_by_node.into(), created_at)
+            .prepare_install(id, created_by_node.into(), created_at)
             .await?;
         copy_directory_recursive(source_dir, &install.content_root).await?;
         self.finalize_install(install).await
     }
 
-    pub fn manifest_path(&self, identifier: &Identifier, version: u64) -> PathBuf {
-        self.version_root(identifier, version).join("manifest.json")
+    pub fn manifest_path(&self, id: &ResourceId) -> PathBuf {
+        self.version_root(id).join("manifest.json")
     }
 
-    pub fn content_root(&self, identifier: &Identifier, version: u64) -> PathBuf {
-        self.version_root(identifier, version).join("content")
+    pub fn content_root(&self, id: &ResourceId) -> PathBuf {
+        self.version_root(id).join("content")
     }
 
-    pub fn archive_path(&self, identifier: &Identifier, version: u64) -> PathBuf {
-        self.version_root(identifier, version).join("archive.tar")
+    pub fn archive_path(&self, id: &ResourceId) -> PathBuf {
+        self.version_root(id).join("archive.tar")
     }
 
-    pub fn remove_version(
-        &self,
-        identifier: &Identifier,
-        version: u64,
-    ) -> Result<(), ResourceStoreError> {
-        let install_root = self.version_root(identifier, version);
+    pub fn remove_version(&self, id: &ResourceId) -> Result<(), ResourceStoreError> {
+        let install_root = self.version_root(id);
         if install_root.exists() {
             fs::remove_dir_all(&install_root).map_err(|_| ResourceStoreError::DeleteResourceDir)?;
         }
-        let staging_root = self.staging_root(identifier, version);
+        let staging_root = self.staging_root(id);
         if staging_root.exists() {
             fs::remove_dir_all(&staging_root).map_err(|_| ResourceStoreError::DeleteResourceDir)?;
         }
         Ok(())
     }
 
-    pub fn read_archive_bytes(
-        &self,
-        identifier: &Identifier,
-        version: u64,
-    ) -> Result<Vec<u8>, ResourceStoreError> {
-        fs::read(self.archive_path(identifier, version))
-            .map_err(|_| ResourceStoreError::ReadArchive)
+    pub fn read_archive_bytes(&self, id: &ResourceId) -> Result<Vec<u8>, ResourceStoreError> {
+        fs::read(self.archive_path(id)).map_err(|_| ResourceStoreError::ReadArchive)
     }
 
-    pub fn read_manifest(
-        &self,
-        identifier: &Identifier,
-        version: u64,
-    ) -> Result<ResourceManifest, ResourceStoreError> {
-        let bytes = fs::read(self.manifest_path(identifier, version))
-            .map_err(|_| ResourceStoreError::ReadFile)?;
+    pub fn read_manifest(&self, id: &ResourceId) -> Result<ResourceManifest, ResourceStoreError> {
+        let bytes = fs::read(self.manifest_path(id)).map_err(|_| ResourceStoreError::ReadFile)?;
         serde_json::from_slice(&bytes).map_err(|_| ResourceStoreError::SerializeManifest)
     }
 
     pub async fn install_from_archive_path(
         &self,
-        identifier: Identifier,
-        version: u64,
+        id: ResourceId,
         archive_path: impl AsRef<Path>,
         root_checksum: String,
         created_by_node: impl Into<String>,
@@ -173,7 +156,7 @@ impl ResourceStore {
         let archive_path = archive_path.as_ref().to_path_buf();
         let created_by_node = created_by_node.into();
         let install = self
-            .prepare_install(identifier, version, created_by_node, created_at)
+            .prepare_install(id, created_by_node, created_at)
             .await?;
         let staged_archive_path = install.staging_root.join("archive.tar");
         tokio::fs::copy(&archive_path, &staged_archive_path)
@@ -190,39 +173,40 @@ impl ResourceStore {
 
     pub fn resolve_content_path(
         &self,
-        identifier: &Identifier,
-        version: u64,
+        id: &ResourceId,
         path: &str,
     ) -> Result<PathBuf, ResourceStoreError> {
         let relative = sanitize_relative_path(path)?;
-        Ok(self.content_root(identifier, version).join(relative))
+        Ok(self.content_root(id).join(relative))
     }
 
-    fn version_root(&self, identifier: &Identifier, version: u64) -> PathBuf {
+    fn resource_root(&self, id: &ResourceId) -> PathBuf {
         self.root
-            .join(identifier.as_str())
-            .join(version.to_string())
+            .join(id.domain.as_str())
+            .join(id.identifier.as_str())
     }
 
-    fn staging_root(&self, identifier: &Identifier, version: u64) -> PathBuf {
-        self.root
-            .join(identifier.as_str())
-            .join(format!(".{version}.staging"))
+    fn version_root(&self, id: &ResourceId) -> PathBuf {
+        self.resource_root(id).join(id.version.to_string())
+    }
+
+    fn staging_root(&self, id: &ResourceId) -> PathBuf {
+        self.resource_root(id)
+            .join(format!(".{}.staging", id.version))
     }
 
     async fn prepare_install_paths(
         &self,
-        identifier: &Identifier,
-        version: u64,
+        id: &ResourceId,
     ) -> Result<(PathBuf, PathBuf, PathBuf), ResourceStoreError> {
-        let install_root = self.version_root(identifier, version);
+        let install_root = self.version_root(id);
         if install_root.exists() {
             tokio::fs::remove_dir_all(&install_root)
                 .await
                 .map_err(|_| ResourceStoreError::RenameResourceDir)?;
         }
 
-        let staging_root = self.staging_root(identifier, version);
+        let staging_root = self.staging_root(id);
         if staging_root.exists() {
             tokio::fs::remove_dir_all(&staging_root)
                 .await
@@ -237,16 +221,13 @@ impl ResourceStore {
 
     async fn prepare_install(
         &self,
-        identifier: Identifier,
-        version: u64,
+        id: ResourceId,
         created_by_node: String,
         created_at: Timestamp,
     ) -> Result<PendingInstall, ResourceStoreError> {
-        let (install_root, staging_root, content_root) =
-            self.prepare_install_paths(&identifier, version).await?;
+        let (install_root, staging_root, content_root) = self.prepare_install_paths(&id).await?;
         Ok(PendingInstall {
-            identifier,
-            version,
+            id,
             install_root,
             staging_root,
             content_root,
@@ -289,7 +270,7 @@ impl ResourceStore {
         .unwrap_or(u64::MAX);
         let manifest_checksum = manifest_checksum(&entries)?;
         let resource = ResourceVersion {
-            id: ResourceId::new(install.identifier.clone(), install.version),
+            id: install.id.clone(),
             root_checksum,
             manifest_checksum,
             file_count,
@@ -543,10 +524,18 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{Identifier, Timestamp};
+    use nervix_models::{Domain, Identifier, ResourceId, Timestamp};
     use tempfile::{NamedTempFile, tempdir};
 
     use super::{ResourceEntryType, ResourceStore, ResourceStoreError};
+
+    fn resource_id(domain: &str, identifier: &str, version: u64) -> ResourceId {
+        ResourceId::new(
+            Domain::parse(domain).expect("valid domain"),
+            Identifier::parse(identifier).expect("valid identifier"),
+            version,
+        )
+    }
 
     #[tokio::test]
     async fn install_from_directory_writes_manifest_and_preserves_tree() {
@@ -565,8 +554,7 @@ mod tests {
         let store = ResourceStore::open(install_root.path()).expect("store should open");
         let manifest = store
             .install_from_directory(
-                Identifier::parse("fraud_model").expect("valid identifier"),
-                1,
+                resource_id("tenant", "fraud_model", 1),
                 source.path(),
                 "node-1",
                 Timestamp::from_unix_nanos(42),
@@ -576,16 +564,18 @@ mod tests {
 
         assert_eq!(manifest.resource.id.version, 1);
         assert_eq!(manifest.resource.file_count, 2);
+        assert!(store.manifest_path(&manifest.resource.id).exists());
         assert!(
             store
-                .manifest_path(&manifest.resource.id.identifier, 1)
+                .content_root(&manifest.resource.id)
+                .join("proto/schema.proto")
                 .exists()
         );
         assert!(
-            store
-                .content_root(&manifest.resource.id.identifier, 1)
-                .join("proto/schema.proto")
-                .exists()
+            !store
+                .content_root(&resource_id("other", "fraud_model", 1))
+                .exists(),
+            "the same name in another domain must have its own content root"
         );
         assert!(manifest.entries.iter().any(|entry| {
             entry.path == "proto" && entry.entry_type == ResourceEntryType::Directory
@@ -610,11 +600,10 @@ mod tests {
 
         let install_root = tempdir().expect("install tempdir");
         let store = ResourceStore::open(install_root.path()).expect("store should open");
-        let source_identifier = Identifier::parse("fraud_model").expect("valid identifier");
+        let source_id = resource_id("tenant", "fraud_model", 1);
         let source_manifest = store
             .install_from_directory(
-                source_identifier.clone(),
-                1,
+                source_id.clone(),
                 source.path(),
                 "node-1",
                 Timestamp::from_unix_nanos(42),
@@ -622,19 +611,17 @@ mod tests {
             .await
             .expect("resource should install");
         let archive_bytes = store
-            .read_archive_bytes(&source_identifier, 1)
+            .read_archive_bytes(&source_id)
             .expect("archive should be readable");
 
         let temp_archive = NamedTempFile::new().expect("temp archive should be created");
         std::fs::write(temp_archive.path(), &archive_bytes)
             .expect("temp archive should be written");
 
-        let replica_identifier =
-            Identifier::parse("fraud_model_replica").expect("valid identifier");
+        let replica_id = resource_id("other", "fraud_model_replica", 7);
         let replica_manifest = store
             .install_from_archive_path(
-                replica_identifier.clone(),
-                7,
+                replica_id.clone(),
                 temp_archive.path(),
                 source_manifest.resource.root_checksum.clone(),
                 "node-2",
@@ -653,12 +640,12 @@ mod tests {
         );
         assert!(
             store
-                .content_root(&replica_identifier, 7)
+                .content_root(&replica_id)
                 .join("proto/nested/schema.proto")
                 .exists()
         );
         assert!(
-            store.archive_path(&replica_identifier, 7).exists(),
+            store.archive_path(&replica_id).exists(),
             "replica archive should be written"
         );
     }
@@ -678,11 +665,10 @@ mod tests {
 
         let install_root = tempdir().expect("install tempdir");
         let store = ResourceStore::open(install_root.path()).expect("store should open");
-        let source_identifier = Identifier::parse("fraud_model").expect("valid identifier");
+        let source_id = resource_id("tenant", "fraud_model", 1);
         let source_manifest = store
             .install_from_directory(
-                source_identifier.clone(),
-                1,
+                source_id.clone(),
                 source.path(),
                 "node-1",
                 Timestamp::from_unix_nanos(42),
@@ -690,19 +676,16 @@ mod tests {
             .await
             .expect("resource should install");
         let archive_bytes = store
-            .read_archive_bytes(&source_identifier, 1)
+            .read_archive_bytes(&source_id)
             .expect("archive should be readable");
 
         let temp_archive = NamedTempFile::new().expect("temp archive should be created");
         std::fs::write(temp_archive.path(), &archive_bytes)
             .expect("temp archive should be written");
 
-        let replica_identifier =
-            Identifier::parse("fraud_model_streamed").expect("valid identifier");
         let replica_manifest = store
             .install_from_archive_path(
-                replica_identifier,
-                8,
+                resource_id("tenant", "fraud_model_streamed", 8),
                 temp_archive.path(),
                 source_manifest.resource.root_checksum.clone(),
                 "node-2",
@@ -725,10 +708,9 @@ mod tests {
     fn resolve_content_path_rejects_parent_segments() {
         let install_root = tempdir().expect("install tempdir");
         let store = ResourceStore::open(install_root.path()).expect("store should open");
-        let identifier = Identifier::parse("fraud_model").expect("valid identifier");
 
         let err = store
-            .resolve_content_path(&identifier, 7, "../escape")
+            .resolve_content_path(&resource_id("tenant", "fraud_model", 7), "../escape")
             .expect_err("parent segments must be rejected");
         assert!(matches!(err, ResourceStoreError::InvalidResourcePath));
     }

@@ -44,11 +44,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Transaction Handles And Attach
 
 `CommandOutcome::transaction` replaces the former boolean transaction flag. Its
-`TransactionStatus` contains the transaction id, `Open`/`Committing`/finished state, pending and
-completed counts, total statement count, and any failure error and one-based failing statement.
-Treat the id as the durable transaction handle:
+`TransactionStatus` contains the transaction id, the domain the transaction is bound to,
+`Open`/`Committing`/finished state, pending and completed counts, total statement count, and any
+failure error and one-based failing statement. Treat the id as the durable transaction handle:
 
 ```rust
+client.execute("CREATE DOMAIN production;").await?;
+client.set_domain("production").await;
+
 let begun = client.execute("BEGIN;").await?;
 let transaction_id = begun
     .transaction
@@ -57,7 +60,7 @@ let transaction_id = begun
     .id
     .clone();
 
-client.execute("CREATE DOMAIN production;").await?;
+client.execute("CREATE SCHEMA notification (user_id I64);").await?;
 
 // A different Client authenticated as the same user can take over the transaction.
 let attached = recovered_client.attach_transaction(transaction_id).await?;
@@ -65,6 +68,10 @@ if !attached.success {
     eprintln!("attach outcome: {}", attached.message);
 }
 ```
+
+`BEGIN` requires an already-existing selected domain and binds the transaction to it. Attaching
+adopts that domain, so `recovered_client` follows the transaction's domain without an explicit
+`set_domain`.
 
 While a transaction is open, `execute` first preflights a queueable statement against the
 replicated prefix. An unsuccessful preflight leaves the transaction `Open` with the same pending

@@ -23,6 +23,9 @@ enum CommandResultKind {
   COMMAND_RESULT_KIND_OK = 1;
   COMMAND_RESULT_KIND_ERROR = 2;
   COMMAND_RESULT_KIND_NOT_LEADER = 3;
+  // The session names a transaction this leader has no binding for. The client must attach the
+  // transaction again before the command can run.
+  COMMAND_RESULT_KIND_TRANSACTION_DETACHED = 4;
 }
 
 message CommandResult {
@@ -56,6 +59,7 @@ message TransactionStatus {
   uint64 total_count = 5;
   string error = 6;
   optional uint64 failing_step = 7;
+  string domain = 8;
 }
 
 message AttachTransactionRequest {
@@ -139,6 +143,7 @@ message ClusterSummary {
 message UploadResourceStart {
   string name = 1;
   uint64 total_bytes = 2;
+  string domain = 3;
 }
 
 message UploadResourceRequest {

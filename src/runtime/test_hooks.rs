@@ -33,6 +33,13 @@ pub struct SchedulePublicationFaultInjector {
     domains: DashMap<String, (), RandomState>,
 }
 
+/// Drops a node's leader-local transaction session bindings on its next transaction command, so
+/// tests can reproduce the soft state a node does not have after a leadership change.
+#[derive(Debug, Default)]
+pub struct TransactionBindingDropInjector {
+    nodes: DashMap<String, (), RandomState>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct TransactionCommitPauseInjector {
     pauses: DashMap<(String, usize), Arc<TransactionCommitPause>, RandomState>,
@@ -71,6 +78,7 @@ pub struct RuntimeTestHooks {
     pub ingestor_faults: Arc<IngestorFaultInjector>,
     pub otel_client_faults: Arc<OtelClientFaultInjector>,
     pub schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
+    pub transaction_binding_drops: Arc<TransactionBindingDropInjector>,
     pub(crate) transaction_commit_pauses: Arc<TransactionCommitPauseInjector>,
     pub(crate) entity_gate_pauses: Arc<EntityGatePauseInjector>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
@@ -93,6 +101,7 @@ impl Default for RuntimeTestHooks {
             ingestor_faults: Arc::default(),
             otel_client_faults: Arc::default(),
             schedule_publication_faults: Arc::default(),
+            transaction_binding_drops: Arc::default(),
             transaction_commit_pauses: Arc::default(),
             entity_gate_pauses: Arc::default(),
             branch_instance_expiration_scan_interval: None,
@@ -109,6 +118,12 @@ impl RuntimeTestHooks {
             from_node_id,
             to_node_id,
         });
+    }
+
+    pub fn drop_transaction_bindings_on(&self, node_id: impl Into<String>) {
+        self.transaction_binding_drops
+            .nodes
+            .insert(node_id.into(), ());
     }
 
     pub fn pause_transaction_commit_after(
@@ -201,6 +216,15 @@ impl RuntimeTestHooks {
             .clone();
         pause.released.store(true, Ordering::Release);
         pause.release_notify.notify_waiters();
+    }
+}
+
+impl TransactionBindingDropInjector {
+    /// Consumes an armed drop for `node_id`, returning whether the node should forget its
+    /// transaction session bindings now.
+    #[cfg(feature = "testing")]
+    pub(crate) fn take(&self, node_id: &str) -> bool {
+        self.nodes.remove(node_id).is_some()
     }
 }
 

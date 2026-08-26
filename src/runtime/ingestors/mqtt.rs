@@ -115,7 +115,7 @@ impl MqttIngestor {
 
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         runtime
-            .resolve_client_config_with_instance(client.mount.as_ref(), &client.config, 0)
+            .resolve_client_config_with_instance(domain, client.mount.as_ref(), &client.config, 0)
             .map_err(|reason| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -254,6 +254,7 @@ impl MqttIngestor {
                     }
                     let resolved_client =
                         match task_context.runtime.resolve_client_config_with_instance(
+                            &task_context.domain,
                             task_client_mount.as_ref(),
                             &task_config,
                             instance_idx,

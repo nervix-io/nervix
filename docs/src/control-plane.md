@@ -37,6 +37,13 @@ in written order; `COMMIT` applies them and `REVERT` discards them. `BEGIN` insi
 transaction is rejected, as are `COMMIT` and `REVERT` without one. A request containing multiple
 statements outside an explicit transaction is rejected instead of becoming an implicit batch.
 
+A transaction belongs to exactly one domain. `BEGIN` binds the transaction to the session's
+selected domain, which must already exist; without a selected domain, or with one that does not
+exist, `BEGIN` fails and no transaction is opened. Every statement queued afterwards must select
+that same domain, and a statement submitted for another domain is rejected without changing the
+pending count. A transaction therefore cannot create the domain it configures, and cannot span
+domains.
+
 The cluster owns the transaction, not the TCP or WebSocket connection. Its owner, timestamps,
 state, structured semantic statements, and commit progress are replicated. The original statement
 source is retained for display, but execution never reparses that text. `BEGIN`, queueing,
@@ -47,17 +54,22 @@ A transaction is `OPEN`, `COMMITTING`, or finished as `COMMITTED`, `FAILED`, `RE
 `EXPIRED`. A client retains the transaction id and attaches it after reconnecting. Attach is
 restricted to the authenticated owner. Attaching from a second live session takes over the
 transaction, so the displaced session's next transaction operation reports that it was taken over.
-An unclean transport loss or leadership change leaves an open transaction available for attach. A
-clean end of the session reverts a bound open transaction.
+The transaction reports the domain it is bound to, and an attaching or reconnecting session adopts
+that domain as its selected domain. An unclean transport loss or leadership change leaves an open
+transaction available for attach. Binding is leader-local soft state, so a leader that does not
+hold it reports the session as detached; clients treat that as a routing condition, attach the
+transaction again, and replay the command. A clean end of the session reverts a bound open
+transaction.
 
-Only replicated configuration effects may be queued:
+Only the bound domain's replicated configuration effects may be queued:
 
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
-- `CREATE DOMAIN`, `ALTER DOMAIN`, `START`, and `STOP`;
-- `CREATE USER` and `CREATE RESOURCE`.
+- `ALTER DOMAIN`, `START`, and `STOP`;
+- `CREATE RESOURCE`.
 
-Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. Session
-subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership operations (`CORDON`,
+Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
+and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
+Session subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership operations (`CORDON`,
 `UNCORDON`, `DRAIN`, and `DROP NODE`) are also immediate, non-transaction content. Run those
 statements outside `BEGIN`/`COMMIT`.
 
@@ -81,7 +93,7 @@ against the prefix, and `COMMIT` requires the final candidate graph to pass ever
 coordinated multi-model migrations possible without letting a malformed `ALTER` or an impossible
 lifecycle transition enter the queue.
 
-Within a transaction, each consecutive run of model mutations for one domain can mix `CREATE`,
+Within a transaction, each consecutive run of model mutations can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
 `ALTER REORDERER`, `ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`,
 `ALTER PLACEMENT`, and `DROP`. Nervix applies that run as one registry mutation: all operations are
@@ -102,8 +114,8 @@ Atomicity still does not span the whole transaction.
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
 and executed quiesce levels. During retention, attach reports the exact outcome and aggregate
 commit output; after removal the id is unknown. `SHOW TRANSACTIONS;`
-can be served by any node from locally applied replicated state and lists the id, owner, state,
-pending count, progress, age, and idle time for live transactions and retained tombstones.
+can be served by any node from locally applied replicated state and lists the id, owner, domain,
+state, pending count, progress, age, and idle time for live transactions and retained tombstones.
 
 An unbound `OPEN` transaction expires after its idle timeout; a bound transaction does not, and a
 `COMMITTING` transaction never expires. Defaults and server settings are:

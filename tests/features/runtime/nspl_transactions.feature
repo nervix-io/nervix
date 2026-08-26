@@ -2,13 +2,16 @@ Feature: NSPL transactions
   Scenario: An open transaction survives leader failover and the client resumes it
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given client "owner" is connected to node "{{old_leader}}"
     When client "owner" executes these NSPL commands
       """
       BEGIN;
-      CREATE DOMAIN {{domain}};
       CREATE SCHEMA before_failover (
         value STRING
       );
@@ -69,12 +72,18 @@ Feature: NSPL transactions
   Scenario Outline: A clean session close reverts its open transaction
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     Given client "owner" is connected to the leader node
     And client "observer" is connected to the leader node
     When client "owner" executes these NSPL commands
       """
       BEGIN;
-      CREATE DOMAIN {{domain}};
+      CREATE SCHEMA closed_session_event (
+        value STRING
+      );
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
     When client "owner" closes its session cleanly
@@ -93,6 +102,10 @@ Feature: NSPL transactions
   Scenario: A commit interrupted between steps is completed by the new leader
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given client "owner" is connected to node "{{old_leader}}"
@@ -100,7 +113,7 @@ Feature: NSPL transactions
     When client "owner" executes these NSPL commands
       """
       BEGIN;
-      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE resumed_commit_bundle;
       CREATE SCHEMA resumed_commit (
         value STRING
       );
@@ -139,6 +152,10 @@ Feature: NSPL transactions
   Scenario: A failing resumed commit records the failing step and preserves its prefix
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given client "owner" is connected to node "{{old_leader}}"
@@ -146,13 +163,13 @@ Feature: NSPL transactions
     When client "owner" executes these NSPL commands
       """
       BEGIN;
-      CREATE DOMAIN {{domain}};
-      CREATE DOMAIN transaction_commit_conflict;
+      CREATE RESOURCE transaction_commit_prefix;
+      CREATE RESOURCE transaction_commit_conflict;
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
     When client "observer" executes these NSPL commands
       """
-      CREATE DOMAIN transaction_commit_conflict;
+      CREATE RESOURCE transaction_commit_conflict;
       """
     Given transaction commit on node "{{old_leader}}" pauses after 1 statement
     When client "owner" begins executing these NSPL commands in the background
@@ -171,11 +188,11 @@ Feature: NSPL transactions
       """
     When these NSPL commands are executed on the leader node
       """
-      DESCRIBE DOMAIN;
+      DESCRIBE RESOURCE transaction_commit_prefix;
       """
     Then the last command output contains
       """
-      domain: {{domain}}
+      resource: transaction_commit_prefix
       """
     When the transaction commit pause on node "{{old_leader}}" after 1 statement is released
     Then the background NSPL execution is discarded
@@ -183,12 +200,18 @@ Feature: NSPL transactions
   Scenario: Attaching from a second session takes over an open transaction
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     Given client "owner" is connected to the leader node
     And client "taker" is connected to the leader node
     When client "owner" executes these NSPL commands
       """
       BEGIN;
-      CREATE DOMAIN {{domain}};
+      CREATE SCHEMA taken_over_event (
+        value STRING
+      );
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
     When client "taker" attaches to transaction "{{transaction_id}}"
@@ -209,9 +232,133 @@ Feature: NSPL transactions
       transaction reverted
       """
 
+  Scenario Outline: BEGIN requires an existing selected domain
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands fail with "domain '{{domain}}' does not exist"
+      """
+      BEGIN;
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      no transactions
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_domain_binding
+  Scenario Outline: A transaction is bound to the domain selected at BEGIN
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE UNPACED DOMAIN transaction_other_domain;
+      """
+    Given client "owner" is connected to the leader node
+    And client "taker" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA bound_domain_event (
+        value STRING
+      );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "owner" selects domain "transaction_other_domain"
+    And client "owner" fails to execute these NSPL commands
+      """
+      CREATE SCHEMA other_domain_event (
+        value STRING
+      );
+      """
+    Then the last command error contains
+      """
+      is bound to domain '{{domain}}'
+      """
+    When client "taker" executes these NSPL commands
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      domain={{domain}} state=OPEN pending=1
+      """
+    When client "taker" selects domain "transaction_other_domain"
+    And client "taker" attaches to transaction "{{transaction_id}}"
+    Then client "taker" active domain is "{{domain}}"
+    When client "taker" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA bound_domain_event;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA bound_domain_event (value STRING);
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_binding_recovery
+  Scenario Outline: A session whose leader lost its binding re-attaches instead of failing
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA rebound_event (
+        value STRING
+      );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    Given the leader node forgets its transaction session bindings
+    When client "owner" executes these NSPL commands
+      """
+      CREATE SCHEMA rebound_second_event (
+        value STRING
+      );
+      COMMIT;
+      """
+    Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA rebound_second_event;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA rebound_second_event (value STRING);
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Non-configuration statements are rejected while a transaction is open
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     Given client "owner" is connected to the leader node
     When client "owner" executes these NSPL commands
       """
@@ -230,6 +377,8 @@ Feature: NSPL transactions
       | statement                                                 | error                                                       |
       | SHOW TRANSACTIONS;                                        | cannot be queued in a transaction                           |
       | DESCRIBE DOMAIN;                                          | cannot be queued in a transaction                           |
+      | CREATE DOMAIN transaction_extra_domain;                   | CREATE DOMAIN cannot be queued in a transaction             |
+      | CREATE USER transaction_user WITH PASSWORD 'secret';      | CREATE USER cannot be queued in a transaction               |
       | CREATE SUBSCRIPTION tx_view TO missing_relay;             | session-scoped and client-local statements cannot be queued |
       | UPLOAD RESOURCE local_bundle VERSION '/tmp/local_bundle'; | client-local commands are not allowed                       |
       | CORDON NODE node-1;                                       | cannot be queued in a transaction                           |
@@ -263,11 +412,13 @@ Feature: NSPL transactions
       """
     When client "owner" fails to execute these NSPL commands
       """
-      CREATE DOMAIN {{domain}};
+      CREATE SCHEMA queued_preflight (
+        value STRING
+      );
       """
     Then the last command error contains
       """
-      domain '{{domain}}' already exists
+      already exists
       """
     When client "observer" executes these NSPL commands
       """
@@ -301,11 +452,15 @@ Feature: NSPL transactions
   Scenario Outline: Queue admission errors retain earlier request outcomes
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     When this NSPL command request is executed on the leader node
       """
       BEGIN;
-      CREATE DOMAIN {{domain}};
-      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE batch_preflight_bundle;
+      CREATE RESOURCE batch_preflight_bundle;
       COMMIT;
       """
     Then the last command error contains
@@ -314,11 +469,11 @@ Feature: NSPL transactions
       """
     And the last command error contains
       """
-      domain '{{domain}}' already exists
+      resource 'batch_preflight_bundle' already exists
       """
     When these NSPL commands fail with "does not exist"
       """
-      DESCRIBE DOMAIN;
+      DESCRIBE RESOURCE batch_preflight_bundle;
       """
 
     Examples:
@@ -332,6 +487,10 @@ Feature: NSPL transactions
     And the concurrent transaction limit is configured as 1
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     Given client "owner" is connected to the leader node
     And client "other" is connected to the leader node
     When client "owner" executes these NSPL commands
@@ -367,7 +526,9 @@ Feature: NSPL transactions
       """
     And client "other" fails to execute these NSPL commands
       """
-      CREATE DOMAIN {{domain}};
+      CREATE SCHEMA exceeds_byte_limit (
+        value STRING
+      );
       """
     Then the last command error contains
       """
@@ -379,6 +540,10 @@ Feature: NSPL transactions
     And the transaction tombstone retention is configured as "1s"
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given client "owner" is connected to node "{{old_leader}}"
@@ -406,6 +571,10 @@ Feature: NSPL transactions
   Scenario Outline: Open transactions are visible from replicated state
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     When these NSPL commands are executed on the leader node
       """
       BEGIN;
@@ -420,7 +589,7 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      state=OPEN
+      domain={{domain}} state=OPEN
       """
 
     Examples:
@@ -451,10 +620,13 @@ Feature: NSPL transactions
   Scenario Outline: COMMIT executes queued transaction commands
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     When this NSPL command request is executed on the leader node
       """
       BEGIN;
-      CREATE DOMAIN {{domain}};
       CREATE SCHEMA committed_notification (
         user_id I64
       );
@@ -566,6 +738,10 @@ Feature: NSPL transactions
   Scenario Outline: Nested BEGIN is rejected
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     When these NSPL commands fail with "transaction is already active"
       """
       BEGIN;

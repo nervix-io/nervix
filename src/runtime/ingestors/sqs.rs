@@ -58,7 +58,7 @@ impl SqsIngestor {
         };
 
         let resolved_client = runtime
-            .resolve_client_config(client.mount.as_ref(), &client.config)
+            .resolve_client_config(domain, client.mount.as_ref(), &client.config)
             .map_err(|reason| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),

@@ -53,9 +53,9 @@ use nervix_models::{
     OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
     OtelValueMapping, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
     PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, RouteConstruction,
-    ScheduledNode, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, StructuredMessageError,
-    Timestamp, WireSchemaDefinition,
+    RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceVersionStatus, RetryPolicy,
+    RouteConstruction, ScheduledNode, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, Timestamp, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -3014,6 +3014,7 @@ pub struct Runtime {
     #[cfg(feature = "testing")]
     schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     #[cfg(feature = "testing")]
+    transaction_binding_drops: Arc<test_hooks::TransactionBindingDropInjector>,
     transaction_commit_pauses: Arc<test_hooks::TransactionCommitPauseInjector>,
     #[cfg(feature = "testing")]
     entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
@@ -3027,7 +3028,7 @@ pub struct Runtime {
     pending_state_syncs: Arc<DashMap<u64, PendingStateSyncSender, RandomState>>,
     expiring_stream_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>>,
-    latest_resource_versions: Arc<DashMap<Identifier, u64, RandomState>>,
+    latest_resource_versions: Arc<DashMap<(Domain, Identifier), u64, RandomState>>,
     replicated_deduplicator_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>>,
     replicated_kafka_offset_states:
@@ -6270,7 +6271,11 @@ impl RelayProcessorTemplate {
 }
 
 impl BranchInstanceTemplate {
-    async fn prepare_wasm_processors(&mut self, runtime: &Runtime) -> Result<(), String> {
+    async fn prepare_wasm_processors(
+        &mut self,
+        runtime: &Runtime,
+        domain: &Domain,
+    ) -> Result<(), String> {
         for processor in self.processors.values_mut() {
             tokio::task::consume_budget().await;
             if let RelayProcessorOperationTemplate::WasmProcessor {
@@ -6284,6 +6289,7 @@ impl BranchInstanceTemplate {
                 *compiled = Some(
                     runtime
                         .compile_wasm_processor_module(
+                            domain,
                             &processor.processor,
                             resource,
                             *resource_version,
@@ -16600,25 +16606,24 @@ async fn flush_branch_inferencer_output(
         }
     };
 
-    let version = match resource_version {
-        Some(version) => version,
-        None => match branch
-            .runtime
-            .resolve_resource_version(resource, resource.as_str())
-        {
-            Ok(version) => version,
-            Err(error) => {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    forwarded.acks.iter(),
-                    error,
-                );
-                return;
-            }
-        },
+    let version = match branch.runtime.resolve_resource_id(
+        &branch.domain,
+        resource,
+        resource_version,
+        resource.as_str(),
+    ) {
+        Ok(id) => id.version,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                forwarded.acks.iter(),
+                error,
+            );
+            return;
+        }
     };
     if session
         .as_ref()
@@ -16635,7 +16640,8 @@ async fn flush_branch_inferencer_output(
             );
             return;
         };
-        let path = match resource_store.resolve_content_path(resource, version, file) {
+        let resource_id = ResourceId::new(branch.domain.clone(), resource.clone(), version);
+        let path = match resource_store.resolve_content_path(&resource_id, file) {
             Ok(path) => path,
             Err(error) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -17217,20 +17223,19 @@ struct WasmInstanceContext<'a> {
 impl Runtime {
     async fn compile_wasm_processor_module(
         &self,
+        domain: &Domain,
         processor: &Identifier,
         resource: &Identifier,
         resource_version: Option<u64>,
         file: &str,
     ) -> Result<WasmCompiledBranchProcessor, String> {
-        let version = match resource_version {
-            Some(version) => version,
-            None => self.resolve_resource_version(resource, resource.as_str())?,
-        };
+        let id = self.resolve_resource_id(domain, resource, resource_version, resource.as_str())?;
+        let version = id.version;
         let Some(resource_store) = self.resource_store.read().clone() else {
             return Err("resource store is not attached".to_string());
         };
         let path = resource_store
-            .resolve_content_path(resource, version, file)
+            .resolve_content_path(&id, file)
             .map_err(|error| error.to_string())?;
         let wasm = tokio::fs::read(&path).await.map_err(|error| {
             format!(
@@ -17280,12 +17285,15 @@ async fn ensure_wasm_processor_instance(
         output_schemas,
         replicated_state,
     } = context;
-    let version = match resource_version {
-        Some(version) => version,
-        None => branch
-            .runtime
-            .resolve_resource_version(resource, resource.as_str())?,
-    };
+    let version = branch
+        .runtime
+        .resolve_resource_id(
+            &branch.domain,
+            resource,
+            resource_version,
+            resource.as_str(),
+        )?
+        .version;
     let needs_compile = compiled
         .as_ref()
         .is_none_or(|compiled| compiled.version != version);
@@ -17293,7 +17301,13 @@ async fn ensure_wasm_processor_instance(
         *compiled = Some(
             branch
                 .runtime
-                .compile_wasm_processor_module(processor, resource, Some(version), file)
+                .compile_wasm_processor_module(
+                    &branch.domain,
+                    processor,
+                    resource,
+                    Some(version),
+                    file,
+                )
                 .await?,
         );
         *instance = None;

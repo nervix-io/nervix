@@ -2,10 +2,13 @@ Feature: Domain lifecycle
   Scenario Outline: Explicit transactions execute multiple commands as one request
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
     When this NSPL command request is executed on the leader node
       """
       BEGIN;
-      CREATE DOMAIN {{domain}};
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SCHEMA notification (
         user_id I64

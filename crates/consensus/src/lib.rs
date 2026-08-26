@@ -49,8 +49,8 @@ mod transaction;
 pub use transaction::{
     FinishedTransaction, ReplicatedTransaction, TransactionCommandResult, TransactionCommitAdvance,
     TransactionCommitProgress, TransactionDiagnostic, TransactionMutationError,
-    TransactionMutationResponse, TransactionOutcome, TransactionState, TransactionStatement,
-    TransactionStepEffect, TransactionStepResult,
+    TransactionMutationResponse, TransactionOutcome, TransactionQueueLimits, TransactionState,
+    TransactionStatement, TransactionStepEffect, TransactionStepResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,10 +84,12 @@ pub enum ConsensusCommand {
         user: Box<UserCredentials>,
     },
     CreateResourceCatalog {
-        identifier: String,
+        domain: DomainId,
+        identifier: Identifier,
     },
     AdvanceResourceVersion {
-        identifier: String,
+        domain: DomainId,
+        identifier: Identifier,
     },
     PutResourceVersion {
         resource: Box<ResourceVersion>,
@@ -106,10 +108,10 @@ pub enum ConsensusCommand {
     QueueTransactionStatement {
         id: String,
         owner: Identifier,
+        domain: Domain,
         at: nervix_models::Timestamp,
         statement: Box<TransactionStatement>,
-        max_statements: usize,
-        max_source_bytes: u64,
+        limits: TransactionQueueLimits,
     },
     TouchTransaction {
         id: String,
@@ -152,7 +154,7 @@ pub enum ConsensusCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsensusResponse {
     Applied,
-    Transaction(TransactionMutationResponse),
+    Transaction(Box<TransactionMutationResponse>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,21 +182,33 @@ impl std::fmt::Display for ConsensusCommand {
             Self::PauseDomain { domain_id } => write!(f, "pause-domain:{}", domain_id.as_str()),
             Self::ResumeDomain { domain_id } => write!(f, "resume-domain:{}", domain_id.as_str()),
             Self::CreateUser { user } => write!(f, "create-user:{}", user.name.as_str()),
-            Self::CreateResourceCatalog { identifier } => {
-                write!(f, "create-resource-catalog:{identifier}")
+            Self::CreateResourceCatalog { domain, identifier } => {
+                write!(
+                    f,
+                    "create-resource-catalog:{}.{}",
+                    domain.as_str(),
+                    identifier.as_str()
+                )
             }
-            Self::AdvanceResourceVersion { identifier } => {
-                write!(f, "advance-resource-version:{identifier}")
+            Self::AdvanceResourceVersion { domain, identifier } => {
+                write!(
+                    f,
+                    "advance-resource-version:{}.{}",
+                    domain.as_str(),
+                    identifier.as_str()
+                )
             }
             Self::PutResourceVersion { resource } => write!(
                 f,
-                "put-resource-version:{}@{}",
+                "put-resource-version:{}.{}@{}",
+                resource.id.domain.as_str(),
                 resource.id.identifier.as_str(),
                 resource.id.version
             ),
             Self::PutResourceReplica { replica } => write!(
                 f,
-                "put-resource-replica:{}@{}:{}",
+                "put-resource-replica:{}.{}@{}:{}",
+                replica.key.domain.as_str(),
                 replica.key.identifier.as_str(),
                 replica.key.version,
                 replica.key.node_id
@@ -934,39 +948,41 @@ impl ConsensusHandle {
             .map_err(Self::map_write_error)
     }
 
-    pub async fn allocate_resource_version(&self, identifier: &str) -> Result<u64, ConsensusError> {
+    pub async fn allocate_resource_version(
+        &self,
+        domain: &DomainId,
+        identifier: &Identifier,
+    ) -> Result<u64, ConsensusError> {
         let resources = self.current_resources().await;
-        if !resources
-            .next_version_by_identifier
-            .iter()
-            .any(|(stored_identifier, _)| stored_identifier.as_str() == identifier)
-        {
+        if !resources.is_declared(domain, identifier) {
             return Err(ConsensusError::Write(format!(
-                "resource '{identifier}' does not exist"
+                "resource '{}' does not exist in domain '{}'",
+                identifier.as_str(),
+                domain.as_str()
             )));
         }
         self.raft
             .client_write(ConsensusCommand::AdvanceResourceVersion {
-                identifier: identifier.to_string(),
+                domain: domain.clone(),
+                identifier: identifier.clone(),
             })
             .await
             .map(|_| ())
             .map_err(Self::map_write_error)?;
 
         let resources = self.current_resources().await;
-        Ok(resources
-            .next_version_by_identifier
-            .iter()
-            .find_map(|(stored_identifier, next_version)| {
-                (stored_identifier.as_str() == identifier).then_some(next_version.saturating_sub(1))
-            })
-            .unwrap_or(1))
+        Ok(resources.latest_version(domain, identifier).unwrap_or(1))
     }
 
-    pub async fn create_resource_catalog(&self, identifier: &str) -> Result<(), ConsensusError> {
+    pub async fn create_resource_catalog(
+        &self,
+        domain: &DomainId,
+        identifier: &Identifier,
+    ) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::CreateResourceCatalog {
-                identifier: identifier.to_string(),
+                domain: domain.clone(),
+                identifier: identifier.clone(),
             })
             .await
             .map(|_| ())
@@ -1042,18 +1058,18 @@ impl ConsensusHandle {
         &self,
         id: String,
         owner: Identifier,
+        domain: Domain,
         at: nervix_models::Timestamp,
         statement: TransactionStatement,
-        max_statements: usize,
-        max_source_bytes: u64,
+        limits: TransactionQueueLimits,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::QueueTransactionStatement {
             id,
             owner,
+            domain,
             at,
             statement: Box::new(statement),
-            max_statements,
-            max_source_bytes,
+            limits,
         })
         .await
     }
@@ -1981,7 +1997,9 @@ impl AppliedConsensusCommand {
         changes: StateMachineChanges,
     ) -> Self {
         Self {
-            response: ConsensusResponse::Transaction(TransactionMutationResponse { result }),
+            response: ConsensusResponse::Transaction(Box::new(TransactionMutationResponse {
+                result,
+            })),
             schedule_changed: changes.schedule_changed,
             domains_changed: changes.domains_changed,
             resources_changed: changes.resources_changed,
@@ -2054,12 +2072,12 @@ fn apply_consensus_command(
                 .entry(user.name.clone())
                 .or_insert_with(|| user.as_ref().clone());
         }
-        ConsensusCommand::CreateResourceCatalog { identifier } => {
-            ensure_resource_catalog(&mut state.resources, identifier);
+        ConsensusCommand::CreateResourceCatalog { domain, identifier } => {
+            ensure_resource_catalog(&mut state.resources, domain, identifier);
             changes.resources_changed = true;
         }
-        ConsensusCommand::AdvanceResourceVersion { identifier } => {
-            advance_resource_version(&mut state.resources, identifier);
+        ConsensusCommand::AdvanceResourceVersion { domain, identifier } => {
+            advance_resource_version(&mut state.resources, domain, identifier);
             changes.resources_changed = true;
         }
         ConsensusCommand::PutResourceVersion { resource } => {
@@ -2108,19 +2126,13 @@ fn apply_consensus_command(
         ConsensusCommand::QueueTransactionStatement {
             id,
             owner,
+            domain,
             at,
             statement,
-            max_statements,
-            max_source_bytes,
+            limits,
         } => {
             let result = mutate_transaction(state, id, |transaction| {
-                transaction.queue(
-                    owner,
-                    *at,
-                    statement.as_ref().clone(),
-                    *max_statements,
-                    *max_source_bytes,
-                )
+                transaction.queue(owner, domain, *at, statement.as_ref().clone(), *limits)
             });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
@@ -2179,7 +2191,7 @@ fn apply_consensus_command(
                 ) {
                     return AppliedConsensusCommand::transaction(Err(error), changes);
                 }
-                apply_transaction_step_effect(state, effect, &mut changes);
+                apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
             } else if let Err(error) = validate_transaction_step_without_effect(
                 state
                     .transactions
@@ -2320,8 +2332,6 @@ fn validate_transaction_step_without_effect(
     }
     let statement = &statements[0];
     let valid_no_effect = match &statement.statement {
-        Statement::CreateDomain(create) => create.if_not_exists && result.result.already_existed,
-        Statement::CreateUser(create) => create.if_not_exists && result.result.already_existed,
         Statement::CreateResource(create) => create.if_not_exists && result.result.already_existed,
         Statement::AlterDomain(_) => true,
         _ => false,
@@ -2358,9 +2368,10 @@ fn validate_transaction_step_effect(
     }
     let effect_matches = match effect {
         TransactionStepEffect::ReplaceDomainSchedule { domain, .. } => {
-            statements.iter().all(|statement| {
-                statement.domain.as_ref() == Some(domain) && statement.statement.is_model_mutation()
-            })
+            &transaction.domain == domain
+                && statements
+                    .iter()
+                    .all(|statement| statement.statement.is_model_mutation())
         }
         TransactionStepEffect::PutDomainAndSchedule {
             expected_domain,
@@ -2368,40 +2379,25 @@ fn validate_transaction_step_effect(
             ..
         } => {
             statements.len() == 1
-                && statements[0].domain.as_ref() == Some(&domain.id)
+                && transaction.domain == domain.id
                 && expected_domain.id == domain.id
                 && matches!(statements[0].statement, Statement::AlterDomain(_))
         }
-        TransactionStepEffect::PutDomain { domain } => {
-            statements.len() == 1
-                && matches!(
-                    &statements[0].statement,
-                    Statement::CreateDomain(create) if create.id == domain.id
-                )
-        }
         TransactionStepEffect::StartDomain { domain_id, .. } => {
             statements.len() == 1
-                && statements[0].domain.as_ref() == Some(domain_id)
+                && &transaction.domain == domain_id
                 && matches!(statements[0].statement, Statement::StartDomain(_))
         }
         TransactionStepEffect::StopDomain { domain_id, .. } => {
             statements.len() == 1
-                && statements[0].domain.as_ref() == Some(domain_id)
+                && &transaction.domain == domain_id
                 && matches!(statements[0].statement, Statement::StopDomain(_))
-        }
-        TransactionStepEffect::CreateUser { user } => {
-            statements.len() == 1
-                && matches!(
-                    &statements[0].statement,
-                    Statement::CreateUser(create) if create.name == user.name
-                )
         }
         TransactionStepEffect::CreateResourceCatalog { identifier } => {
             statements.len() == 1
                 && matches!(
                     &statements[0].statement,
-                    Statement::CreateResource(create)
-                        if create.identifier.as_str() == identifier
+                    Statement::CreateResource(create) if &create.identifier == identifier
                 )
         }
     };
@@ -2437,10 +2433,6 @@ fn validate_transaction_step_effect(
                 None
             }
         }
-        TransactionStepEffect::PutDomain { domain } => state
-            .domains
-            .contains_key(&domain.id)
-            .then(|| format!("domain '{}' now exists", domain.id.as_str())),
         TransactionStepEffect::StartDomain {
             domain_id,
             expected_start_version,
@@ -2474,16 +2466,16 @@ fn validate_transaction_step_effect(
             )),
             None => Some(format!("domain '{}' no longer exists", domain_id.as_str())),
         },
-        TransactionStepEffect::CreateUser { user } => state
-            .users
-            .contains_key(&user.name)
-            .then(|| format!("user '{}' now exists", user.name.as_str())),
         TransactionStepEffect::CreateResourceCatalog { identifier } => state
             .resources
-            .next_version_by_identifier
-            .iter()
-            .any(|(known, _)| known.as_str() == identifier)
-            .then(|| format!("resource '{identifier}' now exists")),
+            .is_declared(&transaction.domain, identifier)
+            .then(|| {
+                format!(
+                    "resource '{}' now exists in domain '{}'",
+                    identifier.as_str(),
+                    transaction.domain.as_str()
+                )
+            }),
     };
     match conflict {
         Some(reason) => Err(TransactionMutationError::StepConflict {
@@ -2496,6 +2488,7 @@ fn validate_transaction_step_effect(
 
 fn apply_transaction_step_effect(
     state: &mut StateMachineData,
+    domain: &DomainId,
     effect: &TransactionStepEffect,
     changes: &mut StateMachineChanges,
 ) {
@@ -2515,12 +2508,6 @@ fn apply_transaction_step_effect(
             state.replace_domain_schedule(&domain.id, schedule.as_deref());
             changes.domains_changed = true;
             changes.schedule_changed = true;
-        }
-        TransactionStepEffect::PutDomain { domain } => {
-            state
-                .domains
-                .insert(domain.id.clone(), domain.as_ref().clone());
-            changes.domains_changed = true;
         }
         TransactionStepEffect::StartDomain {
             domain_id,
@@ -2543,50 +2530,54 @@ fn apply_transaction_step_effect(
                 changes.domains_changed = true;
             }
         }
-        TransactionStepEffect::CreateUser { user } => {
-            state
-                .users
-                .entry(user.name.clone())
-                .or_insert_with(|| user.as_ref().clone());
-        }
         TransactionStepEffect::CreateResourceCatalog { identifier } => {
-            ensure_resource_catalog(&mut state.resources, identifier);
+            ensure_resource_catalog(&mut state.resources, domain, identifier);
             changes.resources_changed = true;
         }
     }
 }
 
-fn ensure_resource_catalog(resources: &mut ResourceVersionStatus, identifier: &str) {
-    let Ok(identifier) = nervix_models::Identifier::parse(identifier) else {
-        return;
-    };
-    if let Err(index) = resources
-        .next_version_by_identifier
-        .binary_search_by(|(stored_identifier, _)| stored_identifier.cmp(&identifier))
-    {
+fn resource_catalog_slot(
+    resources: &ResourceVersionStatus,
+    domain: &DomainId,
+    identifier: &Identifier,
+) -> Result<usize, usize> {
+    resources
+        .next_version_by_resource
+        .binary_search_by(|(stored_domain, stored_identifier, _)| {
+            stored_domain
+                .cmp(domain)
+                .then_with(|| stored_identifier.cmp(identifier))
+        })
+}
+
+fn ensure_resource_catalog(
+    resources: &mut ResourceVersionStatus,
+    domain: &DomainId,
+    identifier: &Identifier,
+) {
+    if let Err(index) = resource_catalog_slot(resources, domain, identifier) {
         resources
-            .next_version_by_identifier
-            .mutate_vec(|entries| entries.insert(index, (identifier, 1)));
+            .next_version_by_resource
+            .mutate_vec(|entries| entries.insert(index, (domain.clone(), identifier.clone(), 1)));
     }
 }
 
-fn advance_resource_version(resources: &mut ResourceVersionStatus, identifier: &str) {
-    let Ok(identifier) = nervix_models::Identifier::parse(identifier) else {
-        return;
-    };
-    match resources
-        .next_version_by_identifier
-        .binary_search_by(|(stored_identifier, _)| stored_identifier.cmp(&identifier))
-    {
+fn advance_resource_version(
+    resources: &mut ResourceVersionStatus,
+    domain: &DomainId,
+    identifier: &Identifier,
+) {
+    match resource_catalog_slot(resources, domain, identifier) {
         Ok(index) => {
-            resources.next_version_by_identifier.mutate_vec(|entries| {
-                entries[index].1 = entries[index].1.saturating_add(1);
+            resources.next_version_by_resource.mutate_vec(|entries| {
+                entries[index].2 = entries[index].2.saturating_add(1);
             });
         }
         Err(index) => {
-            resources
-                .next_version_by_identifier
-                .mutate_vec(|entries| entries.insert(index, (identifier, 2)));
+            resources.next_version_by_resource.mutate_vec(|entries| {
+                entries.insert(index, (domain.clone(), identifier.clone(), 2))
+            });
         }
     }
 }
@@ -2678,7 +2669,7 @@ mod tests {
         UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame, io_error,
         load_value, read_key, write_key,
     };
-    use crate::{ConsensusError, ReplicatedTransaction, VoteOf};
+    use crate::{ConsensusError, ReplicatedTransaction, TransactionQueueLimits, VoteOf};
 
     fn domain(raw: &str) -> Domain {
         Domain::try_from(raw).expect("valid domain")
@@ -2743,9 +2734,10 @@ mod tests {
         }
     }
 
-    fn resource_version(identifier: &str, version: u64) -> ResourceVersion {
+    fn resource_version(domain_id: &str, identifier: &str, version: u64) -> ResourceVersion {
         ResourceVersion {
             id: ResourceId::new(
+                domain(domain_id),
                 Identifier::parse(identifier).expect("valid identifier"),
                 version,
             ),
@@ -2945,6 +2937,7 @@ mod tests {
 
         let transaction = ReplicatedTransaction::open(
             "tx-1".to_string(),
+            domain_id.clone(),
             owner.clone(),
             nervix_models::Timestamp::from_unix_nanos(1),
         );
@@ -2969,16 +2962,18 @@ mod tests {
                 &ConsensusCommand::QueueTransactionStatement {
                     id: "tx-1".to_string(),
                     owner: owner.clone(),
+                    domain: domain_id.clone(),
                     at: nervix_models::Timestamp::from_unix_nanos(
                         i64::try_from(at).unwrap_or_default().saturating_add(2),
                     ),
                     statement: Box::new(TransactionStatement {
                         source: "statement".to_string(),
                         statement,
-                        domain: Some(domain_id.clone()),
                     }),
-                    max_statements: 4,
-                    max_source_bytes: 1024,
+                    limits: TransactionQueueLimits {
+                        max_statements: 4,
+                        max_source_bytes: 1024,
+                    },
                 },
             );
         }
@@ -3115,23 +3110,32 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::AdvanceResourceVersion {
-                identifier: "fraud_model".to_string(),
+                domain: domain("tenant"),
+                identifier: Identifier::parse("fraud_model").expect("valid identifier"),
             },
         );
         assert_eq!(
             state
                 .resources
-                .next_version_by_identifier
+                .next_version_by_resource
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>(),
             vec![(
+                domain("tenant"),
                 Identifier::parse("fraud_model").expect("valid identifier"),
                 2
             )]
         );
+        assert!(
+            !state.resources.is_declared(
+                &domain("other"),
+                &Identifier::parse("fraud_model").expect("valid identifier")
+            ),
+            "a resource declared in one domain must not appear in another"
+        );
 
-        let version = resource_version("fraud_model", 1);
+        let version = resource_version("tenant", "fraud_model", 1);
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutResourceVersion {
@@ -3145,6 +3149,7 @@ mod tests {
 
         let replica = ResourceNodeStatus {
             key: ResourceReplicaKey::new(
+                domain("tenant"),
                 Identifier::parse("fraud_model").expect("valid identifier"),
                 1,
                 "node-2",

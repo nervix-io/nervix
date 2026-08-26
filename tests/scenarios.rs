@@ -2778,6 +2778,14 @@ async fn when_leadership_is_transferred_from_node_to_node(
         .transfer_leadership(&from_node_id, &to_node_id);
 }
 
+#[given("the leader node forgets its transaction session bindings")]
+async fn given_leader_forgets_transaction_bindings(world: &mut ScenarioWorld) {
+    let leader = current_leader_node(world).await;
+    world
+        .runtime_test_hooks
+        .drop_transaction_bindings_on(leader);
+}
+
 #[given(expr = "transaction commit on node {string} pauses after {int} statement")]
 async fn given_transaction_commit_pause(
     world: &mut ScenarioWorld,
@@ -3974,6 +3982,38 @@ async fn when_named_client_fails_to_execute_commands(
     panic!("client '{name}' commands unexpectedly succeeded");
 }
 
+#[when(expr = "client {string} selects domain {string}")]
+async fn when_named_client_selects_domain(world: &mut ScenarioWorld, name: String, domain: String) {
+    let name = expand_placeholders(world, &name);
+    let domain = expand_placeholders(world, &domain);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    client.set_domain(domain).await;
+}
+
+#[then(expr = "client {string} active domain is {string}")]
+async fn then_named_client_active_domain_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let expected = expand_placeholders(world, &expected);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let actual = client.domain().await;
+    assert_eq!(
+        actual, expected,
+        "client '{name}' active domain must be '{expected}'"
+    );
+}
+
 #[then(expr = "client {string} transaction id is saved as placeholder {string}")]
 async fn then_named_client_transaction_id_is_saved(
     world: &mut ScenarioWorld,
@@ -4737,6 +4777,7 @@ async fn when_these_nspl_commands_fail_with(
     world.active_session_node = None;
     world.active_session_has_subscription = false;
 
+    let expected_error = expand_placeholders(world, &expected_error);
     let commands = expand_placeholders(world, docstring(step));
     let leader = current_leader_node(world).await;
     match execute_nspl_commands_on_node(world, &leader, &commands).await {

@@ -153,35 +153,35 @@ impl ProtobufDescriptorCompileConfig {
     fn compile_descriptor_set(
         self,
         store: &ResourceStore,
-        resource: &Identifier,
-        version: u64,
+        id: &ResourceId,
     ) -> Result<prost_types::FileDescriptorSet, String> {
         let files = if self.files.is_empty() {
-            Self::collect_resource_proto_files(store, resource, version)?
+            Self::collect_resource_proto_files(store, id)?
         } else {
             self.files
                 .iter()
                 .map(|path| {
                     store
-                        .resolve_content_path(resource, version, path)
+                        .resolve_content_path(id, path)
                         .map_err(|error| format!("invalid protobuf source path '{path}': {error}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?
         };
         if files.is_empty() {
             return Err(format!(
-                "protobuf resource '{}' version {version} contains no .proto files",
-                resource.as_str()
+                "protobuf resource '{}' version {} contains no .proto files",
+                id.identifier.as_str(),
+                id.version
             ));
         }
         let includes = if self.includes.is_empty() {
-            vec![store.content_root(resource, version)]
+            vec![store.content_root(id)]
         } else {
             self.includes
                 .iter()
                 .map(|path| {
                     store
-                        .resolve_content_path(resource, version, path)
+                        .resolve_content_path(id, path)
                         .map_err(|error| format!("invalid protobuf include path '{path}': {error}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?
@@ -193,10 +193,9 @@ impl ProtobufDescriptorCompileConfig {
 
     fn collect_resource_proto_files(
         store: &ResourceStore,
-        resource: &Identifier,
-        version: u64,
+        id: &ResourceId,
     ) -> Result<Vec<PathBuf>, String> {
-        let root = store.content_root(resource, version);
+        let root = store.content_root(id);
         let mut files = BTreeSet::new();
         Self::collect_proto_files_recursive(&root, &mut files)?;
         Ok(files.into_iter().collect())
@@ -256,6 +255,7 @@ impl Runtime {
             };
             let pool = self
                 .compile_protobuf_descriptor_pool(
+                    domain,
                     &config.resource,
                     config.resource_version,
                     &config.config,
@@ -287,6 +287,7 @@ impl Runtime {
         let descriptors = if let SignalingWireFormat::Protobuf(config) = &protocol.format {
             let pool = self
                 .compile_protobuf_descriptor_pool(
+                    domain,
                     &config.resource,
                     config.resource_version,
                     &config.config,
@@ -308,6 +309,7 @@ impl Runtime {
 
     async fn compile_protobuf_descriptor_pool(
         &self,
+        domain: &Domain,
         resource: &Identifier,
         resource_version: Option<u64>,
         config: &[ClientConfigEntry],
@@ -316,20 +318,14 @@ impl Runtime {
             self.resource_store.read().clone().ok_or_else(|| {
                 "protobuf descriptors require an attached resource store".to_string()
             })?;
-        let version = if let Some(version) = resource_version {
-            version
-        } else {
-            self.resolve_resource_version(resource, resource.as_str())?
-        };
-        let resource = resource.clone();
+        let id = self.resolve_resource_id(domain, resource, resource_version, resource.as_str())?;
         let compile_config = ProtobufDescriptorCompileConfig::from_entries(config)?;
-        let file_descriptor_set = tokio::task::spawn_blocking(move || {
-            compile_config.compile_descriptor_set(&store, &resource, version)
-        })
-        .await
-        .map_err(|error| {
-            format!("failed to join protobuf descriptor compilation task: {error}")
-        })??;
+        let file_descriptor_set =
+            tokio::task::spawn_blocking(move || compile_config.compile_descriptor_set(&store, &id))
+                .await
+                .map_err(|error| {
+                    format!("failed to join protobuf descriptor compilation task: {error}")
+                })??;
 
         ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
     }
@@ -442,6 +438,7 @@ impl Runtime {
             #[cfg(feature = "testing")]
             schedule_publication_faults: hooks.schedule_publication_faults,
             #[cfg(feature = "testing")]
+            transaction_binding_drops: hooks.transaction_binding_drops,
             transaction_commit_pauses: hooks.transaction_commit_pauses,
             #[cfg(feature = "testing")]
             entity_gate_pauses: hooks.entity_gate_pauses,
@@ -859,6 +856,11 @@ impl Runtime {
     #[cfg(feature = "testing")]
     pub fn take_armed_schedule_publication_fault(&self, domain: &Domain) -> bool {
         self.schedule_publication_faults.take_armed_fault(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn take_armed_transaction_binding_drop(&self, node_id: &str) -> bool {
+        self.transaction_binding_drops.take(node_id)
     }
 
     #[cfg(feature = "testing")]
@@ -1289,16 +1291,14 @@ impl Runtime {
     pub fn sync_resource_versions(&self, resources: &nervix_models::ResourceVersionStatus) {
         self.latest_resource_versions.clear();
         for resource in &resources.versions {
-            if let Some(mut existing) = self
-                .latest_resource_versions
-                .get_mut(&resource.id.identifier)
-            {
+            let key = (resource.id.domain.clone(), resource.id.identifier.clone());
+            if let Some(mut existing) = self.latest_resource_versions.get_mut(&key) {
                 if resource.id.version > *existing {
                     *existing = resource.id.version;
                 }
             } else {
                 self.latest_resource_versions
-                    .insert(resource.id.identifier.clone(), resource.id.version);
+                    .insert(key, resource.id.version);
             }
         }
     }
@@ -1334,11 +1334,19 @@ impl Runtime {
         *self.resource_versions.write() = resource_versions;
     }
 
-    pub(in crate::runtime) fn resolve_resource_version(
+    /// Resolves a resource reference to the concrete version installed in `domain`. Resources are
+    /// domain-owned, so the same name in another domain is a different resource with its own
+    /// version sequence. `spec` may pin a version as `<name>@<version>`.
+    pub(in crate::runtime) fn resolve_resource_id(
         &self,
+        domain: &Domain,
         identifier: &Identifier,
+        requested_version: Option<u64>,
         spec: &str,
-    ) -> Result<u64, String> {
+    ) -> Result<ResourceId, String> {
+        if let Some(version) = requested_version {
+            return Ok(ResourceId::new(domain.clone(), identifier.clone(), version));
+        }
         if let Some((name, version)) = spec.rsplit_once('@') {
             let parsed = Identifier::parse(name)
                 .map_err(|_| format!("invalid client resource identifier '{name}'"))?;
@@ -1348,42 +1356,43 @@ impl Runtime {
                     parsed.as_str()
                 ));
             }
-            return version
+            let version = version
                 .parse::<u64>()
-                .map_err(|_| format!("invalid client resource version '{version}'"));
+                .map_err(|_| format!("invalid client resource version '{version}'"))?;
+            return Ok(ResourceId::new(domain.clone(), identifier.clone(), version));
         }
 
         let resources = self.resource_versions.read();
         resources
-            .next_version_by_identifier
-            .iter()
-            .find_map(|(known_identifier, next_version)| {
-                (known_identifier == identifier).then_some(next_version.saturating_sub(1))
-            })
-            .filter(|version| *version > 0)
+            .latest_version(domain, identifier)
+            .map(|version| ResourceId::new(domain.clone(), identifier.clone(), version))
             .ok_or_else(|| {
                 format!(
-                    "resource '{}' has no installed versions",
-                    identifier.as_str()
+                    "resource '{}' has no installed versions in domain '{}'",
+                    identifier.as_str(),
+                    domain.as_str()
                 )
             })
     }
 
     pub(crate) fn resolve_client_config(
         &self,
+        domain: &Domain,
         mount: Option<&Identifier>,
         config: &[nervix_models::ClientConfigEntry],
     ) -> Result<ResolvedClientConfig, String> {
-        self.resolve_client_config_with_template_vars(mount, config, BTreeMap::default())
+        self.resolve_client_config_with_template_vars(domain, mount, config, BTreeMap::default())
     }
 
     pub(in crate::runtime) fn resolve_client_config_with_instance(
         &self,
+        domain: &Domain,
         mount: Option<&Identifier>,
         config: &[nervix_models::ClientConfigEntry],
         instance: u64,
     ) -> Result<ResolvedClientConfig, String> {
         self.resolve_client_config_with_template_vars(
+            domain,
             mount,
             config,
             BTreeMap::from([("instance".to_string(), instance.to_string())]),
@@ -1392,6 +1401,7 @@ impl Runtime {
 
     fn resolve_client_config_with_template_vars(
         &self,
+        domain: &Domain,
         mount: Option<&Identifier>,
         config: &[nervix_models::ClientConfigEntry],
         mut context: BTreeMap<String, String>,
@@ -1425,8 +1435,8 @@ impl Runtime {
         let mount_root = tempfile::tempdir()
             .map_err(|source| format!("failed to create client resource mount root: {source}"))?;
         let mut aliases = BTreeMap::new();
-        let version = self.resolve_resource_version(mount, mount.as_str())?;
-        let source_root = resource_store.content_root(mount, version);
+        let id = self.resolve_resource_id(domain, mount, None, mount.as_str())?;
+        let source_root = resource_store.content_root(&id);
         if !source_root.exists() {
             return Err(format!(
                 "client resource mount '{}' points to missing content root '{}'",
@@ -5887,7 +5897,7 @@ impl Runtime {
             };
 
             template
-                .prepare_wasm_processors(self)
+                .prepare_wasm_processors(self, domain)
                 .await
                 .map_err(|reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -6273,6 +6283,7 @@ impl Runtime {
                 }
                 Model::WasmProcessor(processor) => {
                     self.compile_wasm_processor_module(
+                        domain,
                         &processor.name,
                         &processor.resource,
                         processor.resource_version,
@@ -7067,7 +7078,7 @@ impl Runtime {
                 reason,
             })?;
             template
-                .prepare_wasm_processors(self)
+                .prepare_wasm_processors(self, domain)
                 .await
                 .map_err(|reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -9280,7 +9291,7 @@ impl Runtime {
                 reason,
             })?;
             template
-                .prepare_wasm_processors(self)
+                .prepare_wasm_processors(self, domain)
                 .await
                 .map_err(|reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -12591,17 +12602,20 @@ impl Runtime {
         };
         let Some(resource_version) = self
             .latest_resource_versions
-            .get(&lookup.resource)
+            .get(&(domain.clone(), lookup.resource.clone()))
             .map(|value| *value)
         else {
             return Err(format!(
-                "resource '{}' has no uploaded versions for lookup '{}'",
+                "resource '{}' has no uploaded versions for lookup '{}' in domain '{}'",
                 lookup.resource.as_str(),
-                lookup.name.as_str()
+                lookup.name.as_str(),
+                domain.as_str()
             ));
         };
+        let resource_id =
+            ResourceId::new(domain.clone(), lookup.resource.clone(), resource_version);
         let path = resource_store
-            .resolve_content_path(&lookup.resource, resource_version, &lookup.path)
+            .resolve_content_path(&resource_id, &lookup.path)
             .map_err(|error| error.to_string())?;
         let file = tokio::fs::File::open(&path).await.map_err(|error| {
             format!(

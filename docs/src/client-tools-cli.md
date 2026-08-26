@@ -129,13 +129,15 @@ applying one model change:
 | `USE <domain>` | switch the session's active domain |
 | `LIST DOMAINS` | list domains with pace and status |
 | `BEGIN` / `COMMIT` / `REVERT` | open, apply, or discard a replicated transaction on the leader |
-| `UPLOAD RESOURCE <name> VERSION '<dir>'` | stream a local directory as a new resource version |
+| `UPLOAD RESOURCE <name> VERSION '<dir>'` | stream a local directory as a new version of that resource in the active domain |
 | `CREATE SUBSCRIPTION` / `DELETE SUBSCRIPTION` | start and stop a read-only relay subscription |
 
 `USE`, `LIST DOMAINS`, and `UPLOAD RESOURCE` must be submitted on their own, and never inside a
-transaction. Read-only statements, subscriptions, and node administration are also rejected while
-queueing transaction content. An upload renders live progress and finishes once the cluster has
-replicated the version:
+transaction. Read-only statements, subscriptions, `CREATE DOMAIN`, `CREATE USER`, and node
+administration are also rejected while queueing transaction content. `BEGIN` requires an existing
+active domain and binds the transaction to it; attaching a transaction switches the active domain
+to the transaction's domain. An upload targets the active domain, renders live progress, and
+finishes once the cluster has replicated the version:
 
 ```text
 upload resource 'order_model' finished: 4.2 MiB sent, replication complete
