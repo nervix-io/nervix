@@ -474,7 +474,7 @@ docker-prepare-qemu platform="linux/amd64":
         docker run --privileged --rm tonistiigi/binfmt --install all
     fi
 
-docker-build-debian debian_version="trixie" llvm_version="22" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="":
+docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="":
     #!/usr/bin/env bash
     set -euo pipefail
     normalized_platform="{{ platform }}"
