@@ -953,7 +953,7 @@ mod tests {
             )
             .expect("subscription request should build")
             .to_query(),
-            "CREATE SUBSCRIPTION live_myss TO myss WHERE (input.tenant = 'acme');"
+            "CREATE SUBSCRIPTION live_myss TO myss WHERE input.tenant = 'acme';"
         );
         assert_eq!(
             subscribe_request(
@@ -966,7 +966,7 @@ mod tests {
             .expect("subscription request should build")
             .to_query(),
             "CREATE SUBSCRIPTION sampled_myss TO myss DROPPING BATCH SAMPLE RATE 0.1 WHERE \
-             (input.tenant = 'acme');"
+             input.tenant = 'acme';"
         );
     }
 
