@@ -169,12 +169,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cd /app \
     && cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server \
     && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
+    && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-nspl-format \
     && kache save-manifest --manifest-key "${KACHE_MANIFEST_KEY}" --namespace "${KACHE_NAMESPACE}" \
     && kache sync --push \
     && mkdir -p /artifacts \
     && cp "/app/target/sonic/${RUST_TARGET}/release/nervix-server" /artifacts/nervix-server \
     && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix-server.bundle" /artifacts/nervix-server.bundle \
-    && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/nervix-cli
+    && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/nervix-cli \
+    && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/nervix-nspl-format
 
 ARG DEBIAN_VERSION=trixie
 FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS onnxruntime
@@ -225,6 +227,7 @@ COPY --from=onnxruntime /onnxruntime/lib/libonnxruntime*.so* /usr/local/lib/
 COPY --from=builder /artifacts/nervix-server /usr/local/bin/nervix-server
 COPY --from=builder /artifacts/nervix-server.bundle /usr/local/bin/nervix-server.bundle
 COPY --from=builder /artifacts/nervix-cli /usr/local/bin/nervix-cli
+COPY --from=builder /artifacts/nervix-nspl-format /usr/local/bin/nervix-nspl-format
 
 USER nervix:nervix
 

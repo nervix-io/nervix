@@ -7,23 +7,25 @@ CREATE SCHEMA input_schema (
 CREATE SCHEMA output_schema (
   scores ARRAY<F32, 10>
 );
-CREATE SCHEMA tenant_schema ( tenant STRING );
+CREATE SCHEMA tenant_schema (
+  tenant STRING
+);
 CREATE BRANCH tenant SCHEMA tenant_schema TTL 5m;
-CREATE RELAY input SCHEMA input_schema BRANCHED BY tenant;
-CREATE RELAY output SCHEMA output_schema BRANCHED BY tenant;
+CREATE RELAY input SCHEMA input_schema BRANCHED BY tenant CAPACITY 1;
+CREATE RELAY output SCHEMA output_schema BRANCHED BY tenant CAPACITY 1;
 
-CREATE INFERENCER score_message
+CREATE ATTACHED INFERENCER score_message
   FROM input
   USING RESOURCE inference
   FILE 'score.onnx'
   INPUTS {
-    "features" DENSE TENSOR<F32>[128] = input.features
+    'features' DENSE TENSOR<F32>[128] = input.features
   }
   OUTPUT SCHEMA {
-    "scores" DENSE TENSOR<F32>[10]
+    'scores' DENSE TENSOR<F32>[10]
   }
   BRANCHED BY tenant
   TO output
-  SET scores = scores
-  FLUSH IMMEDIATE
-  ON MESSAGE ERROR IGNORE;
+    SET scores = scores
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR IGNORE;

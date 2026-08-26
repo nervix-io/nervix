@@ -23,7 +23,9 @@ Feature: Entity name reuse across kinds
       """
     Then the last command output contains
       """
-      CREATE SCHEMA shared_name (user_id I64);
+      CREATE SCHEMA shared_name (
+        user_id I64
+      );
       """
     When these NSPL commands are executed
       """
@@ -31,5 +33,9 @@ Feature: Entity name reuse across kinds
       """
     Then the last command output contains
       """
-      CREATE CLIENT shared_name TYPE KAFKA CONFIG {'bootstrap.servers' = '127.0.0.1:9092'};
+      CREATE CLIENT shared_name
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '127.0.0.1:9092'
+        };
       """

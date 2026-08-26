@@ -33,7 +33,9 @@ Feature: Domain lifecycle
       """
     Then the last command output contains
       """
-      CREATE SCHEMA notification (user_id I64);
+      CREATE SCHEMA notification (
+        user_id I64
+      );
       """
     When this NSPL command request is executed on the leader node
       """
@@ -83,7 +85,9 @@ Feature: Domain lifecycle
       """
     Then the last command output contains
       """
-      CREATE SCHEMA notification (user_id I64);
+      CREATE SCHEMA notification (
+        user_id I64
+      );
       """
     When these NSPL commands are executed on the leader node
       """

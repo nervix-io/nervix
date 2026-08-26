@@ -33,7 +33,7 @@ CREATE SCHEMA binance_ws_event (
 CREATE CODEC binance_ws_event_codec
   FROM JSON
   TO SCHEMA binance_ws_event
-  WITH JAQ TRANSFORMATIONS ON INGESTION $jaq${
+  WITH JAQ TRANSFORMATIONS ON INGESTION $s${
     event_type: .e,
     event_time: .E,
     symbol: .s,
@@ -48,14 +48,11 @@ CREATE CODEC binance_ws_event_codec
     final_update_id: (if .e == "depthUpdate" then .u else null end),
     bid_count: (if .e == "depthUpdate" then (.b | length) else null end),
     ask_count: (if .e == "depthUpdate" then (.a | length) else null end)
-  }$jaq$;
+  }$s$;
 
-CREATE BRANCH by_symbol
-  SCHEMA symbol_branch TTL 5m;
+CREATE BRANCH by_symbol SCHEMA symbol_branch TTL 5m;
 
-CREATE RELAY binance_ws_events
-  SCHEMA binance_ws_event
-  BRANCHED BY by_symbol;
+CREATE RELAY binance_ws_events SCHEMA binance_ws_event BRANCHED BY by_symbol CAPACITY 1;
 
 // Steps run one after another: both subscriptions are written, then each is
 // acknowledged in turn. Neither depends on the other's reply, so they are sent
@@ -65,15 +62,7 @@ CREATE RELAY binance_ws_events
 // trades stream while the btcusdc acknowledgement is still outstanding. Frames
 // that arrive before that point are not market data the graph asked for yet and
 // are dropped rather than buffered.
-CREATE SIGNALING PROTOCOL binance_ws_subscribe_to_btcusd
-  FORMAT JSON
-  FAIL JAQ '.error'
-  ON CONNECT
-  SEND JAQ '{method: "SUBSCRIBE", params: ["btcusdt@aggTrade", "btcusdt@depth"], id: 1}',
-           '{method: "SUBSCRIBE", params: ["btcusdc@aggTrade", "btcusdc@depth"], id: 2}'
-  WAIT JAQ '.id == 1 and .result == null' ACCEPT DATA
-  WAIT JAQ '.id == 2 and .result == null'
-  TIMEOUT 5s;
+CREATE SIGNALING PROTOCOL binance_ws_subscribe_to_btcusd FORMAT JSON FAIL JAQ '.error' ON CONNECT SEND JAQ '{method: "SUBSCRIBE", params: ["btcusdt@aggTrade", "btcusdt@depth"], id: 1}', '{method: "SUBSCRIBE", params: ["btcusdc@aggTrade", "btcusdc@depth"], id: 2}' WAIT JAQ '.id == 1 and .result == null' ACCEPT DATA WAIT JAQ '.id == 2 and .result == null' TIMEOUT 5s;
 
 CREATE CLIENT binance_ws
   TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_ws_subscribe_to_btcusd
@@ -86,14 +75,13 @@ CREATE IF NOT EXISTS SCHEMA symbol_branch (
 );
 
 CREATE INGESTOR ingest_binance_ws
-  FROM WEBSOCKETS binance_ws MODE NO_ACK SEQUENTIAL
-  ON QUIESCE DROP DECODE USING binance_ws_event_codec
+  FROM WEBSOCKETS binance_ws MODE NO_ACK SEQUENTIAL ON QUIESCE DROP
+  DECODE USING binance_ws_event_codec
   TO binance_ws_events
-  INHERIT ALL
-  BRANCHED BY by_symbol
-  SET symbol = message.symbol
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-  ON MESSAGE ERROR LOG
+    INHERIT ALL
+    BRANCHED BY by_symbol SET symbol = message.symbol
+    FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
 CREATE SUBSCRIPTION binance_ws_events_subscription TO binance_ws_events;

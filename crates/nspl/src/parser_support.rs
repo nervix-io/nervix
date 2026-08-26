@@ -82,6 +82,40 @@ pub enum ParseFromSourceError {
     },
 }
 
+impl ParseFromSourceError {
+    /// The diagnostics describing why the source was rejected.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        match self {
+            Self::Lex { diagnostics, .. } | Self::Parse { diagnostics, .. } => diagnostics,
+        }
+    }
+
+    /// The source text that was rejected.
+    pub fn source_text(&self) -> &str {
+        match self {
+            Self::Lex { source, .. } | Self::Parse { source, .. } => source,
+        }
+    }
+}
+
+impl std::fmt::Display for ParseFromSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stage = match self {
+            Self::Lex { .. } => "lex",
+            Self::Parse { .. } => "parse",
+        };
+        let messages = self
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        write!(f, "{stage} error: {messages}")
+    }
+}
+
+impl std::error::Error for ParseFromSourceError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub message: String,
@@ -1956,7 +1990,15 @@ fn vm_program_token_to_source(token: &Token) -> String {
         Token::Word(Word::KnownWord { raw, .. }) => raw.clone(),
         Token::Word(Word::UnknownWord(raw)) => raw.clone(),
         Token::StringLiteral(value) => {
-            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+            // The expression lexer rejects raw control characters inside a quoted string, so they
+            // are escaped here rather than passed through from the outer dollar-quoted form.
+            let escaped = value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
+            format!("\"{escaped}\"")
         }
         Token::NumberLiteral(value) => value.clone(),
         Token::LParen => "(".to_string(),

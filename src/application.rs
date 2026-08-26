@@ -647,6 +647,7 @@ impl SessionSubscriptions {
     fn plan_commands(
         &self,
         statements: Vec<ParsedClientStatement>,
+        query: &str,
         request_domain: &str,
     ) -> Result<Vec<SessionCommandOperation>, String> {
         let mut transaction_active = self.transaction_active();
@@ -654,6 +655,7 @@ impl SessionSubscriptions {
         let mut operations = Vec::with_capacity(statements.len());
 
         for parsed in statements {
+            let span = parsed.span.clone();
             match parsed.statement {
                 ClientStatement::BeginTransaction => {
                     if transaction_active {
@@ -680,7 +682,7 @@ impl SessionSubscriptions {
                 }
                 statement => {
                     let command = PendingSessionCommand {
-                        source: parsed.source,
+                        source: query[span].to_string(),
                         statement,
                         domain: request_domain.to_string(),
                     };
@@ -7615,14 +7617,15 @@ impl SessionServiceImpl {
             }
         }
 
-        let operations = match subscriptions.plan_commands(client_statements, &req.domain) {
-            Ok(operations) => operations,
-            Err(error) => {
-                return self
-                    .command_with_transaction_status(command_error(error), subscriptions)
-                    .await;
-            }
-        };
+        let operations =
+            match subscriptions.plan_commands(client_statements, &req.query, &req.domain) {
+                Ok(operations) => operations,
+                Err(error) => {
+                    return self
+                        .command_with_transaction_status(command_error(error), subscriptions)
+                        .await;
+                }
+            };
 
         let result = self
             .process_session_command_operations(operations, tx, subscriptions)

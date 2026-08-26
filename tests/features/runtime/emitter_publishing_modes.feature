@@ -359,7 +359,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 180ms MAX 18s
+      WITH MAX BATCH 2
+      """
+    And the last command output contains
+      """
+      MODE ACK RETRY POLICY BACKOFF 180ms MAX 18s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -375,7 +379,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      WITH MAX BATCH 3 MODE ACK RETRY POLICY BACKOFF 190ms MAX 19s
+      WITH MAX BATCH 3
+      """
+    And the last command output contains
+      """
+      MODE ACK RETRY POLICY BACKOFF 190ms MAX 19s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -383,7 +391,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      WITH MAX BATCH 4 MODE ACK RETRY POLICY BACKOFF 200ms MAX 20s
+      WITH MAX BATCH 4
+      """
+    And the last command output contains
+      """
+      MODE ACK RETRY POLICY BACKOFF 200ms MAX 20s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -391,7 +403,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      WITH MAX BATCH 5 MODE ACK RETRY POLICY BACKOFF 210ms MAX 21s
+      WITH MAX BATCH 5
+      """
+    And the last command output contains
+      """
+      MODE ACK RETRY POLICY BACKOFF 210ms MAX 21s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -399,7 +415,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY BACKOFF 220ms MAX 22s
+      COMMIT EACH 1m MAX SIZE 64MiB
+      """
+    And the last command output contains
+      """
+      MODE ACK RETRY POLICY BACKOFF 220ms MAX 22s
       """
 
     Examples:

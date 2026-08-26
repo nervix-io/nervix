@@ -20,7 +20,7 @@ test-loom: wasm-processor-guests
 
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
-tests-deps: build-deps
+tests-deps: build-deps build-nspl-format
 
 test: tests-deps
     #!/usr/bin/env bash
@@ -139,7 +139,7 @@ taplo-format:
     taplo format
 
 [parallel]
-fmt: cargo-fmt taplo-format dockerfmt proto-fmt gherkin-fmt autoinherit
+fmt: cargo-fmt taplo-format dockerfmt proto-fmt gherkin-fmt nspl-fmt autoinherit
 
 cargo-fmt-check:
     cargo +nightly fmt --check
@@ -148,13 +148,24 @@ taplo-format-check:
     taplo format --check
 
 [parallel]
-fmt-check: cargo-fmt-check taplo-format-check dockerfmt-check proto-fmt-check gherkin-fmt-check autoinherit-check
+fmt-check: cargo-fmt-check taplo-format-check dockerfmt-check proto-fmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
 
 gherkin-fmt:
     ghokin fmt replace tests/features
 
 gherkin-fmt-check:
     ghokin check tests/features
+
+# Format every NSPL file in the repository.
+nspl-fmt:
+    cargo run -q --package nervix-nspl-format -- .
+
+# Report every NSPL file in the repository that is not formatted.
+nspl-fmt-check:
+    cargo run -q --package nervix-nspl-format -- --check .
+
+build-nspl-format:
+    cargo build --package nervix-nspl-format
 
 autoinherit:
     cargo autoinherit

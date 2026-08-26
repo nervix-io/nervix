@@ -40,15 +40,22 @@ Feature: Altering ingestors
       """
     Then the last command output contains
       """
-      CREATE INGESTOR event_source FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec_v2 TIMESTAMP NOW FILTER WHERE (input.seq > 0)
-      """
-    And the last command output contains
-      """
-      TO outgoing SET seq = (input.seq + 1) UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR IGNORE
-      """
-    And the last command output contains
-      """
-      TO audit INHERIT ALL UNBRANCHED FLUSH EACH 10ms MAX BATCH SIZE 512KiB ON MESSAGE ERROR LOG ON GENERAL ERROR IGNORE;
+      CREATE INGESTOR event_source
+        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB
+        DECODE USING event_codec_v2
+        TIMESTAMP NOW
+        FILTER WHERE input.seq > 0
+        TO outgoing
+          SET seq = input.seq + 1
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR IGNORE
+        TO audit
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH EACH 10ms MAX BATCH SIZE 512KiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR IGNORE;
       """
 
     Examples:

@@ -37,7 +37,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE SCHEMA after_failover (value STRING);
+      CREATE SCHEMA after_failover (
+        value STRING
+      );
       """
 
   Scenario: REVERT remains available after leader failover
@@ -143,7 +145,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE SCHEMA resumed_commit (value STRING);
+      CREATE SCHEMA resumed_commit (
+        value STRING
+      );
       """
     When the transaction commit pause on node "{{old_leader}}" after 1 statement is released
     Then the background NSPL execution is discarded
@@ -304,7 +308,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE SCHEMA bound_domain_event (value STRING);
+      CREATE SCHEMA bound_domain_event (
+        value STRING
+      );
       """
 
     Examples:
@@ -344,7 +350,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE SCHEMA rebound_second_event (value STRING);
+      CREATE SCHEMA rebound_second_event (
+        value STRING
+      );
       """
 
     Examples:
@@ -440,7 +448,10 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE SCHEMA queued_preflight (value STRING, note STRING OPTIONAL);
+      CREATE SCHEMA queued_preflight (
+        value STRING,
+        note STRING OPTIONAL
+      );
       """
 
     Examples:
@@ -642,7 +653,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE SCHEMA committed_notification (user_id I64);
+      CREATE SCHEMA committed_notification (
+        user_id I64
+      );
       """
 
     Examples:
@@ -788,7 +801,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE SCHEMA transaction_event (value F64);
+      CREATE SCHEMA transaction_event (
+        value F64
+      );
       """
     When these NSPL commands are executed on the leader node
       """
@@ -796,7 +811,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE WIRE JSON SCHEMA transaction_event_wire MODE STRICT (value NUMBER);
+      CREATE WIRE JSON SCHEMA transaction_event_wire MODE STRICT (
+        value NUMBER
+      );
       """
 
     Examples:
@@ -833,7 +850,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE SCHEMA transaction_event_wire (value STRING);
+      CREATE SCHEMA transaction_event_wire (
+        value STRING
+      );
       """
     When these NSPL commands are executed on the leader node
       """
@@ -841,7 +860,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE WIRE JSON SCHEMA transaction_event_wire MODE LOOSE (value STRING);
+      CREATE WIRE JSON SCHEMA transaction_event_wire MODE LOOSE (
+        value STRING
+      );
       """
     When these NSPL commands are executed on the leader node
       """
@@ -849,7 +870,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE WIRE CBOR SCHEMA transaction_event_wire MODE STRICT (value STRING);
+      CREATE WIRE CBOR SCHEMA transaction_event_wire MODE STRICT (
+        value STRING
+      );
       """
 
     Examples:
@@ -885,7 +908,9 @@ Feature: NSPL transactions
       """
     Then the last command output contains
       """
-      CREATE SCHEMA atomic_event (value STRING);
+      CREATE SCHEMA atomic_event (
+        value STRING
+      );
       """
     When these NSPL commands fail with "schema 'must_not_exist' does not exist"
       """

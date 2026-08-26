@@ -79,7 +79,12 @@ Feature: Web console NSPL REPL
     And selector ".terminal" contains "quiesce level: DYNAMIC"
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA notification"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE SCHEMA notification (user_id I64);"
+    Then selector ".terminal" contains
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      """
 
   Scenario: Web console commands opened on a follower are handled by the leader
     Given a 3 node nervix cluster is started
@@ -130,7 +135,12 @@ Feature: Web console NSPL REPL
     Then selector ".terminal" contains "quiesce level: DYNAMIC"
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA follower_notification"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE SCHEMA follower_notification (user_id I64);"
+    Then selector ".terminal" contains
+      """
+      CREATE SCHEMA follower_notification (
+        user_id I64
+      );
+      """
 
   Scenario: Web console reattaches an open transaction after leader switchover
     Given a 3 node nervix cluster is started
@@ -162,7 +172,12 @@ Feature: Web console NSPL REPL
     And selector ".prompt-row" does not contain "{{domain}} tx"
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA after_switchover;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE SCHEMA after_switchover (value I64);"
+    Then selector ".terminal" contains
+      """
+      CREATE SCHEMA after_switchover (
+        value I64
+      );
+      """
 
   Scenario: Web console autocompletes NSPL commands
     Given a 3 node nervix cluster is started

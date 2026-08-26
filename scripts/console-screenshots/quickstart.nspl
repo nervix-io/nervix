@@ -20,20 +20,20 @@ CREATE SCHEMA order_tiered (
 );
 
 CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
-  order_id string,
-  customer string,
-  status string,
-  amount integer,
-  quantity integer
+  order_id STRING,
+  customer STRING,
+  status STRING,
+  amount INTEGER,
+  quantity INTEGER
 );
 
 CREATE WIRE JSON SCHEMA order_tiered_wire MODE STRICT (
-  order_id string,
-  customer string,
-  status string,
-  amount integer,
-  quantity integer,
-  tier string
+  order_id STRING,
+  customer STRING,
+  status STRING,
+  amount INTEGER,
+  quantity INTEGER,
+  tier STRING
 );
 
 CREATE CODEC order_codec
@@ -44,11 +44,11 @@ CREATE CODEC order_tiered_codec
   FROM WIRE JSON SCHEMA order_tiered_wire
   TO SCHEMA order_tiered;
 
-CREATE RELAY orders SCHEMA order_record UNBRANCHED;
+CREATE RELAY orders SCHEMA order_record UNBRANCHED CAPACITY 1;
 
-CREATE RELAY high_value_orders SCHEMA order_tiered UNBRANCHED;
+CREATE RELAY high_value_orders SCHEMA order_tiered UNBRANCHED CAPACITY 1;
 
-CREATE RELAY routine_orders SCHEMA order_record UNBRANCHED;
+CREATE RELAY routine_orders SCHEMA order_record UNBRANCHED CAPACITY 1;
 
 CREATE CLIENT kafka_local
   TYPE KAFKA
@@ -63,11 +63,8 @@ CREATE CLIENT redis_local
   };
 
 CREATE INGESTOR kafka_orders
-  FROM KAFKA kafka_local
-  TOPIC orders
-  OFFSET BY CONSUMER GROUP quickstart
-  MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-  ON QUIESCE SUSPEND DECODE USING order_codec
+  FROM KAFKA kafka_local TOPIC orders OFFSET BY CONSUMER GROUP quickstart MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING order_codec
   TO orders
     INHERIT ALL
     UNBRANCHED
@@ -75,15 +72,12 @@ CREATE INGESTOR kafka_orders
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE JUNCTION route_orders
+CREATE ATTACHED JUNCTION route_orders
   FROM orders
   UNBRANCHED
   TO high_value_orders
     INHERIT ALL
-    SET tier = CASE
-          WHEN input.amount >= 10000 THEN "vip"
-          ELSE "high"
-        END
+    SET tier = CASE WHEN input.amount >= 10000 THEN 'vip' ELSE 'high' END
     WHERE output.amount >= 1000
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG
@@ -93,7 +87,7 @@ CREATE JUNCTION route_orders
     FLUSH EACH 1s MAX BATCH SIZE 1MiB
     ON MESSAGE ERROR LOG;
 
-CREATE EMITTER redis_orders
+CREATE ATTACHED EMITTER redis_orders
   FROM orders
   TO REDIS PUBSUB redis_local CHANNEL orders_out
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -103,7 +97,7 @@ CREATE EMITTER redis_orders
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE EMITTER redis_high_value
+CREATE ATTACHED EMITTER redis_high_value
   FROM high_value_orders
   TO REDIS PUBSUB redis_local CHANNEL high_value_out
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s

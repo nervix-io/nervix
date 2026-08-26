@@ -35,15 +35,21 @@ Feature: Altering deduplicators and reorderers
       """
     Then the last command output contains
       """
-      CREATE DETACHED DEDUPLICATOR dedup_events FROM incoming_a, incoming_b WHERE (input.key > 0) COLLECT FOR 10ms MAX BATCH SIZE 1MiB FILTER WHERE (input.alternate > 0) DEDUPLICATE ON input.alternate, input.key MAX TIME 20m UNBRANCHED
-      """
-    And the last command output contains
-      """
-      USING MATERIALIZED STATE state_events REQUIRED SKIP TO outgoing
-      """
-    And the last command output contains
-      """
-      TO audit INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DETACHED DEDUPLICATOR dedup_events
+        FROM incoming_a, incoming_b WHERE input.key > 0 COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        FILTER WHERE input.alternate > 0
+        DEDUPLICATE ON input.alternate, input.key
+        MAX TIME 20m
+        UNBRANCHED
+        USING MATERIALIZED STATE state_events REQUIRED SKIP
+        TO outgoing
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        TO audit
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
       """
 
     Examples:
@@ -87,15 +93,21 @@ Feature: Altering deduplicators and reorderers
       """
     Then the last command output contains
       """
-      CREATE DETACHED REORDERER order_events FROM incoming_a, incoming_b WHERE (input.primary_key > 0) COLLECT FOR 10ms MAX BATCH SIZE 1MiB FILTER WHERE (input.secondary_key > 0) BY input.secondary_key, input.primary_key MAX TIME 20m UNBRANCHED
-      """
-    And the last command output contains
-      """
-      USING MATERIALIZED STATE state_events REQUIRED SKIP TO outgoing
-      """
-    And the last command output contains
-      """
-      TO audit INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DETACHED REORDERER order_events
+        FROM incoming_a, incoming_b WHERE input.primary_key > 0 COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        FILTER WHERE input.secondary_key > 0
+        BY input.secondary_key, input.primary_key
+        MAX TIME 20m
+        UNBRANCHED
+        USING MATERIALIZED STATE state_events REQUIRED SKIP
+        TO outgoing
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        TO audit
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
       """
 
     Examples:

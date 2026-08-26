@@ -393,6 +393,66 @@ mod tests {
         }
     }
 
+    /// Builds an expression tree deep enough to exercise every precedence boundary.
+    fn gen_expression(g: &mut ByteGen, depth: u8) -> nervix_models::Expression {
+        use nervix_models::{BinaryOperator, Expression, FieldReference, Literal, UnaryOperator};
+
+        if depth == 0 {
+            return match g.next_u8() % 4 {
+                0 => Expression::Literal(Literal::I64(g.bounded_u64(0, 999) as i64)),
+                1 => Expression::Literal(Literal::Bool(g.bool())),
+                2 => Expression::Literal(Literal::Null),
+                // Prefixed so a generated name can never collide with a language keyword.
+                _ => Expression::Field(FieldReference::bare(
+                    ModelIdentifier::try_from(format!("f_{}", g.ident().as_str()).as_str())
+                        .expect("prefixed identifier must be valid"),
+                )),
+            };
+        }
+
+        match g.next_u8() % 7 {
+            0..=3 => {
+                let operator = g.choose(&[
+                    BinaryOperator::Or,
+                    BinaryOperator::And,
+                    BinaryOperator::Equal,
+                    BinaryOperator::NotEqual,
+                    BinaryOperator::GreaterThan,
+                    BinaryOperator::LessThan,
+                    BinaryOperator::GreaterThanOrEqual,
+                    BinaryOperator::LessThanOrEqual,
+                    BinaryOperator::Add,
+                    BinaryOperator::Subtract,
+                    BinaryOperator::Multiply,
+                    BinaryOperator::Divide,
+                    BinaryOperator::Remainder,
+                ]);
+                Expression::Binary {
+                    operator,
+                    left: Box::new(gen_expression(g, depth - 1)),
+                    right: Box::new(gen_expression(g, depth - 1)),
+                }
+            }
+            4 => Expression::Unary {
+                operator: g.choose(&[UnaryOperator::Negate, UnaryOperator::Not]),
+                expression: Box::new(gen_expression(g, depth - 1)),
+            },
+            5 => Expression::Cast {
+                expression: Box::new(gen_expression(g, depth - 1)),
+                target: g.choose(&[
+                    nervix_models::ParseAsType::String,
+                    nervix_models::ParseAsType::I64,
+                    nervix_models::ParseAsType::F64,
+                    nervix_models::ParseAsType::Bool,
+                ]),
+            },
+            _ => Expression::Array(vec![
+                gen_expression(g, depth - 1),
+                gen_expression(g, depth - 1),
+            ]),
+        }
+    }
+
     fn gen_model(bytes: &[u8]) -> Model {
         let mut g = ByteGen::new(bytes);
         match g.next_u8() % 29 {
@@ -1860,8 +1920,8 @@ mod tests {
         let canonical = processor
             .to_canonical_nspl()
             .expect("inferencer should render canonically");
-        assert!(canonical.contains("TO scored SET score = score FLUSH IMMEDIATE"));
-        assert!(canonical.contains("OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] }"));
+        assert!(canonical.contains("TO scored\n    SET score = score\n    FLUSH IMMEDIATE"));
+        assert!(canonical.contains("OUTPUT SCHEMA {\n    'score' DENSE TENSOR<F32>[1]\n  }"));
     }
 
     #[test]
@@ -2692,7 +2752,7 @@ mod tests {
             panic!("expected create statement");
         };
         let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        assert!(canonical.contains("MAX FUEL 1000000 MAX MEMORY 67108864B"));
+        assert!(canonical.contains("MAX FUEL 1000000\n  MAX MEMORY 64MiB"));
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::Create(parsed), reparsed);
     }
@@ -2800,6 +2860,71 @@ mod tests {
     }
 
     #[test]
+    fn canonical_roundtrip_expression_string_spanning_lines() {
+        let input = "
+            CREATE DEDUPLICATOR dedup_txns
+                FROM ss1
+                DEDUPLICATE ON input.transaction_id
+                MAX TIME 10m
+                BRANCHED BY tenant
+                TO ss2 INHERIT ALL WHERE note = $s$line\nbreak$s$
+                FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG;
+        ";
+
+        let parsed = parse_statement(input).expect("parse should succeed");
+        let Statement::Create(parsed) = parsed else {
+            panic!("expected create statement");
+        };
+        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::Create(parsed), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_codec_with_multiline_jaq_program() {
+        let input = r#"
+            CREATE CODEC binance_ws_event_codec
+                FROM JSON
+                TO SCHEMA binance_ws_event
+                WITH JAQ TRANSFORMATIONS ON INGESTION $jaq${
+                    event_type: .e,
+                    price: (if .e == "aggTrade" then .p else null end)
+                }$jaq$;
+        "#;
+
+        let parsed = parse_statement(input).expect("parse should succeed");
+        let Statement::Create(parsed) = parsed else {
+            panic!("expected create statement");
+        };
+        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::Create(parsed), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_preserves_float_literal_types() {
+        let input = r#"
+            CREATE DEDUPLICATOR dedup_txns
+                FROM ss1
+                DEDUPLICATE ON input.transaction_id
+                MAX TIME 10m
+                BRANCHED BY tenant
+                TO ss2 INHERIT ALL WHERE battery_pct < 15.0 AND score >= 80.0
+                FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG;
+        "#;
+
+        let parsed = parse_statement(input).expect("parse should succeed");
+        let Statement::Create(parsed) = parsed else {
+            panic!("expected create statement");
+        };
+        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::Create(parsed), reparsed);
+    }
+
+    #[test]
     fn canonical_roundtrip_emitter() {
         let input = r#"
             CREATE EMITTER emit
@@ -2876,6 +3001,24 @@ mod tests {
         let canonical = parsed.to_canonical_nspl().expect("must render canonical");
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::Create(parsed), reparsed);
+    }
+
+    #[test]
+    fn bolero_expression_roundtrip_minimal_parentheses() {
+        check!()
+            .with_test_time(std::time::Duration::from_millis(400))
+            .for_each(|bytes: &[u8]| {
+                let mut g = ByteGen::new(bytes);
+                let expression = gen_expression(&mut g, 4);
+                let rendered = nervix_models::expression_to_nspl(&expression)
+                    .expect("generator output must be renderable");
+                let reparsed = crate::parse_expression(&rendered)
+                    .unwrap_or_else(|error| panic!("{rendered} must reparse: {error:?}"));
+                assert_eq!(
+                    expression, reparsed,
+                    "{rendered} regrouped when it was reparsed"
+                );
+            });
     }
 
     #[test]

@@ -29,11 +29,18 @@ Feature: Altering junctions
       """
     Then the last command output contains
       """
-      CREATE DETACHED JUNCTION route_events FROM incoming_a, incoming_b COLLECT FOR 10ms MAX BATCH SIZE 1MiB FILTER WHERE (input.seq > 0) UNBRANCHED
-      """
-    And the last command output contains
-      """
-      TO audit INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DETACHED JUNCTION route_events
+        FROM incoming_a, incoming_b COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        FILTER WHERE input.seq > 0
+        UNBRANCHED
+        TO outgoing
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        TO audit
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
       """
 
     Examples:

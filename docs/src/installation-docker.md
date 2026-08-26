@@ -1,8 +1,8 @@
 # Docker
 
 Nervix publishes a rolling multi-architecture Debian image to
-`ghcr.io/nervix-io/nervix:debian-latest`. The image contains both `nervix-server` and
-`nervix-cli`. The examples on this page create a three-node cluster for local evaluation.
+`ghcr.io/nervix-io/nervix:debian-latest`. The image contains `nervix-server`, `nervix-cli`, and
+`nervix-nspl-format`. The examples on this page create a three-node cluster for local evaluation.
 
 For a reproducible or production deployment, replace the rolling tag with a reviewed timestamped
 tag or image digest. Use TLS, a secret manager, and a client-reachable advertise hostname instead

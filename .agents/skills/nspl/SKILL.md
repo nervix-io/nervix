@@ -38,7 +38,7 @@ guidance to select the relevant Markdown entries from the public index.
 ## Assemble the graph
 
 Run the control plane with `nervix-server` and submit configuration through the separate
-`nervix-cli` client.
+`nervix-cli` client. Format saved `.nspl` files with `nervix-nspl-format`.
 
 Build configuration in dependency order:
 
