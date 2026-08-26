@@ -7447,6 +7447,48 @@ impl SessionServiceImpl {
         }
     }
 
+    /// The configuration this session's bound transaction has queued for `domain`. Queued
+    /// configuration follows the binding, so a session that holds no transaction, one displaced by
+    /// a takeover, one whose transaction this node does not hold, and one whose transaction
+    /// configures another domain all fall back to committed configuration alone.
+    async fn queued_configuration(
+        &self,
+        subscriptions: &SessionSubscriptions,
+        domain: Option<&Domain>,
+    ) -> QueuedConfiguration {
+        let (Some(domain), Some(id)) = (domain, subscriptions.transaction_id()) else {
+            return QueuedConfiguration::default();
+        };
+        if self
+            .validate_session_transaction_binding(subscriptions)
+            .is_err()
+        {
+            return QueuedConfiguration::default();
+        }
+        let Some(transaction) = self.consensus.current_transaction(id).await else {
+            return QueuedConfiguration::default();
+        };
+        if &transaction.domain != domain {
+            return QueuedConfiguration::default();
+        }
+
+        let mut queued = QueuedConfiguration::default();
+        for statement in transaction
+            .statements
+            .iter()
+            .map(|queued_statement| &queued_statement.statement)
+        {
+            if statement.is_model_mutation() {
+                queued
+                    .models
+                    .push(Self::transaction_registry_mutation(statement));
+            } else if let Statement::CreateResource(create) = statement {
+                queued.resources.insert(create.identifier.clone());
+            }
+        }
+        queued
+    }
+
     async fn process_suggest(
         &self,
         req: SuggestRequest,
@@ -7454,6 +7496,9 @@ impl SessionServiceImpl {
     ) -> SuggestResponse {
         let cursor = usize::try_from(req.cursor).unwrap_or(req.input.len());
         let domain = parse_request_domain(&req.domain).ok();
+        let queued = self
+            .queued_configuration(subscriptions, domain.as_ref())
+            .await;
 
         let (grammar_input, grammar_cursor, prefix) = completion_context(&req.input, cursor);
         let grammar = suggest_client_statement(&grammar_input, grammar_cursor);
@@ -7485,7 +7530,9 @@ impl SessionServiceImpl {
         for kind in &semantic_kinds {
             if let Some(domain) = &domain
                 && self.consensus.current_domain(domain).await.is_some()
-                && let Ok(ids) = self.registry.list_identifiers(domain, *kind, &prefix)
+                && let Ok(ids) =
+                    self.registry
+                        .resulting_identifiers(domain, *kind, &prefix, &queued.models)
             {
                 suggestions.extend(ids.into_iter().map(|id| id.to_string()));
             }
@@ -7503,6 +7550,7 @@ impl SessionServiceImpl {
                 &self.registry,
                 domain,
                 &prefix,
+                &queued.models,
             ));
         }
 
@@ -7512,6 +7560,7 @@ impl SessionServiceImpl {
             let resources = self.consensus.current_resources().await;
             if expects_resource_ref {
                 suggestions.extend(resource_ref_suggestions(&resources, domain, &prefix));
+                suggestions.extend(queued.resource_suggestions(&prefix));
             }
             if let Some(resource_identifier) = requested_resource_versions.as_ref() {
                 suggestions.extend(resource_version_suggestions(
@@ -14278,41 +14327,47 @@ fn placement_rule_coverage_status(rule: &PlacementRulePlan) -> &'static str {
     }
 }
 
+/// Configuration a bound transaction has queued but not yet applied. Completion resolves
+/// identifiers against it so a session sees the names its own queued statements define, and stops
+/// seeing the names they drop, before the transaction commits.
+#[derive(Debug, Default)]
+struct QueuedConfiguration {
+    models: Vec<RegistryMutation>,
+    resources: BTreeSet<Identifier>,
+}
+
+impl QueuedConfiguration {
+    /// Queued resource names matching `prefix`. A queued resource has no versions to suggest,
+    /// because uploading one is not transaction content.
+    fn resource_suggestions(&self, prefix: &str) -> Vec<String> {
+        let prefix = prefix.to_ascii_lowercase();
+        self.resources
+            .iter()
+            .filter(|identifier| identifier.as_str().starts_with(&prefix))
+            .map(Identifier::to_string)
+            .collect()
+    }
+}
+
 fn placement_runtime_node_ref_suggestions(
     registry: &Registry,
     domain: &Domain,
     prefix: &str,
+    queued: &[RegistryMutation],
 ) -> Vec<String> {
-    const ELIGIBLE_KINDS: [ModelKind; 13] = [
-        ModelKind::Generator,
-        ModelKind::Inferencer,
-        ModelKind::WasmProcessor,
-        ModelKind::Ingestor,
-        ModelKind::Reingestor,
-        ModelKind::Relay,
-        ModelKind::Lookup,
-        ModelKind::Junction,
-        ModelKind::Deduplicator,
-        ModelKind::Correlator,
-        ModelKind::Reorderer,
-        ModelKind::WindowProcessor,
-        ModelKind::Emitter,
-    ];
+    let Ok(models) = registry.resulting_models(domain, queued) else {
+        return Vec::new();
+    };
 
-    let mut eligible = Vec::new();
-    for kind in ELIGIBLE_KINDS {
-        let Ok(identifiers) = registry.list_identifiers(domain, kind, prefix) else {
-            continue;
-        };
-        for identifier in identifiers {
-            let Ok(Some(model)) = registry.get(domain, kind, &identifier) else {
-                continue;
-            };
-            if placement_member_model_is_eligible(&model) {
-                eligible.push(identifier);
-            }
-        }
-    }
+    let prefix = prefix.to_ascii_lowercase();
+    let eligible = models
+        .iter()
+        .filter(|model| {
+            placement_member_model_is_eligible(model)
+                && model.identifier().as_str().starts_with(&prefix)
+        })
+        .map(|model| model.identifier().clone())
+        .collect::<Vec<_>>();
 
     let mut counts = HashMap::<Identifier, usize>::default();
     for identifier in &eligible {
@@ -20706,6 +20761,294 @@ mod tests {
             !values.contains(&"ref:runtime_node".to_string()),
             "{values:?}"
         );
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    async fn suggestion_values(
+        service: &SessionServiceImpl,
+        subscriptions: &SessionSubscriptions,
+        input: &str,
+    ) -> Vec<String> {
+        service
+            .process_suggest(
+                SuggestRequest {
+                    input: input.to_string(),
+                    cursor: u32::try_from(input.len()).expect("test input length fits u32"),
+                    domain: "default".to_string(),
+                },
+                subscriptions,
+            )
+            .await
+            .suggestions
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect()
+    }
+
+    async fn queue_in_transaction(
+        service: &SessionServiceImpl,
+        subscriptions: &mut SessionSubscriptions,
+        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
+        query: &str,
+    ) {
+        let result = service
+            .process_command(
+                CommandRequest {
+                    query: query.to_string(),
+                    domain: "default".to_string(),
+                },
+                tx,
+                subscriptions,
+            )
+            .await;
+        assert!(
+            result.success,
+            "queueing {query:?} should succeed: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_offers_models_queued_in_the_open_transaction() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+
+        queue_in_transaction(&service, &mut subscriptions, &tx, "BEGIN;").await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            &tx,
+            "CREATE SCHEMA queued_order ( order_id I64 );",
+        )
+        .await;
+
+        let values =
+            suggestion_values(&service, &subscriptions, "CREATE RELAY orders SCHEMA ").await;
+        assert!(values.contains(&"queued_order".to_string()), "{values:?}");
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn completion_hides_models_dropped_in_the_open_transaction() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            &tx,
+            "BEGIN; CREATE SCHEMA committed_order ( order_id I64 ); CREATE RELAY committed_orders \
+             SCHEMA committed_order UNBRANCHED; COMMIT;",
+        )
+        .await;
+
+        let committed = suggestion_values(&service, &subscriptions, "DROP RELAY ").await;
+        assert!(
+            committed.contains(&"committed_orders".to_string()),
+            "{committed:?}"
+        );
+
+        queue_in_transaction(&service, &mut subscriptions, &tx, "BEGIN;").await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            &tx,
+            "DROP RELAY committed_orders;",
+        )
+        .await;
+
+        let dropped = suggestion_values(&service, &subscriptions, "DROP RELAY ").await;
+        assert!(
+            !dropped.contains(&"committed_orders".to_string()),
+            "{dropped:?}"
+        );
+
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            &tx,
+            "CREATE RELAY committed_orders SCHEMA committed_order UNBRANCHED;",
+        )
+        .await;
+
+        let recreated = suggestion_values(&service, &subscriptions, "DROP RELAY ").await;
+        assert!(
+            recreated.contains(&"committed_orders".to_string()),
+            "{recreated:?}"
+        );
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn completion_keeps_queued_models_out_of_other_sessions() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut writer = SessionSubscriptions::new();
+        let mut observer = SessionSubscriptions::new();
+
+        queue_in_transaction(&service, &mut writer, &tx, "BEGIN;").await;
+        queue_in_transaction(
+            &service,
+            &mut writer,
+            &tx,
+            "CREATE SCHEMA isolated_order ( order_id I64 );",
+        )
+        .await;
+
+        let bound = suggestion_values(&service, &writer, "CREATE RELAY orders SCHEMA ").await;
+        assert!(bound.contains(&"isolated_order".to_string()), "{bound:?}");
+
+        let unbound = suggestion_values(&service, &observer, "CREATE RELAY orders SCHEMA ").await;
+        assert!(
+            !unbound.contains(&"isolated_order".to_string()),
+            "{unbound:?}"
+        );
+
+        writer.stop_all(&service).await;
+        observer.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn completion_drops_queued_models_until_a_detached_transaction_is_attached() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+
+        queue_in_transaction(&service, &mut subscriptions, &tx, "BEGIN;").await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            &tx,
+            "CREATE SCHEMA detached_order ( order_id I64 );",
+        )
+        .await;
+        let transaction_id = subscriptions
+            .transaction_id()
+            .expect("BEGIN must bind a transaction")
+            .to_string();
+
+        let bound =
+            suggestion_values(&service, &subscriptions, "CREATE RELAY orders SCHEMA ").await;
+        assert!(bound.contains(&"detached_order".to_string()), "{bound:?}");
+
+        // A leadership change leaves the replicated transaction intact while the leader-local
+        // binding is gone, which is what the session observes until it attaches again.
+        service.transaction_bindings.remove(&transaction_id);
+
+        let detached =
+            suggestion_values(&service, &subscriptions, "CREATE RELAY orders SCHEMA ").await;
+        assert!(
+            !detached.contains(&"detached_order".to_string()),
+            "{detached:?}"
+        );
+
+        let attached = service
+            .attach_transaction(
+                proto::AttachTransactionRequest {
+                    id: transaction_id.clone(),
+                },
+                &mut subscriptions,
+            )
+            .await;
+        assert!(attached.success, "reattach must succeed: {attached:?}");
+
+        let reattached =
+            suggestion_values(&service, &subscriptions, "CREATE RELAY orders SCHEMA ").await;
+        assert!(
+            reattached.contains(&"detached_order".to_string()),
+            "{reattached:?}"
+        );
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn completion_moves_queued_models_to_the_session_that_takes_the_transaction_over() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut first = SessionSubscriptions::new();
+        let mut second = SessionSubscriptions::new();
+
+        queue_in_transaction(&service, &mut first, &tx, "BEGIN;").await;
+        queue_in_transaction(
+            &service,
+            &mut first,
+            &tx,
+            "CREATE SCHEMA takeover_order ( order_id I64 );",
+        )
+        .await;
+        let transaction_id = first
+            .transaction_id()
+            .expect("BEGIN must bind a transaction")
+            .to_string();
+
+        let attached = service
+            .attach_transaction(
+                proto::AttachTransactionRequest {
+                    id: transaction_id.clone(),
+                },
+                &mut second,
+            )
+            .await;
+        assert!(attached.success, "takeover must succeed: {attached:?}");
+
+        let displaced = suggestion_values(&service, &first, "CREATE RELAY orders SCHEMA ").await;
+        assert!(
+            !displaced.contains(&"takeover_order".to_string()),
+            "{displaced:?}"
+        );
+
+        let holder = suggestion_values(&service, &second, "CREATE RELAY orders SCHEMA ").await;
+        assert!(holder.contains(&"takeover_order".to_string()), "{holder:?}");
+
+        first.stop_all(&service).await;
+        second.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn placement_member_completion_expands_queued_runtime_names() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+
+        queue_in_transaction(&service, &mut subscriptions, &tx, "BEGIN;").await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            &tx,
+            "CREATE SCHEMA queued_event ( id I64 );",
+        )
+        .await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            &tx,
+            "CREATE RELAY queued_state SCHEMA queued_event UNBRANCHED WITH MATERIALIZED STATE \
+             LAST BY TIMESTAMP;",
+        )
+        .await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            &tx,
+            "CREATE RELAY queued_plain SCHEMA queued_event UNBRANCHED;",
+        )
+        .await;
+
+        let values =
+            suggestion_values(&service, &subscriptions, "CREATE PLACEMENT policy FROM ").await;
+        assert!(values.contains(&"queued_state".to_string()), "{values:?}");
+        assert!(!values.contains(&"queued_plain".to_string()), "{values:?}");
 
         subscriptions.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);

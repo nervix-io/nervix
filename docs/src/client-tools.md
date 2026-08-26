@@ -28,7 +28,8 @@ clicking a graph item or an entity — that simply type NSPL for you.
   `CREATE SUBSCRIPTION`, and `DELETE SUBSCRIPTION` are session/client operations. `BEGIN`,
   `COMMIT`, and `REVERT` operate on a leader-owned, replicated transaction.
 - **Server-driven completion.** Suggestions come from the cluster, not from a local copy of the
-  grammar, so they include the identifiers that actually exist in the active domain.
+  grammar, so they include the identifiers that actually exist in the active domain. Inside a
+  transaction they also include the identifiers its queued statements define.
 - **HTTP Basic authentication** against a registry user.
 - **Automatic leader redirects.** A session opened against a follower is redirected to the current
   leader; you do not need to know which node leads.

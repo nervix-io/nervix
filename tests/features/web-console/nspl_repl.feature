@@ -179,6 +179,64 @@ Feature: Web console NSPL REPL
     When selector ".prompt-row input" is pressed with "Tab"
     Then selector ".prompt-row input" has value "SHOW CREATE"
 
+  Scenario: Web console autocompletes entities queued in an open transaction
+    Given a 3 node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "created domain '{{domain}}'"
+    And selector ".prompt-row" contains "{{domain}}"
+    When selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "transaction started"
+    And selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA queued_order ( order_id I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    When selector ".prompt-row input" is filled with "CREATE RELAY queued_orders SCHEMA queued_"
+    Then selector ".suggestions" contains "queued_order"
+    When selector ".prompt-row input" is filled with "CREATE RELAY queued_orders SCHEMA queued_order UNBRANCHED;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
+    When selector ".prompt-row input" is filled with "DROP RELAY queued_"
+    Then selector ".suggestions" contains "queued_orders"
+    When selector ".prompt-row input" is filled with "DROP RELAY queued_orders;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 3 times
+    When selector ".prompt-row input" is filled with "DROP RELAY queued_"
+    Then selector ".suggestions" does not contain "queued_orders"
+
+  Scenario: Web console autocompletes queued entities after leader switchover
+    Given a 3 node nervix cluster is started
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When the web console is opened on node "{{old_leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "created domain '{{domain}}'"
+    And selector ".prompt-row" contains "{{domain}}"
+    When selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA switchover_before ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    When selector ".prompt-row input" is filled with "CREATE RELAY orders SCHEMA switchover_"
+    Then selector ".suggestions" contains "switchover_before"
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
+    And selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA switchover_after ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
+    When selector ".prompt-row input" is filled with "CREATE RELAY orders SCHEMA switchover_"
+    Then selector ".suggestions" contains "switchover_before"
+    And selector ".suggestions" contains "switchover_after"
+
   Scenario: Web console renders live domain list in the domain selector
     Given a 3 node nervix cluster is started
     When these NSPL commands are executed on the leader node
