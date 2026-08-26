@@ -2778,6 +2778,14 @@ async fn when_leadership_is_transferred_from_node_to_node(
         .transfer_leadership(&from_node_id, &to_node_id);
 }
 
+#[given("the leader node forgets its transaction session bindings")]
+async fn given_leader_forgets_transaction_bindings(world: &mut ScenarioWorld) {
+    let leader = current_leader_node(world).await;
+    world
+        .runtime_test_hooks
+        .drop_transaction_bindings_on(leader);
+}
+
 #[given(expr = "transaction commit on node {string} pauses after {int} statement")]
 async fn given_transaction_commit_pause(
     world: &mut ScenarioWorld,

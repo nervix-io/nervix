@@ -59,6 +59,7 @@ pub enum CommandOutcomeKind {
     Ok,
     Error,
     NotLeader,
+    TransactionDetached,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,16 +67,20 @@ enum LeaderRouting<'a> {
     Complete,
     Redirect(&'a str),
     AwaitElection,
+    /// The node serving this session has no binding for its transaction. Attaching the transaction
+    /// again restores the binding there, after which the command can run.
+    Detached,
 }
 
 impl CommandOutcome {
     fn leader_routing(&self) -> LeaderRouting<'_> {
-        if self.kind != CommandOutcomeKind::NotLeader {
-            LeaderRouting::Complete
-        } else if let Some(uri) = self.leader_grpc_uri.as_deref() {
-            LeaderRouting::Redirect(uri)
-        } else {
-            LeaderRouting::AwaitElection
+        match self.kind {
+            CommandOutcomeKind::TransactionDetached => LeaderRouting::Detached,
+            CommandOutcomeKind::NotLeader => match self.leader_grpc_uri.as_deref() {
+                Some(uri) => LeaderRouting::Redirect(uri),
+                None => LeaderRouting::AwaitElection,
+            },
+            _ => LeaderRouting::Complete,
         }
     }
 }
@@ -445,6 +450,13 @@ impl Client {
             };
             let leader_grpc_uri = match outcome.leader_routing() {
                 LeaderRouting::Complete => return Ok(outcome),
+                LeaderRouting::Detached if self.active_transaction_status().await.is_some() => {
+                    match self.restore_transaction_binding().await? {
+                        Some(outcome) => return Ok(recovered_transaction_outcome(outcome)),
+                        None => continue,
+                    }
+                }
+                LeaderRouting::Detached => return Ok(outcome),
                 LeaderRouting::Redirect(uri) => uri,
                 LeaderRouting::AwaitElection if self.await_leader_election_retry(attempt).await => {
                     continue;
@@ -486,7 +498,7 @@ impl Client {
                 Err(error) => return Err(error),
             };
             let leader_grpc_uri = match outcome.leader_routing() {
-                LeaderRouting::Complete => return Ok(outcome),
+                LeaderRouting::Complete | LeaderRouting::Detached => return Ok(outcome),
                 LeaderRouting::Redirect(uri) => uri,
                 LeaderRouting::AwaitElection if self.await_leader_election_retry(attempt).await => {
                     continue;
@@ -800,7 +812,7 @@ impl Client {
                 results: Vec::new(),
             };
             let leader_grpc_uri = match outcome.leader_routing() {
-                LeaderRouting::Complete => return Ok(outcome),
+                LeaderRouting::Complete | LeaderRouting::Detached => return Ok(outcome),
                 LeaderRouting::Redirect(uri) => uri,
                 LeaderRouting::AwaitElection if self.await_leader_election_retry(attempt).await => {
                     continue;
@@ -1353,6 +1365,7 @@ impl CommandOutcomeKind {
             Ok(proto::CommandResultKind::Ok) => Self::Ok,
             Ok(proto::CommandResultKind::Error) => Self::Error,
             Ok(proto::CommandResultKind::NotLeader) => Self::NotLeader,
+            Ok(proto::CommandResultKind::TransactionDetached) => Self::TransactionDetached,
             Ok(proto::CommandResultKind::Unspecified) | Err(_) => Self::Unspecified,
         }
     }

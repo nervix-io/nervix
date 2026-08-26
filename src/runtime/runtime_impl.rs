@@ -438,6 +438,7 @@ impl Runtime {
             #[cfg(feature = "testing")]
             schedule_publication_faults: hooks.schedule_publication_faults,
             #[cfg(feature = "testing")]
+            transaction_binding_drops: hooks.transaction_binding_drops,
             transaction_commit_pauses: hooks.transaction_commit_pauses,
             #[cfg(feature = "testing")]
             entity_gate_pauses: hooks.entity_gate_pauses,
@@ -855,6 +856,11 @@ impl Runtime {
     #[cfg(feature = "testing")]
     pub fn take_armed_schedule_publication_fault(&self, domain: &Domain) -> bool {
         self.schedule_publication_faults.take_armed_fault(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn take_armed_transaction_binding_drop(&self, node_id: &str) -> bool {
+        self.transaction_binding_drops.take(node_id)
     }
 
     #[cfg(feature = "testing")]

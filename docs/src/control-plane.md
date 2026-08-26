@@ -56,7 +56,10 @@ restricted to the authenticated owner. Attaching from a second live session take
 transaction, so the displaced session's next transaction operation reports that it was taken over.
 The transaction reports the domain it is bound to, and an attaching or reconnecting session adopts
 that domain as its selected domain. An unclean transport loss or leadership change leaves an open
-transaction available for attach. A clean end of the session reverts a bound open transaction.
+transaction available for attach. Binding is leader-local soft state, so a leader that does not
+hold it reports the session as detached; clients treat that as a routing condition, attach the
+transaction again, and replay the command. A clean end of the session reverts a bound open
+transaction.
 
 Only the bound domain's replicated configuration effects may be queued:
 

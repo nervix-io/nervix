@@ -845,6 +845,27 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                                                                 }
                                                             }
                                                         }
+                                                        SessionResponseAction::ReattachTransaction { id } => {
+                                                            let request = nervix_proto::SessionRequest {
+                                                                request: Some(
+                                                                    nervix_proto::session_request::Request::AttachTransaction(
+                                                                        nervix_proto::AttachTransactionRequest { id },
+                                                                    ),
+                                                                ),
+                                                            };
+                                                            if socket
+                                                                .send(WebSocketMessage::Bytes(request.encode_to_vec()))
+                                                                .await
+                                                                .is_err()
+                                                            {
+                                                                break;
+                                                            }
+                                                            pending_requests.push_front(
+                                                                PendingRequest::AttachTransaction { request },
+                                                            );
+                                                            waiting_for_transaction_attach = true;
+                                                            resend_pending_after_connect = true;
+                                                        }
                                                         SessionResponseAction::TransactionAttached {
                                                             replay_pending,
                                                         } => {
@@ -1021,7 +1042,14 @@ fn web_console_websocket_url_from_base(base_url: &str, auth_token: &str) -> Opti
 
 enum SessionResponseAction {
     Continue,
-    TransactionAttached { replay_pending: bool },
+    /// The leader has no binding for this session's transaction. Attach it again, then replay the
+    /// command that was rejected.
+    ReattachTransaction {
+        id: String,
+    },
+    TransactionAttached {
+        replay_pending: bool,
+    },
     TransactionAttachFailed,
     Reconnect(String),
 }
@@ -1104,7 +1132,18 @@ fn handle_session_response(
                 terminal_lines.update(|lines| lines.extend(command_result_lines(result, "")));
                 return SessionResponseAction::Continue;
             }
-            let pending = pending_requests.pop_front();
+            let mut pending = pending_requests.pop_front();
+            if command_result_is_transaction_detached(&result)
+                && pending.is_some()
+                && let Some(id) = transaction_status
+                    .get_untracked()
+                    .map(|status| status.id)
+                    .filter(|id| !id.is_empty())
+            {
+                pending_requests.push_front(pending.take().expect("pending was checked above"));
+                return SessionResponseAction::ReattachTransaction { id };
+            }
+            let pending = pending;
             if let Some(PendingRequest::AttachTransaction { .. }) = pending {
                 if !result.success {
                     if result.transaction.is_none() {
@@ -1246,6 +1285,11 @@ fn handle_session_response(
 
 fn result_is_set_active_domain_ack(result: &nervix_proto::CommandResult) -> bool {
     result.success && result.message.starts_with("using domain '")
+}
+
+fn command_result_is_transaction_detached(result: &nervix_proto::CommandResult) -> bool {
+    nervix_proto::CommandResultKind::try_from(result.kind).ok()
+        == Some(nervix_proto::CommandResultKind::TransactionDetached)
 }
 
 fn leader_web_console_redirect_url(result: &nervix_proto::CommandResult) -> Option<String> {

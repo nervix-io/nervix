@@ -312,6 +312,46 @@ Feature: NSPL transactions
       | 1            |
       | 3            |
 
+  @transaction_binding_recovery
+  Scenario Outline: A session whose leader lost its binding re-attaches instead of failing
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA rebound_event (
+        value STRING
+      );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    Given the leader node forgets its transaction session bindings
+    When client "owner" executes these NSPL commands
+      """
+      CREATE SCHEMA rebound_second_event (
+        value STRING
+      );
+      COMMIT;
+      """
+    Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA rebound_second_event;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA rebound_second_event (value STRING);
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Non-configuration statements are rejected while a transaction is open
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"

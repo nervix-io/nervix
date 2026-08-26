@@ -41,7 +41,9 @@ selected domain, so a session can never queue a statement for a different domain
 transaction it holds. `USE` remains unavailable while a transaction is active.
 
 The CLI, web console, and Rust client retain the transaction id and automatically attach after a
-redirect or transport reconnect before replaying a command. An unclean transport loss, node loss,
+redirect or transport reconnect before replaying a command. A leader that has no binding for the
+session's transaction answers with a distinct detached result rather than an ordinary error, and
+the client attaches again and replays the command instead of surfacing it. An unclean transport loss, node loss,
 or leadership change therefore leaves an open transaction intact until attach or idle expiry. A
 client compares the attached progress with the status it last observed and does not repeat an
 operation already recorded by the cluster. During election convergence, a client also retries a

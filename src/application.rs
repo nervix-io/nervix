@@ -7605,11 +7605,12 @@ impl SessionServiceImpl {
                     )
                     .await;
             }
+            self.drop_transaction_bindings_if_armed();
             if subscriptions.transaction_active()
-                && let Err(message) = self.validate_session_transaction_binding(subscriptions)
+                && let Err(error) = self.validate_session_transaction_binding(subscriptions)
             {
                 return self
-                    .command_with_transaction_status(command_error(message), subscriptions)
+                    .command_with_transaction_status(error.into_command_result(), subscriptions)
                     .await;
             }
         }
@@ -7644,22 +7645,29 @@ impl SessionServiceImpl {
         result
     }
 
+    /// Drops this node's leader-local transaction bindings when a test arms it, reproducing the
+    /// soft state a node does not carry across a leadership change.
+    fn drop_transaction_bindings_if_armed(&self) {
+        #[cfg(feature = "testing")]
+        if self
+            .runtime
+            .take_armed_transaction_binding_drop(self.consensus.local_node_id())
+        {
+            self.transaction_bindings.clear();
+        }
+    }
+
     fn validate_session_transaction_binding(
         &self,
         subscriptions: &SessionSubscriptions,
-    ) -> Result<(), String> {
+    ) -> Result<(), SessionTransactionBindingError> {
         let Some(id) = subscriptions.transaction_id() else {
-            return Err("no transaction is attached to this session".to_string());
+            return Err(SessionTransactionBindingError::Unbound);
         };
         match self.transaction_bindings.get(id) {
             Some(binding) if binding.value() == &subscriptions.session_id => Ok(()),
-            Some(_) => Err(format!(
-                "transaction '{id}' was taken over by another session"
-            )),
-            None => Err(format!(
-                "transaction '{id}' is not attached after a leadership change; attach it before \
-                 continuing"
-            )),
+            Some(_) => Err(SessionTransactionBindingError::TakenOver { id: id.to_string() }),
+            None => Err(SessionTransactionBindingError::Detached { id: id.to_string() }),
         }
     }
 
@@ -7869,8 +7877,8 @@ impl SessionServiceImpl {
         command: PendingSessionCommand,
         subscriptions: &SessionSubscriptions,
     ) -> CommandResult {
-        if let Err(message) = self.validate_session_transaction_binding(subscriptions) {
-            return command_error(message);
+        if let Err(error) = self.validate_session_transaction_binding(subscriptions) {
+            return error.into_command_result();
         }
         let Some(id) = subscriptions.transaction_id() else {
             return command_error("no transaction is attached to this session".to_string());
@@ -8118,8 +8126,8 @@ impl SessionServiceImpl {
         &self,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        if let Err(message) = self.validate_session_transaction_binding(subscriptions) {
-            return command_error(message);
+        if let Err(error) = self.validate_session_transaction_binding(subscriptions) {
+            return error.into_command_result();
         }
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return command_error("REVERT requires an active transaction".to_string());
@@ -8148,8 +8156,8 @@ impl SessionServiceImpl {
         _tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        if let Err(message) = self.validate_session_transaction_binding(subscriptions) {
-            return command_error(message);
+        if let Err(error) = self.validate_session_transaction_binding(subscriptions) {
+            return error.into_command_result();
         }
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return command_error("COMMIT requires an active transaction".to_string());
@@ -13081,6 +13089,30 @@ impl SessionServiceImpl {
                 ..Default::default()
             },
         }
+    }
+}
+
+/// Why a session may not act on the transaction it names. `Detached` is a recoverable routing
+/// condition rather than a user error: the leader simply has no binding for this session, so the
+/// client is told to attach the transaction again and retry.
+#[derive(Debug, PartialEq, Eq, Error)]
+enum SessionTransactionBindingError {
+    #[error("no transaction is attached to this session")]
+    Unbound,
+    #[error("transaction '{id}' was taken over by another session")]
+    TakenOver { id: String },
+    #[error("transaction '{id}' is not attached to this leader; attach it before continuing")]
+    Detached { id: String },
+}
+
+impl SessionTransactionBindingError {
+    fn into_command_result(self) -> CommandResult {
+        let detached = matches!(self, Self::Detached { .. });
+        let mut result = command_error(self.to_string());
+        if detached {
+            result.kind = CommandResultKind::TransactionDetached as i32;
+        }
+        result
     }
 }
 

@@ -3014,6 +3014,7 @@ pub struct Runtime {
     #[cfg(feature = "testing")]
     schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     #[cfg(feature = "testing")]
+    transaction_binding_drops: Arc<test_hooks::TransactionBindingDropInjector>,
     transaction_commit_pauses: Arc<test_hooks::TransactionCommitPauseInjector>,
     #[cfg(feature = "testing")]
     entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
