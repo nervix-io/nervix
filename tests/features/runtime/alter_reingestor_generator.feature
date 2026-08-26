@@ -57,7 +57,9 @@ Feature: Altering reingestors and generators
       """
     Then the last command output contains
       """
-      CREATE DETACHED REINGESTOR repartition FROM incoming COLLECT FOR 10ms MAX BATCH SIZE 1MiB FILTER WHERE (input.key > 0)
+      CREATE DETACHED REINGESTOR repartition
+        FROM incoming COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        FILTER WHERE input.key > 0
       """
     When http payload is posted to host "http-{{test_id}}-alter-reingestor.example.com" path "/events"
       """
@@ -144,7 +146,10 @@ Feature: Altering reingestors and generators
       """
     Then the last command output contains
       """
-      CREATE GENERATOR synth USING MATERIALIZED STATE state_events EACH 200ms UNBRANCHED
+      CREATE GENERATOR synth
+        USING MATERIALIZED STATE state_events
+        EACH 200ms
+        UNBRANCHED
       """
     Then within "5s" the relay subscription receives a payload
       """

@@ -13,6 +13,9 @@ entirely through NSPL, whatever submits it.
 | [Web Console](client-tools-web-console.md) | your browser, served by every node | reading a running graph, exploring an unfamiliar domain, guided subscriptions, uploading resources |
 | [Rust Client Library](client-library.md) | your own program | embedding Nervix control and subscriptions in a Rust application |
 
+One further tool is not a client at all: [`nervix-nspl-format`](client-tools-nspl-format.md) formats
+saved `.nspl` files and checks that they are formatted. It never opens a session.
+
 The console is the better tool for understanding a graph you did not write, because it draws one.
 The command line client is the better tool for repeating yourself, because it can be scripted.
 

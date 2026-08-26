@@ -15,7 +15,15 @@ Feature: Ingestor branching
       """
     Then the last command output contains
       """
-      CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB
+        DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       """
     And the last command output does not contain
       """

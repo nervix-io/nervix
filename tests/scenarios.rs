@@ -131,6 +131,10 @@ struct ScenarioWorld {
     runtime_test_hooks: RuntimeTestHooks,
     cluster_config: TestClusterConfig,
     temp_root: Option<TempDir>,
+    formatter_root: Option<TempDir>,
+    formatter_exit_code: Option<i32>,
+    /// Contents each NSPL file was given, so "is unchanged" has something to compare against.
+    formatter_original_files: BTreeMap<String, String>,
     last_cluster_operation_elapsed: Option<Duration>,
     browser_page: Option<playwright_rs::Page>,
     browser_context: Option<playwright_rs::BrowserContext>,
@@ -715,6 +719,175 @@ fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
     );
     world.last_command_output =
         Some(String::from_utf8(output.stdout).expect("nervix-server help output must be UTF-8"));
+}
+
+/// Resolves the formatter beside the server binary.
+///
+/// `CARGO_BIN_EXE_` is only defined for binaries of the test target's own package, and the
+/// formatter lives in its own crate, so it is located by its neighbour in the same target
+/// directory. `just test-scenarios` builds it through `tests-deps`.
+fn nspl_format_binary() -> PathBuf {
+    let candidate = Path::new(env!("CARGO_BIN_EXE_nervix-server"))
+        .parent()
+        .expect("the server binary must live in a directory")
+        .join("nervix-nspl-format");
+    assert!(
+        candidate.exists(),
+        "nervix-nspl-format must be built beside nervix-server; run `just test-scenarios`"
+    );
+    candidate
+}
+
+/// The directory holding the NSPL files a formatter scenario writes.
+fn formatter_root(world: &mut ScenarioWorld) -> PathBuf {
+    if world.formatter_root.is_none() {
+        world.formatter_root = Some(
+            tempfile::Builder::new()
+                .prefix("nervix-nspl-format-")
+                .tempdir()
+                .expect("formatter scenarios need a temporary directory"),
+        );
+    }
+    world
+        .formatter_root
+        .as_ref()
+        .expect("formatter directory must exist")
+        .path()
+        .to_path_buf()
+}
+
+fn record_formatter_output(world: &mut ScenarioWorld, output: std::process::Output) {
+    world.formatter_exit_code = output.status.code();
+    world.last_command_output =
+        Some(String::from_utf8(output.stdout).expect("formatter output must be UTF-8"));
+    world.last_command_error =
+        Some(String::from_utf8(output.stderr).expect("formatter errors must be UTF-8"));
+}
+
+#[given(regex = r#"^an NSPL file "([^"]+)" containing$"#)]
+fn given_an_nspl_file_containing(world: &mut ScenarioWorld, name: String, #[step] step: &Step) {
+    let root = formatter_root(world);
+    let path = root.join(&name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("NSPL file directory must be created");
+    }
+    let contents = format!("{}\n", docstring(step).trim());
+    std::fs::write(&path, &contents).expect("NSPL file must be written");
+    world.formatter_original_files.insert(name, contents);
+}
+
+#[when("the nervix-nspl-format help is requested")]
+fn when_nspl_format_help_is_requested(world: &mut ScenarioWorld) {
+    let output = Command::new(nspl_format_binary())
+        .arg("--help")
+        .output()
+        .expect("nervix-nspl-format help must run");
+    record_formatter_output(world, output);
+}
+
+#[when(regex = r#"^nervix-nspl-format formats the NSPL file "([^"]+)"$"#)]
+fn when_nspl_format_formats_file(world: &mut ScenarioWorld, name: String) {
+    let root = formatter_root(world);
+    let output = Command::new(nspl_format_binary())
+        .arg(&name)
+        .current_dir(&root)
+        .output()
+        .expect("nervix-nspl-format must run");
+    record_formatter_output(world, output);
+}
+
+#[when("nervix-nspl-format formats the NSPL directory")]
+fn when_nspl_format_formats_directory(world: &mut ScenarioWorld) {
+    let root = formatter_root(world);
+    let output = Command::new(nspl_format_binary())
+        .arg(".")
+        .current_dir(&root)
+        .output()
+        .expect("nervix-nspl-format must run");
+    record_formatter_output(world, output);
+}
+
+#[when("nervix-nspl-format checks the NSPL directory")]
+fn when_nspl_format_checks_directory(world: &mut ScenarioWorld) {
+    let root = formatter_root(world);
+    let output = Command::new(nspl_format_binary())
+        .args([".", "--check"])
+        .current_dir(&root)
+        .output()
+        .expect("nervix-nspl-format must run");
+    record_formatter_output(world, output);
+}
+
+#[when(regex = r#"^nervix-nspl-format checks the NSPL file "([^"]+)"$"#)]
+fn when_nspl_format_checks_file(world: &mut ScenarioWorld, name: String) {
+    let root = formatter_root(world);
+    let output = Command::new(nspl_format_binary())
+        .args(["--check", &name])
+        .current_dir(&root)
+        .output()
+        .expect("nervix-nspl-format must run");
+    record_formatter_output(world, output);
+}
+
+#[when("nervix-nspl-format formats the standard input")]
+fn when_nspl_format_formats_stdin(world: &mut ScenarioWorld, #[step] step: &Step) {
+    use std::process::Stdio;
+
+    let contents = format!("{}\n", docstring(step).trim());
+    let mut child = Command::new(nspl_format_binary())
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("nervix-nspl-format must run");
+    child
+        .stdin
+        .as_mut()
+        .expect("standard input must be piped")
+        .write_all(contents.as_bytes())
+        .expect("standard input must be written");
+    let output = child
+        .wait_with_output()
+        .expect("nervix-nspl-format must finish");
+    record_formatter_output(world, output);
+}
+
+#[then(regex = r"^the formatter exits with code (\d+)$")]
+fn then_the_formatter_exits_with_code(world: &mut ScenarioWorld, expected: i32) {
+    let actual = world
+        .formatter_exit_code
+        .expect("the formatter must have run before its exit code is asserted");
+    assert_eq!(
+        actual,
+        expected,
+        "formatter exit code; stdout: {:?}, stderr: {:?}",
+        world.last_command_output.as_deref().unwrap_or_default(),
+        world.last_command_error.as_deref().unwrap_or_default()
+    );
+}
+
+#[then(regex = r#"^the NSPL file "([^"]+)" contains$"#)]
+fn then_the_nspl_file_contains(world: &mut ScenarioWorld, name: String, #[step] step: &Step) {
+    let root = formatter_root(world);
+    let actual = std::fs::read_to_string(root.join(&name)).expect("NSPL file must be readable");
+    let expected = docstring(step).trim();
+    assert!(
+        actual.contains(expected),
+        "expected {name} to contain:\n{expected}\ngot:\n{actual}"
+    );
+}
+
+#[then(regex = r#"^the NSPL file "([^"]+)" is unchanged$"#)]
+fn then_the_nspl_file_is_unchanged(world: &mut ScenarioWorld, name: String) {
+    let expected = world
+        .formatter_original_files
+        .get(&name)
+        .expect("the file must have been given before it is compared")
+        .clone();
+    let root = formatter_root(world);
+    let actual = std::fs::read_to_string(root.join(&name)).expect("NSPL file must be readable");
+    assert_eq!(actual, expected, "{name} was rewritten");
 }
 
 #[then("the legacy nervix server executable is absent")]
@@ -3344,8 +3517,8 @@ fn resource_directory_ca_pem(world: &ScenarioWorld, placeholder: &str) -> String
 fn nspl_statements(input: &str) -> Vec<String> {
     if let Ok(statements) = nervix_nspl::client_statement::parse_client_statement_sources(input) {
         return statements
-            .into_iter()
-            .map(|statement| format!("{};", statement.source))
+            .iter()
+            .map(|statement| statement.source(input).to_string())
             .collect();
     }
 
@@ -5083,6 +5256,38 @@ async fn then_selector_contains_text(
         assert!(
             Instant::now() < deadline,
             "expected selector '{selector}' to contain '{expected}', got '{text}'"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(regex = r#"^selector "([^"]+)" contains$"#)]
+async fn then_selector_contains_docstring(
+    world: &mut ScenarioWorld,
+    selector: String,
+    #[step] step: &Step,
+) {
+    let expected = expand_placeholders(world, docstring(step).trim());
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let locator = page.locator(&selector);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let texts = locator
+            .all_inner_texts()
+            .await
+            .expect("selector text must be readable");
+        let text = texts.join("\n");
+        if text.contains(&expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected selector '{selector}' to contain:\n{expected}\ngot:\n{text}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

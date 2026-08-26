@@ -35,7 +35,7 @@ fn kafka_filter_map_implementations_render_from_one_workload() {
     assert_eq!(
         statements
             .iter()
-            .filter(|statement| statement.source.starts_with("CREATE JUNCTION"))
+            .filter(|statement| statement.source(&nervix).starts_with("CREATE JUNCTION"))
             .count(),
         16
     );

@@ -28,18 +28,18 @@ CREATE SCHEMA iot_telemetry (
 );
 
 CREATE WIRE JSON SCHEMA iot_telemetry_wire MODE STRICT (
-  site string,
-  line string,
-  device_id string,
-  sensor string,
-  value number,
-  unit string,
-  warn_high number,
-  critical_high number,
-  battery_pct number,
-  status string,
-  ts string,
-  seq integer
+  site STRING,
+  line STRING,
+  device_id STRING,
+  sensor STRING,
+  value NUMBER,
+  unit STRING,
+  warn_high NUMBER,
+  critical_high NUMBER,
+  battery_pct NUMBER,
+  status STRING,
+  ts STRING,
+  seq INTEGER
 );
 
 CREATE CODEC iot_telemetry_codec
@@ -57,16 +57,14 @@ CREATE IF NOT EXISTS SCHEMA device_branch (
   device_id STRING
 );
 
-CREATE BRANCH by_site
-  SCHEMA site_branch TTL 5m;
+CREATE BRANCH by_site SCHEMA site_branch TTL 5m;
 
 CREATE RELAY telemetry_by_site SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
 CREATE RELAY telemetry_rejected SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
 CREATE RELAY battery_alerts SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
 CREATE RELAY telemetry_clean SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
 
-CREATE BRANCH by_device
-  SCHEMA device_branch TTL 5m;
+CREATE BRANCH by_device SCHEMA device_branch TTL 5m;
 CREATE RELAY telemetry_by_device SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
 CREATE RELAY telemetry_ordered SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
 CREATE RELAY critical_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
@@ -74,8 +72,7 @@ CREATE RELAY thermal_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 
 CREATE RELAY maintenance_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
 CREATE RELAY normal_telemetry SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
 
-CREATE BRANCH by_site_critical
-  SCHEMA site_branch TTL 5m;
+CREATE BRANCH by_site_critical SCHEMA site_branch TTL 5m;
 CREATE RELAY site_critical_alerts SCHEMA iot_telemetry BRANCHED BY by_site_critical CAPACITY 2;
 
 CREATE CLIENT mqtt_edge
@@ -92,11 +89,8 @@ CREATE CLIENT redis_alerts
   };
 
 CREATE INGESTOR mqtt_telemetry
-  FROM MQTT mqtt_edge
-  TOPIC factory_telemetry
-  INSTANCES 4
-  MODE NO_ACK PARALLEL
-  ON QUIESCE DROP DECODE USING iot_telemetry_codec
+  FROM MQTT mqtt_edge TOPIC factory_telemetry INSTANCES 4 MODE NO_ACK PARALLEL ON QUIESCE DROP
+  DECODE USING iot_telemetry_codec
   TIMESTAMP AT ts
   TO telemetry_by_site
     INHERIT ALL
@@ -108,19 +102,27 @@ CREATE INGESTOR mqtt_telemetry
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DEDUPLICATOR quality_gate
+CREATE ATTACHED DEDUPLICATOR quality_gate
   FROM telemetry_by_site
   DEDUPLICATE ON input.site, input.device_id, input.sensor, input.ts, input.seq
   MAX TIME 5m
   BRANCHED BY by_site
-  TO telemetry_rejected INHERIT ALL
-    WHERE device_id = "" OR sensor = "" OR status = "offline"
-    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
-  TO battery_alerts INHERIT ALL WHERE battery_pct < 15.0
-    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
-  TO telemetry_clean INHERIT ALL FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG;
+  TO telemetry_rejected
+    INHERIT ALL
+    WHERE device_id = '' OR sensor = '' OR status = 'offline'
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO battery_alerts
+    INHERIT ALL
+    WHERE battery_pct < 15.0
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO telemetry_clean
+    INHERIT ALL
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
 
-CREATE REINGESTOR device_repartition
+CREATE ATTACHED REINGESTOR device_repartition
   FROM telemetry_clean
   TO telemetry_by_device
     INHERIT ALL
@@ -128,27 +130,42 @@ CREATE REINGESTOR device_repartition
     FLUSH EACH 250ms MAX BATCH SIZE 10kb
     ON MESSAGE ERROR LOG;
 
-CREATE REORDERER device_event_reorderer
+CREATE ATTACHED REORDERER device_event_reorderer
   FROM telemetry_by_device
   BY input.ts, input.seq
   MAX TIME 5s
   BRANCHED BY by_device
-  TO telemetry_ordered INHERIT ALL FLUSH EACH 500ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG;
+  TO telemetry_ordered
+    INHERIT ALL
+    FLUSH EACH 500ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
 
-CREATE DEDUPLICATOR anomaly_splitter
+CREATE ATTACHED DEDUPLICATOR anomaly_splitter
   FROM telemetry_ordered
   DEDUPLICATE ON input.site, input.line, input.device_id, input.sensor, input.ts, input.seq
   MAX TIME 5m
   BRANCHED BY by_device
-  TO critical_alerts INHERIT ALL WHERE status = "fault" OR value >= critical_high
-    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
-  TO thermal_alerts INHERIT ALL WHERE sensor = "temperature" AND value >= 80.0
-    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
-  TO maintenance_alerts INHERIT ALL WHERE value >= warn_high
-    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
-  TO normal_telemetry INHERIT ALL FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG;
+  TO critical_alerts
+    INHERIT ALL
+    WHERE status = 'fault' OR value >= critical_high
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO thermal_alerts
+    INHERIT ALL
+    WHERE sensor = 'temperature' AND value >= 80.0
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO maintenance_alerts
+    INHERIT ALL
+    WHERE value >= warn_high
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO normal_telemetry
+    INHERIT ALL
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
 
-CREATE REINGESTOR site_alert_repartition
+CREATE ATTACHED REINGESTOR site_alert_repartition
   FROM critical_alerts
   TO site_critical_alerts
     INHERIT ALL
@@ -156,41 +173,45 @@ CREATE REINGESTOR site_alert_repartition
     FLUSH EACH 250ms MAX BATCH SIZE 10kb
     ON MESSAGE ERROR LOG;
 
-CREATE EMITTER redis_site_critical_alerts
+CREATE ATTACHED EMITTER redis_site_critical_alerts
   FROM site_critical_alerts
   TO REDIS PUBSUB redis_alerts CHANNEL iot_site_critical_alerts
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
-CREATE EMITTER redis_battery_alerts
+CREATE ATTACHED EMITTER redis_battery_alerts
   FROM battery_alerts
   TO REDIS PUBSUB redis_alerts CHANNEL iot_battery_alerts
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
-CREATE EMITTER redis_thermal_alerts
+CREATE ATTACHED EMITTER redis_thermal_alerts
   FROM thermal_alerts
   TO REDIS PUBSUB redis_alerts CHANNEL iot_thermal_alerts
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
-CREATE EMITTER redis_maintenance_alerts
+CREATE ATTACHED EMITTER redis_maintenance_alerts
   FROM maintenance_alerts
   TO REDIS PUBSUB redis_alerts CHANNEL iot_maintenance_alerts
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
 COMMIT;
 

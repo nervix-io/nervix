@@ -46,53 +46,63 @@ CREATE SCHEMA metric (
 );
 
 CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
-  value integer
+  value INTEGER
 );
 
 CREATE CODEC metric_codec
   FROM WIRE JSON SCHEMA metric_wire
   TO SCHEMA metric;
 
-CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
-CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
-CREATE RELAY rust_positive_metrics SCHEMA metric UNBRANCHED;
-CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
-CREATE RELAY go_positive_metrics SCHEMA metric UNBRANCHED;
+CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED CAPACITY 1;
+CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED CAPACITY 1;
+CREATE RELAY rust_positive_metrics SCHEMA metric UNBRANCHED CAPACITY 1;
+CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED CAPACITY 1;
+CREATE RELAY go_positive_metrics SCHEMA metric UNBRANCHED CAPACITY 1;
 
 CREATE VHOST edge http-wasm-dual.example.com;
 
-CREATE ENDPOINT wasm_metrics_ingress
-  ON edge
-  PATH '/wasm-metrics'
-  TYPE HTTP;
+CREATE ENDPOINT wasm_metrics_ingress ON edge PATH '/wasm-metrics' TYPE HTTP;
 
 CREATE INGESTOR metric_source
-  FROM ENDPOINT wasm_metrics_ingress MODE NO_ACK SEQUENTIAL
-  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
-  TO raw_metrics INHERIT ALL UNBRANCHED
-    FLUSH EACH 100ms MAX BATCH SIZE 100kb ON MESSAGE ERROR LOG
+  FROM ENDPOINT wasm_metrics_ingress MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB
+  DECODE USING metric_codec
+  TO raw_metrics
+    INHERIT ALL
+    UNBRANCHED
+    FLUSH EACH 100ms MAX BATCH SIZE 100kb
+    ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE WASM PROCESSOR rust_filter_even_rows
+CREATE ATTACHED WASM PROCESSOR rust_filter_even_rows
   FROM raw_metrics
   USING RESOURCE rust_wasm_filter VERSION 1
   FILE 'nervix_wasm_processor_rust_guest.wasm'
   MAX FUEL 1000000000
   MAX MEMORY 64MiB
   UNBRANCHED
-  TO rust_filtered_metrics SET value = value ON MESSAGE ERROR LOG
-  TO rust_positive_metrics SET value = value WHERE output.value > 0 AS I32 ON MESSAGE ERROR LOG
+  TO rust_filtered_metrics
+    SET value = value
+    ON MESSAGE ERROR LOG
+  TO rust_positive_metrics
+    SET value = value
+    WHERE output.value > 0 AS I32
+    ON MESSAGE ERROR LOG
   ON GLOBAL ERROR LOG;
 
-CREATE WASM PROCESSOR go_filter_even_rows
+CREATE ATTACHED WASM PROCESSOR go_filter_even_rows
   FROM rust_filtered_metrics
   USING RESOURCE go_wasm_filter VERSION 1
   FILE 'nervix_wasm_processor_go_guest.wasm'
   MAX FUEL 1000000000
   MAX MEMORY 64MiB
   UNBRANCHED
-  TO go_filtered_metrics SET value = value ON MESSAGE ERROR LOG
-  TO go_positive_metrics SET value = value WHERE output.value > 0 AS I32 ON MESSAGE ERROR LOG
+  TO go_filtered_metrics
+    SET value = value
+    ON MESSAGE ERROR LOG
+  TO go_positive_metrics
+    SET value = value
+    WHERE output.value > 0 AS I32
+    ON MESSAGE ERROR LOG
   ON GLOBAL ERROR LOG;
 
 CREATE SUBSCRIPTION rust_filtered_metrics_subscription TO rust_filtered_metrics;

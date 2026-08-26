@@ -25,6 +25,7 @@
   - [Command Line Client](./client-tools-cli.md)
     - [nervix-cli Reference](./nervix-cli-reference.md)
   - [Web Console](./client-tools-web-console.md)
+  - [NSPL Formatter](./client-tools-nspl-format.md)
 - [NSPL Agent Skill](./nspl-agent-skill.md)
 - [Manual](./manual.md)
   - [What It Is Not](./what-it-is-not.md)

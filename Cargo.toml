@@ -218,6 +218,7 @@ members = [
   "crates/web-console",
   "crates/nervix-vm",
   "crates/nspl",
+  "crates/nspl-format",
   "crates/models",
   "crates/proto",
   "crates/test-environment",
@@ -311,6 +312,7 @@ iceberg-storage-opendal = { version = "0.10", features = [
   "opendal-gcs",
   "opendal-azdls",
 ] }
+ignore = "0.4.33"
 indexmap = "2"
 jaq-core = "3"
 jaq-fmts = "0.1"

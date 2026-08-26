@@ -29,19 +29,19 @@ CREATE SCHEMA machine_signal (
 );
 
 CREATE WIRE JSON SCHEMA machine_signal_wire MODE STRICT (
-  site string,
-  line string,
-  asset_id string,
-  sensor string,
-  value number,
-  unit string,
-  target_min number,
-  target_max number,
-  critical_high number,
-  battery_pct number,
-  status string,
-  ts string,
-  seq integer
+  site STRING,
+  line STRING,
+  asset_id STRING,
+  sensor STRING,
+  value NUMBER,
+  unit STRING,
+  target_min NUMBER,
+  target_max NUMBER,
+  critical_high NUMBER,
+  battery_pct NUMBER,
+  status STRING,
+  ts STRING,
+  seq INTEGER
 );
 
 CREATE CODEC machine_signal_codec
@@ -69,22 +69,22 @@ CREATE SCHEMA signal_window (
 );
 
 CREATE WIRE JSON SCHEMA signal_window_wire MODE STRICT (
-  site string,
-  line string,
-  asset_id string,
-  sensor string,
-  sample_count integer,
-  first_ts string,
-  last_ts string,
-  first_value number,
-  last_value number,
-  min_value number,
-  max_value number,
-  total_value number,
-  value_p50 number,
-  value_p90 number,
-  value_p99 number,
-  value_percentiles array
+  site STRING,
+  line STRING,
+  asset_id STRING,
+  sensor STRING,
+  sample_count INTEGER,
+  first_ts STRING,
+  last_ts STRING,
+  first_value NUMBER,
+  last_value NUMBER,
+  min_value NUMBER,
+  max_value NUMBER,
+  total_value NUMBER,
+  value_p50 NUMBER,
+  value_p90 NUMBER,
+  value_p99 NUMBER,
+  value_percentiles ARRAY
 );
 
 CREATE CODEC signal_window_codec
@@ -103,16 +103,14 @@ CREATE IF NOT EXISTS SCHEMA asset_signal_branch (
   sensor STRING
 );
 
-CREATE BRANCH by_site
-  SCHEMA site_branch TTL 5m;
+CREATE BRANCH by_site SCHEMA site_branch TTL 5m;
 
 CREATE RELAY signals_by_site SCHEMA machine_signal BRANCHED BY by_site CAPACITY 256;
 CREATE RELAY rejected_signals SCHEMA machine_signal BRANCHED BY by_site CAPACITY 64;
 CREATE RELAY battery_alerts SCHEMA machine_signal BRANCHED BY by_site CAPACITY 64;
 CREATE RELAY clean_signals SCHEMA machine_signal BRANCHED BY by_site CAPACITY 256;
 
-CREATE BRANCH by_asset_signal
-  SCHEMA asset_signal_branch TTL 5m;
+CREATE BRANCH by_asset_signal SCHEMA asset_signal_branch TTL 5m;
 CREATE RELAY signals_by_asset SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 256;
 CREATE RELAY signals_ordered SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 256;
 CREATE RELAY critical_signals SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 64;
@@ -120,8 +118,7 @@ CREATE RELAY drift_signals SCHEMA machine_signal BRANCHED BY by_asset_signal CAP
 CREATE RELAY normal_signals SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 128;
 CREATE RELAY signal_windows SCHEMA signal_window BRANCHED BY by_asset_signal CAPACITY 64;
 
-CREATE BRANCH by_site_critical
-  SCHEMA site_branch TTL 5m;
+CREATE BRANCH by_site_critical SCHEMA site_branch TTL 5m;
 CREATE RELAY site_critical_signals SCHEMA machine_signal BRANCHED BY by_site_critical CAPACITY 64;
 
 CREATE CLIENT nats_edge
@@ -131,12 +128,8 @@ CREATE CLIENT nats_edge
   };
 
 CREATE INGESTOR nats_machine_signals
-  FROM NATS nats_edge
-  SUBJECT factory_signals
-  QUEUE GROUP factory_signal_workers
-  INSTANCES 4
-  MODE NO_ACK SEQUENTIAL
-  ON QUIESCE DROP DECODE USING machine_signal_codec
+  FROM NATS nats_edge SUBJECT factory_signals QUEUE GROUP factory_signal_workers INSTANCES 4 MODE NO_ACK SEQUENTIAL ON QUIESCE DROP
+  DECODE USING machine_signal_codec
   TIMESTAMP AT ts
   TO signals_by_site
     INHERIT ALL
@@ -148,77 +141,89 @@ CREATE INGESTOR nats_machine_signals
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DEDUPLICATOR intake_quality_gate
+CREATE ATTACHED DEDUPLICATOR intake_quality_gate
   FROM signals_by_site
   DEDUPLICATE ON input.site, input.line, input.asset_id, input.sensor, input.ts, input.seq
   MAX TIME 5m
   BRANCHED BY by_site
-  TO rejected_signals INHERIT ALL
-    WHERE asset_id = "" OR sensor = "" OR status = "offline"
-    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
-  TO battery_alerts INHERIT ALL WHERE battery_pct < 15.0
-    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
-  TO clean_signals INHERIT ALL
-    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG;
-
-CREATE REINGESTOR asset_signal_repartition
-  FROM clean_signals
-  TO signals_by_asset
+  TO rejected_signals
     INHERIT ALL
-    BRANCHED BY by_asset_signal
-    SET site = message.site, line = message.line, asset_id = message.asset_id, sensor = message.sensor
+    WHERE asset_id = '' OR sensor = '' OR status = 'offline'
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG
+  TO battery_alerts
+    INHERIT ALL
+    WHERE battery_pct < 15.0
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG
+  TO clean_signals
+    INHERIT ALL
     FLUSH EACH 250ms MAX BATCH SIZE 32kb
     ON MESSAGE ERROR LOG;
 
-CREATE REORDERER asset_signal_reorderer
+CREATE ATTACHED REINGESTOR asset_signal_repartition
+  FROM clean_signals
+  TO signals_by_asset
+    INHERIT ALL
+    BRANCHED BY by_asset_signal SET site = message.site, line = message.line, asset_id = message.asset_id, sensor = message.sensor
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED REORDERER asset_signal_reorderer
   FROM signals_by_asset
   BY input.ts, input.seq
   MAX TIME 5s
   BRANCHED BY by_asset_signal
-  TO signals_ordered INHERIT ALL
-    FLUSH EACH 500ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG;
+  TO signals_ordered
+    INHERIT ALL
+    FLUSH EACH 500ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG;
 
-CREATE DEDUPLICATOR process_alert_splitter
+CREATE ATTACHED DEDUPLICATOR process_alert_splitter
   FROM signals_ordered
   DEDUPLICATE ON input.site, input.line, input.asset_id, input.sensor, input.ts, input.seq
   MAX TIME 5m
   BRANCHED BY by_asset_signal
-  TO critical_signals INHERIT ALL WHERE status = "fault" OR value >= critical_high
-    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
-  TO drift_signals INHERIT ALL WHERE value < target_min OR value > target_max
-    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
-  TO normal_signals INHERIT ALL
-    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG;
+  TO critical_signals
+    INHERIT ALL
+    WHERE status = 'fault' OR value >= critical_high
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG
+  TO drift_signals
+    INHERIT ALL
+    WHERE value < target_min OR value > target_max
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG
+  TO normal_signals
+    INHERIT ALL
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG;
 
-CREATE WINDOW PROCESSOR asset_signal_window
+CREATE ATTACHED WINDOW PROCESSOR asset_signal_window
   FROM signals_ordered
   WIDTH 20 MESSAGES 30s DURATION
   STEP 10 MESSAGES 10s DURATION
   BRANCHED BY by_asset_signal
   TO signal_windows
-  SET site = FIRST(input.site),
-      line = FIRST(input.line),
-      asset_id = FIRST(input.asset_id),
-      sensor = FIRST(input.sensor),
-      sample_count = COUNT(input.value),
-      first_ts = FIRST(input.ts),
-      last_ts = LAST(input.ts),
-      first_value = FIRST(input.value),
-      last_value = LAST(input.value),
-      min_value = MIN(input.value),
-      max_value = MAX(input.value),
-      total_value = SUM(input.value),
-      value_p50 = PERCENTILE_LINEAR_HISTOGRAM(input.value, 50, 512, 0, 200, '2s'),
-      value_p90 = PERCENTILE_LINEAR_HISTOGRAM(input.value, 90, 512, 0, 200, '2s'),
-      value_p99 = PERCENTILE_LINEAR_HISTOGRAM(input.value, 99, 512, 0, 200, '2s'),
-      value_percentiles = [
-        PERCENTILE_LINEAR_HISTOGRAM(input.value, 50, 512, 0, 200, '2s'),
-        PERCENTILE_LINEAR_HISTOGRAM(input.value, 90, 512, 0, 200, '2s'),
-        PERCENTILE_LINEAR_HISTOGRAM(input.value, 99, 512, 0, 200, '2s')
-      ]
-  ON MESSAGE ERROR LOG;
+    SET site = first(input.site),
+        line = first(input.line),
+        asset_id = first(input.asset_id),
+        sensor = first(input.sensor),
+        sample_count = count(input.value),
+        first_ts = first(input.ts),
+        last_ts = last(input.ts),
+        first_value = first(input.value),
+        last_value = last(input.value),
+        min_value = min(input.value),
+        max_value = max(input.value),
+        total_value = sum(input.value),
+        value_p50 = percentile_linear_histogram(input.value, 50, 512, 0, 200, '2s'),
+        value_p90 = percentile_linear_histogram(input.value, 90, 512, 0, 200, '2s'),
+        value_p99 = percentile_linear_histogram(input.value, 99, 512, 0, 200, '2s'),
+        value_percentiles = [percentile_linear_histogram(input.value, 50, 512, 0, 200, '2s'), percentile_linear_histogram(input.value, 90, 512, 0, 200, '2s'), percentile_linear_histogram(input.value, 99, 512, 0, 200, '2s')]
+    ON MESSAGE ERROR LOG;
 
-CREATE REINGESTOR site_critical_repartition
+CREATE ATTACHED REINGESTOR site_critical_repartition
   FROM critical_signals
   TO site_critical_signals
     INHERIT ALL
@@ -226,7 +231,7 @@ CREATE REINGESTOR site_critical_repartition
     FLUSH EACH 250ms MAX BATCH SIZE 32kb
     ON MESSAGE ERROR LOG;
 
-CREATE EMITTER nats_signal_windows
+CREATE ATTACHED EMITTER nats_signal_windows
   FROM signal_windows
   TO NATS nats_edge SUBJECT factory_signal_windows
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -236,7 +241,7 @@ CREATE EMITTER nats_signal_windows
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE EMITTER nats_site_critical_signals
+CREATE ATTACHED EMITTER nats_site_critical_signals
   FROM site_critical_signals
   TO NATS nats_edge SUBJECT factory_site_critical_signals
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -246,7 +251,7 @@ CREATE EMITTER nats_site_critical_signals
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE EMITTER nats_battery_alerts
+CREATE ATTACHED EMITTER nats_battery_alerts
   FROM battery_alerts
   TO NATS nats_edge SUBJECT factory_battery_alerts
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s

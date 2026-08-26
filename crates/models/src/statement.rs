@@ -191,57 +191,72 @@ impl<T> DerefMut for CreateStatement<T> {
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum ModelKind {
-    #[strum(props(completion_label = "ref:schema"))]
+    #[strum(props(completion_label = "ref:schema", keyword = "SCHEMA"))]
     Schema,
-    #[strum(props(completion_label = "ref:wire_json_schema"))]
+    #[strum(props(
+        completion_label = "ref:wire_json_schema",
+        keyword = "WIRE JSON SCHEMA"
+    ))]
     WireJsonSchema,
-    #[strum(props(completion_label = "ref:wire_cbor_schema"))]
+    #[strum(props(
+        completion_label = "ref:wire_cbor_schema",
+        keyword = "WIRE CBOR SCHEMA"
+    ))]
     WireCborSchema,
-    #[strum(props(completion_label = "ref:wire_avro_schema"))]
+    #[strum(props(
+        completion_label = "ref:wire_avro_schema",
+        keyword = "WIRE AVRO SCHEMA"
+    ))]
     WireAvroSchema,
-    #[strum(props(completion_label = "ref:codec"))]
+    #[strum(props(completion_label = "ref:codec", keyword = "CODEC"))]
     Codec,
-    #[strum(props(completion_label = "ref:client"))]
+    #[strum(props(completion_label = "ref:client", keyword = "CLIENT"))]
     Client,
-    #[strum(props(completion_label = "ref:vhost"))]
+    #[strum(props(completion_label = "ref:vhost", keyword = "VHOST"))]
     Vhost,
-    #[strum(props(completion_label = "ref:branch"))]
+    #[strum(props(completion_label = "ref:branch", keyword = "BRANCH"))]
     Branch,
-    #[strum(props(completion_label = "ref:endpoint"))]
+    #[strum(props(completion_label = "ref:endpoint", keyword = "ENDPOINT"))]
     Endpoint,
-    #[strum(props(completion_label = "ref:signaling_protocol"))]
+    #[strum(props(
+        completion_label = "ref:signaling_protocol",
+        keyword = "SIGNALING PROTOCOL"
+    ))]
     SignalingProtocol,
-    #[strum(props(completion_label = "ref:generator"))]
+    #[strum(props(completion_label = "ref:generator", keyword = "GENERATOR"))]
     Generator,
-    #[strum(props(completion_label = "ref:inferencer"))]
+    #[strum(props(completion_label = "ref:inferencer", keyword = "INFERENCER"))]
     Inferencer,
-    #[strum(props(completion_label = "ref:wasm_processor"))]
+    #[strum(props(completion_label = "ref:wasm_processor", keyword = "WASM PROCESSOR"))]
     WasmProcessor,
-    #[strum(props(completion_label = "ref:ingestor"))]
+    #[strum(props(completion_label = "ref:ingestor", keyword = "INGESTOR"))]
     Ingestor,
-    #[strum(props(completion_label = "ref:reingestor"))]
+    #[strum(props(completion_label = "ref:reingestor", keyword = "REINGESTOR"))]
     Reingestor,
-    #[strum(props(completion_label = "ref:relay"))]
+    #[strum(props(completion_label = "ref:relay", keyword = "RELAY"))]
     Relay,
-    #[strum(props(completion_label = "ref:materializer"))]
+    #[strum(props(completion_label = "ref:materializer", keyword = "MATERIALIZER"))]
     Materializer,
-    #[strum(props(completion_label = "ref:lookup"))]
+    #[strum(props(completion_label = "ref:lookup", keyword = "HASH MAP"))]
     Lookup,
-    #[strum(props(completion_label = "ref:junction"))]
+    #[strum(props(completion_label = "ref:junction", keyword = "JUNCTION"))]
     Junction,
-    #[strum(props(completion_label = "ref:deduplicator"))]
+    #[strum(props(completion_label = "ref:deduplicator", keyword = "DEDUPLICATOR"))]
     Deduplicator,
-    #[strum(props(completion_label = "ref:correlator"))]
+    #[strum(props(completion_label = "ref:correlator", keyword = "CORRELATOR"))]
     Correlator,
-    #[strum(props(completion_label = "ref:reorderer"))]
+    #[strum(props(completion_label = "ref:reorderer", keyword = "REORDERER"))]
     Reorderer,
-    #[strum(props(completion_label = "ref:window_processor"))]
+    #[strum(props(
+        completion_label = "ref:window_processor",
+        keyword = "WINDOW PROCESSOR"
+    ))]
     WindowProcessor,
-    #[strum(props(completion_label = "ref:emitter"))]
+    #[strum(props(completion_label = "ref:emitter", keyword = "EMITTER"))]
     Emitter,
-    #[strum(props(completion_label = "ref:placement"))]
+    #[strum(props(completion_label = "ref:placement", keyword = "PLACEMENT"))]
     Placement,
-    #[strum(props(completion_label = "ref:udf"))]
+    #[strum(props(completion_label = "ref:udf", keyword = "UDF"))]
     Udf,
 }
 
@@ -249,6 +264,12 @@ impl ModelKind {
     pub fn completion_label(self) -> &'static str {
         self.get_str("completion_label")
             .expect("every model kind must define a completion_label")
+    }
+
+    /// The NSPL keyword phrase that names this kind in `DROP` and `SHOW CREATE`.
+    pub fn keyword_phrase(self) -> &'static str {
+        self.get_str("keyword")
+            .expect("every model kind must define a keyword phrase")
     }
 
     pub fn from_completion_label(label: &str) -> Option<Self> {

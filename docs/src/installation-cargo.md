@@ -1,25 +1,26 @@
 # Cargo Install From GitHub
 
-Install the Nervix server and interactive CLI directly from the
+Install the Nervix server, the interactive CLI, and the NSPL formatter directly from the
 [Nervix GitHub repository](https://github.com/nervix-io/nervix):
 
 ```bash
 cargo install --locked \
   --git https://github.com/nervix-io/nervix.git \
-  nervix-server nervix-cli
+  nervix-server nervix-cli nervix-nspl-format
 ```
 
-This builds both binaries from source and installs them into Cargo's binary directory, which is
+This builds the binaries from source and installs them into Cargo's binary directory, which is
 `$HOME/.cargo/bin` by default. Ensure that directory is on your `PATH`.
 
 The build requires Rust 1.98 or newer and the native build tools required by Nervix's dependencies.
 The initial build can take several minutes.
 
-Confirm that both commands are available:
+Confirm that the commands are available:
 
 ```bash
 nervix-server --help
 nervix-cli --help
+nervix-nspl-format --help
 ```
 
 ## Pin A Git Revision
@@ -31,7 +32,7 @@ reviewed commit:
 cargo install --locked \
   --git https://github.com/nervix-io/nervix.git \
   --rev <commit-sha> \
-  nervix-server nervix-cli
+  nervix-server nervix-cli nervix-nspl-format
 ```
 
 Run the same command with a different revision to upgrade. Add `--force` if Cargo reports that the
@@ -40,5 +41,5 @@ selected packages are already installed.
 To remove both binaries:
 
 ```bash
-cargo uninstall nervix-server nervix-cli
+cargo uninstall nervix-server nervix-cli nervix-nspl-format
 ```

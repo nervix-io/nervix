@@ -6548,6 +6548,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-nspl-format"
+version = "0.1.0-dev"
+dependencies = [
+ "ariadne 0.5.1",
+ "clap",
+ "ignore",
+ "nervix-models",
+ "nervix-nspl",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "nervix-proto"
 version = "0.1.0-dev"
 dependencies = [

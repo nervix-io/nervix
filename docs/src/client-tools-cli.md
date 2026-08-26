@@ -55,7 +55,8 @@ The client runs in exactly one of three modes, in this order of precedence:
 2. **`--command`**, which submits NSPL, prints the result, and exits.
 3. **The interactive REPL**, when neither of the above is given.
 
-There is no file-execution mode. To run a saved script, pass it through `--command`:
+There is no file-execution mode. To run a saved script, pass it through `--command`; to format
+one, use [`nervix-nspl-format`](client-tools-nspl-format.md):
 
 ```bash
 nervix-cli --domain quickstart --command "$(cat pipeline.nspl)"

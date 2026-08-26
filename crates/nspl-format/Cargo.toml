@@ -1,0 +1,20 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-nspl-format"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ariadne = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+ignore = { workspace = true }
+nervix-models = { workspace = true }
+nervix-nspl = { workspace = true, features = ["client"] }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+nervix-nspl = { workspace = true, features = ["client"] }

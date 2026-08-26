@@ -35,7 +35,15 @@ Feature: Altering emitters
       """
     Then the last command output contains
       """
-      CREATE DETACHED EMITTER event_sink FROM outgoing COLLECT FOR 10ms MAX BATCH SIZE 512KiB TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DETACHED EMITTER event_sink
+        FROM outgoing COLLECT FOR 10ms MAX BATCH SIZE 512KiB
+        TO ZEROMQ sink_b
+          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       """
 
     Examples:

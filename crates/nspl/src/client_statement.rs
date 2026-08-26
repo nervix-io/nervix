@@ -1,5 +1,9 @@
+use std::ops::Range;
+
 use chumsky::prelude::*;
-use nervix_models::{CreateSubscription, DeleteSubscription, Domain, Statement, UploadResource};
+use nervix_models::{
+    CanonicalNsplError, CreateSubscription, DeleteSubscription, Domain, Statement, UploadResource,
+};
 
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
@@ -23,6 +27,36 @@ pub enum ClientStatement {
 }
 
 impl ClientStatement {
+    /// Renders this statement as canonical NSPL.
+    ///
+    /// Server statements delegate to [`Statement::to_canonical_nspl`]; the session-local forms are
+    /// rendered here because they belong to the client protocol rather than to a stored model.
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        match self {
+            Self::UseDomain(domain) => Ok(format!("USE {};", domain.as_str())),
+            Self::ListDomains => Ok("LIST DOMAINS;".to_string()),
+            Self::BeginTransaction => Ok("BEGIN;".to_string()),
+            Self::CommitTransaction => Ok("COMMIT;".to_string()),
+            Self::RevertTransaction => Ok("REVERT;".to_string()),
+            Self::UploadResource(upload) => {
+                Statement::UploadResource(upload.clone()).to_canonical_nspl()
+            }
+            Self::CreateSubscription(subscription) => {
+                Ok(crate::subscribe::create_subscription_query(
+                    subscription.name.as_str(),
+                    subscription.relay.as_str(),
+                    subscription.delivery_behavior,
+                    subscription.batch_sample_rate.as_deref(),
+                    subscription.where_clause.as_ref(),
+                ))
+            }
+            Self::DeleteSubscription(subscription) => Ok(
+                crate::subscribe::delete_subscription_query(subscription.name.as_str()),
+            ),
+            Self::Server(statement) => statement.to_canonical_nspl(),
+        }
+    }
+
     pub fn requires_local_handling(&self) -> bool {
         match self {
             Self::UseDomain(_) | Self::ListDomains | Self::UploadResource(_) => true,
@@ -38,8 +72,22 @@ impl ClientStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedClientStatement {
-    pub source: String,
+    /// Byte range of the statement in the original input, from its first token through the byte
+    /// after its terminating semicolon.
+    ///
+    /// Ending past the semicolon means the gaps between consecutive statements hold only
+    /// whitespace and comments, which is what lets a caller recover comments by scanning them.
+    pub span: Range<usize>,
     pub statement: ClientStatement,
+}
+
+impl ParsedClientStatement {
+    /// The original source text of this statement.
+    ///
+    /// `input` must be the same string the statement was parsed from.
+    pub fn source<'a>(&self, input: &'a str) -> &'a str {
+        &input[self.span.clone()]
+    }
 }
 
 pub fn use_domain_parser<'src>()
@@ -152,36 +200,30 @@ pub fn parse_client_statement_sources(
 ) -> Result<Vec<ParsedClientStatement>, ParseFromSourceError> {
     let (_, spanned_tokens, _) = lex_input(input)?;
     let mut statements = Vec::new();
-    let mut start = 0;
+    let mut segment_start: Option<usize> = None;
 
-    for token in spanned_tokens
-        .iter()
-        .filter(|token| token.token == Token::Semicolon)
-    {
-        let segment = &input[start..token.span.start];
-        if !segment.trim().is_empty() {
-            statements.push(ParsedClientStatement {
-                source: segment.trim().to_string(),
-                statement: parse_client_statement(segment)?,
-            });
+    for token in &spanned_tokens {
+        if token.token == Token::Semicolon {
+            // A segment is a statement only when it actually contains tokens, so a stray
+            // semicolon or a trailing comment does not become an empty statement.
+            if let Some(start) = segment_start.take() {
+                statements.push(ParsedClientStatement {
+                    span: start..token.span.end,
+                    statement: parse_client_statement(&input[start..token.span.start])?,
+                });
+            }
+        } else if segment_start.is_none() {
+            segment_start = Some(token.span.start);
         }
-        start = token.span.end;
     }
 
-    let tail = &input[start..];
-    if !tail.trim().is_empty() {
+    if let Some(start) = segment_start {
+        let end = spanned_tokens
+            .last()
+            .map_or(input.len(), |token| token.span.end);
         statements.push(ParsedClientStatement {
-            source: tail.trim().to_string(),
-            statement: parse_client_statement(tail)?,
-        });
-    }
-
-    if statements.is_empty() {
-        return parse_client_statement(input).map(|statement| {
-            vec![ParsedClientStatement {
-                source: input.trim().to_string(),
-                statement,
-            }]
+            span: start..end,
+            statement: parse_client_statement(&input[start..])?,
         });
     }
 
@@ -382,23 +424,21 @@ mod tests {
 
     #[test]
     fn parsed_client_statement_sources_preserve_upload_segments() {
-        let parsed = parse_client_statement_sources(
-            "CREATE RESOURCE proto; UPLOAD RESOURCE proto VERSION '/tmp/proto'; DESCRIBE RESOURCE \
-             proto;",
-        )
-        .expect("parse should succeed");
+        let input = "CREATE RESOURCE proto; UPLOAD RESOURCE proto VERSION '/tmp/proto'; DESCRIBE \
+                     RESOURCE proto;";
+        let parsed = parse_client_statement_sources(input).expect("parse should succeed");
 
         assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0].source, "CREATE RESOURCE proto");
+        assert_eq!(parsed[0].source(input), "CREATE RESOURCE proto;");
         assert_eq!(
-            parsed[1].source,
-            "UPLOAD RESOURCE proto VERSION '/tmp/proto'"
+            parsed[1].source(input),
+            "UPLOAD RESOURCE proto VERSION '/tmp/proto';"
         );
         assert!(matches!(
             parsed[1].statement,
             ClientStatement::UploadResource(_)
         ));
-        assert_eq!(parsed[2].source, "DESCRIBE RESOURCE proto");
+        assert_eq!(parsed[2].source(input), "DESCRIBE RESOURCE proto;");
     }
 
     #[test]
@@ -446,6 +486,123 @@ mod tests {
         parse_example_script(
             "wasm_dual",
             include_str!("../../../examples/wasm-processors/wasm-dual.nspl"),
+        );
+    }
+
+    /// Renders every statement of `source` and asserts each one reparses to the same statement.
+    fn roundtrip_example_script(name: &str, source: &str) {
+        let statements =
+            parse_client_statements(source).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+
+        for statement in statements {
+            let canonical = statement
+                .to_canonical_nspl()
+                .unwrap_or_else(|error| panic!("{name}: must render {statement:?}: {error}"));
+            let reparsed = parse_client_statement(&canonical)
+                .unwrap_or_else(|error| panic!("{name}: {canonical} must reparse: {error:?}"));
+            assert_eq!(statement, reparsed, "{name}: {canonical} changed meaning");
+        }
+    }
+
+    #[test]
+    fn canonical_roundtrip_of_statements_outside_the_example_scripts() {
+        // Kinds the runnable examples never use: the lifecycle, administration, and query forms.
+        const STATEMENTS: &[&str] = &[
+            "USE demo;",
+            "LIST DOMAINS;",
+            "BEGIN;",
+            "COMMIT;",
+            "REVERT;",
+            "CREATE UNPACED DOMAIN demo;",
+            "CREATE IF NOT EXISTS UNPACED DOMAIN demo;",
+            "CREATE PACED DOMAIN sim WITH PERIOD 100ms SKEW 10ms;",
+            "CREATE PACED DOMAIN sim WITH PERIOD 100ms SKEW 10ms PLACEMENT REQUIRE COLOCATION;",
+            "CREATE UNPACED DOMAIN demo PLACEMENT SUGGEST SEPARATION;",
+            "ALTER DOMAIN SET PLACEMENT NEUTRAL;",
+            "ALTER DOMAIN SET PLACEMENT PREFER COLOCATION;",
+            "CREATE USER alice WITH PASSWORD 'secret';",
+            "CREATE RESOURCE refdata;",
+            "UPLOAD RESOURCE refdata VERSION './reference-data';",
+            "START;",
+            "START AT NOW TIME RATE 1.0;",
+            "START AT '2026-01-01T00:00:00Z' TIME RATE 2.0;",
+            "STOP;",
+            "DROP RELAY orders;",
+            "DROP WIRE JSON SCHEMA orders_wire;",
+            "DROP NODE node3;",
+            "CORDON NODE node3;",
+            "UNCORDON NODE node3;",
+            "DRAIN NODE node3;",
+            "DESCRIBE DOMAIN;",
+            "DESCRIBE RELAY orders;",
+            "DESCRIBE RELAY orders WHERE (tenant = 'acme');",
+            "DESCRIBE INGESTOR ing;",
+            "DESCRIBE RESOURCE refdata VERSION 2;",
+            "DESCRIBE RESOURCE refdata;",
+            "DESCRIBE HASH MAP sites;",
+            "DESCRIBE UDF risk_band;",
+            "DESCRIBE PLACEMENT scoring_local;",
+            "DESCRIBE WINDOW PROCESSOR windows;",
+            "DESCRIBE WASM PROCESSOR guest;",
+            "SHOW CREATE RELAY orders;",
+            "SHOW CREATE WIRE AVRO SCHEMA orders_wire;",
+            "SHOW CREATE HASH MAP sites;",
+            "SHOW UDFS;",
+            "SHOW PLACEMENTS;",
+            "SHOW CLUSTER STATUS;",
+            "SHOW TRANSACTIONS;",
+            "SHOW RELAY orders MATERIALIZED STATE;",
+            "LOOKUP sites KEY 'edge-7';",
+            "ALTER PLACEMENT scoring SET RANK 2;",
+            "ALTER PLACEMENT scoring SET POLICY NEUTRAL, DROP RANK;",
+            "ALTER PLACEMENT scoring SET FROM a, b TO c, d;",
+            "ALTER PLACEMENT scoring RENAME TO scoring_local;",
+            "CREATE SUBSCRIPTION alerts TO critical_alerts;",
+            "DELETE SUBSCRIPTION alerts;",
+        ];
+
+        for source in STATEMENTS {
+            let statement = parse_client_statement(source)
+                .unwrap_or_else(|error| panic!("{source} must parse: {error:?}"));
+            let canonical = statement
+                .to_canonical_nspl()
+                .unwrap_or_else(|error| panic!("{source} must render: {error}"));
+            let reparsed = parse_client_statement(&canonical)
+                .unwrap_or_else(|error| panic!("{canonical} must reparse: {error:?}"));
+            assert_eq!(statement, reparsed, "{source} rendered as {canonical}");
+        }
+    }
+
+    #[test]
+    fn canonical_roundtrip_of_every_runnable_example_statement() {
+        roundtrip_example_script("iot", include_str!("../../../examples/iot/iot.nspl"));
+        roundtrip_example_script(
+            "nats_factory_windows",
+            include_str!("../../../examples/nats-factory-windows/nats_factory_windows.nspl"),
+        );
+        roundtrip_example_script(
+            "datalake",
+            include_str!("../../../examples/datalake/datalake.nspl"),
+        );
+        roundtrip_example_script(
+            "wasm_dual",
+            include_str!("../../../examples/wasm-processors/wasm-dual.nspl"),
+        );
+        roundtrip_example_script(
+            "binance_websocket",
+            include_str!("../../../examples/binance-websocket/binance_websocket.nspl"),
+        );
+        roundtrip_example_script(
+            "onnx_batched",
+            include_str!("../../../examples/onnx-inference/batched.nspl"),
+        );
+        roundtrip_example_script(
+            "onnx_per_message",
+            include_str!("../../../examples/onnx-inference/per-message.nspl"),
+        );
+        roundtrip_example_script(
+            "quickstart",
+            include_str!("../../../scripts/console-screenshots/quickstart.nspl"),
         );
     }
 

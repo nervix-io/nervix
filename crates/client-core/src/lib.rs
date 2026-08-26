@@ -588,8 +588,9 @@ impl Client {
                 .into_iter()
                 .next()
                 .expect("non-empty parsed statements must contain one statement");
+            let source = parsed.source(query).to_string();
             return self
-                .execute_client_statement(parsed.statement, &parsed.source)
+                .execute_client_statement(parsed.statement, &source)
                 .await;
         }
         self.execute_remote_once(query).await
@@ -1461,7 +1462,7 @@ mod tests {
         assert_eq!(
             sampled.to_query(),
             "CREATE SUBSCRIPTION sampled_orders TO orders DROPPING BATCH SAMPLE RATE 0.1 WHERE \
-             (input.tenant = 'acme');"
+             input.tenant = 'acme';"
         );
 
         assert_eq!(

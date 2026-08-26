@@ -102,7 +102,7 @@ emitter_max_batch_size = "8MiB"
 
 [implementations.nervix]
 kind = "nervix"
-template = "nervix.nspl"
+template = "nervix.nspl.upon"
 
 [implementations.competitor]
 kind = "container"
