@@ -50,12 +50,12 @@ jobs:
             version: trixie
             platform: linux/amd64
             arch: amd64
-            llvm: "22"
+            llvm: "23"
           - image: debian
             version: trixie
             platform: linux/arm64
             arch: arm64
-            llvm: "22"
+            llvm: "23"
           # - image: alpine
           #   version: "3.23"
           #   platform: linux/amd64
@@ -167,14 +167,14 @@ jobs:
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 22
+          sudo ./llvm.sh 23
 
       - name: Configure cargo
         run: |
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
-          ar = "llvm-ar-22"
-          linker = "clang-22"
+          ar = "llvm-ar-23"
+          linker = "clang-23"
           rustflags = ["-Clink-arg=--ld-path=wild"]
           EOF
 

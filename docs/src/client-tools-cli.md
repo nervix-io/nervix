@@ -95,6 +95,12 @@ resource names and versions, session subscription names, and domain names. Insid
 `UPLOAD RESOURCE ... VERSION '<path>'` the client completes local filesystem paths instead,
 expanding `~` to your home directory.
 
+While a transaction is open, completion describes the configuration that transaction is building:
+models and resources its queued statements create are suggested before `COMMIT`, and a model whose
+`DROP` is queued stops being suggested until a later statement recreates it. Only the session bound
+to the transaction sees them; every other session is offered committed configuration alone. A
+queued resource has no versions to suggest, because `UPLOAD RESOURCE` is not transaction content.
+
 ### History
 
 Submitted lines are stored in `.nervix_client_history`, relative to the directory the client was

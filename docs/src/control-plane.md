@@ -67,6 +67,13 @@ Only the bound domain's replicated configuration effects may be queued:
 - `ALTER DOMAIN`, `START`, and `STOP`;
 - `CREATE RESOURCE`.
 
+Completion on the bound session resolves identifiers against the configuration the queued
+statements produce, applied in written order, so a client is offered the models and resources its
+own transaction defines and is no longer offered a model whose `DROP` it has queued. Only the
+create and drop sequence decides a name, so an intermediate configuration that does not yet resolve
+still completes. Sessions that are not bound to the transaction, including other sessions of the
+same user, are offered committed configuration alone.
+
 Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
 and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
 Session subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership operations (`CORDON`,
