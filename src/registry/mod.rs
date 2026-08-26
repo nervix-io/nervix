@@ -2,7 +2,7 @@ mod stored;
 
 use std::{
     cmp::{Ordering, Reverse},
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     path::Path,
     str::FromStr,
     sync::Arc as StdArc,
@@ -1283,6 +1283,59 @@ impl Registry {
             .change_context(RegistryError::LoadStoredModels)
     }
 
+    /// Identifiers of `kind` in the configuration `queued` produces when applied to `domain` in
+    /// written order. Only the create and drop sequence decides a name, so an intermediate
+    /// configuration that does not yet resolve still reports the names it defines.
+    pub fn resulting_identifiers(
+        &self,
+        domain: &Domain,
+        kind: ModelKind,
+        prefix: &str,
+        queued: &[RegistryMutation],
+    ) -> Result<Vec<Identifier>, Report<RegistryError>> {
+        let committed = self.list_identifiers(domain, kind, prefix)?;
+        if queued.is_empty() {
+            return Ok(committed);
+        }
+
+        let prefix = prefix.to_ascii_lowercase();
+        let mut identifiers = committed.into_iter().collect::<BTreeSet<_>>();
+        for mutation in queued {
+            let target = mutation.target_key();
+            if target.kind == kind {
+                identifiers.remove(&target.identifier);
+            }
+            if let Some(resulting) = mutation.resulting_key()
+                && resulting.kind == kind
+                && resulting.identifier.as_str().starts_with(&prefix)
+            {
+                identifiers.insert(resulting.identifier);
+            }
+        }
+        Ok(identifiers.into_iter().collect())
+    }
+
+    /// The models of `domain` as `queued` leaves them, applied in written order and without
+    /// validating the result. An alteration whose target is gone is skipped, because this describes
+    /// configuration a client is still writing rather than a plan that will be persisted.
+    pub fn resulting_models(
+        &self,
+        domain: &Domain,
+        queued: &[RegistryMutation],
+    ) -> Result<Vec<Model>, Report<RegistryError>> {
+        let mut models = self
+            .storage
+            .list_models(domain)
+            .change_context(RegistryError::LoadStoredModels)?
+            .into_iter()
+            .map(|record| (record.key, record.model))
+            .collect::<HashMap<_, _>>();
+        for mutation in queued {
+            mutation.fold_into_models(&mut models);
+        }
+        Ok(models.into_values().collect())
+    }
+
     pub fn active_graph(&self, domain: &Domain) -> Option<ActiveGraph> {
         let state = self.state.read();
         state.domains.get(domain).map(|ns| ns.graph.clone())
@@ -1495,6 +1548,73 @@ impl RegistryMutation {
                 Some(RegistryKey::new(ModelKind::Placement, identifier.clone()))
             }
             _ => Some(self.target_key()),
+        }
+    }
+
+    /// Fold this mutation into `models` without validating the outcome. An alteration that no
+    /// longer applies leaves the stored model as it was, so a description of queued configuration
+    /// never fails on an intermediate state its later statements repair.
+    fn fold_into_models(&self, models: &mut HashMap<RegistryKey, Model>) {
+        match self {
+            Self::Create(model) => {
+                models.insert(RegistryKey::from_model(model), model.as_ref().clone());
+            }
+            Self::Drop(_) => {
+                models.remove(&self.target_key());
+            }
+            _ => {
+                let Some(mut model) = models.remove(&self.target_key()) else {
+                    return;
+                };
+                self.apply_alteration(&mut model);
+                let resulting = self.resulting_key().unwrap_or_else(|| self.target_key());
+                models.insert(resulting, model);
+            }
+        }
+    }
+
+    fn apply_alteration(&self, model: &mut Model) {
+        match (self, model) {
+            (Self::AlterSchema(alter), Model::Schema(schema)) => {
+                let _ = schema.apply_alter(alter);
+            }
+            (Self::AlterWireJsonSchema(alter), Model::WireJsonSchema(schema)) => {
+                let _ = schema.apply_alter(alter);
+            }
+            (Self::AlterWireCborSchema(alter), Model::WireCborSchema(schema)) => {
+                let _ = schema.apply_alter(alter);
+            }
+            (Self::AlterWireAvroSchema(alter), Model::WireAvroSchema(schema)) => {
+                let _ = schema.apply_alter(alter);
+            }
+            (Self::AlterRelay(alter), Model::Relay(relay)) => {
+                let _ = relay.apply_alter(alter);
+            }
+            (Self::AlterJunction(alter), Model::Junction(junction)) => {
+                let _ = junction.apply_alter(alter);
+            }
+            (Self::AlterDeduplicator(alter), Model::Deduplicator(deduplicator)) => {
+                let _ = deduplicator.apply_alter(alter);
+            }
+            (Self::AlterReorderer(alter), Model::Reorderer(reorderer)) => {
+                let _ = reorderer.apply_alter(alter);
+            }
+            (Self::AlterEmitter(alter), Model::Emitter(emitter)) => {
+                let _ = emitter.apply_alter(alter);
+            }
+            (Self::AlterIngestor(alter), Model::Ingestor(ingestor)) => {
+                let _ = ingestor.apply_alter(alter);
+            }
+            (Self::AlterReingestor(alter), Model::Reingestor(reingestor)) => {
+                let _ = reingestor.apply_alter(alter);
+            }
+            (Self::AlterGenerator(alter), Model::Generator(generator)) => {
+                let _ = generator.apply_alter(alter);
+            }
+            (Self::AlterPlacement(alter), Model::Placement(placement)) => {
+                let _ = placement.apply_alter(alter);
+            }
+            _ => {}
         }
     }
 }
