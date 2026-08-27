@@ -13,6 +13,7 @@ use nervix_models::{Expression, Identifier, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tokio::sync::Notify;
+use triomphe::Arc;
 
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement, UdfExecutor,
@@ -21,7 +22,7 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledDeduplicatorKeyProgram {
-    pub(super) program: VmCompiledProgram,
+    pub(super) program: Arc<VmCompiledProgram>,
     pub(super) key_column_offset: usize,
     pub(super) key_count: usize,
 }
@@ -75,7 +76,7 @@ pub(super) fn compile_deduplicator_key_program(
     Ok(CompiledDeduplicatorKeyProgram {
         key_column_offset: 0,
         key_count: deduplicate_on.len(),
-        program: compiled,
+        program: Arc::new(compiled),
     })
 }
 

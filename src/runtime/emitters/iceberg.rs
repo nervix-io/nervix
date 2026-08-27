@@ -1000,7 +1000,7 @@ impl IcebergEmitter {
         )
         .map_err(|error| Report::new(IcebergEmitterError::MapBatch).attach_printable(error))?;
         let result = execute_program_with_selection_in_context(
-            program.program.as_ref(),
+            &program.program,
             &input,
             &VmExecutionContext {
                 now: current_timestamp(),

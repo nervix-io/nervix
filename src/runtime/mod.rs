@@ -10625,7 +10625,7 @@ fn compile_reorderer_program(
     Ok(CompiledReordererProgram {
         key_column_offset: 0,
         key_count: order_by.len(),
-        program: compiled,
+        program: Arc::new(compiled),
     })
 }
 
@@ -10679,7 +10679,9 @@ fn compile_correlator_where_program(
             error.message
         )
     })?;
-    Ok(CompiledCorrelatorWhereProgram { program })
+    Ok(CompiledCorrelatorWhereProgram {
+        program: Arc::new(program),
+    })
 }
 
 struct CorrelatorOutputCompileContext<'a> {
@@ -11253,7 +11255,7 @@ async fn evaluate_correlator_output_message(
                 ))
             })?;
     let result = execute_program_with_selection_in_context(
-        program.program.compiled.as_ref(),
+        &program.program.compiled,
         &input,
         &VmExecutionContext {
             now: execution_now,
@@ -11884,7 +11886,7 @@ async fn evaluate_filter_map_on_records(
         Some(&uninitialized),
     )?;
     let result = execute_program_with_selection_in_context(
-        filter_map.compiled.as_ref(),
+        &filter_map.compiled,
         &batch,
         &VmExecutionContext {
             now: execution_now,
@@ -11918,7 +11920,7 @@ async fn evaluate_filter_map_on_records(
                 "FILTER-MAP selected row {input_row} outside its {row_count}-record input"
             ));
         };
-        if let Some(side_error) = result.batch.errors()[output_row].first() {
+        if let Some(side_error) = result.batch.errors().row(output_row).first() {
             *slot = SingleRecordFilterMapOutcome::MessageError {
                 error: filter_map.structured_side_error(
                     format!(
@@ -12339,7 +12341,7 @@ async fn evaluate_processor_output_events(
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
-        if let Some(side_error) = executed.batch.errors()[output_row].first() {
+        if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output = vm_partial_output_row_to_runtime_record(
                 &executed.batch,
                 output_row,
@@ -12896,7 +12898,7 @@ async fn plan_filter_map_messages(
     let mut acks = std::mem::take(&mut batch.acks);
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
     let result = match execute_program_with_selection_in_context(
-        program.compiled.as_ref(),
+        &program.compiled,
         &vm_batch,
         &VmExecutionContext {
             now: execution_now,
@@ -12935,8 +12937,9 @@ async fn plan_filter_map_messages(
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
+    let rows_always_materialize = vm_output_rows_always_materialize(&result.batch);
     for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
-        if let Some(side_error) = result.batch.errors()[output_row].first() {
+        if let Some(side_error) = result.batch.errors().row(output_row).first() {
             let partial_output = if program.captures_partial_output() {
                 Some(vm_partial_output_row_to_runtime_record(
                     &result.batch,
@@ -12991,7 +12994,9 @@ async fn plan_filter_map_messages(
             ));
             continue;
         }
-        if let Err(error) = vm_output_row_to_decoded_record(&result.batch, output_row) {
+        if !rows_always_materialize
+            && let Err(error) = vm_output_row_to_decoded_record(&result.batch, output_row)
+        {
             let record =
                 batch
                     .runtime_record(input_row)
@@ -13137,7 +13142,7 @@ async fn plan_emitter_filter_map_batch(
                     ),
                 })
         };
-        if let Some(side_error) = body_result.batch.errors()[output_row].first() {
+        if let Some(side_error) = body_result.batch.errors().row(output_row).first() {
             let source_record = source_record("FILTER-MAP error")?;
             let partial_output = program
                 .codec_route
@@ -13345,7 +13350,7 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
                 ),
             });
         }
-        if let Some(side_error) = result.batch.errors()[output_row].first() {
+        if let Some(side_error) = result.batch.errors().row(output_row).first() {
             groups[input_row] = Err(format!(
                 "SQS FIFO GROUP expression failed with {} at {}",
                 side_error.code.as_str(),
@@ -13494,7 +13499,7 @@ async fn execute_prepared_filter_map(
     acks: Vec<AckSet>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralError> {
     let result = match execute_program_with_selection_in_context(
-        program.compiled.as_ref(),
+        &program.compiled,
         &vm_batch,
         &VmExecutionContext {
             now: execution_now,
@@ -15343,7 +15348,7 @@ async fn runtime_record_lookup_key(
         Some(&uninitialized),
     )?;
     let result = execute_program_with_selection_in_context(
-        call.key_program.as_ref(),
+        &call.key_program,
         &vm_batch,
         &VmExecutionContext {
             now: execution_now,
@@ -15361,7 +15366,7 @@ async fn runtime_record_lookup_key(
     })?;
     let mut keys = vec![None; records.len()];
     for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
-        if let Some(side_error) = result.batch.errors()[output_row].first() {
+        if let Some(side_error) = result.batch.errors().row(output_row).first() {
             return Err(format!(
                 "LOOKUP_HASH_MAP key side error {}: {} at {}",
                 side_error.code.as_str(),
@@ -15917,7 +15922,7 @@ async fn compute_lookup_hash_map_columns(
             },
         )?;
         let result = execute_program_with_selection_in_context(
-            call.key_program.as_ref(),
+            &call.key_program,
             &vm_batch,
             &VmExecutionContext {
                 now: execution_now,
@@ -15945,7 +15950,7 @@ async fn compute_lookup_hash_map_columns(
             .transpose()?;
         let mut row_keys: Vec<Option<String>> = vec![None; row_count];
         for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
-            if let Some(side_error) = result.batch.errors()[output_row].first() {
+            if let Some(side_error) = result.batch.errors().row(output_row).first() {
                 return Err(format!(
                     "LOOKUP_HASH_MAP key side error {}: {} at {}",
                     side_error.code.as_str(),
@@ -16276,6 +16281,27 @@ fn vm_typed_batch_from_runtime_records_with_metadata(
         })
         .collect::<Result<Vec<_>, _>>()?;
     VmTypedBatch::try_new(schema.clone(), columns).map_err(|error| error.to_string())
+}
+
+/// Reports whether every row of `batch` is guaranteed to materialize into a record.
+///
+/// Materialization only fails when a required field holds a null or when a generic column
+/// cannot be mapped to a runtime value, and both are decidable per column. Answering this
+/// once per batch keeps the successful path from decoding every row just to discover that
+/// no row failed.
+fn vm_output_rows_always_materialize(batch: &VmTypedBatch) -> bool {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .zip(batch.columns())
+        .all(|(field, column)| match column {
+            // Generic columns go through the runtime value mapping, which can fail for
+            // reasons a null count does not express.
+            VmTypedArray::Generic(_) => false,
+            VmTypedArray::Uninitialized { .. } => field.is_nullable(),
+            _ => field.is_nullable() || column.null_count() == 0,
+        })
 }
 
 fn vm_output_row_to_decoded_record(
@@ -16773,6 +16799,7 @@ async fn flush_branch_inferencer_output(
                 return;
             }
         };
+    let mapped_program = Arc::new(mapped_program);
     let mapped_result = match execute_program_with_selection_in_context(
         &mapped_program,
         &mapped_vm_input,
@@ -18514,7 +18541,7 @@ async fn dispatch_wasm_output_route(
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
-        if let Some(side_error) = executed.batch.errors()[output_row].first() {
+        if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output = vm_partial_output_row_to_runtime_record(
                 &executed.batch,
                 output_row,
@@ -19123,7 +19150,7 @@ async fn execute_generator_program_on_context(
     materialized_state: &HashMap<String, RuntimeValue>,
 ) -> Result<SingleRecordFilterMapOutcome, String> {
     let result = execute_program_with_selection_in_context(
-        program.compiled.as_ref(),
+        &program.compiled,
         input,
         &VmExecutionContext {
             now: execution_now,

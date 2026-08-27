@@ -14,6 +14,7 @@ anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 humantime = { workspace = true }
 nervix-client-core = { workspace = true }
+nervix-nspl = { workspace = true }
 nervix-test-environment = { workspace = true }
 parking_lot = { workspace = true }
 rdkafka = { workspace = true, features = [
@@ -36,5 +37,4 @@ upon = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
-nervix-nspl = { workspace = true }
 tempfile = { workspace = true }
