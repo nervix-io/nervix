@@ -51,7 +51,7 @@ use nervix_models::{
     MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping,
     MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
     OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    OtelValueMapping, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
+    OtelValueMapping, OutputBranch, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
     PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
     RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceVersionStatus, RetryPolicy,
     RouteConstruction, ScheduledNode, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
@@ -59,10 +59,10 @@ use nervix_models::{
 };
 use nervix_nspl::{
     vm_program::{
-        BinaryOp, CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
-        SemanticNamespaces, Span as VmSpan, SpannedExpr, UnaryOp, lower_finalized_output_filter,
-        lower_generated_route, lower_route_construction, lower_set_only_route,
-        lower_transforming_route,
+        CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
+        SemanticNamespaces, Span as VmSpan, SpannedExpr, lower_branch_construction,
+        lower_finalized_output_filter, lower_generated_route, lower_route_construction,
+        lower_set_only_route, lower_transforming_route,
     },
     window_processor::aggregate::{
         WindowAggregateDemand, WindowAggregateFunction, WindowAggregateProgram,
@@ -104,6 +104,8 @@ use tracing::{debug, error, info, trace, warn};
 use triomphe::Arc;
 use upon::Engine as TemplateEngine;
 
+#[cfg(test)]
+use crate::runtime_schema::test_runtime_row;
 use crate::{
     cluster,
     metrics::{
@@ -115,10 +117,10 @@ use crate::{
     resource::ResourceStore,
     runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckRootTracker, AckSet},
     runtime_schema::{
-        CodecError, CompiledCodec, CompiledSchema, DecodedRecord, ProtobufDescriptorPool,
-        RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
-        compile_codec_with_protobuf, compile_schema, decode_with_codec, decode_with_codec_owned,
-        parse_as_type_from_arrow, runtime_value_from_arrow_array,
+        CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool, RuntimeRecordBatch,
+        RuntimeRecordMetadata, RuntimeRow, RuntimeValue, compile_codec_with_protobuf,
+        compile_schema, decode_with_codec, decode_with_codec_owned, parse_as_type_from_arrow,
+        runtime_value_arrow_array, runtime_value_from_arrow_array,
     },
 };
 
@@ -176,13 +178,11 @@ use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
     matching_message_error_output,
 };
-#[cfg(test)]
-use planning::resolve_concrete_branch;
 use planning::{
-    assignments_contain_udf, branched_node_specs_from_active_graph,
-    branched_node_specs_from_models, branched_node_specs_from_scheduled_nodes, format_branched_by,
+    branched_node_specs_from_active_graph, branched_node_specs_from_models,
+    branched_node_specs_from_scheduled_nodes, format_branched_by,
     materialize_ingestor_route_template, materialize_processor_instance_template,
-    processor_template_for_graph_node, resolve_concrete_branch_from_assignments,
+    processor_template_for_graph_node,
 };
 use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
@@ -804,12 +804,6 @@ pub(crate) struct BranchKey {
     json: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ConcreteBranch {
-    Root,
-    Key(BranchKey),
-}
-
 impl BranchKey {
     pub(crate) fn field_value(&self, name: &str) -> Option<&RuntimeValue> {
         self.fields
@@ -832,16 +826,23 @@ impl BranchKey {
         Ok(Self { fields, json })
     }
 
-    fn from_record<'a>(
-        record: &RuntimeRecord,
+    fn from_remote_record<'a>(
+        record: &nervix_models::RemoteRuntimeRecord,
         field_names: impl IntoIterator<Item = &'a Identifier>,
     ) -> Result<Option<Self>, String> {
         let mut fields = BTreeMap::new();
         for field_name in field_names {
-            let Some(value) = record.value(field_name.as_str()) else {
+            let Some(field) = record
+                .fields
+                .iter()
+                .find(|field| field.name == field_name.as_str())
+            else {
                 return Ok(None);
             };
-            fields.insert(field_name.clone(), value.clone());
+            fields.insert(
+                field_name.clone(),
+                RuntimeValue::from_remote(field.value.clone()),
+            );
         }
         Self::from_fields(fields).map(Some)
     }
@@ -912,15 +913,6 @@ fn kafka_domain_offset_describe_from_schedule(
 impl std::fmt::Display for BranchKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-
-impl ConcreteBranch {
-    fn into_relay_key(self) -> Option<BranchKey> {
-        match self {
-            Self::Root => None,
-            Self::Key(key) => Some(key),
-        }
     }
 }
 
@@ -1191,7 +1183,8 @@ pub(crate) struct LookupRuntime {
     model: CreateLookup,
     resource_version: u64,
     schema: Arc<CompiledSchema>,
-    entries: Arc<HashMap<String, DecodedRecord>>,
+    batch: Arc<RuntimeRecordBatch>,
+    entries: Arc<HashMap<String, usize>>,
 }
 
 #[derive(Debug)]
@@ -1381,7 +1374,7 @@ struct IngestGroupDispatch<'a> {
     timestamp_source: Option<&'a IngestTimestampSource>,
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    records: Vec<DecodedRecord>,
+    records: Vec<RuntimeRecordBatch>,
     /// Row-aligned with `records`, or empty when the source carries no ingest metadata.
     metadata: Vec<IngestFilterMapMetadata>,
     /// Row-aligned with `records`. An empty set is replaced by a tracked ack root.
@@ -1398,7 +1391,7 @@ struct IngestGroupContribution<'a> {
     timestamp_source: Option<&'a IngestTimestampSource>,
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    records: Vec<DecodedRecord>,
+    records: Vec<RuntimeRecordBatch>,
     metadata: Vec<IngestFilterMapMetadata>,
     acks: Vec<AckSet>,
     ingested_at: Timestamp,
@@ -1423,15 +1416,16 @@ struct RawIngestDispatch<'a> {
 /// is what keeps a message error attributable to the record that produced it and keeps
 /// each record's ack identity its own once the group has been filtered.
 struct IngestGroupRows {
-    records: Vec<RuntimeRecord>,
+    batch: RuntimeRecordBatch,
+    record_metadata: Vec<RuntimeRecordMetadata>,
     /// Empty when the source carries no ingest metadata, otherwise row-aligned.
-    metadata: Vec<IngestFilterMapMetadata>,
+    ingest_metadata: Vec<IngestFilterMapMetadata>,
     acks: Vec<AckSet>,
 }
 
 #[derive(Default)]
 struct PendingIngestGroup {
-    records: Vec<DecodedRecord>,
+    records: Vec<RuntimeRecordBatch>,
     /// Empty when the source carries no ingest metadata, otherwise row-aligned.
     metadata: Vec<IngestFilterMapMetadata>,
     acks: Vec<AckSet>,
@@ -1441,7 +1435,7 @@ struct PendingIngestGroup {
 impl PendingIngestGroup {
     fn append(
         &mut self,
-        records: Vec<DecodedRecord>,
+        records: Vec<RuntimeRecordBatch>,
         metadata: Vec<IngestFilterMapMetadata>,
         acks: Vec<AckSet>,
         ingested_at: Timestamp,
@@ -1462,6 +1456,11 @@ impl PendingIngestGroup {
         if !self.records.is_empty() && self.metadata.is_empty() != metadata.is_empty() {
             return Err("cannot mix ingest rows with and without source metadata".to_string());
         }
+        if records.iter().any(|record| record.batch().num_rows() != 1) {
+            return Err(
+                "decoded a message into a batch that does not contain exactly one row".to_string(),
+            );
+        }
 
         self.records.extend(records);
         self.metadata.extend(metadata);
@@ -1479,58 +1478,68 @@ impl PendingIngestGroup {
         self.records.len()
     }
 
-    fn into_rows(self) -> IngestGroupRows {
+    fn into_rows(self) -> Result<IngestGroupRows, String> {
         debug_assert_eq!(self.records.len(), self.ingested_at.len());
         debug_assert_eq!(self.records.len(), self.acks.len());
         debug_assert!(self.metadata.is_empty() || self.metadata.len() == self.records.len());
-        IngestGroupRows {
-            records: self
-                .records
+        let batch_refs = self.records.iter().collect::<Vec<_>>();
+        Ok(IngestGroupRows {
+            batch: RuntimeRecordBatch::concat(&batch_refs)?,
+            record_metadata: self
+                .ingested_at
                 .into_iter()
-                .zip(self.ingested_at)
-                .map(|(record, ingested_at)| {
-                    record.into_runtime_record(RuntimeRecordMetadata::from_ingested_at_watermarks(
-                        ingested_at,
-                        ingested_at,
-                    ))
+                .map(|ingested_at| {
+                    RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at)
                 })
                 .collect(),
-            metadata: self.metadata,
+            ingest_metadata: self.metadata,
             acks: self.acks,
-        }
+        })
     }
 }
 
 impl IngestGroupRows {
     fn len(&self) -> usize {
-        self.records.len()
+        self.batch.batch().num_rows()
     }
 
     fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.batch.batch().num_rows() == 0
     }
 
     fn metadata_row(&self, row: usize) -> Option<&IngestFilterMapMetadata> {
-        self.metadata.get(row)
+        self.ingest_metadata.get(row)
     }
 
     fn metadata_rows(&self) -> Option<&[IngestFilterMapMetadata]> {
-        (!self.metadata.is_empty()).then_some(self.metadata.as_slice())
+        (!self.ingest_metadata.is_empty()).then_some(self.ingest_metadata.as_slice())
+    }
+
+    fn row(&self, row: usize) -> Result<RuntimeRow, String> {
+        let metadata = self.record_metadata.get(row).cloned().ok_or_else(|| {
+            format!(
+                "ingest row {row} is outside metadata with {} rows",
+                self.record_metadata.len()
+            )
+        })?;
+        RuntimeRow::new(Arc::new(self.batch.clone()), row, metadata)
     }
 
     /// Keeps only the rows selected by `keep`, moving records, metadata and acks
     /// together so the three stay row-aligned.
-    fn select(self, keep: &[bool]) -> Self {
+    fn select(self, keep: &[bool]) -> Result<Self, String> {
         let selected = |row: usize| keep.get(row).copied().unwrap_or(false);
-        Self {
-            records: self
-                .records
+        let predicate = BooleanArray::from_iter((0..self.len()).map(|row| Some(selected(row))));
+        Ok(Self {
+            batch: self.batch.filter(&predicate)?,
+            record_metadata: self
+                .record_metadata
                 .into_iter()
                 .enumerate()
-                .filter_map(|(row, record)| selected(row).then_some(record))
+                .filter_map(|(row, metadata)| selected(row).then_some(metadata))
                 .collect(),
-            metadata: self
-                .metadata
+            ingest_metadata: self
+                .ingest_metadata
                 .into_iter()
                 .enumerate()
                 .filter_map(|(row, metadata)| selected(row).then_some(metadata))
@@ -1541,7 +1550,7 @@ impl IngestGroupRows {
                 .enumerate()
                 .filter_map(|(row, acks)| selected(row).then_some(acks))
                 .collect(),
-        }
+        })
     }
 }
 
@@ -1550,7 +1559,7 @@ struct IngestorFilterWhereError<'a> {
     domain: &'a Domain,
     ingestor: &'a Identifier,
     output_routes: &'a RelayProcessorOutputsNode,
-    record: &'a RuntimeRecord,
+    record: &'a RuntimeRow,
     ingest_metadata: Option<&'a IngestFilterMapMetadata>,
     acks: AckSet,
     error: StructuredMessageError,
@@ -1608,9 +1617,9 @@ impl IngestRouteCollector {
         Ok(())
     }
 
-    fn take_pending(&mut self) -> Option<(IngestGroupContext, IngestGroupRows)> {
+    fn take_pending(&mut self) -> Result<Option<(IngestGroupContext, IngestGroupRows)>, String> {
         if self.pending.is_empty() {
-            return None;
+            return Ok(None);
         }
         self.flush_at = None;
         let context = self
@@ -1618,7 +1627,7 @@ impl IngestRouteCollector {
             .take()
             .expect("a non-empty ingest group must retain its execution context");
         let pending = std::mem::take(&mut self.pending);
-        Some((context, pending.into_rows()))
+        Ok(Some((context, pending.into_rows()?)))
     }
 
     fn push(&mut self, relay: Identifier, message: RelayMessage) {
@@ -1679,15 +1688,8 @@ struct BranchedBranchSelection {
     rows: Vec<usize>,
 }
 
-struct BranchedEntrypointRowError {
-    record: RuntimeRecord,
-    acks: AckSet,
-    reason: String,
-}
-
 struct BranchedBranchPlan {
     selections: Vec<BranchedBranchSelection>,
-    row_errors: Vec<BranchedEntrypointRowError>,
     valid_rows: Vec<(Option<BranchKey>, usize)>,
 }
 
@@ -1741,58 +1743,26 @@ impl BranchedEntrypointBatch {
         })
     }
 
-    fn branch_selections(
-        &self,
-        mappings: &[Assignment],
-        source: &Identifier,
-        root_relay: &Identifier,
-        udfs: Option<&UdfExecutor>,
-    ) -> Result<BranchedBranchPlan, String> {
-        let records = self.batch.runtime_records(&self.metadata)?;
+    fn branch_selections(&self) -> Result<BranchedBranchPlan, String> {
         let mut selections = Vec::<BranchedBranchSelection>::new();
         let mut positions = HashMap::<Option<BranchKey>, usize>::default();
-        let mut row_errors = Vec::new();
         let mut valid_rows = Vec::new();
-        for (index, record) in records.iter().enumerate() {
-            match resolve_concrete_branch_from_assignments(
-                record,
-                None,
-                self.keys.get(index).and_then(Option::as_ref),
-                mappings,
-                source,
-                udfs,
-            ) {
-                Ok(branch) => {
-                    let key = branch.into_relay_key();
-                    valid_rows.push((key.clone(), index));
-                    if let Some(position) = positions.get(&key).copied() {
-                        selections[position].rows.push(index);
-                        continue;
-                    }
-                    positions.insert(key.clone(), selections.len());
-                    selections.push(BranchedBranchSelection {
-                        key,
-                        rows: vec![index],
-                    });
-                }
-                Err(error) => {
-                    row_errors.push(BranchedEntrypointRowError {
-                        record: record.clone(),
-                        acks: self.acks[index].clone(),
-                        reason: format!(
-                            "branch entrypoint '{}' failed to resolve branch for relay '{}': {}",
-                            source.as_str(),
-                            root_relay.as_str(),
-                            error
-                        ),
-                    });
-                }
+        for index in 0..self.metadata.len() {
+            let key = self.keys.get(index).cloned().flatten();
+            valid_rows.push((key.clone(), index));
+            if let Some(position) = positions.get(&key).copied() {
+                selections[position].rows.push(index);
+                continue;
             }
+            positions.insert(key.clone(), selections.len());
+            selections.push(BranchedBranchSelection {
+                key,
+                rows: vec![index],
+            });
         }
 
         Ok(BranchedBranchPlan {
             selections,
-            row_errors,
             valid_rows,
         })
     }
@@ -1862,7 +1832,7 @@ struct MessageErrorContext<'a> {
     source_route: Option<&'a Identifier>,
     message: &'a RelayMessage,
     error: &'a StructuredMessageError,
-    partial_output: Option<&'a RuntimeRecord>,
+    partial_output: Option<&'a RuntimeRecordBatch>,
     materialized_state: &'a HashMap<String, RuntimeValue>,
     ingest_metadata: Option<&'a IngestFilterMapMetadata>,
 }
@@ -1875,7 +1845,7 @@ struct MessageErrorHandling<'a> {
     policy: &'a MessageErrorPolicy,
     message: RelayMessage,
     error: StructuredMessageError,
-    partial_output: Option<RuntimeRecord>,
+    partial_output: Option<RuntimeRecordBatch>,
     materialized_state: HashMap<String, RuntimeValue>,
     ingest_metadata: Option<&'a IngestFilterMapMetadata>,
 }
@@ -1917,10 +1887,10 @@ struct MessageErrorCompileSchemas {
 #[derive(Debug)]
 enum SingleRecordFilterMapOutcome {
     Filtered,
-    Output(RuntimeRecord),
+    Output(RuntimeRow),
     MessageError {
         error: StructuredMessageError,
-        partial_output: Option<RuntimeRecord>,
+        partial_output: Option<RuntimeRecordBatch>,
         materialized_state: HashMap<String, RuntimeValue>,
     },
 }
@@ -2762,20 +2732,8 @@ async fn branched_entrypoint_batch_from_inputs_blocking(
 
 async fn branched_branch_plan_blocking(
     input: Arc<BranchedEntrypointBatch>,
-    mappings: Vec<Assignment>,
-    source: Identifier,
-    root_relay: Identifier,
-    udfs: Option<UdfExecutor>,
 ) -> Result<BranchedBranchPlan, String> {
-    if !assignments_contain_udf(&mappings) {
-        return input.branch_selections(&mappings, &source, &root_relay, udfs.as_ref());
-    }
-
-    tokio::task::spawn_blocking(move || {
-        input.branch_selections(&mappings, &source, &root_relay, udfs.as_ref())
-    })
-    .await
-    .map_err(|error| format!("branch UDF execution task failed: {error}"))?
+    input.branch_selections()
 }
 
 async fn branched_branch_filter_blocking(
@@ -2875,6 +2833,7 @@ struct WindowEntry {
     sequence: u64,
     timestamp: Timestamp,
     message: RelayMessage,
+    aggregate_inputs: Vec<WindowAggregateInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -2963,6 +2922,11 @@ pub(crate) struct CompiledProgramWithMaterializedInterest {
     output_namespace_input: OutputNamespaceInput,
     lookup_hash_maps: Vec<LookupHashMapCall>,
     error_sites: Vec<CompiledMessageErrorSite>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CompiledBranchProgram {
+    program: CompiledProgramWithMaterializedInterest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4505,6 +4469,8 @@ impl RelayProcessorNode {
                     state,
                 } => {
                     let input_arrow_schema = batch.arrow_schema();
+                    let key_input_batch = batch.batch.clone();
+                    let key_input_keys = batch.keys.clone();
                     let execution_now = branch
                         .runtime
                         .current_stream_expiration_time(&branch.domain)
@@ -4557,15 +4523,19 @@ impl RelayProcessorNode {
                     let Some(key_program) = compiled_key_program.as_ref() else {
                         return;
                     };
-                    let records = messages
-                        .iter()
-                        .map(|message| message.record.clone())
-                        .collect::<Vec<_>>();
-                    let records =
-                        augment_runtime_records_with_side_inputs(records, &materialized_values);
-                    let vm_batch = match vm_typed_batch_from_runtime_records(
-                        &records,
+                    let lookup_columns = HashMap::default();
+                    let vm_batch = match project_vm_input_batch(
                         &key_program.program.input_schema,
+                        &VmInputProjectionSources {
+                            carrier: &key_input_batch,
+                            namespace_batches: &[],
+                            strict_namespaces: &[],
+                            keys: &key_input_keys,
+                            side_inputs: &materialized_values,
+                            ingest_metadata: None,
+                            lookup_columns: &lookup_columns,
+                            uninitialized: None,
+                        },
                     ) {
                         Ok(batch) => batch,
                         Err(error) => {
@@ -4618,7 +4588,6 @@ impl RelayProcessorNode {
                     for (row, message) in messages.into_iter().enumerate() {
                         trace!(
                             processor = self.processor.as_str(),
-                            payload = message.record.to_json_string(),
                             operator = "deduplicator",
                             "branched relay operator received message"
                         );
@@ -4803,9 +4772,49 @@ impl RelayProcessorNode {
                         }
                     };
                     for message in messages {
+                        tokio::task::consume_budget().await;
                         let timestamp = message_timestamp(&message);
+                        let mut aggregate_inputs = Vec::new();
+                        let mut aggregate_input_error = None;
+                        for compiled in compiled_aggregates.iter() {
+                            tokio::task::consume_budget().await;
+                            match evaluate_window_aggregate_inputs(
+                                compiled,
+                                &message.record,
+                                timestamp,
+                            )
+                            .await
+                            {
+                                Ok(inputs) => aggregate_inputs.extend(inputs),
+                                Err(error) => {
+                                    aggregate_input_error = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(error) = aggregate_input_error {
+                            branch
+                                .runtime
+                                .handle_message_error(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    message,
+                                    MessageErrorFailure::publish(
+                                        None,
+                                        format!(
+                                            "window processor '{}' aggregate input failed: {}",
+                                            self.processor.as_str(),
+                                            error
+                                        ),
+                                    ),
+                                )
+                                .await;
+                            continue;
+                        }
                         if let Err(error_and_message) =
-                            state.push_message(aggregate, timestamp, message)
+                            state.push_message(aggregate, timestamp, message, aggregate_inputs)
                         {
                             let (error, message) = *error_and_message;
                             branch
@@ -4927,8 +4936,11 @@ impl RelayProcessorNode {
                         &program.program.input_schema,
                         &VmInputProjectionSources {
                             carrier: &batch.batch,
+                            namespace_batches: &[],
+                            strict_namespaces: &[],
                             keys: &batch.keys,
                             side_inputs: &materialized_values,
+                            ingest_metadata: None,
                             lookup_columns: &lookup_columns,
                             uninitialized: None,
                         },
@@ -5244,6 +5256,7 @@ impl RelayProcessorNode {
                         let incoming = CorrelatorPendingMessage {
                             received_at: execution_now,
                             message,
+                            materialized_state: materialized_values.clone(),
                         };
                         match correlate_incoming_message(
                             &self.processor,
@@ -5453,7 +5466,27 @@ impl RelayProcessorNode {
                     for (left, right) in correlations {
                         let key = left.message.key.clone();
                         let combined =
-                            correlator_combined_record(&left.message.record, &right.message.record);
+                            match correlator_input_row(&left.message.record, &right.message.record)
+                            {
+                                Ok(combined) => combined,
+                                Err(error) => {
+                                    branch.runtime.handle_internal_processor_error_for_acks(
+                                        &branch.domain,
+                                        self.kind.as_str(),
+                                        &self.processor,
+                                        &self.error_policies,
+                                        [&left.message.acks, &right.message.acks],
+                                        format!(
+                                            "correlator '{}' failed to build paired Arrow input: \
+                                             {error}",
+                                            self.processor.as_str()
+                                        ),
+                                    );
+                                    continue;
+                                }
+                            };
+                        let mut materialized_state = left.materialized_state.clone();
+                        materialized_state.extend(right.materialized_state.clone());
                         let mut pair_acks = Some(AckSet::merged([
                             left.message.acks.attached(),
                             right.message.acks.attached(),
@@ -5483,6 +5516,7 @@ impl RelayProcessorNode {
                                 output_program,
                                 key.clone(),
                                 combined.clone(),
+                                &materialized_state,
                                 route_acks,
                                 execution_now,
                             )
@@ -6205,6 +6239,7 @@ impl RelayProcessorTemplate {
             pending: Vec::new(),
             next_flush: None,
             compiled_program: None,
+            compiled_branch_program: None,
         }
     }
 
@@ -6287,7 +6322,14 @@ impl RelayProcessorTemplate {
                             0,
                         )
                         .map_err(|error| error.to_string())?;
-                    let state = replicated_state.restore_state(aggregate)?;
+                    let input_relay = self.input_relays.first().ok_or_else(|| {
+                        format!(
+                            "window processor '{}' requires an input relay",
+                            self.processor.as_str()
+                        )
+                    })?;
+                    let input_schema = relay_schema_for_runtime(runtime, domain, input_relay)?;
+                    let state = replicated_state.restore_state(aggregate, &input_schema)?;
                     RelayProcessorOperationNode::WindowProcessor {
                         output_routes: Self::instantiate_outputs(output_routes),
                         width_messages: *width_messages,
@@ -7021,15 +7063,7 @@ impl IngestorRouteTask {
                 return Vec::new();
             }
         };
-        let branch_plan = match branched_branch_plan_blocking(
-            input_batch.clone(),
-            self.template.branch_assignments.clone(),
-            self.template.branch.source.clone(),
-            self.template.branch.root_relay.clone(),
-            self.runtime_handle.udf_executor(&self.domain),
-        )
-        .await
-        {
+        let branch_plan = match branched_branch_plan_blocking(input_batch.clone()).await {
             Ok(plan) => plan,
             Err(error) => {
                 self.handle_general_error(
@@ -7044,26 +7078,6 @@ impl IngestorRouteTask {
                 return Vec::new();
             }
         };
-        for row_error in branch_plan.row_errors {
-            tokio::task::consume_budget().await;
-            self.runtime_handle
-                .handle_message_error(
-                    &self.domain,
-                    self.template.branch.source_kind.as_str(),
-                    &self.template.branch.source,
-                    &self.template.branch.error_policies,
-                    RelayMessage {
-                        key: None,
-                        record: row_error.record,
-                        acks: row_error.acks,
-                    },
-                    MessageErrorFailure::publish(
-                        Some(&self.template.branch.root_relay),
-                        row_error.reason,
-                    ),
-                )
-                .await;
-        }
         if self.template.branch.source_kind == ModelKind::Ingestor {
             let row_count = input_batch.batch.batch().num_rows();
             let row_bytes = input_batch
@@ -10212,6 +10226,136 @@ fn compile_processor_output_filter_map_program(
     }))
 }
 
+fn compile_output_branch_program(
+    target: RuntimeCompileTarget<'_>,
+    branch: Option<&OutputBranch>,
+    input: RuntimeVmSchema,
+    output: RuntimeVmSchema,
+    branch_schema: Option<StdArc<arrow_schema::Schema>>,
+    context: RuntimeVmCompileContext<'_>,
+) -> Result<Option<CompiledBranchProgram>, RuntimeError> {
+    let RuntimeCompileTarget { domain, identifier } = target;
+    let Some(OutputBranch::BranchedBy { assignments, .. }) = branch else {
+        return Ok(None);
+    };
+    if assignments.is_empty() {
+        return Ok(None);
+    }
+    let branch_schema = branch_schema.ok_or_else(|| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "output branch construction for '{}' has no branch schema",
+            identifier.as_str()
+        ),
+    })?;
+    let parsed = lower_branch_construction(
+        assignments,
+        branch_schema.as_ref(),
+        output.schema.as_ref(),
+        input.schema.as_ref(),
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "output branch construction for '{}' is invalid: {}",
+            identifier.as_str(),
+            reason
+        ),
+    })?;
+    let error_sites = compiled_message_error_sites(
+        &parsed,
+        &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
+        None,
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason,
+    })?;
+    let original_parsed = parsed.clone();
+    let mut bindings = vec![
+        VmCompileBinding::readonly("input", input.schema.clone())
+            .with_sensitivity(input.sensitivity),
+        VmCompileBinding::readonly("output", output.schema.clone())
+            .with_sensitivity(output.sensitivity.clone()),
+        VmCompileBinding::readonly("message", output.schema).with_sensitivity(output.sensitivity),
+        VmCompileBinding::writable(BRANCH_NAMESPACE, branch_schema.clone()),
+    ];
+    let local_namespaces = HashSet::from_iter([
+        "input".to_string(),
+        "output".to_string(),
+        "message".to_string(),
+        BRANCH_NAMESPACE.to_string(),
+    ]);
+    let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
+        &original_parsed,
+        &local_namespaces,
+        context.available_materialized_streams,
+        context.current_branching,
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason,
+    })?;
+    bindings.extend(materialized_bindings);
+    let (parsed, pending_lookup_calls) =
+        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
+            RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "output branch compile failed for '{}': {}",
+                    identifier.as_str(),
+                    reason
+                ),
+            }
+        })?;
+    let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
+        pending_lookup_calls,
+        BRANCH_NAMESPACE,
+        &bindings,
+        context.udfs,
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "output branch compile failed for '{}': {}",
+            identifier.as_str(),
+            reason
+        ),
+    })?;
+    if let Some(lookup_binding) = lookup_binding {
+        bindings.push(lookup_binding);
+    }
+    let sensitivity = VmSchemaSensitivity::default();
+    let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        branch_schema,
+        sensitivity.clone(),
+        bindings,
+        context.compile_options(VmCompileOptions {
+            output_mode: VmOutputMode::ExplicitOnly,
+            ..VmCompileOptions::default()
+        }),
+    )
+    .map_err(|error| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "output branch compile failed for '{}': {}",
+            identifier.as_str(),
+            error.message
+        ),
+    })?;
+    Ok(Some(CompiledBranchProgram {
+        program: CompiledProgramWithMaterializedInterest {
+            compiled: Arc::new(compiled),
+            output_sensitivity: sensitivity,
+            materialized_interest,
+            output_namespace_input: OutputNamespaceInput::Uninitialized,
+            lookup_hash_maps,
+            error_sites,
+        },
+    }))
+}
+
 fn compile_wasm_output_filter_map_program(
     domain: &Domain,
     identifier: &Identifier,
@@ -10743,6 +10887,97 @@ pub(super) fn compile_key_projection_program(
     })
 }
 
+async fn evaluate_constant_expression_vm(
+    expression: &nervix_models::Expression,
+    udfs: Option<&UdfExecutor>,
+) -> Result<RuntimeValue, String> {
+    const OUTPUT_NAMESPACE: &str = "constant";
+    const OUTPUT_FIELD: &str = "value";
+    let assignment = nervix_models::Assignment {
+        target: nervix_models::AssignmentTarget::bare(
+            Identifier::parse(OUTPUT_FIELD).map_err(|error| error.to_string())?,
+        ),
+        value: expression.clone(),
+    };
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            assignments: vec![assignment],
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new("input", OUTPUT_NAMESPACE),
+    )
+    .map_err(|reason| format!("constant expression is invalid: {reason}"))?;
+    let empty_schema = StdArc::new(arrow_schema::Schema::empty());
+    let infer_bindings = vec![
+        VmCompileBinding::readonly("input", empty_schema.clone()),
+        VmCompileBinding::writeonly(OUTPUT_NAMESPACE, empty_schema),
+    ];
+    let inferred = infer_vm_set_expr_types_for_bindings_with_udfs(
+        &parsed,
+        infer_bindings,
+        udfs.map(|executor| executor.signatures().clone())
+            .unwrap_or_default(),
+    )
+    .map_err(|error| {
+        format!(
+            "constant expression type inference failed: {}",
+            error.message
+        )
+    })?;
+    let output_schema = StdArc::new(arrow_schema::Schema::new(
+        inferred
+            .into_iter()
+            .map(|(name, data_type, nullable)| arrow_schema::Field::new(name, data_type, nullable))
+            .collect::<Vec<_>>(),
+    ));
+    let bindings = vec![
+        VmCompileBinding::readonly("input", StdArc::new(arrow_schema::Schema::empty())),
+        VmCompileBinding::writeonly(OUTPUT_NAMESPACE, output_schema.clone()),
+    ];
+    let compiled = Arc::new(
+        compile_vm_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_schema,
+            VmSchemaSensitivity::default(),
+            bindings,
+            runtime_udf_compile_options(
+                udfs,
+                VmCompileOptions {
+                    output_mode: VmOutputMode::ExplicitOnly,
+                    ..VmCompileOptions::default()
+                },
+            ),
+        )
+        .map_err(|error| format!("constant expression compile failed: {}", error.message))?,
+    );
+    let input = VmTypedBatch::try_new_with_row_count(
+        compiled.input_schema.clone(),
+        compiled
+            .input_schema
+            .fields()
+            .iter()
+            .map(|field| VmTypedArray::uninitialized(field.data_type().clone(), 1))
+            .collect(),
+        1,
+    )
+    .map_err(|error| error.to_string())?;
+    let result = execute_program_with_selection_in_context(
+        &compiled,
+        &input,
+        &VmExecutionContext {
+            now: current_timestamp(),
+            injector: None,
+        },
+    )
+    .await
+    .map_err(|error| format!("constant expression execution failed: {error}"))?;
+    if result.selected_rows.as_slice() != [0] {
+        return Err("constant expression did not produce exactly one row".to_string());
+    }
+    vm_output_value(&result.batch, 0, OUTPUT_FIELD)?
+        .ok_or_else(|| "constant expression produced NULL".to_string())
+}
+
 fn compile_reorderer_program(
     processor: &Identifier,
     input_relays: &[Identifier],
@@ -10768,7 +11003,7 @@ fn compile_reorderer_program(
     Ok(CompiledReordererProgram {
         key_column_offset: 0,
         key_count: order_by.len(),
-        program: compiled,
+        program: Arc::new(compiled),
     })
 }
 
@@ -10822,7 +11057,9 @@ fn compile_correlator_where_program(
             error.message
         )
     })?;
-    Ok(CompiledCorrelatorWhereProgram { program })
+    Ok(CompiledCorrelatorWhereProgram {
+        program: Arc::new(program),
+    })
 }
 
 struct CorrelatorOutputCompileContext<'a> {
@@ -11266,9 +11503,8 @@ async fn evaluate_correlator_where_match(
     execution_now: Timestamp,
 ) -> Result<bool, (String, Vec<AckSet>)> {
     let acks = AckSet::merged([left.message.acks.attached(), right.message.acks.attached()]);
-    let combined = correlator_combined_record(&left.message.record, &right.message.record);
-    let input = vm_typed_batch_from_runtime_record(&combined, None, &program.program.input_schema)
-        .map_err(|error| {
+    let combined =
+        correlator_input_row(&left.message.record, &right.message.record).map_err(|error| {
             (
                 format!(
                     "correlator '{}' failed to build CORRELATE WHERE input batch: {}",
@@ -11278,6 +11514,32 @@ async fn evaluate_correlator_where_match(
                 vec![acks.clone()],
             )
         })?;
+    let keys = vec![left.message.key.clone()];
+    let side_inputs = HashMap::default();
+    let lookup_columns = HashMap::default();
+    let input = project_vm_input_batch(
+        &program.program.input_schema,
+        &VmInputProjectionSources {
+            carrier: combined.batch(),
+            namespace_batches: &[],
+            strict_namespaces: &["left", "right"],
+            keys: &keys,
+            side_inputs: &side_inputs,
+            ingest_metadata: None,
+            lookup_columns: &lookup_columns,
+            uninitialized: None,
+        },
+    )
+    .map_err(|error| {
+        (
+            format!(
+                "correlator '{}' failed to project CORRELATE WHERE input batch: {}",
+                processor.as_str(),
+                error
+            ),
+            vec![acks.clone()],
+        )
+    })?;
     let result = execute_program_with_selection_in_context(
         &program.program,
         &input,
@@ -11300,24 +11562,35 @@ async fn evaluate_correlator_where_match(
     Ok(!result.selected_rows.is_empty())
 }
 
-fn correlator_combined_record(left: &RuntimeRecord, right: &RuntimeRecord) -> RuntimeRecord {
-    let mut fields = HashMap::default();
-    for (name, value) in left.fields() {
-        if name.starts_with("relay_state.") {
-            fields.insert(name.to_string(), value.clone());
-        } else if !name.starts_with("branch.") {
-            fields.insert(format!("left.{name}"), value.clone());
+fn correlator_input_row(left: &RuntimeRow, right: &RuntimeRow) -> Result<RuntimeRow, String> {
+    let mut fields = Vec::with_capacity(
+        left.batch().schema().fields().len() + right.batch().schema().fields().len(),
+    );
+    let mut columns = Vec::with_capacity(fields.capacity());
+    for (namespace, row) in [("left", left), ("right", right)] {
+        for (index, field) in row.batch().schema().fields().iter().enumerate() {
+            fields.push(StdArc::new(arrow_schema::Field::new(
+                format!("{namespace}.{}", field.name()),
+                field.data_type().clone(),
+                field.is_nullable(),
+            )));
+            columns.push(row.batch().batch().column(index).slice(row.index(), 1));
         }
     }
-    for (name, value) in right.fields() {
-        if name.starts_with("relay_state.") {
-            fields.insert(name.to_string(), value.clone());
-        } else if !name.starts_with("branch.") {
-            fields.insert(format!("right.{name}"), value.clone());
-        }
+    let schema = StdArc::new(arrow_schema::Schema::new(fields));
+    let batch = if columns.is_empty() {
+        RecordBatch::try_new_with_options(
+            schema.clone(),
+            columns,
+            &arrow_array::RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+    } else {
+        RecordBatch::try_new(schema.clone(), columns)
     }
-    RuntimeRecord::from_fields_with_metadata(
-        fields,
+    .map_err(|error| error.to_string())?;
+    RuntimeRow::new(
+        Arc::new(RuntimeRecordBatch::from_record_batch(schema, batch)?),
+        0,
         correlator_output_metadata(left.metadata(), right.metadata()),
     )
 }
@@ -11338,19 +11611,24 @@ async fn evaluate_correlator_output_message(
     processor: &Identifier,
     program: &CompiledCorrelatorOutputProgram,
     key: Option<BranchKey>,
-    combined: RuntimeRecord,
+    combined: RuntimeRow,
+    materialized_state: &HashMap<String, RuntimeValue>,
     acks: AckSet,
     execution_now: Timestamp,
 ) -> Result<Option<RelayMessage>, Box<PlannedMessageError>> {
-    let combined = augment_runtime_record_with_branch_key(combined, key.as_ref());
     let source_message = RelayMessage {
         key: key.clone(),
         record: combined.clone(),
         acks,
     };
-    let combined = augment_runtime_records_with_lookup_hash_maps(
-        vec![combined],
+    let keys = vec![key];
+    let lookup_columns = compute_lookup_hash_map_columns(
         &program.program,
+        combined.batch(),
+        &[],
+        &keys,
+        materialized_state,
+        None,
         execution_now,
     )
     .await
@@ -11369,34 +11647,53 @@ async fn evaluate_correlator_output_message(
                 std::iter::empty(),
             ),
             None,
-            materialized_state_snapshot(&source_message.record),
+            materialized_state.clone(),
         ))
-    })?
-    .into_iter()
-    .next()
-    .expect("one correlator pair must prepare one output input record");
-    let input =
-        vm_typed_batch_from_runtime_record(&combined, None, &program.program.compiled.input_schema)
-            .map_err(|error| {
-                Box::new(planned_structured_message_error(
-                    source_message.clone(),
-                    structured_message_error(
-                        MessageErrorCode::Internal,
-                        format!(
-                            "correlator '{}' failed to build TO output input batch: {}",
-                            processor.as_str(),
-                            error
-                        ),
-                        MessageErrorOperation::Set,
-                        None,
-                        std::iter::empty(),
-                    ),
-                    None,
-                    materialized_state_snapshot(&source_message.record),
-                ))
-            })?;
+    })?;
+    let uninitialized = VmUninitializedInput {
+        fields: program
+            .program
+            .compiled
+            .input_schema
+            .fields()
+            .iter()
+            .filter(|field| field.name().starts_with("output."))
+            .map(|field| field.name().clone())
+            .collect(),
+    };
+    let input = project_vm_input_batch(
+        &program.program.compiled.input_schema,
+        &VmInputProjectionSources {
+            carrier: combined.batch(),
+            namespace_batches: &[],
+            strict_namespaces: &["left", "right"],
+            keys: &keys,
+            side_inputs: materialized_state,
+            ingest_metadata: None,
+            lookup_columns: &lookup_columns,
+            uninitialized: Some(&uninitialized),
+        },
+    )
+    .map_err(|error| {
+        Box::new(planned_structured_message_error(
+            source_message.clone(),
+            structured_message_error(
+                MessageErrorCode::Internal,
+                format!(
+                    "correlator '{}' failed to build TO output input batch: {}",
+                    processor.as_str(),
+                    error
+                ),
+                MessageErrorOperation::Set,
+                None,
+                std::iter::empty(),
+            ),
+            None,
+            materialized_state.clone(),
+        ))
+    })?;
     let result = execute_program_with_selection_in_context(
-        program.program.compiled.as_ref(),
+        &program.program.compiled,
         &input,
         &VmExecutionContext {
             now: execution_now,
@@ -11419,7 +11716,7 @@ async fn evaluate_correlator_output_message(
                 std::iter::empty(),
             ),
             None,
-            materialized_state_snapshot(&source_message.record),
+            materialized_state.clone(),
         ))
     })?;
     if result.selected_rows.is_empty() {
@@ -11445,13 +11742,8 @@ async fn evaluate_correlator_output_message(
         )));
     }
     if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-        let partial_output = vm_partial_output_row_to_runtime_record(
-            &result.batch,
-            0,
-            source_message.record.metadata().clone(),
-        )
-        .ok();
-        let materialized_state = materialized_state_snapshot(&source_message.record);
+        let partial_output = vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok();
+        let materialized_state = materialized_state.clone();
         return Err(Box::new(planned_structured_message_error(
             source_message,
             program.program.structured_side_error(
@@ -11469,40 +11761,50 @@ async fn evaluate_correlator_output_message(
             materialized_state,
         )));
     }
-    let record = vm_output_row_to_decoded_record(&result.batch, 0).map_err(|error| {
-        let partial_output = vm_partial_output_row_to_runtime_record(
-            &result.batch,
-            0,
-            source_message.record.metadata().clone(),
-        )
-        .ok();
-        Box::new(planned_structured_message_error(
-            source_message.clone(),
-            structured_message_error(
-                MessageErrorCode::Validation,
-                format!(
-                    "correlator '{}' failed to decode TO output row: {}",
-                    processor.as_str(),
-                    error
+    let RelayMessage { key, acks, .. } = source_message;
+    let output =
+        vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0]).map_err(|error| {
+            Box::new(planned_structured_message_error(
+                RelayMessage {
+                    key: key.clone(),
+                    record: combined.clone(),
+                    acks: acks.clone(),
+                },
+                structured_message_error(
+                    MessageErrorCode::Validation,
+                    format!(
+                        "correlator '{}' failed to finalize TO output row: {}",
+                        processor.as_str(),
+                        error
+                    ),
+                    MessageErrorOperation::Finalize,
+                    None,
+                    invalid_output_fields(&result.batch, 0),
                 ),
-                MessageErrorOperation::Finalize,
+                vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok(),
+                materialized_state.clone(),
+            ))
+        })?;
+    let record =
+        RuntimeRow::new(Arc::new(output), 0, combined.metadata().clone()).map_err(|error| {
+            Box::new(planned_structured_message_error(
+                RelayMessage {
+                    key: key.clone(),
+                    record: combined,
+                    acks: acks.clone(),
+                },
+                structured_message_error(
+                    MessageErrorCode::Internal,
+                    error,
+                    MessageErrorOperation::Finalize,
+                    None,
+                    std::iter::empty(),
+                ),
                 None,
-                invalid_output_fields(&result.batch, 0),
-            ),
-            partial_output,
-            materialized_state_snapshot(&source_message.record),
-        ))
-    })?;
-    let RelayMessage {
-        key,
-        record: source,
-        acks,
-    } = source_message;
-    Ok(Some(RelayMessage {
-        key,
-        record: record.into_runtime_record(source.metadata().clone()),
-        acks,
-    }))
+                materialized_state.clone(),
+            ))
+        })?;
+    Ok(Some(RelayMessage { key, record, acks }))
 }
 
 struct CorrelatorOutputContext<'a> {
@@ -11662,6 +11964,7 @@ async fn handle_correlator_timeout_action(
                 pending: Vec::new(),
                 next_flush: None,
                 compiled_program: None,
+                compiled_branch_program: None,
             };
             let output_schema =
                 match relay_schema_for_runtime(&branch.runtime, &branch.domain, relay) {
@@ -11948,17 +12251,28 @@ fn ingestor_filter_map_metadata_arrow_schema(
 }
 
 pub(crate) async fn execute_filter_map_on_record(
+    owner: &Identifier,
     filter_map: &CompiledProgramWithMaterializedInterest,
-    record: RuntimeRecord,
+    record: RuntimeRow,
     branch_key: Option<&BranchKey>,
     filter_map_metadata: Option<&IngestFilterMapMetadata>,
+    side_inputs: &HashMap<String, RuntimeValue>,
     execution_now: Timestamp,
-) -> Result<Option<RuntimeRecord>, String> {
-    let outcome = evaluate_filter_map_on_records(
+) -> Result<Option<RuntimeRow>, String> {
+    let keys = vec![branch_key.cloned()];
+    let metadata = vec![record.metadata().clone()];
+    let carrier = record.one_row_batch();
+    let outcome = evaluate_filter_map_on_batch(
+        "subscription",
+        owner,
         filter_map,
-        vec![record],
-        branch_key,
-        filter_map_metadata.map(std::slice::from_ref),
+        FilterMapOutcomeInputs {
+            carrier: &carrier,
+            record_metadata: &metadata,
+            keys: &keys,
+            filter_map_metadata: filter_map_metadata.map(std::slice::from_ref),
+            side_inputs,
+        },
         execution_now,
     )
     .await?
@@ -11981,17 +12295,44 @@ pub(crate) async fn execute_filter_map_on_record(
 /// carries the input row index behind every surviving output row. Walking that mapping
 /// is what keeps message-error attribution and ack identity tied to the record each
 /// outcome came from, so a group never has to be evaluated a row at a time.
-async fn evaluate_filter_map_on_records(
+struct FilterMapOutcomeInputs<'a> {
+    carrier: &'a RuntimeRecordBatch,
+    record_metadata: &'a [RuntimeRecordMetadata],
+    keys: &'a [Option<BranchKey>],
+    filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
+    side_inputs: &'a HashMap<String, RuntimeValue>,
+}
+
+async fn evaluate_filter_map_on_batch(
+    processor_kind: &str,
+    processor: &Identifier,
     filter_map: &CompiledProgramWithMaterializedInterest,
-    records: Vec<RuntimeRecord>,
-    branch_key: Option<&BranchKey>,
-    filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
+    inputs: FilterMapOutcomeInputs<'_>,
     execution_now: Timestamp,
 ) -> Result<Vec<SingleRecordFilterMapOutcome>, String> {
-    if records.is_empty() {
+    let FilterMapOutcomeInputs {
+        carrier,
+        record_metadata,
+        keys,
+        filter_map_metadata,
+        side_inputs,
+    } = inputs;
+    let row_count = carrier.batch().num_rows();
+    if row_count == 0 {
         return Ok(Vec::new());
     }
-    let row_count = records.len();
+    if record_metadata.len() != row_count {
+        return Err(format!(
+            "FILTER-MAP received {} runtime metadata rows for {row_count} records",
+            record_metadata.len()
+        ));
+    }
+    if keys.len() != row_count {
+        return Err(format!(
+            "FILTER-MAP received {} branch keys for {row_count} records",
+            keys.len()
+        ));
+    }
     if let Some(metadata) = filter_map_metadata
         && metadata.len() != row_count
     {
@@ -12000,50 +12341,27 @@ async fn evaluate_filter_map_on_records(
             metadata.len()
         ));
     }
-    let record_metadata = records
-        .iter()
-        .map(|record| record.metadata().clone())
-        .collect::<Vec<_>>();
-    let records = records
-        .into_iter()
-        .map(|record| augment_runtime_record_with_branch_key(record, branch_key))
-        .collect::<Vec<_>>();
-    let records =
-        augment_runtime_records_with_lookup_hash_maps(records, filter_map, execution_now).await?;
-    let uninitialized = VmUninitializedInput {
-        fields: filter_map
-            .compiled
-            .input_schema
-            .fields()
-            .iter()
-            .filter(|field| field.name().starts_with("output."))
-            .map(|field| field.name().clone())
-            .collect(),
-    };
-    let batch = vm_typed_batch_from_runtime_records_with_metadata_and_uninitialized(
-        &records,
-        filter_map_metadata,
-        &filter_map.compiled.input_schema,
-        Some(&uninitialized),
-    )?;
-    let result = execute_program_with_selection_in_context(
-        filter_map.compiled.as_ref(),
-        &batch,
-        &VmExecutionContext {
-            now: execution_now,
-            injector: Some(IngestHeaderFunctionInjector::from_metadata(
-                filter_map_metadata,
-                batch.row_count(),
-            )),
+    let executed = execute_filter_map_program_on_batch(
+        processor_kind,
+        processor,
+        filter_map,
+        FilterMapBatchInputs {
+            carrier,
+            namespace_batches: &[],
+            keys,
+            side_inputs,
+            ingest_metadata: filter_map_metadata,
         },
+        execution_now,
+        (0..row_count).map(|_| AckSet::empty()).collect(),
     )
     .await
-    .map_err(|error| format!("FILTER-MAP execution failed: {error}"))?;
-    if result.selected_rows.len() != result.batch.row_count() {
+    .map_err(|error| error.reason)?;
+    if executed.selected_rows.len() != executed.batch.row_count() {
         return Err(format!(
             "FILTER-MAP produced {} rows for {} selected rows",
-            result.batch.row_count(),
-            result.selected_rows.len()
+            executed.batch.row_count(),
+            executed.selected_rows.len()
         ));
     }
     // Rows the program filtered out never appear in `selected_rows`, so starting every
@@ -12052,7 +12370,10 @@ async fn evaluate_filter_map_on_records(
     let mut outcomes = (0..row_count)
         .map(|_| SingleRecordFilterMapOutcome::Filtered)
         .collect::<Vec<_>>();
-    for (output_row, input_row) in result.selected_rows.iter().copied().enumerate() {
+    let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
+    let mut successful_output_rows = Vec::new();
+    let mut successful_input_rows = Vec::new();
+    for (output_row, input_row) in executed.selected_rows.iter().copied().enumerate() {
         let (Some(slot), Some(metadata)) = (
             outcomes.get_mut(input_row),
             record_metadata.get(input_row).cloned(),
@@ -12061,7 +12382,7 @@ async fn evaluate_filter_map_on_records(
                 "FILTER-MAP selected row {input_row} outside its {row_count}-record input"
             ));
         };
-        if let Some(side_error) = result.batch.errors()[output_row].first() {
+        if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             *slot = SingleRecordFilterMapOutcome::MessageError {
                 error: filter_map.structured_side_error(
                     format!(
@@ -12073,20 +12394,28 @@ async fn evaluate_filter_map_on_records(
                     side_error.span,
                     MessageErrorOperation::Set,
                 ),
-                partial_output: vm_partial_output_row_to_runtime_record(
-                    &result.batch,
-                    output_row,
-                    metadata,
-                )
-                .ok(),
-                materialized_state: materialized_state_snapshot(&records[input_row]),
+                partial_output: vm_partial_output_row_to_runtime_batch(&executed.batch, output_row)
+                    .ok(),
+                materialized_state: state_snapshot.clone(),
             };
             continue;
         }
-        *slot = SingleRecordFilterMapOutcome::Output(
-            vm_output_row_to_decoded_record(&result.batch, output_row)?
-                .into_runtime_record(metadata),
-        );
+        let _ = metadata;
+        successful_output_rows.push(output_row);
+        successful_input_rows.push(input_row);
+    }
+    if !successful_output_rows.is_empty() {
+        let output_batch = Arc::new(vm_typed_batch_selected_rows_to_runtime_batch(
+            &executed.batch,
+            &successful_output_rows,
+        )?);
+        for (output_row, input_row) in successful_input_rows.into_iter().enumerate() {
+            outcomes[input_row] = SingleRecordFilterMapOutcome::Output(RuntimeRow::new(
+                output_batch.clone(),
+                output_row,
+                record_metadata[input_row].clone(),
+            )?);
+        }
     }
     Ok(outcomes)
 }
@@ -12215,7 +12544,7 @@ struct PendingProcessorOutputMessage {
     row: usize,
     output_index: usize,
     key: Option<BranchKey>,
-    record: RuntimeRecord,
+    record: RuntimeRow,
 }
 
 struct PendingProcessorOutputBatch {
@@ -12232,26 +12561,56 @@ impl PendingProcessorOutputBatch {
     }
 }
 
+fn pending_output_batches_by_key(
+    output_index: usize,
+    input_rows: &[usize],
+    keys: Vec<Option<BranchKey>>,
+    batch: RuntimeRecordBatch,
+    metadata: &[RuntimeRecordMetadata],
+) -> Result<Vec<PendingProcessorOutputBatch>, String> {
+    if input_rows.len() != keys.len()
+        || input_rows.len() != batch.batch().num_rows()
+        || input_rows.len() != metadata.len()
+    {
+        return Err(format!(
+            "pending output has {} input rows, {} keys, {} Arrow rows, and {} metadata rows",
+            input_rows.len(),
+            keys.len(),
+            batch.batch().num_rows(),
+            metadata.len()
+        ));
+    }
+    let mut groups = Vec::<(Option<BranchKey>, Vec<usize>)>::new();
+    let mut positions = HashMap::<Option<BranchKey>, usize>::default();
+    for (row, key) in keys.into_iter().enumerate() {
+        if let Some(position) = positions.get(&key).copied() {
+            groups[position].1.push(row);
+        } else {
+            positions.insert(key.clone(), groups.len());
+            groups.push((key, vec![row]));
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(key, rows)| {
+            Ok(PendingProcessorOutputBatch {
+                output_index,
+                input_rows: rows.iter().map(|row| input_rows[*row]).collect(),
+                key,
+                batch: batch.take(&rows)?,
+                metadata: rows.iter().map(|row| metadata[*row].clone()).collect(),
+            })
+        })
+        .collect()
+}
+
 struct PendingProcessorOutputMessageError {
     row: usize,
     key: Option<BranchKey>,
-    record: RuntimeRecord,
+    record: RuntimeRow,
     error: StructuredMessageError,
-    partial_output: Option<RuntimeRecord>,
+    partial_output: Option<RuntimeRecordBatch>,
     materialized_state: HashMap<String, RuntimeValue>,
-}
-
-fn pending_passthrough_output_batch(
-    output_index: usize,
-    batch: &RelayRecordBatch,
-) -> PendingProcessorOutputBatch {
-    PendingProcessorOutputBatch {
-        output_index,
-        input_rows: (0..batch.batch.batch().num_rows()).collect(),
-        key: batch.key.clone(),
-        batch: batch.batch.clone(),
-        metadata: batch.metadata.clone(),
-    }
 }
 
 fn processor_output_input_sensitivity(
@@ -12376,42 +12735,39 @@ async fn evaluate_processor_output_events(
     }
 
     let Some(program) = output.compiled_program.as_ref() else {
-        let can_forward_batch = relay_schema_for_runtime(
+        let output_schema = relay_schema_for_runtime(
             &context.branch.runtime,
             &context.branch.domain,
             &output.relay,
         )
-        .ok()
-        .is_some_and(|schema| schema.arrow_schema().as_ref() == batch.arrow_schema().as_ref());
-        if can_forward_batch {
-            return Ok((
-                Vec::new(),
-                vec![pending_passthrough_output_batch(output_index, batch)],
-                Vec::new(),
-            ));
-        }
-        let records = batch
-            .runtime_records()
+        .map_err(|error| PlannedGeneralError {
+            acks: batch.acks.clone(),
+            reason: error.to_string(),
+        })?;
+        let projected = batch
+            .batch
+            .project(output_schema.arrow_schema())
             .map_err(|error| PlannedGeneralError {
                 acks: batch.acks.clone(),
                 reason: format!(
-                    "{} '{}' failed to materialize row-oriented output boundary: {}",
+                    "{} '{}' failed to project output relay '{}': {}",
                     context.node_kind,
                     context.processor.as_str(),
+                    output.relay.as_str(),
                     error
                 ),
             })?;
-        let messages = records
-            .into_iter()
-            .enumerate()
-            .map(|(row, record)| PendingProcessorOutputMessage {
-                row,
+        return Ok((
+            Vec::new(),
+            vec![PendingProcessorOutputBatch {
                 output_index,
-                key: batch.keys[row].clone(),
-                record,
-            })
-            .collect();
-        return Ok((messages, Vec::new(), Vec::new()));
+                input_rows: (0..projected.batch().num_rows()).collect(),
+                key: batch.key.clone(),
+                batch: projected,
+                metadata: batch.metadata.clone(),
+            }],
+            Vec::new(),
+        ));
     };
 
     let execution_now = context
@@ -12457,8 +12813,10 @@ async fn evaluate_processor_output_events(
         program,
         FilterMapBatchInputs {
             carrier: &batch.batch,
+            namespace_batches: &[],
             keys: &batch.keys,
             side_inputs: &side_inputs,
+            ingest_metadata: None,
         },
         execution_now,
         batch.acks.clone(),
@@ -12482,15 +12840,11 @@ async fn evaluate_processor_output_events(
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
-        if let Some(side_error) = executed.batch.errors()[output_row].first() {
-            let partial_output = vm_partial_output_row_to_runtime_record(
-                &executed.batch,
-                output_row,
-                batch.metadata[input_row].clone(),
-            )
-            .ok();
+        if let Some(side_error) = executed.batch.errors().row(output_row).first() {
+            let partial_output =
+                vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();
             let record = batch
-                .runtime_record(input_row)
+                .runtime_row(input_row)
                 .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
                     reason: format!(
@@ -12980,8 +13334,10 @@ async fn plan_filter_map_messages(
     let lookup_columns = match compute_lookup_hash_map_columns(
         program,
         &batch.batch,
+        &[],
         &batch.keys,
         side_inputs,
+        None,
         execution_now,
     )
     .await
@@ -13013,8 +13369,11 @@ async fn plan_filter_map_messages(
         &program.compiled.input_schema,
         &VmInputProjectionSources {
             carrier: &batch.batch,
+            namespace_batches: &[],
+            strict_namespaces: &[],
             keys: &batch.keys,
             side_inputs,
+            ingest_metadata: None,
             lookup_columns: &lookup_columns,
             uninitialized: Some(&uninitialized),
         },
@@ -13039,7 +13398,7 @@ async fn plan_filter_map_messages(
     let mut acks = std::mem::take(&mut batch.acks);
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
     let result = match execute_program_with_selection_in_context(
-        program.compiled.as_ref(),
+        &program.compiled,
         &vm_batch,
         &VmExecutionContext {
             now: execution_now,
@@ -13079,12 +13438,11 @@ async fn plan_filter_map_messages(
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
-        if let Some(side_error) = result.batch.errors()[output_row].first() {
+        if let Some(side_error) = result.batch.errors().row(output_row).first() {
             let partial_output = if program.captures_partial_output() {
-                Some(vm_partial_output_row_to_runtime_record(
+                Some(vm_partial_output_row_to_runtime_batch(
                     &result.batch,
                     output_row,
-                    metadata[input_row].clone(),
                 ))
             } else {
                 None
@@ -13107,7 +13465,7 @@ async fn plan_filter_map_messages(
                 reason
             };
             let record = batch
-                .runtime_record(input_row)
+                .runtime_row(input_row)
                 .map_err(|error| PlannedGeneralError {
                     acks: acks.clone(),
                     reason: format!(
@@ -13134,10 +13492,11 @@ async fn plan_filter_map_messages(
             ));
             continue;
         }
-        if let Err(error) = vm_output_row_to_decoded_record(&result.batch, output_row) {
+        let invalid_fields = invalid_output_fields(&result.batch, output_row);
+        if !invalid_fields.is_empty() {
             let record =
                 batch
-                    .runtime_record(input_row)
+                    .runtime_row(input_row)
                     .map_err(|decode_error| PlannedGeneralError {
                         acks: acks.clone(),
                         reason: format!(
@@ -13161,11 +13520,11 @@ async fn plan_filter_map_messages(
                         processor_kind,
                         processor.as_str(),
                         program_label,
-                        error
+                        "required output fields are uninitialized or null"
                     ),
                     operation_for_filter_label(program_label),
                     None,
-                    std::iter::empty(),
+                    invalid_fields,
                 ),
                 None,
                 state_snapshot.clone(),
@@ -13242,8 +13601,10 @@ async fn plan_emitter_filter_map_batch(
         &program.body,
         FilterMapBatchInputs {
             carrier: &input.batch,
+            namespace_batches: &[],
             keys: &input.keys,
             side_inputs,
+            ingest_metadata: None,
         },
         execution_now,
         acks,
@@ -13271,7 +13632,7 @@ async fn plan_emitter_filter_map_batch(
     for (output_row, &input_row) in body_result.selected_rows.iter().enumerate() {
         let source_record = |context: &str| {
             input
-                .runtime_record(input_row)
+                .runtime_row(input_row)
                 .map_err(|error| PlannedGeneralError {
                     acks: acks.clone(),
                     reason: format!(
@@ -13280,17 +13641,12 @@ async fn plan_emitter_filter_map_batch(
                     ),
                 })
         };
-        if let Some(side_error) = body_result.batch.errors()[output_row].first() {
+        if let Some(side_error) = body_result.batch.errors().row(output_row).first() {
             let source_record = source_record("FILTER-MAP error")?;
             let partial_output = program
                 .codec_route
                 .then(|| {
-                    vm_partial_output_row_to_runtime_record(
-                        &body_result.batch,
-                        output_row,
-                        source_record.metadata().clone(),
-                    )
-                    .ok()
+                    vm_partial_output_row_to_runtime_batch(&body_result.batch, output_row).ok()
                 })
                 .flatten();
             let reason = format!(
@@ -13328,12 +13684,8 @@ async fn plan_emitter_filter_map_batch(
                     let partial_output = program
                         .codec_route
                         .then(|| {
-                            vm_partial_output_row_to_runtime_record(
-                                &body_result.batch,
-                                output_row,
-                                source_record.metadata().clone(),
-                            )
-                            .ok()
+                            vm_partial_output_row_to_runtime_batch(&body_result.batch, output_row)
+                                .ok()
                         })
                         .flatten();
                     message_errors.push(planned_structured_message_error(
@@ -13365,12 +13717,7 @@ async fn plan_emitter_filter_map_batch(
             let partial_output = program
                 .codec_route
                 .then(|| {
-                    vm_partial_output_row_to_runtime_record(
-                        &body_result.batch,
-                        output_row,
-                        source_record.metadata().clone(),
-                    )
-                    .ok()
+                    vm_partial_output_row_to_runtime_batch(&body_result.batch, output_row).ok()
                 })
                 .flatten();
             message_errors.push(planned_structured_message_error(
@@ -13467,8 +13814,10 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
         program,
         FilterMapBatchInputs {
             carrier: &batch.batch,
+            namespace_batches: &[],
             keys: &batch.keys,
             side_inputs,
+            ingest_metadata: None,
         },
         execution_now,
         batch.acks.clone(),
@@ -13488,7 +13837,7 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
                 ),
             });
         }
-        if let Some(side_error) = result.batch.errors()[output_row].first() {
+        if let Some(side_error) = result.batch.errors().row(output_row).first() {
             groups[input_row] = Err(format!(
                 "SQS FIFO GROUP expression failed with {} at {}",
                 side_error.code.as_str(),
@@ -13496,18 +13845,20 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
             ));
             continue;
         }
-        groups[input_row] = match vm_output_row_to_decoded_record(&result.batch, output_row)
-            .and_then(|record| match record.value("fifo_group") {
-                Some(RuntimeValue::String(value)) => Ok(value.clone()),
-                Some(value) => Err(format!(
-                    "SQS FIFO GROUP expression produced {}, expected STRING",
-                    runtime_value_type_name(value)
-                )),
-                None => Err("SQS FIFO GROUP expression produced NULL".to_string()),
+        groups[input_row] =
+            match vm_output_value(&result.batch, output_row, "fifo_group").and_then(|value| {
+                match value {
+                    Some(RuntimeValue::String(value)) => Ok(value),
+                    Some(value) => Err(format!(
+                        "SQS FIFO GROUP expression produced {}, expected STRING",
+                        runtime_value_type_name(&value)
+                    )),
+                    None => Err("SQS FIFO GROUP expression produced NULL".to_string()),
+                }
             }) {
-            Ok(value) => Ok(Some(value)),
-            Err(reason) => Err(reason),
-        };
+                Ok(value) => Ok(Some(value)),
+                Err(reason) => Err(reason),
+            };
     }
     Ok(groups)
 }
@@ -13517,50 +13868,6 @@ struct ExecutedFilterMap {
     selected_rows: Vec<usize>,
     invocations: Vec<nervix_vm::FunctionInvocation>,
     acks: Vec<AckSet>,
-}
-
-struct FilterMapInputPreparation<'a> {
-    execution_now: Timestamp,
-    side_inputs: &'a HashMap<String, RuntimeValue>,
-    branch_keys: &'a [Option<BranchKey>],
-    acks: &'a [AckSet],
-}
-
-async fn prepare_filter_map_input_records(
-    processor_kind: &str,
-    processor: &Identifier,
-    program: &CompiledProgramWithMaterializedInterest,
-    input_records: Vec<RuntimeRecord>,
-    preparation: FilterMapInputPreparation<'_>,
-) -> Result<Vec<RuntimeRecord>, PlannedGeneralError> {
-    let FilterMapInputPreparation {
-        execution_now,
-        side_inputs,
-        branch_keys,
-        acks,
-    } = preparation;
-    let input_records = augment_runtime_records_with_side_inputs(input_records, side_inputs);
-    let input_records = augment_runtime_records_with_branch_keys(input_records, branch_keys)
-        .map_err(|error| PlannedGeneralError {
-            acks: acks.to_vec(),
-            reason: format!(
-                "{} '{}' failed to prepare branch inputs: {}",
-                processor_kind,
-                processor.as_str(),
-                error
-            ),
-        })?;
-    augment_runtime_records_with_lookup_hash_maps(input_records, program, execution_now)
-        .await
-        .map_err(|error| PlannedGeneralError {
-            acks: acks.to_vec(),
-            reason: format!(
-                "{} '{}' failed to prepare LOOKUP_HASH_MAP inputs: {}",
-                processor_kind,
-                processor.as_str(),
-                error
-            ),
-        })
 }
 
 struct VmUninitializedInput {
@@ -13573,61 +13880,6 @@ impl VmUninitializedInput {
     }
 }
 
-async fn execute_filter_map_program_with_uninitialized(
-    processor_kind: &str,
-    processor: &Identifier,
-    program: &CompiledProgramWithMaterializedInterest,
-    input_records: &[RuntimeRecord],
-    execution_now: Timestamp,
-    acks: Vec<AckSet>,
-    uninitialized: Option<&VmUninitializedInput>,
-) -> Result<ExecutedFilterMap, PlannedGeneralError> {
-    let mut uninitialized_fields = match program.output_namespace_input {
-        OutputNamespaceInput::Uninitialized => program
-            .compiled
-            .input_schema
-            .fields()
-            .iter()
-            .filter(|field| field.name().starts_with("output."))
-            .map(|field| field.name().clone())
-            .collect::<HashSet<_>>(),
-        OutputNamespaceInput::Finalized => HashSet::default(),
-    };
-    if let Some(uninitialized) = uninitialized {
-        uninitialized_fields.extend(uninitialized.fields.iter().cloned());
-    }
-    let uninitialized = (!uninitialized_fields.is_empty()).then_some(VmUninitializedInput {
-        fields: uninitialized_fields,
-    });
-    let vm_batch = match vm_typed_batch_from_runtime_records_with_uninitialized(
-        input_records,
-        &program.compiled.input_schema,
-        uninitialized.as_ref(),
-    ) {
-        Ok(vm_batch) => vm_batch,
-        Err(error) => {
-            return Err(PlannedGeneralError {
-                acks,
-                reason: format!(
-                    "{} '{}' failed to prepare FILTER-MAP input batch: {}",
-                    processor_kind,
-                    processor.as_str(),
-                    error
-                ),
-            });
-        }
-    };
-    execute_prepared_filter_map(
-        processor_kind,
-        processor,
-        program,
-        vm_batch,
-        execution_now,
-        acks,
-    )
-    .await
-}
-
 async fn execute_prepared_filter_map(
     processor_kind: &str,
     processor: &Identifier,
@@ -13635,13 +13887,14 @@ async fn execute_prepared_filter_map(
     vm_batch: VmTypedBatch,
     execution_now: Timestamp,
     acks: Vec<AckSet>,
+    injector: Option<Arc<Box<dyn VmFunctionInjector>>>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralError> {
     let result = match execute_program_with_selection_in_context(
-        program.compiled.as_ref(),
+        &program.compiled,
         &vm_batch,
         &VmExecutionContext {
             now: execution_now,
-            injector: None,
+            injector,
         },
     )
     .await
@@ -13669,8 +13922,10 @@ async fn execute_prepared_filter_map(
 
 struct FilterMapBatchInputs<'a> {
     carrier: &'a RuntimeRecordBatch,
+    namespace_batches: &'a [(&'a str, &'a RuntimeRecordBatch)],
     keys: &'a [Option<BranchKey>],
     side_inputs: &'a HashMap<String, RuntimeValue>,
+    ingest_metadata: Option<&'a [IngestFilterMapMetadata]>,
 }
 
 async fn execute_filter_map_program_on_batch(
@@ -13684,8 +13939,10 @@ async fn execute_filter_map_program_on_batch(
     let lookup_columns = match compute_lookup_hash_map_columns(
         program,
         inputs.carrier,
+        inputs.namespace_batches,
         inputs.keys,
         inputs.side_inputs,
+        inputs.ingest_metadata,
         execution_now,
     )
     .await
@@ -13721,8 +13978,11 @@ async fn execute_filter_map_program_on_batch(
         &program.compiled.input_schema,
         &VmInputProjectionSources {
             carrier: inputs.carrier,
+            namespace_batches: inputs.namespace_batches,
+            strict_namespaces: &[],
             keys: inputs.keys,
             side_inputs: inputs.side_inputs,
+            ingest_metadata: inputs.ingest_metadata,
             lookup_columns: &lookup_columns,
             uninitialized: uninitialized.as_ref(),
         },
@@ -13747,8 +14007,129 @@ async fn execute_filter_map_program_on_batch(
         vm_batch,
         execution_now,
         acks,
+        inputs.ingest_metadata.map(|metadata| {
+            IngestHeaderFunctionInjector::from_metadata(
+                Some(metadata),
+                inputs.carrier.batch().num_rows(),
+            )
+        }),
     )
     .await
+}
+
+async fn evaluate_output_branch_program(
+    owner: &Identifier,
+    program: &CompiledBranchProgram,
+    input: &RuntimeRecordBatch,
+    output: &RuntimeRecordBatch,
+    keys: &[Option<BranchKey>],
+    side_inputs: &HashMap<String, RuntimeValue>,
+    execution_now: Timestamp,
+) -> Result<Vec<Result<Option<BranchKey>, String>>, String> {
+    let row_count = output.batch().num_rows();
+    if input.batch().num_rows() != row_count || keys.len() != row_count {
+        return Err(format!(
+            "branch construction for '{}' received {} input rows, {} output rows, and {} keys",
+            owner.as_str(),
+            input.batch().num_rows(),
+            row_count,
+            keys.len()
+        ));
+    }
+    let namespace_batches = [("input", input), ("output", output), ("message", output)];
+    let lookup_columns = compute_lookup_hash_map_columns(
+        &program.program,
+        output,
+        &namespace_batches,
+        keys,
+        side_inputs,
+        None,
+        execution_now,
+    )
+    .await?;
+    let uninitialized = VmUninitializedInput {
+        fields: program
+            .program
+            .compiled
+            .input_schema
+            .fields()
+            .iter()
+            .filter(|field| field.name().starts_with("branch."))
+            .map(|field| field.name().clone())
+            .collect(),
+    };
+    let vm_input = project_vm_input_batch(
+        &program.program.compiled.input_schema,
+        &VmInputProjectionSources {
+            carrier: output,
+            namespace_batches: &namespace_batches,
+            strict_namespaces: &["input", "output", "message"],
+            keys,
+            side_inputs,
+            ingest_metadata: None,
+            lookup_columns: &lookup_columns,
+            uninitialized: Some(&uninitialized),
+        },
+    )?;
+    let result = execute_program_with_selection_in_context(
+        &program.program.compiled,
+        &vm_input,
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
+        },
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "branch construction VM for '{}' failed: {}",
+            owner.as_str(),
+            error
+        )
+    })?;
+    let mut outcomes = (0..row_count)
+        .map(|_| Err("branch construction VM did not preserve the input row".to_string()))
+        .collect::<Vec<_>>();
+    for (output_row, input_row) in result.selected_rows.iter().copied().enumerate() {
+        if input_row >= outcomes.len() {
+            return Err(format!(
+                "branch construction VM for '{}' selected unknown row {}",
+                owner.as_str(),
+                input_row
+            ));
+        }
+        if let Some(error) = result.batch.errors().row(output_row).first() {
+            outcomes[input_row] = Err(format!(
+                "branch SET failed with {}: {} at {}",
+                error.code.as_str(),
+                error.message,
+                error.span
+            ));
+            continue;
+        }
+        let mut fields = Vec::with_capacity(result.batch.schema().fields().len());
+        for (column_index, field) in result.batch.schema().fields().iter().enumerate() {
+            let array = result.batch.column(column_index).to_array_ref();
+            let value = runtime_value_from_arrow_array(
+                array.as_ref(),
+                &parse_as_type_from_arrow(field.data_type())?,
+                false,
+                output_row,
+                field.name(),
+            )?
+            .ok_or_else(|| format!("branch field '{}' is null", field.name()))?;
+            let name = Identifier::parse(field.name()).map_err(|error| {
+                format!(
+                    "compiled branch field '{}' is invalid: {}",
+                    field.name(),
+                    error
+                )
+            })?;
+            fields.push((name, value));
+        }
+        outcomes[input_row] = BranchKey::from_fields(fields).map(Some);
+    }
+    Ok(outcomes)
 }
 
 fn emitter_headers_from_invocations(
@@ -13933,29 +14314,50 @@ async fn flush_ready_window_processor(
                         break;
                     }
                 };
-            let output_record = match evaluate_window_aggregate(compiled_aggregate, state).await {
-                Ok(record) => record,
-                Err(error) => {
-                    branch.runtime.handle_internal_processor_error_for_acks(
-                        &branch.domain,
-                        node_kind,
-                        processor,
-                        error_policies,
-                        state.entries.iter().map(|entry| &entry.message.acks),
-                        format!(
-                            "window processor '{}' output route '{}' aggregate failed: {}",
-                            processor.as_str(),
-                            output_relay.as_str(),
-                            error
-                        ),
-                    );
-                    route_failed = true;
-                    break;
-                }
-            };
+            let output_batch =
+                match evaluate_window_aggregate(compiled_aggregate, state, &output_schema).await {
+                    Ok(record) => record,
+                    Err(error) => {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            node_kind,
+                            processor,
+                            error_policies,
+                            state.entries.iter().map(|entry| &entry.message.acks),
+                            format!(
+                                "window processor '{}' output route '{}' aggregate failed: {}",
+                                processor.as_str(),
+                                output_relay.as_str(),
+                                error
+                            ),
+                        );
+                        route_failed = true;
+                        break;
+                    }
+                };
             let output_message = RelayMessage {
                 key: first_entry.message.key.clone(),
-                record: output_record.into_runtime_record(output_metadata.clone()),
+                record: match RuntimeRow::new(Arc::new(output_batch), 0, output_metadata.clone()) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            node_kind,
+                            processor,
+                            error_policies,
+                            state.entries.iter().map(|entry| &entry.message.acks),
+                            format!(
+                                "window processor '{}' failed to construct output route '{}' row: \
+                                 {}",
+                                processor.as_str(),
+                                output_relay.as_str(),
+                                error
+                            ),
+                        );
+                        route_failed = true;
+                        break;
+                    }
+                },
                 acks: AckSet::merged(
                     state
                         .entries
@@ -14433,29 +14835,37 @@ impl WindowProcessorState {
         }
     }
 
-    fn to_snapshot(&self) -> WindowProcessorStateSnapshot {
-        WindowProcessorStateSnapshot {
+    fn to_snapshot(&self) -> Result<WindowProcessorStateSnapshot, String> {
+        Ok(WindowProcessorStateSnapshot {
             entries: self
                 .entries
                 .iter()
-                .map(|entry| WindowEntrySnapshot {
-                    sequence: entry.sequence,
-                    timestamp: entry.timestamp,
-                    key: BranchKey::to_remote_key(&entry.message.key),
-                    record: entry.message.record.to_remote(),
+                .map(|entry| {
+                    Ok(WindowEntrySnapshot {
+                        sequence: entry.sequence,
+                        timestamp: entry.timestamp,
+                        key: BranchKey::to_remote_key(&entry.message.key),
+                        record: entry.message.record.to_remote()?,
+                        aggregate_inputs: entry
+                            .aggregate_inputs
+                            .iter()
+                            .map(|input| input.value.as_ref().map(RuntimeValue::to_remote))
+                            .collect(),
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, String>>()?,
             next_sequence: self.next_sequence,
             accumulators: self
                 .accumulators
                 .iter()
                 .map(WindowAggregateAccumulator::to_snapshot)
                 .collect(),
-        }
+        })
     }
 
     fn from_snapshot(
         program: &WindowAggregateProgram,
+        input_schema: &CompiledSchema,
         snapshot: WindowProcessorStateSnapshot,
     ) -> Result<Self, String> {
         if snapshot.accumulators.len() != program.demands().len() {
@@ -14475,9 +14885,16 @@ impl WindowProcessorState {
                         timestamp: entry.timestamp,
                         message: RelayMessage {
                             key: BranchKey::from_remote_key(entry.key)?,
-                            record: RuntimeRecord::from_remote(entry.record),
+                            record: input_schema.runtime_row_from_remote(entry.record)?,
                             acks: AckSet::empty(),
                         },
+                        aggregate_inputs: entry
+                            .aggregate_inputs
+                            .into_iter()
+                            .map(|value| WindowAggregateInput {
+                                value: value.map(RuntimeValue::from_remote),
+                            })
+                            .collect(),
                     })
                 })
                 .collect::<Result<VecDeque<_>, String>>()?,
@@ -14495,10 +14912,9 @@ impl WindowProcessorState {
         program: &WindowAggregateProgram,
         timestamp: Timestamp,
         message: RelayMessage,
+        inputs: Vec<WindowAggregateInput>,
     ) -> Result<(), Box<(String, RelayMessage)>> {
         let sequence = self.next_sequence;
-        let inputs = window_aggregate_inputs(program.demands(), Some(&message.record))
-            .map_err(|error| Box::new((error, message.clone())))?;
         self.apply_aggregate_inputs(
             program.demands(),
             timestamp,
@@ -14511,6 +14927,7 @@ impl WindowProcessorState {
             sequence,
             timestamp,
             message,
+            aggregate_inputs: inputs,
         });
         self.next_sequence = self.next_sequence.saturating_add(1);
         Ok(())
@@ -14554,12 +14971,11 @@ impl WindowProcessorState {
         let Some(entry) = self.entries.pop_front() else {
             return Ok(None);
         };
-        let inputs = window_aggregate_inputs(program.demands(), Some(&entry.message.record))?;
         self.apply_aggregate_inputs(
             program.demands(),
             entry.timestamp,
             entry.sequence,
-            &inputs,
+            &entry.aggregate_inputs,
             WindowAccumulatorAction::Remove { at: removal_time },
         )?;
         Ok(Some(entry))
@@ -14600,26 +15016,86 @@ struct WindowAggregateInput {
     value: Option<RuntimeValue>,
 }
 
+async fn evaluate_window_aggregate_inputs(
+    program: &CompiledWindowAggregateProgram,
+    row: &RuntimeRow,
+    execution_now: Timestamp,
+) -> Result<Vec<WindowAggregateInput>, String> {
+    let carrier = row.one_row_batch();
+    let keys = [None];
+    let side_inputs = HashMap::new();
+    let lookup_columns = HashMap::new();
+    let uninitialized = VmUninitializedInput {
+        fields: program
+            .input_program
+            .input_schema
+            .fields()
+            .iter()
+            .filter(|field| field.name().starts_with("window_input."))
+            .map(|field| field.name().clone())
+            .collect(),
+    };
+    let input = project_vm_input_batch(
+        &program.input_program.input_schema,
+        &VmInputProjectionSources {
+            carrier: &carrier,
+            namespace_batches: &[],
+            strict_namespaces: &[],
+            keys: &keys,
+            side_inputs: &side_inputs,
+            ingest_metadata: None,
+            lookup_columns: &lookup_columns,
+            uninitialized: Some(&uninitialized),
+        },
+    )?;
+    let result = execute_program_with_selection_in_context(
+        &program.input_program,
+        &input,
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if result.selected_rows.as_slice() != [0] {
+        return Err("window aggregate input VM did not preserve its input row".to_string());
+    }
+    if let Some(error) = result.batch.errors().row(0).first() {
+        return Err(format!(
+            "window aggregate input VM failed with {}: {}",
+            error.code.as_str(),
+            error.message
+        ));
+    }
+    program
+        .input_fields
+        .iter()
+        .map(|field_name| {
+            let Some(field_name) = field_name else {
+                return Ok(WindowAggregateInput { value: None });
+            };
+            let column_index = result.batch.schema().index_of(field_name).map_err(|_| {
+                format!("window aggregate input VM produced no '{field_name}' field")
+            })?;
+            let field = result.batch.schema().field(column_index);
+            let array = result.batch.column(column_index).to_array_ref();
+            runtime_value_from_arrow_array(
+                array.as_ref(),
+                &parse_as_type_from_arrow(field.data_type())?,
+                true,
+                0,
+                field_name,
+            )
+            .map(|value| WindowAggregateInput { value })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy)]
 enum WindowAccumulatorAction {
     Add,
     Remove { at: Timestamp },
-}
-
-fn window_aggregate_inputs(
-    demands: &[WindowAggregateDemand],
-    record: Option<&RuntimeRecord>,
-) -> Result<Vec<WindowAggregateInput>, String> {
-    demands
-        .iter()
-        .map(|demand| {
-            let value = match &demand.input {
-                Some(input) => Some(evaluate_runtime_expr(input, record)?),
-                None => None,
-            };
-            Ok(WindowAggregateInput { value })
-        })
-        .collect()
 }
 
 fn decrement_runtime_value_count(
@@ -14800,22 +15276,10 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
                 ),
             }
         })?;
-        let watermark = Timestamp::now();
-        let records = (0..row_count)
-            .map(|_| {
-                RuntimeRecord::from_fields_with_metadata(
-                    [("value".to_string(), value.clone())],
-                    RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
-                )
+        runtime_value_arrow_array(data_type, Some(&value), row_count)
+            .and_then(|array| {
+                VmTypedArray::try_from_array_ref(array).map_err(|error| error.to_string())
             })
-            .collect::<Vec<_>>();
-        let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-            "value",
-            data_type.clone(),
-            false,
-        )]));
-        vm_typed_batch_from_runtime_records(&records, &schema)
-            .map(|batch| batch.column(0).clone())
             .map_err(|message| nervix_vm::RuntimeError::InvalidBatch { message })
     }
 }
@@ -14823,24 +15287,46 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
 async fn evaluate_window_aggregate(
     program: &CompiledWindowAggregateProgram,
     state: &WindowProcessorState,
-) -> Result<DecodedRecord, String> {
-    let mut fields = Vec::with_capacity(program.assignments.len());
+    output_schema: &CompiledSchema,
+) -> Result<RuntimeRecordBatch, String> {
     let injector: Arc<Box<dyn VmFunctionInjector>> =
         Arc::new(Box::new(WindowAggregateFunctionInjector {
             accumulators: state.accumulators.clone(),
             demand_types: program.demand_types.clone(),
             demand_offset: program.demand_offset,
         }));
-    for assignment in &program.assignments {
-        let value = evaluate_window_aggregate_expr(
-            &assignment.value,
-            &assignment.target.field,
-            injector.clone(),
-        )
-        .await?;
-        fields.push((assignment.target.field.clone(), value));
+    let mut columns = Vec::with_capacity(output_schema.arrow_schema().fields().len());
+    for field in output_schema.arrow_schema().fields() {
+        let value = if let Some(assignment) = program
+            .assignments
+            .iter()
+            .find(|assignment| assignment.target.field == *field.name())
+        {
+            Some(
+                evaluate_window_aggregate_expr(
+                    &assignment.value,
+                    &assignment.target.field,
+                    injector.clone(),
+                )
+                .await?,
+            )
+        } else if field.is_nullable() {
+            None
+        } else {
+            return Err(format!(
+                "window aggregate did not initialize required output field '{}'",
+                field.name()
+            ));
+        };
+        columns.push(runtime_value_arrow_array(
+            field.data_type(),
+            value.as_ref(),
+            1,
+        )?);
     }
-    Ok(DecodedRecord::from_fields(fields))
+    let batch = RecordBatch::try_new(output_schema.arrow_schema(), columns)
+        .map_err(|error| error.to_string())?;
+    RuntimeRecordBatch::from_record_batch(output_schema.arrow_schema(), batch)
 }
 
 fn evaluate_window_aggregate_expr<'a>(
@@ -14872,10 +15358,19 @@ fn evaluate_window_aggregate_expr<'a>(
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-                let output = vm_output_row_to_decoded_record(&result.batch, 0)?;
-                output.value(target_field).cloned().ok_or_else(|| {
+                let column_index = result.batch.schema().index_of(target_field).map_err(|_| {
                     format!("window aggregate VM produced no '{target_field}' output field")
-                })
+                })?;
+                let field = result.batch.schema().field(column_index);
+                let array = result.batch.column(column_index).to_array_ref();
+                runtime_value_from_arrow_array(
+                    array.as_ref(),
+                    &parse_as_type_from_arrow(field.data_type())?,
+                    false,
+                    0,
+                    target_field,
+                )?
+                .ok_or_else(|| format!("window aggregate VM produced null '{target_field}' output"))
             }
             CompiledWindowAggregateExpr::Array { items, fixed_size } => {
                 let mut values = Vec::with_capacity(items.len());
@@ -14893,263 +15388,6 @@ fn evaluate_window_aggregate_expr<'a>(
             }
         }
     })
-}
-
-fn evaluate_runtime_expr(
-    expr: &Expr,
-    record: Option<&RuntimeRecord>,
-) -> Result<RuntimeValue, String> {
-    match expr {
-        Expr::Literal(Literal::Int64(value)) => Ok(RuntimeValue::I64(*value)),
-        Expr::Literal(Literal::Float64(value)) => Ok(RuntimeValue::F64(OrderedFloat(*value))),
-        Expr::Literal(Literal::Bool(value)) => Ok(RuntimeValue::Bool(*value)),
-        Expr::Literal(Literal::String(value)) => Ok(RuntimeValue::String(value.clone())),
-        Expr::Literal(Literal::Null) => {
-            Err("NULL requires a declared optional assignment target".to_string())
-        }
-        Expr::InternalFieldRef(field_ref) => Err(format!(
-            "internal field reference {:?}.{} is not available in aggregate input",
-            field_ref.namespace, field_ref.field
-        )),
-        Expr::FieldRef(field_ref) => record
-            .and_then(|record| record.value(&field_ref.field))
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "missing field '{}.{}' in aggregate input",
-                    field_ref.relay, field_ref.field
-                )
-            }),
-        Expr::Unary { op, expr } => {
-            let value = evaluate_runtime_expr(&expr.inner, record)?;
-            match op {
-                UnaryOp::Neg => negate_runtime_value(value),
-                UnaryOp::Not => match value {
-                    RuntimeValue::Bool(value) => Ok(RuntimeValue::Bool(!value)),
-                    other => Err(format!(
-                        "NOT expects BOOL, found {}",
-                        runtime_value_type_name(&other)
-                    )),
-                },
-            }
-        }
-        Expr::Binary { op, left, right } => {
-            let left = evaluate_runtime_expr(&left.inner, record)?;
-            let right = evaluate_runtime_expr(&right.inner, record)?;
-            evaluate_runtime_binary(*op, left, right)
-        }
-        Expr::Cast { expr, data_type } => {
-            let value = evaluate_runtime_expr(&expr.inner, record)?;
-            cast_runtime_value(value, data_type)
-        }
-        Expr::Call { function, args } => evaluate_runtime_function(function, args, record),
-        Expr::Case {
-            operand,
-            branches,
-            else_result,
-        } => {
-            let operand = operand
-                .as_ref()
-                .map(|operand| evaluate_runtime_expr(&operand.inner, record))
-                .transpose()?;
-            for branch in branches {
-                let when = evaluate_runtime_expr(&branch.when.inner, record)?;
-                let matches = if let Some(operand) = &operand {
-                    operand == &when
-                } else {
-                    match when {
-                        RuntimeValue::Bool(value) => value,
-                        other => {
-                            return Err(format!(
-                                "CASE WHEN condition expects BOOL, found {}",
-                                runtime_value_type_name(&other)
-                            ));
-                        }
-                    }
-                };
-                if matches {
-                    return evaluate_runtime_expr(&branch.result.inner, record);
-                }
-            }
-            else_result
-                .as_ref()
-                .ok_or_else(|| "CASE without ELSE produced NULL in aggregate input".to_string())
-                .and_then(|else_result| evaluate_runtime_expr(&else_result.inner, record))
-        }
-    }
-}
-
-fn evaluate_runtime_function(
-    function: &FunctionName,
-    args: &[SpannedExpr],
-    record: Option<&RuntimeRecord>,
-) -> Result<RuntimeValue, String> {
-    let values = args
-        .iter()
-        .map(|arg| evaluate_runtime_expr(&arg.inner, record))
-        .collect::<Result<Vec<_>, _>>()?;
-    match function {
-        FunctionName::Abs => {
-            let value = values
-                .into_iter()
-                .next()
-                .ok_or_else(|| "abs expects one argument".to_string())?;
-            abs_runtime_value(value)
-        }
-        FunctionName::Lower => {
-            unary_string_function(values, "lower", |value| value.to_ascii_lowercase())
-        }
-        FunctionName::Upper => {
-            unary_string_function(values, "upper", |value| value.to_ascii_uppercase())
-        }
-        FunctionName::Trim => {
-            unary_string_function(values, "trim", |value| value.trim().to_string())
-        }
-        FunctionName::Length => {
-            let value = values
-                .first()
-                .ok_or_else(|| "length expects one argument".to_string())?;
-            if let RuntimeValue::String(value) = value {
-                Ok(RuntimeValue::I64(value.chars().count() as i64))
-            } else {
-                Err(format!(
-                    "length expects STRING, found {}",
-                    runtime_value_type_name(value)
-                ))
-            }
-        }
-        other => Err(format!(
-            "function '{}' is not supported inside window aggregate expressions yet",
-            other.as_str()
-        )),
-    }
-}
-
-fn unary_string_function(
-    values: Vec<RuntimeValue>,
-    name: &str,
-    op: impl FnOnce(&str) -> String,
-) -> Result<RuntimeValue, String> {
-    let value = values
-        .first()
-        .ok_or_else(|| format!("{name} expects one argument"))?;
-    if let RuntimeValue::String(value) = value {
-        Ok(RuntimeValue::String(op(value)))
-    } else {
-        Err(format!(
-            "{name} expects STRING, found {}",
-            runtime_value_type_name(value)
-        ))
-    }
-}
-
-fn negate_runtime_value(value: RuntimeValue) -> Result<RuntimeValue, String> {
-    match value {
-        RuntimeValue::I8(value) => Ok(RuntimeValue::I8(-value)),
-        RuntimeValue::I16(value) => Ok(RuntimeValue::I16(-value)),
-        RuntimeValue::I32(value) => Ok(RuntimeValue::I32(-value)),
-        RuntimeValue::I64(value) => Ok(RuntimeValue::I64(-value)),
-        RuntimeValue::F32(value) => Ok(RuntimeValue::F32(OrderedFloat(-value.0))),
-        RuntimeValue::F64(value) => Ok(RuntimeValue::F64(OrderedFloat(-value.0))),
-        other => Err(format!(
-            "numeric negation does not support {}",
-            runtime_value_type_name(&other)
-        )),
-    }
-}
-
-fn abs_runtime_value(value: RuntimeValue) -> Result<RuntimeValue, String> {
-    match value {
-        RuntimeValue::I8(value) => Ok(RuntimeValue::I8(value.abs())),
-        RuntimeValue::I16(value) => Ok(RuntimeValue::I16(value.abs())),
-        RuntimeValue::I32(value) => Ok(RuntimeValue::I32(value.abs())),
-        RuntimeValue::I64(value) => Ok(RuntimeValue::I64(value.abs())),
-        RuntimeValue::F32(value) => Ok(RuntimeValue::F32(OrderedFloat(value.0.abs()))),
-        RuntimeValue::F64(value) => Ok(RuntimeValue::F64(OrderedFloat(value.0.abs()))),
-        other => Err(format!(
-            "abs does not support {}",
-            runtime_value_type_name(&other)
-        )),
-    }
-}
-
-fn evaluate_runtime_binary(
-    op: BinaryOp,
-    left: RuntimeValue,
-    right: RuntimeValue,
-) -> Result<RuntimeValue, String> {
-    match op {
-        BinaryOp::Add => numeric_binary(left, right, |left, right| left + right),
-        BinaryOp::Sub => numeric_binary(left, right, |left, right| left - right),
-        BinaryOp::Mul => numeric_binary(left, right, |left, right| left * right),
-        BinaryOp::Div => numeric_binary(left, right, |left, right| left / right),
-        BinaryOp::Rem => numeric_binary(left, right, |left, right| left % right),
-        BinaryOp::Eq => Ok(RuntimeValue::Bool(left == right)),
-        BinaryOp::NotEq => Ok(RuntimeValue::Bool(left != right)),
-        BinaryOp::Gt => Ok(RuntimeValue::Bool(
-            compare_runtime_values(&left, &right).is_gt(),
-        )),
-        BinaryOp::Lt => Ok(RuntimeValue::Bool(
-            compare_runtime_values(&left, &right).is_lt(),
-        )),
-        BinaryOp::GtEq => Ok(RuntimeValue::Bool(
-            !compare_runtime_values(&left, &right).is_lt(),
-        )),
-        BinaryOp::LtEq => Ok(RuntimeValue::Bool(
-            !compare_runtime_values(&left, &right).is_gt(),
-        )),
-        BinaryOp::And => match (left, right) {
-            (RuntimeValue::Bool(left), RuntimeValue::Bool(right)) => {
-                Ok(RuntimeValue::Bool(left && right))
-            }
-            (left, right) => Err(format!(
-                "AND expects BOOL operands, found {} and {}",
-                runtime_value_type_name(&left),
-                runtime_value_type_name(&right)
-            )),
-        },
-        BinaryOp::Or => match (left, right) {
-            (RuntimeValue::Bool(left), RuntimeValue::Bool(right)) => {
-                Ok(RuntimeValue::Bool(left || right))
-            }
-            (left, right) => Err(format!(
-                "OR expects BOOL operands, found {} and {}",
-                runtime_value_type_name(&left),
-                runtime_value_type_name(&right)
-            )),
-        },
-    }
-}
-
-fn numeric_binary(
-    left: RuntimeValue,
-    right: RuntimeValue,
-    op: impl FnOnce(f64, f64) -> f64,
-) -> Result<RuntimeValue, String> {
-    Ok(RuntimeValue::F64(OrderedFloat(op(
-        runtime_value_to_f64(&left)?,
-        runtime_value_to_f64(&right)?,
-    ))))
-}
-
-fn cast_runtime_value(
-    value: RuntimeValue,
-    data_type: &ArrowDataType,
-) -> Result<RuntimeValue, String> {
-    match data_type {
-        ArrowDataType::Float64 => Ok(RuntimeValue::F64(OrderedFloat(runtime_value_to_f64(
-            &value,
-        )?))),
-        ArrowDataType::Float32 => Ok(RuntimeValue::F32(OrderedFloat(
-            runtime_value_to_f64(&value)? as f32,
-        ))),
-        ArrowDataType::Int64 => Ok(RuntimeValue::I64(runtime_value_to_f64(&value)? as i64)),
-        ArrowDataType::Utf8 => Ok(RuntimeValue::String(match value {
-            RuntimeValue::String(value) => value,
-            other => other.to_key_fragment(),
-        })),
-        _ => Ok(value),
-    }
 }
 
 fn runtime_value_to_f64(value: &RuntimeValue) -> Result<f64, String> {
@@ -15264,302 +15502,10 @@ fn compare_runtime_values(left: &RuntimeValue, right: &RuntimeValue) -> std::cmp
     }
 }
 
-fn vm_typed_batch_from_runtime_record(
-    record: &RuntimeRecord,
-    filter_map_metadata: Option<&IngestFilterMapMetadata>,
-    schema: &StdArc<arrow_schema::Schema>,
-) -> Result<VmTypedBatch, String> {
-    vm_typed_batch_from_runtime_records_with_metadata(
-        std::slice::from_ref(record),
-        filter_map_metadata.map(std::slice::from_ref),
-        schema,
-    )
-}
-
-fn vm_typed_batch_from_runtime_records(
-    records: &[RuntimeRecord],
-    schema: &StdArc<arrow_schema::Schema>,
-) -> Result<VmTypedBatch, String> {
-    vm_typed_batch_from_runtime_records_with_metadata(records, None, schema)
-}
-
-fn vm_typed_batch_from_runtime_records_with_uninitialized(
-    records: &[RuntimeRecord],
-    schema: &StdArc<arrow_schema::Schema>,
-    uninitialized: Option<&VmUninitializedInput>,
-) -> Result<VmTypedBatch, String> {
-    vm_typed_batch_from_runtime_records_with_metadata_and_uninitialized(
-        records,
-        None,
-        schema,
-        uninitialized,
-    )
-}
-
-fn vm_typed_batch_from_runtime_records_with_metadata_and_uninitialized(
-    records: &[RuntimeRecord],
-    filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
-    schema: &StdArc<arrow_schema::Schema>,
-    uninitialized: Option<&VmUninitializedInput>,
-) -> Result<VmTypedBatch, String> {
-    let Some(uninitialized) = uninitialized else {
-        return vm_typed_batch_from_runtime_records_with_metadata(
-            records,
-            filter_map_metadata,
-            schema,
-        );
-    };
-    let relaxed_schema = StdArc::new(arrow_schema::Schema::new(
-        schema
-            .fields()
-            .iter()
-            .map(|field| {
-                if uninitialized.contains(field) {
-                    field.as_ref().clone().with_nullable(true)
-                } else {
-                    field.as_ref().clone()
-                }
-            })
-            .collect::<Vec<_>>(),
-    ));
-    let batch = vm_typed_batch_from_runtime_records_with_metadata(
-        records,
-        filter_map_metadata,
-        &relaxed_schema,
-    )?;
-    let mut columns = batch.columns().to_vec();
-    for (index, field) in schema.fields().iter().enumerate() {
-        if uninitialized.contains(field) {
-            columns[index] = VmTypedArray::uninitialized(field.data_type().clone(), records.len());
-        }
-    }
-    VmTypedBatch::try_new(schema.clone(), columns).map_err(|error| error.to_string())
-}
-
-fn resolve_filter_map_input_value<'a>(
-    record: &'a RuntimeRecord,
-    filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
-    index: usize,
-    field: &arrow_schema::Field,
-) -> Result<Option<&'a RuntimeValue>, String> {
-    if let Some(value) = record.value(field.name()) {
-        return Ok(Some(value));
-    }
-    let Some((namespace, field_name)) = field.name().split_once('.') else {
-        return Ok(record.value(field.name()));
-    };
-
-    if namespace == INGEST_METADATA_NAMESPACE {
-        return Ok(filter_map_metadata
-            .and_then(|rows| rows.get(index))
-            .and_then(|row| row.metadata_value(field_name)));
-    }
-
-    if namespace == BRANCH_NAMESPACE {
-        return Ok(record.value(field.name()));
-    }
-
-    Ok(record.value(field_name))
-}
-
-fn filter_map_input_value<'a>(
-    record: &'a RuntimeRecord,
-    filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
-    index: usize,
-    field: &arrow_schema::Field,
-) -> Result<Option<&'a RuntimeValue>, String> {
-    let value = resolve_filter_map_input_value(record, filter_map_metadata, index, field)?;
-    if value.is_none() && !field.is_nullable() {
-        return Err(format!(
-            "FILTER-MAP input record is missing field '{}'",
-            field.name()
-        ));
-    }
-    Ok(value)
-}
-
-fn augment_runtime_record_with_side_inputs(
-    record: RuntimeRecord,
-    side_inputs: &HashMap<String, RuntimeValue>,
-) -> RuntimeRecord {
-    if side_inputs.is_empty() {
-        return record;
-    }
-    let metadata = record.metadata().clone();
-    let mut fields = record
-        .to_remote()
-        .fields
-        .into_iter()
-        .map(|field| (field.name, RuntimeValue::from_remote(field.value)))
-        .collect::<HashMap<_, _>>();
-    for (name, value) in side_inputs {
-        fields.entry(name.clone()).or_insert_with(|| value.clone());
-    }
-    RuntimeRecord::from_fields_with_metadata(fields, metadata)
-}
-
-fn augment_runtime_records_with_side_inputs(
-    records: Vec<RuntimeRecord>,
-    side_inputs: &HashMap<String, RuntimeValue>,
-) -> Vec<RuntimeRecord> {
-    records
-        .into_iter()
-        .map(|record| augment_runtime_record_with_side_inputs(record, side_inputs))
-        .collect()
-}
-
-fn augment_runtime_record_with_branch_key(
-    record: RuntimeRecord,
-    branch_key: Option<&BranchKey>,
-) -> RuntimeRecord {
-    let Some(branch_key) = branch_key else {
-        return record;
-    };
-    let metadata = record.metadata().clone();
-    let mut fields = record
-        .to_remote()
-        .fields
-        .into_iter()
-        .map(|field| (field.name, RuntimeValue::from_remote(field.value)))
-        .collect::<HashMap<_, _>>();
-    for (name, value) in branch_key.fields() {
-        fields.insert(
-            format!("{BRANCH_NAMESPACE}.{}", name.as_str()),
-            value.clone(),
-        );
-    }
-    RuntimeRecord::from_fields_with_metadata(fields, metadata)
-}
-
-fn augment_runtime_records_with_branch_keys(
-    records: Vec<RuntimeRecord>,
-    keys: &[Option<BranchKey>],
-) -> Result<Vec<RuntimeRecord>, String> {
-    if records.len() != keys.len() {
-        return Err(format!(
-            "branch key count {} does not match record count {}",
-            keys.len(),
-            records.len()
-        ));
-    }
-    Ok(records
-        .into_iter()
-        .zip(keys)
-        .map(|(record, key)| augment_runtime_record_with_branch_key(record, key.as_ref()))
-        .collect())
-}
-
-fn runtime_record_with_field(
-    record: RuntimeRecord,
-    name: String,
-    value: RuntimeValue,
-) -> RuntimeRecord {
-    let metadata = record.metadata().clone();
-    let mut fields = record
-        .to_remote()
-        .fields
-        .into_iter()
-        .map(|field| (field.name, RuntimeValue::from_remote(field.value)))
-        .collect::<HashMap<_, _>>();
-    fields.insert(name, value);
-    RuntimeRecord::from_fields_with_metadata(fields, metadata)
-}
-
-async fn runtime_record_lookup_key(
-    call: &LookupHashMapCall,
-    records: &[RuntimeRecord],
-    execution_now: Timestamp,
-) -> Result<Vec<Option<String>>, String> {
-    let uninitialized = VmUninitializedInput {
-        fields: call
-            .key_program
-            .input_schema
-            .fields()
-            .iter()
-            .filter(|field| field.name().starts_with("output."))
-            .map(|field| field.name().clone())
-            .collect(),
-    };
-    let vm_batch = vm_typed_batch_from_runtime_records_with_uninitialized(
-        records,
-        &call.key_program.input_schema,
-        Some(&uninitialized),
-    )?;
-    let result = execute_program_with_selection_in_context(
-        call.key_program.as_ref(),
-        &vm_batch,
-        &VmExecutionContext {
-            now: execution_now,
-            injector: None,
-        },
-    )
-    .await
-    .map_err(|error| {
-        format!(
-            "LOOKUP_HASH_MAP key execution failed for hash map '{}' field '{}': {}",
-            call.lookup.as_str(),
-            call.lookup_field,
-            error
-        )
-    })?;
-    let mut keys = vec![None; records.len()];
-    for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
-        if let Some(side_error) = result.batch.errors()[output_row].first() {
-            return Err(format!(
-                "LOOKUP_HASH_MAP key side error {}: {} at {}",
-                side_error.code.as_str(),
-                side_error.message,
-                side_error.span
-            ));
-        }
-        let record = vm_output_row_to_decoded_record(&result.batch, output_row)?;
-        if let Some(value) = record.value(&call.generated_field) {
-            keys[input_row] = Some(value.to_key_fragment());
-        }
-    }
-    Ok(keys)
-}
-
-async fn augment_runtime_records_with_lookup_hash_maps(
-    records: Vec<RuntimeRecord>,
-    program: &CompiledProgramWithMaterializedInterest,
-    execution_now: Timestamp,
-) -> Result<Vec<RuntimeRecord>, String> {
-    if program.lookup_hash_maps.is_empty() {
-        return Ok(records);
-    }
-    let mut records = records;
-    for call in &program.lookup_hash_maps {
-        let keys = runtime_record_lookup_key(call, &records, execution_now).await?;
-        records = records
-            .into_iter()
-            .zip(keys)
-            .map(|(record, key)| {
-                let Some(key) = key else {
-                    return record;
-                };
-                let Some(lookup_record) = call.lookup_runtime.entries.get(&key) else {
-                    return record;
-                };
-                let Some(value) = lookup_record.value(&call.lookup_field).cloned() else {
-                    return record;
-                };
-                runtime_record_with_field(
-                    record,
-                    VmCompileNamespace::Internal(InternalFieldNamespace::LookupHashMap)
-                        .qualified_field_name(&call.generated_field),
-                    value,
-                )
-            })
-            .collect();
-    }
-    Ok(records)
-}
-
 fn materialized_record_from_entries(
-    entries: Vec<(String, RuntimeRecord)>,
+    entries: Vec<(String, nervix_models::RemoteRuntimeRecord)>,
     key: Option<&str>,
-) -> Option<RuntimeRecord> {
+) -> Option<nervix_models::RemoteRuntimeRecord> {
     let Some(key) = key else {
         return entries.into_iter().next().map(|(_, record)| record);
     };
@@ -15711,19 +15657,6 @@ fn append_filter_map_datetime(
     }
 }
 
-fn build_filter_map_nested_input_column(
-    records: &[RuntimeRecord],
-    filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
-    field: &arrow_schema::Field,
-) -> Result<ArrayRef, String> {
-    let mut builder = make_builder(field.data_type(), records.len());
-    for (index, record) in records.iter().enumerate() {
-        let value = filter_map_input_value(record, filter_map_metadata, index, field)?;
-        append_filter_map_nested_value(builder.as_mut(), field.data_type(), value, field)?;
-    }
-    Ok(builder.finish())
-}
-
 fn append_filter_map_nested_value(
     builder: &mut dyn ArrayBuilder,
     data_type: &ArrowDataType,
@@ -15856,8 +15789,11 @@ fn append_filter_map_nested_value(
 
 struct VmInputProjectionSources<'a> {
     carrier: &'a RuntimeRecordBatch,
+    namespace_batches: &'a [(&'a str, &'a RuntimeRecordBatch)],
+    strict_namespaces: &'a [&'a str],
     keys: &'a [Option<BranchKey>],
     side_inputs: &'a HashMap<String, RuntimeValue>,
+    ingest_metadata: Option<&'a [IngestFilterMapMetadata]>,
     lookup_columns: &'a HashMap<String, VmTypedArray>,
     uninitialized: Option<&'a VmUninitializedInput>,
 }
@@ -15872,6 +15808,23 @@ fn project_vm_input_batch(
             "branch key count {} does not match batch row count {row_count}",
             sources.keys.len()
         ));
+    }
+    if let Some(metadata) = sources.ingest_metadata
+        && metadata.len() != row_count
+    {
+        return Err(format!(
+            "ingest metadata count {} does not match batch row count {row_count}",
+            metadata.len()
+        ));
+    }
+    for (namespace, batch) in sources.namespace_batches {
+        if batch.batch().num_rows() != row_count {
+            return Err(format!(
+                "namespace '{namespace}' batch row count {} does not match carrier row count \
+                 {row_count}",
+                batch.batch().num_rows()
+            ));
+        }
     }
     let carrier_schema = sources.carrier.schema();
     let columns = schema
@@ -15892,22 +15845,55 @@ fn project_vm_input_batch(
             if let Ok(index) = carrier_schema.index_of(field.name()) {
                 return carrier_input_column(sources.carrier, index, field);
             }
-            if let Some((namespace, field_name)) = field.name().split_once('.') {
-                if namespace == BRANCH_NAMESPACE {
-                    return branch_key_input_column(sources.keys, field_name, field);
-                }
-                if namespace != INGEST_METADATA_NAMESPACE
-                    && let Ok(index) = carrier_schema.index_of(field_name)
-                {
-                    return carrier_input_column(sources.carrier, index, field);
-                }
-            }
             if let Some(value) = sources.side_inputs.get(field.name()) {
                 return runtime_values_input_column(
                     std::iter::repeat_n(Some(value), row_count),
                     row_count,
                     field,
                 );
+            }
+            if let Some((namespace, field_name)) = field.name().split_once('.') {
+                if namespace == INGEST_METADATA_NAMESPACE {
+                    return runtime_values_input_column(
+                        (0..row_count).map(|row| {
+                            sources
+                                .ingest_metadata
+                                .and_then(|metadata| metadata.get(row))
+                                .and_then(|metadata| metadata.metadata_value(field_name))
+                        }),
+                        row_count,
+                        field,
+                    );
+                }
+                if namespace == BRANCH_NAMESPACE {
+                    return branch_key_input_column(sources.keys, field_name, field);
+                }
+                if let Some((_, batch)) = sources
+                    .namespace_batches
+                    .iter()
+                    .find(|(candidate, _)| *candidate == namespace)
+                    && let Ok(index) = batch.schema().index_of(field_name)
+                {
+                    return carrier_input_column(batch, index, field);
+                }
+                if sources.strict_namespaces.contains(&namespace) {
+                    if field.is_nullable() {
+                        return runtime_values_input_column(
+                            std::iter::repeat_n(None, row_count),
+                            row_count,
+                            field,
+                        );
+                    }
+                    return Err(format!(
+                        "FILTER-MAP input record is missing field '{}'",
+                        field.name()
+                    ));
+                }
+                if namespace != INGEST_METADATA_NAMESPACE
+                    && let Ok(index) = carrier_schema.index_of(field_name)
+                {
+                    return carrier_input_column(sources.carrier, index, field);
+                }
             }
             if field.is_nullable() {
                 return runtime_values_input_column(
@@ -16029,8 +16015,10 @@ fn lookup_generated_input_field<'a>(
 async fn compute_lookup_hash_map_columns(
     program: &CompiledProgramWithMaterializedInterest,
     carrier: &RuntimeRecordBatch,
+    namespace_batches: &[(&str, &RuntimeRecordBatch)],
     keys: &[Option<BranchKey>],
     side_inputs: &HashMap<String, RuntimeValue>,
+    ingest_metadata: Option<&[IngestFilterMapMetadata]>,
     execution_now: Timestamp,
 ) -> Result<HashMap<String, VmTypedArray>, String> {
     let mut lookup_columns = HashMap::new();
@@ -16053,14 +16041,17 @@ async fn compute_lookup_hash_map_columns(
             &call.key_program.input_schema,
             &VmInputProjectionSources {
                 carrier,
+                namespace_batches,
+                strict_namespaces: &[],
                 keys,
                 side_inputs,
+                ingest_metadata,
                 lookup_columns: &lookup_columns,
                 uninitialized: Some(&uninitialized),
             },
         )?;
         let result = execute_program_with_selection_in_context(
-            call.key_program.as_ref(),
+            &call.key_program,
             &vm_batch,
             &VmExecutionContext {
                 now: execution_now,
@@ -16088,7 +16079,7 @@ async fn compute_lookup_hash_map_columns(
             .transpose()?;
         let mut row_keys: Vec<Option<String>> = vec![None; row_count];
         for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
-            if let Some(side_error) = result.batch.errors()[output_row].first() {
+            if let Some(side_error) = result.batch.errors().row(output_row).first() {
                 return Err(format!(
                     "LOOKUP_HASH_MAP key side error {}: {} at {}",
                     side_error.code.as_str(),
@@ -16114,12 +16105,21 @@ async fn compute_lookup_hash_map_columns(
         let Some(field) = lookup_generated_input_field(program, call_index, &generated_name) else {
             continue;
         };
-        let column = runtime_values_input_column(
-            row_keys.iter().map(|key| {
-                key.as_deref()
+        let lookup_values = row_keys
+            .iter()
+            .map(|key| {
+                let Some(row) = key
+                    .as_deref()
                     .and_then(|key| call.lookup_runtime.entries.get(key))
-                    .and_then(|record| record.value(&call.lookup_field))
-            }),
+                    .copied()
+                else {
+                    return Ok(None);
+                };
+                call.lookup_runtime.batch.value(row, &call.lookup_field)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let column = runtime_values_input_column(
+            lookup_values.iter().map(Option::as_ref),
             row_count,
             field,
         )?;
@@ -16128,379 +16128,24 @@ async fn compute_lookup_hash_map_columns(
     Ok(lookup_columns)
 }
 
-fn vm_typed_batch_from_runtime_records_with_metadata(
-    records: &[RuntimeRecord],
-    filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
-    schema: &StdArc<arrow_schema::Schema>,
-) -> Result<VmTypedBatch, String> {
-    if let Some(metadata_rows) = filter_map_metadata
-        && metadata_rows.len() != records.len()
-    {
-        return Err(format!(
-            "FILTER-MAP metadata row count {} does not match record count {}",
-            metadata_rows.len(),
-            records.len()
-        ));
-    }
-
-    let columns = schema
-        .fields()
-        .iter()
-        .map(|field| match field.data_type() {
-            ArrowDataType::UInt8 => Ok(VmTypedArray::UInt8(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::U8(value)) => Ok(Some(*value)),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::Int8 => Ok(VmTypedArray::Int8(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::I8(value)) => Ok(Some(*value)),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::UInt16 => Ok(VmTypedArray::UInt16(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::U16(value)) => Ok(Some(*value)),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::Int16 => Ok(VmTypedArray::Int16(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::I16(value)) => Ok(Some(*value)),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::UInt32 => Ok(VmTypedArray::UInt32(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::U32(value)) => Ok(Some(*value)),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::Int32 => Ok(VmTypedArray::Int32(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::I32(value)) => Ok(Some(*value)),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::UInt64 => Ok(VmTypedArray::UInt64(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::U64(value)) => Ok(Some(*value)),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::Int64 => Ok(VmTypedArray::Int64(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::I64(value)) => Ok(Some(*value)),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::Float32 => Ok(VmTypedArray::Float32(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::F32(value)) => Ok(Some(value.into_inner())),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::Float64 => Ok(VmTypedArray::Float64(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::F64(value)) => Ok(Some(value.into_inner())),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::Boolean => Ok(VmTypedArray::Boolean(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::Bool(value)) => Ok(Some(*value)),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::Utf8 => Ok(VmTypedArray::Utf8(
-                records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        match filter_map_input_value(record, filter_map_metadata, index, field)? {
-                            Some(RuntimeValue::String(value)) => Ok(Some(value.clone())),
-                            Some(RuntimeValue::Datetime(value)) => Ok(Some(value.to_rfc3339())),
-                            Some(value) => Err(format!(
-                                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                field.name(),
-                                field.data_type(),
-                                runtime_value_type_name(value)
-                            )),
-                            None => Ok(None),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
-            )),
-            ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
-                if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
-            {
-                Ok(VmTypedArray::Datetime(
-                    records
-                        .iter()
-                        .enumerate()
-                        .map(|(index, record)| {
-                            match filter_map_input_value(record, filter_map_metadata, index, field)?
-                            {
-                                Some(RuntimeValue::Datetime(value)) => {
-                                    Ok(value.timestamp_nanos_opt())
-                                }
-                                Some(value) => Err(format!(
-                                    "FILTER-MAP input field '{}' expected {:?}, got {}",
-                                    field.name(),
-                                    field.data_type(),
-                                    runtime_value_type_name(value)
-                                )),
-                                None => Ok(None),
-                            }
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_iter()
-                        .collect::<arrow_array::TimestampNanosecondArray>()
-                        .with_timezone_utc(),
-                ))
-            }
-            ArrowDataType::List(_) | ArrowDataType::FixedSizeList(_, _) => {
-                Ok(VmTypedArray::Generic(build_filter_map_nested_input_column(
-                    records,
-                    filter_map_metadata,
-                    field,
-                )?))
-            }
-            _ => Err(format!(
-                "FILTER-MAP input field '{}' has unsupported type {:?}",
-                field.name(),
-                field.data_type()
-            )),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    VmTypedBatch::try_new(schema.clone(), columns).map_err(|error| error.to_string())
-}
-
-fn vm_output_row_to_decoded_record(
+fn vm_output_value(
     batch: &VmTypedBatch,
     row: usize,
-) -> Result<DecodedRecord, String> {
-    let fields = batch
-        .schema()
-        .fields()
-        .iter()
-        .zip(batch.columns())
-        .map(|(field, column)| {
-            let value = match column {
-                VmTypedArray::UInt8(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::U8(values.value(row))),
-                VmTypedArray::Int8(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::I8(values.value(row))),
-                VmTypedArray::UInt16(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::U16(values.value(row))),
-                VmTypedArray::Int16(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::I16(values.value(row))),
-                VmTypedArray::UInt32(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::U32(values.value(row))),
-                VmTypedArray::Int32(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::I32(values.value(row))),
-                VmTypedArray::UInt64(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::U64(values.value(row))),
-                VmTypedArray::Int64(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::I64(values.value(row))),
-                VmTypedArray::Float32(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::F32(values.value(row).into())),
-                VmTypedArray::Float64(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::F64(values.value(row).into())),
-                VmTypedArray::Boolean(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::Bool(values.value(row))),
-                VmTypedArray::Utf8(values) => values
-                    .is_valid(row)
-                    .then(|| RuntimeValue::String(values.value(row).to_string())),
-                VmTypedArray::Datetime(values) => values.is_valid(row).then(|| {
-                    RuntimeValue::Datetime(
-                        chrono::DateTime::from_timestamp_nanos(values.value(row)).fixed_offset(),
-                    )
-                }),
-                VmTypedArray::Generic(array) => {
-                    let ty = parse_as_type_from_arrow(field.data_type())?;
-                    runtime_value_from_arrow_array(
-                        array.as_ref(),
-                        &ty,
-                        field.is_nullable(),
-                        row,
-                        field.name(),
-                    )?
-                }
-                VmTypedArray::Uninitialized { .. } => None,
-            };
-            if let Some(value) = value {
-                Ok(Some((field.name().to_string(), value)))
-            } else if field.is_nullable() {
-                Ok(None)
-            } else {
-                Err(format!(
-                    "FILTER-MAP output field '{}' contains null at row {row}",
-                    field.name()
-                ))
-            }
-        })
-        .collect::<Result<Vec<_>, String>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    Ok(DecodedRecord::from_fields(fields))
+    field_name: &str,
+) -> Result<Option<RuntimeValue>, String> {
+    let column_index = match batch.schema().index_of(field_name) {
+        Ok(index) => index,
+        Err(_) => return Ok(None),
+    };
+    let field = batch.schema().field(column_index);
+    let array = batch.column(column_index).to_array_ref();
+    runtime_value_from_arrow_array(
+        array.as_ref(),
+        &parse_as_type_from_arrow(field.data_type())?,
+        field.is_nullable(),
+        row,
+        field_name,
+    )
 }
 
 fn compile_inferencer_input_mappings(
@@ -16822,6 +16467,7 @@ async fn flush_branch_inferencer_output(
     }
 
     let input_key = forwarded.key.clone();
+    let input_keys = forwarded.keys.clone();
     let input_batch = forwarded.batch.clone();
     let messages = match forwarded.try_into_messages() {
         Ok(messages) => messages,
@@ -16869,10 +16515,6 @@ async fn flush_branch_inferencer_output(
         );
         return;
     };
-    let source_records = messages
-        .iter()
-        .map(|message| message.record.clone())
-        .collect::<Vec<_>>();
     let input_sensitivity = input_relays
         .first()
         .and_then(|relay| {
@@ -16901,21 +16543,35 @@ async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let mapped_vm_input =
-        match vm_typed_batch_from_runtime_records(&source_records, &mapped_program.input_schema) {
-            Ok(batch) => batch,
-            Err(error) => {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    messages.iter().map(|message| &message.acks),
-                    format!("inferencer '{}' INPUTS batch failed: {error}", processor),
-                );
-                return;
-            }
-        };
+    let side_inputs = HashMap::default();
+    let lookup_columns = HashMap::default();
+    let mapped_vm_input = match project_vm_input_batch(
+        &mapped_program.input_schema,
+        &VmInputProjectionSources {
+            carrier: &input_batch,
+            namespace_batches: &[],
+            strict_namespaces: &[],
+            keys: &input_keys,
+            side_inputs: &side_inputs,
+            ingest_metadata: None,
+            lookup_columns: &lookup_columns,
+            uninitialized: None,
+        },
+    ) {
+        Ok(batch) => batch,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                messages.iter().map(|message| &message.acks),
+                format!("inferencer '{}' INPUTS batch failed: {error}", processor),
+            );
+            return;
+        }
+    };
+    let mapped_program = Arc::new(mapped_program);
     let mapped_result = match execute_program_with_selection_in_context(
         &mapped_program,
         &mapped_vm_input,
@@ -16942,15 +16598,9 @@ async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let input_records = match (0..mapped_result.batch.row_count())
-        .map(|row| {
-            vm_output_row_to_decoded_record(&mapped_result.batch, row)
-                .map(|record| record.into_runtime_record(messages[row].record.metadata().clone()))
-        })
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(records) if records.len() == messages.len() => records,
-        Ok(records) => {
+    let mapped_batch = match vm_typed_batch_to_runtime_batch(&mapped_result.batch) {
+        Ok(batch) if batch.batch().num_rows() == messages.len() => batch,
+        Ok(batch) => {
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
                 node_kind,
@@ -16960,7 +16610,7 @@ async fn flush_branch_inferencer_output(
                 format!(
                     "inferencer '{}' INPUTS produced {} rows for {} messages",
                     processor,
-                    records.len(),
+                    batch.batch().num_rows(),
                     messages.len()
                 ),
             );
@@ -16978,8 +16628,8 @@ async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let output_fields = match session
-        .execute(&input_records, inputs, output_schema, execution_mode)
+    let output_columns = match session
+        .execute(&mapped_batch, inputs, output_schema, execution_mode)
         .await
     {
         Ok(output_fields) => output_fields,
@@ -17002,7 +16652,11 @@ async fn flush_branch_inferencer_output(
             return;
         }
     };
-    if output_fields.len() != messages.len() {
+    if output_columns.len() != output_schema.len()
+        || output_columns
+            .iter()
+            .any(|column| column.len() != messages.len())
+    {
         branch.runtime.handle_internal_processor_error_for_acks(
             &branch.domain,
             node_kind,
@@ -17010,9 +16664,11 @@ async fn flush_branch_inferencer_output(
             error_policies,
             messages.iter().map(|message| &message.acks),
             format!(
-                "inferencer '{}' returned {} output rows for {} input messages",
+                "inferencer '{}' returned {} output columns for {} declarations or a column with \
+                 an invalid row count for {} input messages",
                 processor.as_str(),
-                output_fields.len(),
+                output_columns.len(),
+                output_schema.len(),
                 messages.len()
             ),
         );
@@ -17024,9 +16680,12 @@ async fn flush_branch_inferencer_output(
         .fields()
         .iter()
         .map(|field| {
+            let column_index = tensor_schema
+                .index_of(field.name())
+                .map_err(|error| error.to_string())?;
             runtime_values_input_column(
-                output_fields.iter().map(|fields| fields.get(field.name())),
-                output_fields.len(),
+                output_columns[column_index].iter().map(Some),
+                messages.len(),
                 field,
             )
             .map(|column| column.to_array_ref())
@@ -18470,28 +18129,6 @@ async fn dispatch_wasm_output_route(
             );
         return None;
     };
-    let output_schema = match relay_schema_for_runtime(
-        &context.branch.runtime,
-        &context.branch.domain,
-        &output.relay,
-    ) {
-        Ok(schema) => schema,
-        Err(error) => {
-            context
-                .branch
-                .runtime
-                .handle_internal_processor_error_for_acks(
-                    &context.branch.domain,
-                    context.node_kind,
-                    context.processor,
-                    context.error_policies,
-                    decoded.batch.acks.iter(),
-                    error,
-                );
-            return None;
-        }
-    };
-
     let execution_now = context
         .branch
         .runtime
@@ -18538,19 +18175,27 @@ async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let source_records = match output_schema
-        .decoded_records_from_arrow_batch_excluding(
-            &decoded.batch.batch,
-            &decoded.uninitialized_columns,
-        )
-        .map(|records| {
-            records
-                .into_iter()
-                .zip(decoded.batch.metadata.iter().cloned())
-                .map(|(record, metadata)| record.into_runtime_record(metadata))
-                .collect::<Vec<_>>()
-        }) {
-        Ok(records) => records,
+    let output_arrow_schema = decoded.batch.arrow_schema();
+    let uninitialized_input = VmUninitializedInput {
+        fields: decoded
+            .uninitialized_columns
+            .iter()
+            .filter_map(|column_index| output_arrow_schema.fields().get(*column_index))
+            .map(|field| format!("generated.{}", field.name()))
+            .collect(),
+    };
+    let lookup_columns = match compute_lookup_hash_map_columns(
+        program,
+        &decoded.batch.batch,
+        &[],
+        &decoded.batch.keys,
+        &side_inputs,
+        None,
+        execution_now,
+    )
+    .await
+    {
+        Ok(columns) => columns,
         Err(error) => {
             context
                 .branch
@@ -18562,7 +18207,8 @@ async fn dispatch_wasm_output_route(
                     context.error_policies,
                     decoded.batch.acks.iter(),
                     format!(
-                        "wasm processor '{}' failed to materialize node-local FILTER-MAP rows: {}",
+                        "{} '{}' failed to prepare LOOKUP_HASH_MAP columns: {}",
+                        context.node_kind,
                         context.processor.as_str(),
                         error
                     ),
@@ -18570,8 +18216,20 @@ async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let input_records = match wasm_filter_map_records(&source_records) {
-        Ok(records) => records,
+    let vm_input = match project_vm_input_batch(
+        &program.compiled.input_schema,
+        &VmInputProjectionSources {
+            carrier: &decoded.batch.batch,
+            namespace_batches: &[],
+            strict_namespaces: &[],
+            keys: &decoded.batch.keys,
+            side_inputs: &side_inputs,
+            ingest_metadata: None,
+            lookup_columns: &lookup_columns,
+            uninitialized: Some(&uninitialized_input),
+        },
+    ) {
+        Ok(input) => input,
         Err(error) => {
             context
                 .branch
@@ -18582,58 +18240,23 @@ async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     decoded.batch.acks.iter(),
-                    error,
+                    format!(
+                        "{} '{}' failed to project WASM output into FILTER-MAP input: {}",
+                        context.node_kind,
+                        context.processor.as_str(),
+                        error
+                    ),
                 );
             return None;
         }
     };
-    let input_records = match prepare_filter_map_input_records(
-        context.node_kind,
-        context.processor,
-        program,
-        input_records,
-        FilterMapInputPreparation {
-            execution_now,
-            side_inputs: &side_inputs,
-            branch_keys: &decoded.batch.keys,
-            acks: &decoded.batch.acks,
+    let executed = match execute_program_with_selection_in_context(
+        &program.compiled,
+        &vm_input,
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
         },
-    )
-    .await
-    {
-        Ok(records) => records,
-        Err(error) => {
-            context
-                .branch
-                .runtime
-                .handle_internal_processor_error_for_acks(
-                    &context.branch.domain,
-                    context.node_kind,
-                    context.processor,
-                    context.error_policies,
-                    error.acks.iter(),
-                    error.reason,
-                );
-            return None;
-        }
-    };
-    let output_arrow_schema = decoded.batch.arrow_schema();
-    let uninitialized_input = VmUninitializedInput {
-        fields: decoded
-            .uninitialized_columns
-            .iter()
-            .filter_map(|column_index| output_arrow_schema.fields().get(*column_index))
-            .map(|field| format!("generated.{}", field.name()))
-            .collect(),
-    };
-    let executed = match execute_filter_map_program_with_uninitialized(
-        context.node_kind,
-        context.processor,
-        program,
-        &input_records,
-        execution_now,
-        decoded.batch.acks.clone(),
-        Some(&uninitialized_input),
     )
     .await
     {
@@ -18647,8 +18270,13 @@ async fn dispatch_wasm_output_route(
                     context.node_kind,
                     context.processor,
                     context.error_policies,
-                    error.acks.iter(),
-                    error.reason,
+                    decoded.batch.acks.iter(),
+                    format!(
+                        "{} '{}' FILTER-MAP execution failed: {}",
+                        context.node_kind,
+                        context.processor.as_str(),
+                        error
+                    ),
                 );
             return None;
         }
@@ -18657,17 +18285,36 @@ async fn dispatch_wasm_output_route(
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
-        if let Some(side_error) = executed.batch.errors()[output_row].first() {
-            let partial_output = vm_partial_output_row_to_runtime_record(
-                &executed.batch,
-                output_row,
-                decoded.batch.metadata[input_row].clone(),
-            )
-            .ok();
+        if let Some(side_error) = executed.batch.errors().row(output_row).first() {
+            let partial_output =
+                vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();
+            let record = match decoded.batch.runtime_row(input_row) {
+                Ok(record) => record,
+                Err(error) => {
+                    context
+                        .branch
+                        .runtime
+                        .handle_internal_processor_error_for_acks(
+                            &context.branch.domain,
+                            context.node_kind,
+                            context.processor,
+                            context.error_policies,
+                            decoded.batch.acks.iter(),
+                            format!(
+                                "{} '{}' failed to address WASM input row {}: {}",
+                                context.node_kind,
+                                context.processor.as_str(),
+                                input_row,
+                                error
+                            ),
+                        );
+                    return None;
+                }
+            };
             message_errors.push(PendingProcessorOutputMessageError {
                 row: input_row,
                 key: decoded.batch.keys[input_row].clone(),
-                record: source_records[input_row].clone(),
+                record,
                 error: program.structured_side_error(
                     format!(
                         "{} '{}' FILTER-MAP side error {}: {} at {}",
@@ -18681,7 +18328,7 @@ async fn dispatch_wasm_output_route(
                     MessageErrorOperation::Set,
                 ),
                 partial_output,
-                materialized_state: materialized_state_snapshot(&input_records[input_row]),
+                materialized_state: relay_state_snapshot_from_side_inputs(&side_inputs),
             });
             continue;
         }
@@ -18867,32 +18514,6 @@ fn wasm_output_token_use_counts(outputs: &[WasmMaterializedOutput]) -> HashMap<u
     token_use_counts
 }
 
-fn wasm_filter_map_records(output_records: &[RuntimeRecord]) -> Result<Vec<RuntimeRecord>, String> {
-    Ok(output_records
-        .iter()
-        .map(|output_record| {
-            let metadata = output_record.metadata().clone();
-            let mut fields = HashMap::new();
-            insert_wasm_filter_map_fields(&mut fields, "generated", output_record, true);
-            RuntimeRecord::from_fields_with_metadata(fields, metadata)
-        })
-        .collect())
-}
-
-fn insert_wasm_filter_map_fields(
-    fields: &mut HashMap<String, RuntimeValue>,
-    namespace: &str,
-    record: &RuntimeRecord,
-    include_unqualified: bool,
-) {
-    for (name, value) in record.fields() {
-        if include_unqualified {
-            fields.insert(name.to_string(), value.clone());
-        }
-        fields.insert(format!("{namespace}.{name}"), value.clone());
-    }
-}
-
 struct WasmSidecarTerminalContext<'a> {
     branch: &'a BranchRuntime,
     node_kind: &'a str,
@@ -18922,7 +18543,7 @@ async fn apply_wasm_sidecar_terminal_decisions(
                 .expect("message error token should have been validated");
             let record = match context
                 .input_batch
-                .runtime_record(context.input_row, context.metadata.clone())
+                .runtime_row(context.input_row, context.metadata.clone())
             {
                 Ok(record) => record,
                 Err(error) => {
@@ -19266,7 +18887,7 @@ async fn execute_generator_program_on_context(
     materialized_state: &HashMap<String, RuntimeValue>,
 ) -> Result<SingleRecordFilterMapOutcome, String> {
     let result = execute_program_with_selection_in_context(
-        program.compiled.as_ref(),
+        &program.compiled,
         input,
         &VmExecutionContext {
             now: execution_now,
@@ -19285,8 +18906,6 @@ async fn execute_generator_program_on_context(
         ));
     }
     if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-        let metadata =
-            RuntimeRecordMetadata::from_ingested_at_watermarks(execution_now, execution_now);
         return Ok(SingleRecordFilterMapOutcome::MessageError {
             error: program.structured_side_error(
                 format!(
@@ -19298,16 +18917,17 @@ async fn execute_generator_program_on_context(
                 side_error.span,
                 MessageErrorOperation::Set,
             ),
-            partial_output: vm_partial_output_row_to_runtime_record(&result.batch, 0, metadata)
-                .ok(),
+            partial_output: vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok(),
             materialized_state: materialized_state.clone(),
         });
     }
-    vm_output_row_to_decoded_record(&result.batch, 0).map(|record| {
-        SingleRecordFilterMapOutcome::Output(record.into_runtime_record(
-            RuntimeRecordMetadata::from_ingested_at_watermarks(execution_now, execution_now),
-        ))
-    })
+    let batch = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])?;
+    RuntimeRow::new(
+        Arc::new(batch),
+        0,
+        RuntimeRecordMetadata::from_ingested_at_watermarks(execution_now, execution_now),
+    )
+    .map(SingleRecordFilterMapOutcome::Output)
 }
 
 fn checked_add_duration_to_timestamp(base: Timestamp, duration: Duration) -> Timestamp {
@@ -19432,7 +19052,7 @@ impl Default for Runtime {
 async fn decode_ingested_payload(
     codec: Arc<CompiledCodec>,
     payload: &[u8],
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     if !codec.requires_blocking_decode() {
         return decode_with_codec(&codec, payload);
     }
@@ -19450,7 +19070,7 @@ async fn decode_ingested_payload(
 async fn decode_ingested_payload_owned(
     codec: Arc<CompiledCodec>,
     payload: Vec<u8>,
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     if !codec.requires_blocking_decode() {
         return decode_with_codec_owned(&codec, payload);
     }
@@ -19538,7 +19158,7 @@ fn structured_message_error(
 fn planned_structured_message_error(
     message: RelayMessage,
     error: StructuredMessageError,
-    partial_output: Option<RuntimeRecord>,
+    partial_output: Option<RuntimeRecordBatch>,
     materialized_state: HashMap<String, RuntimeValue>,
 ) -> PlannedMessageError {
     PlannedMessageError {
@@ -19547,14 +19167,6 @@ fn planned_structured_message_error(
         partial_output,
         materialized_state,
     }
-}
-
-fn materialized_state_snapshot(record: &RuntimeRecord) -> HashMap<String, RuntimeValue> {
-    record
-        .fields()
-        .filter(|(name, _)| name.starts_with("relay_state."))
-        .map(|(name, value)| (name.to_string(), value.clone()))
-        .collect()
 }
 
 fn operation_for_filter_label(label: &str) -> MessageErrorOperation {
@@ -19584,51 +19196,54 @@ fn preserved_message_error_branch(
     }
 }
 
-fn vm_partial_output_row_to_runtime_record(
+fn vm_partial_output_row_to_runtime_batch(
     batch: &VmTypedBatch,
     row: usize,
-    metadata: RuntimeRecordMetadata,
-) -> Result<RuntimeRecord, String> {
-    let fields = batch
+) -> Result<RuntimeRecordBatch, String> {
+    if row >= batch.row_count() {
+        return Err(format!(
+            "partial output row {row} is outside batch with {} rows",
+            batch.row_count()
+        ));
+    }
+    let fields_and_columns = batch
         .schema()
         .fields()
         .iter()
         .zip(batch.columns())
         .filter_map(|(field, column)| {
-            let array: &dyn Array = match column {
-                VmTypedArray::UInt8(array) => array,
-                VmTypedArray::Int8(array) => array,
-                VmTypedArray::UInt16(array) => array,
-                VmTypedArray::Int16(array) => array,
-                VmTypedArray::UInt32(array) => array,
-                VmTypedArray::Int32(array) => array,
-                VmTypedArray::UInt64(array) => array,
-                VmTypedArray::Int64(array) => array,
-                VmTypedArray::Float32(array) => array,
-                VmTypedArray::Float64(array) => array,
-                VmTypedArray::Boolean(array) => array,
-                VmTypedArray::Utf8(array) => array,
-                VmTypedArray::Datetime(array) => array,
-                VmTypedArray::Generic(array) => array.as_ref(),
+            let array = match column {
                 VmTypedArray::Uninitialized { .. } => return None,
+                column => column.to_array_ref().slice(row, 1),
             };
             let field_name = field
                 .name()
                 .strip_prefix("output.")
                 .unwrap_or(field.name())
                 .to_string();
-            Some(
-                parse_as_type_from_arrow(field.data_type())
-                    .and_then(|ty| {
-                        runtime_value_from_arrow_array(array, &ty, true, row, &field_name)
-                    })
-                    .map(|value| value.map(|value| (field_name, value))),
-            )
+            Some((
+                StdArc::new(arrow_schema::Field::new(
+                    field_name,
+                    field.data_type().clone(),
+                    true,
+                )),
+                array,
+            ))
         })
-        .collect::<Result<Vec<_>, String>>()?
-        .into_iter()
-        .flatten();
-    Ok(RuntimeRecord::from_fields_with_metadata(fields, metadata))
+        .collect::<Vec<_>>();
+    let (fields, columns): (Vec<_>, Vec<_>) = fields_and_columns.into_iter().unzip();
+    let schema = StdArc::new(arrow_schema::Schema::new(fields));
+    let record_batch = if columns.is_empty() {
+        RecordBatch::try_new_with_options(
+            schema.clone(),
+            columns,
+            &arrow_array::RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+    } else {
+        RecordBatch::try_new(schema.clone(), columns)
+    }
+    .map_err(|error| error.to_string())?;
+    RuntimeRecordBatch::from_record_batch(schema, record_batch)
 }
 
 fn invalid_output_fields(batch: &VmTypedBatch, row: usize) -> Vec<FieldPath> {

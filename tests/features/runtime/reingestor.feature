@@ -1,5 +1,5 @@
 Feature: Reingestor repartitioning
-  Scenario Outline: Reingestor changes branch grouping for an internal relay
+  Scenario Outline: Reingestor evaluates branch construction through the VM and changes grouping
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -44,7 +44,10 @@ Feature: Reingestor repartitioning
         TO tenant_notifications
         INHERIT ALL
         BRANCHED BY by_tenant_partition
-        SET tenant = message.tenant
+        SET tenant = LOWER(CASE
+          WHEN message.user_id = 42 THEN message.tenant
+          ELSE 'fallback'
+        END)
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications;
@@ -52,11 +55,11 @@ Feature: Reingestor repartitioning
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
-      {"tenant":"acme","user_id":42}
+      {"tenant":"ACME","user_id":42}
       """
     Then the relay subscription receives a payload
       """
-      "tenant":"acme","user_id":42
+      "tenant":"ACME","user_id":42
       """
     And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
 

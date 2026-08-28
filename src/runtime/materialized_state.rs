@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     metrics::{RuntimeMetrics, RuntimeMetricsSnapshot},
-    runtime_schema::RuntimeRecord,
+    runtime_schema::RuntimeRow,
 };
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -189,9 +189,11 @@ impl ReplicatedMaterializedRelayState {
         &self,
         metrics: &RuntimeMetrics,
         key: &Option<BranchKey>,
-        record: &RuntimeRecord,
+        record: &RuntimeRow,
     ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
-        let candidate = record.to_remote();
+        let candidate = record
+            .to_remote()
+            .map_err(RuntimePersistenceError::EncodeState)?;
         let should_update = if let Some(existing) = self.entries.get(key) {
             materialized_record_is_newer(&existing.metadata, &candidate.metadata)
         } else {
@@ -311,7 +313,7 @@ mod tests {
     use nervix_models::{Domain, Identifier, ModelKind};
 
     use super::*;
-    use crate::runtime_schema::RuntimeValue;
+    use crate::runtime_schema::{RuntimeValue, test_runtime_row};
 
     #[test]
     fn unbranched_materialized_state_snapshots_and_restores_global_metrics() {
@@ -344,7 +346,7 @@ mod tests {
             None,
         )
         .expect("unbranched materialized state should build");
-        let record = RuntimeRecord::from_fields([(
+        let record = test_runtime_row([(
             "value".to_string(),
             RuntimeValue::String("ready".to_string()),
         )]);

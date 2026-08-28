@@ -37,13 +37,6 @@ pub struct RemoteRuntimeRecord {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct RemoteDecodedRecord {
-    pub fields: Vec<RemoteRuntimeField>,
-}
-
-#[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RemoteRuntimeRecordMetadata {

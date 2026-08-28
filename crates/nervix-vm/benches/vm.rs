@@ -1,16 +1,21 @@
-use std::sync::Arc;
+use std::sync::Arc as StdArc;
 
 use arrow_array::{BooleanArray, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use nervix_nspl::vm_program::parse_program;
 use nervix_vm::{
-    CompileBinding, CompileOptions, TypedArray, TypedBatch, compile_program_for_bindings,
+    CompileBinding, CompileOptions, CompiledProgram, TypedArray, TypedBatch,
     compile_program_with_options_for_bindings, execute_program,
 };
+use triomphe::Arc;
 
-fn arithmetic_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
+/// Row counts spanning `SPAWN_BLOCKING_ROW_THRESHOLD` so the sweep shows both the
+/// amortization curve below it and the cost of the blocking hop above it.
+const SWEEP_ROW_COUNTS: [usize; 6] = [64, 256, 1_024, 4_096, 16_384, 65_536];
+
+fn arithmetic_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
         Field::new("left", DataType::Int64, true),
         Field::new("right", DataType::Int64, true),
         Field::new("divisor", DataType::Int64, true),
@@ -18,7 +23,7 @@ fn arithmetic_schema() -> Arc<Schema> {
     ]))
 }
 
-fn arithmetic_output_schema() -> Arc<Schema> {
+fn arithmetic_output_schema() -> StdArc<Schema> {
     let mut fields = arithmetic_schema()
         .fields()
         .iter()
@@ -29,7 +34,7 @@ fn arithmetic_output_schema() -> Arc<Schema> {
         Field::new("quotient", DataType::Int64, true),
         Field::new("magnitude", DataType::Int64, true),
     ]);
-    Arc::new(Schema::new(fields))
+    StdArc::new(Schema::new(fields))
 }
 
 fn arithmetic_batch(row_count: usize) -> TypedBatch {
@@ -50,8 +55,8 @@ fn arithmetic_batch(row_count: usize) -> TypedBatch {
     .expect("benchmark batch must build")
 }
 
-fn string_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
+fn string_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
         Field::new("primary", DataType::Utf8, true),
         Field::new("fallback", DataType::Utf8, true),
         Field::new("text", DataType::Utf8, true),
@@ -61,7 +66,7 @@ fn string_schema() -> Arc<Schema> {
     ]))
 }
 
-fn string_output_schema() -> Arc<Schema> {
+fn string_output_schema() -> StdArc<Schema> {
     let mut fields = string_schema()
         .fields()
         .iter()
@@ -75,7 +80,7 @@ fn string_output_schema() -> Arc<Schema> {
         Field::new("starts", DataType::Boolean, true),
         Field::new("ends", DataType::Boolean, true),
     ]);
-    Arc::new(Schema::new(fields))
+    StdArc::new(Schema::new(fields))
 }
 
 fn string_batch(row_count: usize) -> TypedBatch {
@@ -108,67 +113,98 @@ fn string_batch(row_count: usize) -> TypedBatch {
     .expect("benchmark batch must build")
 }
 
-fn execute_benches(c: &mut Criterion) {
-    let arithmetic_program = parse_program(
+fn compile_arithmetic(options: CompileOptions) -> Arc<CompiledProgram> {
+    let program = parse_program(
         "SET input.total = input.left + input.right, input.quotient = (input.left + input.right) \
          / input.divisor, input.magnitude = abs(input.left - input.right) WHERE input.keep;",
     )
     .expect("benchmark program must parse");
-    let arithmetic_input_schema = arithmetic_schema();
-    let arithmetic_output_schema = arithmetic_output_schema();
-    let arithmetic_compiled = compile_program_for_bindings(
-        &arithmetic_program,
-        arithmetic_output_schema.clone(),
-        [CompileBinding::writable(
-            "input",
-            arithmetic_input_schema.clone(),
-        )],
+    compile_program_with_options_for_bindings(
+        &program,
+        arithmetic_output_schema(),
+        [CompileBinding::writable("input", arithmetic_schema())],
+        options,
     )
-    .expect("optimized benchmark must compile");
-    let arithmetic_unoptimized = compile_program_with_options_for_bindings(
-        &arithmetic_program,
-        arithmetic_output_schema,
-        [CompileBinding::writable("input", arithmetic_input_schema)],
-        CompileOptions {
-            optimize_temp_registers: false,
-            ..CompileOptions::default()
-        },
-    )
-    .expect("unoptimized benchmark must compile");
-    let arithmetic_batch = arithmetic_batch(8_192);
+    .map(Arc::new)
+    .expect("benchmark program must compile")
+}
 
-    let string_program = parse_program(
+fn compile_string(options: CompileOptions) -> Arc<CompiledProgram> {
+    let program = parse_program(
         "SET input.chosen = coalesce(input.primary, input.fallback), input.was_null = \
          is_null(input.primary), input.maybe = nullif(input.primary, input.fallback), input.has = \
          contains(input.text, input.needle), input.starts = starts_with(input.text, \
          input.prefix), input.ends = ends_with(input.text, input.suffix);",
     )
     .expect("benchmark program must parse");
-    let string_input_schema = string_schema();
-    let string_output_schema = string_output_schema();
-    let string_compiled = compile_program_for_bindings(
-        &string_program,
-        string_output_schema.clone(),
-        [CompileBinding::writable(
-            "input",
-            string_input_schema.clone(),
-        )],
+    compile_program_with_options_for_bindings(
+        &program,
+        string_output_schema(),
+        [CompileBinding::writable("input", string_schema())],
+        options,
     )
-    .expect("optimized benchmark must compile");
-    let string_unoptimized = compile_program_with_options_for_bindings(
-        &string_program,
-        string_output_schema,
-        [CompileBinding::writable("input", string_input_schema)],
-        CompileOptions {
-            optimize_temp_registers: false,
-            ..CompileOptions::default()
-        },
+    .map(Arc::new)
+    .expect("benchmark program must compile")
+}
+
+/// Filters on a numeric comparison and writes text-case builtins, so the sweep also covers
+/// the paths that evaluate row by row rather than through an Arrow kernel.
+fn compile_numeric_compare() -> Arc<CompiledProgram> {
+    let program = parse_program(
+        "SET input.total = input.left + input.right, input.quotient = input.left / input.divisor, \
+         input.magnitude = abs(input.left) WHERE input.left > input.divisor;",
     )
-    .expect("unoptimized benchmark must compile");
-    let string_batch = string_batch(8_192);
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    .expect("benchmark program must parse");
+    compile_program_with_options_for_bindings(
+        &program,
+        arithmetic_output_schema(),
+        [CompileBinding::writable("input", arithmetic_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("benchmark program must compile")
+}
+
+fn compile_text_case() -> Arc<CompiledProgram> {
+    let program = parse_program(
+        "SET input.chosen = upper(input.primary), input.was_null = is_null(input.primary), \
+         input.maybe = lower(input.fallback), input.has = contains(input.text, input.needle), \
+         input.starts = starts_with(input.text, input.prefix), input.ends = ends_with(input.text, \
+         input.suffix);",
+    )
+    .expect("benchmark program must parse");
+    compile_program_with_options_for_bindings(
+        &program,
+        string_output_schema(),
+        [CompileBinding::writable("input", string_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("benchmark program must compile")
+}
+
+fn unoptimized_options() -> CompileOptions {
+    CompileOptions {
+        optimize_temp_registers: false,
+        ..CompileOptions::default()
+    }
+}
+
+fn benchmark_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
         .build()
-        .expect("benchmark runtime must build");
+        .expect("benchmark runtime must build")
+}
+
+fn execute_benches(c: &mut Criterion) {
+    let arithmetic_compiled = compile_arithmetic(CompileOptions::default());
+    let arithmetic_unoptimized = compile_arithmetic(unoptimized_options());
+    let arithmetic_batch = arithmetic_batch(8_192);
+
+    let string_compiled = compile_string(CompileOptions::default());
+    let string_unoptimized = compile_string(unoptimized_options());
+    let string_batch = string_batch(8_192);
+    let runtime = benchmark_runtime();
 
     let mut group = c.benchmark_group("execute_program");
     group.bench_function("arithmetic_filter_optimized_8192", |b| {
@@ -206,5 +242,61 @@ fn execute_benches(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, execute_benches);
+/// Sweeps batch size for the same programs so throughput is reported per row instead of
+/// per batch. This is what shows whether feeding the VM larger batches keeps paying.
+fn batch_size_sweep_benches(c: &mut Criterion) {
+    let arithmetic_compiled = compile_arithmetic(CompileOptions::default());
+    let string_compiled = compile_string(CompileOptions::default());
+    let numeric_compare_compiled = compile_numeric_compare();
+    let text_case_compiled = compile_text_case();
+    let runtime = benchmark_runtime();
+
+    let mut group = c.benchmark_group("execute_program_batch_size");
+    for rows in SWEEP_ROW_COUNTS {
+        group.throughput(Throughput::Elements(rows as u64));
+
+        let batch = arithmetic_batch(rows);
+        group.bench_with_input(
+            BenchmarkId::new("arithmetic_filter", rows),
+            &rows,
+            |b, _| {
+                b.iter(|| {
+                    runtime.block_on(execute_program(
+                        black_box(&arithmetic_compiled),
+                        black_box(&batch),
+                    ))
+                })
+            },
+        );
+        group.bench_with_input(BenchmarkId::new("numeric_compare", rows), &rows, |b, _| {
+            b.iter(|| {
+                runtime.block_on(execute_program(
+                    black_box(&numeric_compare_compiled),
+                    black_box(&batch),
+                ))
+            })
+        });
+
+        let batch = string_batch(rows);
+        group.bench_with_input(BenchmarkId::new("string_builtins", rows), &rows, |b, _| {
+            b.iter(|| {
+                runtime.block_on(execute_program(
+                    black_box(&string_compiled),
+                    black_box(&batch),
+                ))
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("text_case", rows), &rows, |b, _| {
+            b.iter(|| {
+                runtime.block_on(execute_program(
+                    black_box(&text_case_compiled),
+                    black_box(&batch),
+                ))
+            })
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, execute_benches, batch_size_sweep_benches);
 criterion_main!(benches);

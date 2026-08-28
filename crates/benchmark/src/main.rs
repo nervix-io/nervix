@@ -13,6 +13,7 @@ use nervix_benchmark::{
     Implementation, KafkaRenderInputs, LoadedBenchmark, RunSettings, provision_topics,
 };
 use nervix_client_core::{Client, ConnectOptions};
+use nervix_nspl::client_statement::parse_client_statement_sources;
 use nervix_test_environment::{
     ContainerMode, ContainerReadiness, DependencyEnvironment, KAFKA_ADDR, KAFKA_DOCKER_ADDR,
     KAFKA_DOCKER_NETWORK, ManagedContainerInfo, configure_process_lifecycle,
@@ -709,7 +710,7 @@ impl Subject {
         )
         .await?;
         client.set_domain(domain).await;
-        self.execute_checked(
+        self.execute_graph_statements(
             &client,
             graph,
             &resolved.run_directory.join("create-graph.txt"),
@@ -721,6 +722,46 @@ impl Subject {
             &resolved.run_directory.join("start-domain.txt"),
         )
         .await
+    }
+
+    /// Submits the graph one statement at a time.
+    ///
+    /// A leader that holds no binding for the session reports the transaction as detached, which
+    /// is a routing condition the client recovers from by attaching again. That recovery only
+    /// applies to a statement the client has already adopted a transaction from, so submitting
+    /// the whole graph as a single command leaves a detach unrecoverable, and recovering one
+    /// mid-command could leave the graph partially queued before `COMMIT`.
+    async fn execute_graph_statements(
+        &self,
+        client: &Client,
+        graph: &str,
+        output_path: &Path,
+    ) -> Result<()> {
+        let statements = parse_client_statement_sources(graph)
+            .map_err(|error| anyhow!("failed to split the benchmark graph: {error}"))?;
+        ensure!(
+            !statements.is_empty(),
+            "benchmark graph contains no statements"
+        );
+        let mut transcript = String::new();
+        for statement in &statements {
+            let source = graph[statement.span.clone()].trim();
+            let outcome = client
+                .execute(source)
+                .await
+                .context("failed to execute a Nervix benchmark command")?;
+            transcript.push_str(&format!("{source}\n{outcome:#?}\n\n"));
+            if !outcome.success {
+                fs::write(output_path, &transcript)?;
+                bail!(
+                    "Nervix benchmark command failed: {}\nstatement: {source}\ndiagnostics: {:?}",
+                    outcome.message,
+                    outcome.diagnostics
+                );
+            }
+        }
+        fs::write(output_path, transcript)?;
+        Ok(())
     }
 
     async fn connect_client(&self, domain: &str) -> Result<Client> {

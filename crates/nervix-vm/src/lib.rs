@@ -16,7 +16,7 @@ pub use compiler::{
     compile_program_with_options_for_relay, compile_program_with_options_for_relays,
     infer_set_expr_types_for_bindings, infer_set_expr_types_for_bindings_with_udfs,
 };
-pub use error::{CompileError, ErrorCode, RuntimeError, SideError};
+pub use error::{CompileError, ErrorCode, RowErrorLengths, RowErrors, RuntimeError, SideError};
 pub use ir::{
     CompiledProgram, InputBinding, Instruction, InstructionKind, InvocationBinding, OutputBinding,
     RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,

@@ -1300,7 +1300,7 @@ async fn sql_mapped_batch_values(
     let row_count = output.row_count();
     let mut rows = Vec::with_capacity(row_count);
     for row in 0..row_count {
-        if let Some(side_error) = output.errors()[row].first() {
+        if let Some(side_error) = output.errors().row(row).first() {
             rows.push(Err(program.structured_side_error(
                 format!(
                     "{} VALUES side error {}: {} at {}",
@@ -1313,8 +1313,21 @@ async fn sql_mapped_batch_values(
             )));
             continue;
         }
-        let decoded = match vm_output_row_to_decoded_record(&output, row) {
-            Ok(output) => output,
+        let mapped = mappings
+            .iter()
+            .enumerate()
+            .map(|(index, _mapping)| {
+                let field = format!("c{index}");
+                vm_output_value(&output, row, &field).map(|value| {
+                    value
+                        .as_ref()
+                        .map(runtime_value_to_json)
+                        .unwrap_or(serde_json::Value::Null)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let mapped = match mapped {
+            Ok(mapped) => mapped,
             Err(error) => {
                 rows.push(Err(structured_message_error(
                     MessageErrorCode::Validation,
@@ -1329,18 +1342,7 @@ async fn sql_mapped_batch_values(
                 continue;
             }
         };
-        rows.push(Ok(mappings
-            .iter()
-            .enumerate()
-            .map(|(index, _mapping)| {
-                let field = format!("c{index}");
-                if let Some(value) = decoded.value(&field) {
-                    runtime_value_to_json(value)
-                } else {
-                    serde_json::Value::Null
-                }
-            })
-            .collect()));
+        rows.push(Ok(mapped));
     }
     Ok(rows)
 }
@@ -1356,15 +1358,18 @@ async fn execute_sql_values_program(
         &program.program.input_schema,
         &VmInputProjectionSources {
             carrier: &batch.batch,
+            namespace_batches: &[],
+            strict_namespaces: &[],
             keys: &batch.keys,
             side_inputs: &side_inputs,
+            ingest_metadata: None,
             lookup_columns: &lookup_columns,
             uninitialized: None,
         },
     )
     .map_err(|error| Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error))?;
     let result = execute_program_with_selection_in_context(
-        program.program.as_ref(),
+        &program.program,
         &input,
         &VmExecutionContext {
             now: execution_now,
@@ -2951,7 +2956,7 @@ async fn finish_rejected_records(
                 "record rejection references missing emitter batch {batch_index}"
             ))
         })?;
-        let record = batch.batch.runtime_record(row_index).map_err(|reason| {
+        let record = batch.batch.runtime_row(row_index).map_err(|reason| {
             Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
         })?;
         let key = batch.batch.keys.get(row_index).cloned().ok_or_else(|| {
@@ -4650,7 +4655,7 @@ mod publishing_mode_tests {
         let batch = RelayRecordBatch::single(
             schema,
             None,
-            RuntimeRecord::from_fields([(
+            test_runtime_row([(
                 "value".to_string(),
                 RuntimeValue::String("poison".to_string()),
             )]),
@@ -4696,7 +4701,7 @@ mod publishing_mode_tests {
         let batch = RelayRecordBatch::single(
             schema,
             None,
-            RuntimeRecord::from_fields([(
+            test_runtime_row([(
                 "value".to_string(),
                 RuntimeValue::String("poison".to_string()),
             )]),
@@ -4753,7 +4758,7 @@ mod tests {
         RelayRecordBatch::single(
             input_schema(),
             None,
-            RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I64(value))])
+            test_runtime_row([("value".to_string(), RuntimeValue::I64(value))])
                 .with_ingested_at_watermarks(Timestamp::from_unix_nanos(timestamp)),
             acks,
         )
@@ -4765,11 +4770,11 @@ mod tests {
     }
 
     fn input_value(batch: &RelayRecordBatch) -> i64 {
-        let record = batch.runtime_record(0).expect("batch must contain one row");
-        let Some(RuntimeValue::I64(value)) = record.value("value") else {
+        let record = batch.runtime_row(0).expect("batch must contain one row");
+        let Ok(Some(RuntimeValue::I64(value))) = record.value("value") else {
             panic!("test batch must contain an I64 value")
         };
-        *value
+        value
     }
 
     fn sink_context() -> EmitterSinkContext {
@@ -4854,20 +4859,14 @@ mod tests {
             vec![
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
-                        "value".to_string(),
-                        RuntimeValue::I64(2),
-                    )])
-                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(20)),
+                    record: test_runtime_row([("value".to_string(), RuntimeValue::I64(2))])
+                        .with_ingested_at_watermarks(Timestamp::from_unix_nanos(20)),
                     acks: AckSet::empty(),
                 },
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
-                        "value".to_string(),
-                        RuntimeValue::I64(3),
-                    )])
-                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(20)),
+                    record: test_runtime_row([("value".to_string(), RuntimeValue::I64(3))])
+                        .with_ingested_at_watermarks(Timestamp::from_unix_nanos(20)),
                     acks: AckSet::empty(),
                 },
             ],

@@ -7,7 +7,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Schema, TimeUnit};
 
-use crate::{RuntimeError, SideError};
+use crate::{RowErrors, RuntimeError};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedArray {
@@ -254,7 +254,7 @@ impl TypedArray {
         matches!(self, Self::Uninitialized { .. })
     }
 
-    fn null_count(&self) -> usize {
+    pub fn null_count(&self) -> usize {
         match self {
             Self::UInt8(array) => array.null_count(),
             Self::Int8(array) => array.null_count(),
@@ -279,7 +279,7 @@ impl TypedArray {
 pub struct TypedBatch {
     schema: Arc<Schema>,
     columns: Vec<TypedArray>,
-    errors: Vec<Vec<SideError>>,
+    errors: RowErrors,
     row_count: usize,
 }
 
@@ -289,7 +289,33 @@ impl TypedBatch {
         Ok(Self {
             schema,
             columns,
-            errors: vec![Vec::new(); row_count],
+            errors: RowErrors::new(row_count),
+            row_count,
+        })
+    }
+
+    /// Builds a typed batch whose row count cannot be inferred from a column.
+    ///
+    /// Arrow permits zero-column batches with a non-zero row count. The VM needs the
+    /// same representation for programs made entirely from constants.
+    pub fn try_new_with_row_count(
+        schema: Arc<Schema>,
+        columns: Vec<TypedArray>,
+        row_count: usize,
+    ) -> Result<Self, RuntimeError> {
+        let inferred_row_count = validate_batch(&schema, &columns)?;
+        if !columns.is_empty() && inferred_row_count != row_count {
+            return Err(RuntimeError::InvalidBatch {
+                message: format!(
+                    "provided row count {row_count} does not match column row count \
+                     {inferred_row_count}"
+                ),
+            });
+        }
+        Ok(Self {
+            schema,
+            columns,
+            errors: RowErrors::new(row_count),
             row_count,
         })
     }
@@ -297,14 +323,14 @@ impl TypedBatch {
     pub fn with_errors(
         schema: Arc<Schema>,
         columns: Vec<TypedArray>,
-        errors: Vec<Vec<SideError>>,
+        errors: RowErrors,
     ) -> Result<Self, RuntimeError> {
         let row_count = validate_batch(&schema, &columns)?;
-        if errors.len() != row_count {
+        if errors.row_count() != row_count {
             return Err(RuntimeError::InvalidBatch {
                 message: format!(
                     "error row count {} does not match batch row count {}",
-                    errors.len(),
+                    errors.row_count(),
                     row_count
                 ),
             });
@@ -329,7 +355,7 @@ impl TypedBatch {
         &self.columns[index]
     }
 
-    pub fn errors(&self) -> &[Vec<SideError>] {
+    pub fn errors(&self) -> &RowErrors {
         &self.errors
     }
 
@@ -465,12 +491,28 @@ mod tests {
         assert_eq!(batch.row_count(), 2);
         assert_eq!(batch.columns().len(), 4);
         assert_eq!(batch.column(1).data_type(), DataType::Float64);
-        assert_eq!(batch.errors(), &[Vec::new(), Vec::new()]);
+        assert_eq!(batch.errors().row_count(), 2);
+        assert!(batch.errors().is_error_free());
+    }
+
+    #[test]
+    fn typed_batch_preserves_explicit_row_count_without_columns() {
+        let batch = TypedBatch::try_new_with_row_count(Arc::new(Schema::empty()), Vec::new(), 3)
+            .expect("zero-column batch must build");
+
+        assert_eq!(batch.row_count(), 3);
+        assert_eq!(
+            batch
+                .to_record_batch()
+                .expect("Arrow batch must build")
+                .num_rows(),
+            3
+        );
     }
 
     #[test]
     fn typed_batch_rejects_wrong_error_row_count() {
-        let error = TypedBatch::with_errors(sample_schema(), sample_columns(), vec![Vec::new()])
+        let error = TypedBatch::with_errors(sample_schema(), sample_columns(), RowErrors::new(1))
             .expect_err("batch must reject mismatched error rows");
 
         match error {

@@ -13,7 +13,7 @@ use ort::{
 use parking_lot::Mutex;
 use triomphe::Arc;
 
-use crate::runtime_schema::{RuntimeRecord, RuntimeValue};
+use crate::runtime_schema::{RuntimeRecordBatch, RuntimeValue};
 
 #[derive(Clone)]
 pub(super) struct OnnxInferencerSession {
@@ -54,12 +54,12 @@ impl OnnxInferencerSession {
 
     pub(super) async fn execute(
         &self,
-        records: &[RuntimeRecord],
+        batch: &RuntimeRecordBatch,
         inputs: &[InferencerTensorMapping],
         output_schema: &[InferencerTensorDeclaration],
         mode: InferencerExecutionMode,
-    ) -> Result<Vec<HashMap<String, RuntimeValue>>, String> {
-        let prepared = PreparedExecution::from_records(records, inputs, output_schema, mode)?;
+    ) -> Result<Vec<Vec<RuntimeValue>>, String> {
+        let prepared = PreparedExecution::from_batch(batch, inputs, output_schema, mode)?;
         let session = Arc::clone(&self.session);
         tokio::task::spawn_blocking(move || prepared.run(&mut session.lock()))
             .await
@@ -75,37 +75,38 @@ struct PreparedExecution {
 }
 
 impl PreparedExecution {
-    fn from_records(
-        records: &[RuntimeRecord],
+    fn from_batch(
+        batch: &RuntimeRecordBatch,
         inputs: &[InferencerTensorMapping],
         output_schema: &[InferencerTensorDeclaration],
         mode: InferencerExecutionMode,
     ) -> Result<Self, String> {
-        if records.is_empty() {
+        let message_count = batch.batch().num_rows();
+        if message_count == 0 {
             return Err("cannot execute ONNX inference for an empty message batch".to_string());
         }
         let invocations = match mode {
-            InferencerExecutionMode::PerMessage => records
-                .iter()
-                .enumerate()
-                .map(|(message_index, record)| {
-                    PreparedInvocation::for_record(message_index, record, inputs)
-                })
+            InferencerExecutionMode::PerMessage => (0..message_count)
+                .map(|message_index| PreparedInvocation::for_row(message_index, batch, inputs))
                 .collect::<Result<Vec<_>, _>>()?,
             InferencerExecutionMode::Batched => {
-                PreparedInvocation::for_shape_batches(records, inputs)?
+                PreparedInvocation::for_shape_batches(batch, inputs)?
             }
         };
         Ok(Self {
             invocations,
             output_schema: output_schema.to_vec(),
-            message_count: records.len(),
+            message_count,
             mode,
         })
     }
 
-    fn run(self, session: &mut Session) -> Result<Vec<HashMap<String, RuntimeValue>>, String> {
-        let mut records = vec![HashMap::new(); self.message_count];
+    fn run(self, session: &mut Session) -> Result<Vec<Vec<RuntimeValue>>, String> {
+        let mut columns = self
+            .output_schema
+            .iter()
+            .map(|_| vec![None; self.message_count])
+            .collect::<Vec<Vec<Option<RuntimeValue>>>>();
         match self.mode {
             InferencerExecutionMode::PerMessage => {
                 for invocation in self.invocations {
@@ -114,9 +115,11 @@ impl PreparedExecution {
                     };
                     let message_index = *message_index;
                     let output_tensors = invocation.run(session, &self.output_schema, 1)?;
-                    for (declaration, tensor) in self.output_schema.iter().zip(output_tensors) {
-                        records[message_index].insert(
-                            declaration.tensor.clone(),
+                    for (column, (declaration, tensor)) in columns
+                        .iter_mut()
+                        .zip(self.output_schema.iter().zip(output_tensors))
+                    {
+                        column[message_index] = Some(
                             declaration
                                 .schema
                                 .runtime_value_from_tensor(&tensor.values, &tensor.shape)?,
@@ -130,7 +133,10 @@ impl PreparedExecution {
                     let batch_size = message_indices.len();
                     let output_tensors =
                         invocation.run(session, &self.output_schema, batch_size)?;
-                    for (declaration, tensor) in self.output_schema.iter().zip(output_tensors) {
+                    for (column, (declaration, tensor)) in columns
+                        .iter_mut()
+                        .zip(self.output_schema.iter().zip(output_tensors))
+                    {
                         let slices = declaration.schema.split_batch_values(
                             &tensor.values,
                             batch_size,
@@ -138,8 +144,7 @@ impl PreparedExecution {
                         )?;
                         let slice_shape = declaration.schema.shape_without_batch(&tensor.shape)?;
                         for (message_index, values) in message_indices.iter().zip(slices) {
-                            records[*message_index].insert(
-                                declaration.tensor.clone(),
+                            column[*message_index] = Some(
                                 declaration
                                     .schema
                                     .runtime_value_from_tensor(&values, &slice_shape)?,
@@ -149,7 +154,24 @@ impl PreparedExecution {
                 }
             }
         }
-        Ok(records)
+        columns
+            .into_iter()
+            .enumerate()
+            .map(|(column_index, column)| {
+                column
+                    .into_iter()
+                    .enumerate()
+                    .map(|(row, value)| {
+                        value.ok_or_else(|| {
+                            format!(
+                                "ONNX output tensor '{}' omitted message row {row}",
+                                self.output_schema[column_index].tensor
+                            )
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
     }
 }
 
@@ -159,21 +181,23 @@ struct PreparedInvocation {
 }
 
 impl PreparedInvocation {
-    fn for_record(
+    fn for_row(
         message_index: usize,
-        record: &RuntimeRecord,
+        batch: &RuntimeRecordBatch,
         mappings: &[InferencerTensorMapping],
     ) -> Result<Self, String> {
         let inputs = mappings
             .iter()
             .map(|mapping| {
-                let value = record.value(&mapping.tensor).ok_or_else(|| {
-                    format!(
-                        "ONNX input tensor '{}' mapped value is missing",
-                        mapping.tensor
-                    )
-                })?;
-                let tensor = mapping.schema.tensor_from_runtime_value(value)?;
+                let value = batch
+                    .value(message_index, &mapping.tensor)?
+                    .ok_or_else(|| {
+                        format!(
+                            "ONNX input tensor '{}' mapped value is missing",
+                            mapping.tensor
+                        )
+                    })?;
+                let tensor = mapping.schema.tensor_from_runtime_value(&value)?;
                 Ok(PreparedTensor {
                     name: mapping.tensor.clone(),
                     shape: tensor.shape,
@@ -188,33 +212,35 @@ impl PreparedInvocation {
     }
 
     fn for_shape_batches(
-        records: &[RuntimeRecord],
+        batch: &RuntimeRecordBatch,
         mappings: &[InferencerTensorMapping],
     ) -> Result<Vec<Self>, String> {
         let mut groups = HashMap::<Vec<Vec<usize>>, Vec<usize>>::new();
-        for (message_index, record) in records.iter().enumerate() {
+        for message_index in 0..batch.batch().num_rows() {
             let shapes = mappings
                 .iter()
                 .map(|mapping| {
-                    let value = record.value(&mapping.tensor).ok_or_else(|| {
-                        format!(
-                            "ONNX input tensor '{}' mapped value is missing",
-                            mapping.tensor
-                        )
-                    })?;
-                    Ok(mapping.schema.tensor_from_runtime_value(value)?.shape)
+                    let value = batch
+                        .value(message_index, &mapping.tensor)?
+                        .ok_or_else(|| {
+                            format!(
+                                "ONNX input tensor '{}' mapped value is missing",
+                                mapping.tensor
+                            )
+                        })?;
+                    Ok(mapping.schema.tensor_from_runtime_value(&value)?.shape)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             groups.entry(shapes).or_default().push(message_index);
         }
         groups
             .into_values()
-            .map(|message_indices| Self::for_batch(records, mappings, message_indices))
+            .map(|message_indices| Self::for_batch(batch, mappings, message_indices))
             .collect()
     }
 
     fn for_batch(
-        records: &[RuntimeRecord],
+        batch: &RuntimeRecordBatch,
         mappings: &[InferencerTensorMapping],
         message_indices: Vec<usize>,
     ) -> Result<Self, String> {
@@ -224,14 +250,16 @@ impl PreparedInvocation {
                 let slices = message_indices
                     .iter()
                     .map(|message_index| {
-                        let record = &records[*message_index];
-                        let value = record.value(&mapping.tensor).ok_or_else(|| {
-                            format!(
-                                "ONNX input tensor '{}' mapped value is missing",
-                                mapping.tensor
-                            )
-                        })?;
-                        mapping.schema.tensor_from_runtime_value(value)
+                        let value =
+                            batch
+                                .value(*message_index, &mapping.tensor)?
+                                .ok_or_else(|| {
+                                    format!(
+                                        "ONNX input tensor '{}' mapped value is missing",
+                                        mapping.tensor
+                                    )
+                                })?;
+                        mapping.schema.tensor_from_runtime_value(&value)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let shape = mapping

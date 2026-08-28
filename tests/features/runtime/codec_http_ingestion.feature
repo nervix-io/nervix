@@ -1,5 +1,5 @@
 Feature: HTTP codec ingestion
-  Scenario Outline: HTTP endpoint ingestor delivers a single <wire_format> payload through a schemaful codec
+  Scenario Outline: HTTP endpoint ingestor maps a payload encoded as <wire_format> from wire field order into internal schema order
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -13,8 +13,8 @@ Feature: HTTP codec ingestion
         user_id I64
       );
         CREATE WIRE <wire_format> SCHEMA notification_wire MODE STRICT (
-        tenant <tenant_wire_type>,
-        user_id <user_id_wire_type>
+        user_id <user_id_wire_type>,
+        tenant <tenant_wire_type>
       );
         CREATE CODEC notification_codec
         FROM WIRE <wire_format> SCHEMA notification_wire

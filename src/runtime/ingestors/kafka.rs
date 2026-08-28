@@ -290,7 +290,7 @@ impl KafkaIngestor {
                     partition: i32,
                     offset: i64,
                     next_offset: i64,
-                    record: DecodedRecord,
+                    record: RuntimeRecordBatch,
                     filter_map_metadata: IngestFilterMapMetadata,
                 }
 

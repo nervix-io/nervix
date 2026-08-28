@@ -768,40 +768,39 @@ impl SessionSubscriptions {
                                     tokio::task::consume_budget().await;
                                     let Some(message) = (match filter_map.as_ref() {
                                         Some(filter_map) => match execute_filter_map_on_record(
+                                            &event_name,
                                             filter_map,
-                                            augment_subscription_record_with_side_inputs(
-                                                message.record.clone(),
-                                                &match runtime
-                                                    .load_materialized_side_inputs(
-                                                        &task_domain,
-                                                        &message.key,
-                                                        &filter_map.materialized_interest,
-                                                        &materialized_stream_owner_nodes,
-                                                    )
-                                                    .await
-                                                {
-                                                    Ok(values) => values,
-                                                    Err(error) => {
-                                                        let event = SessionResponse {
-                                                            event: Some(proto::session_response::Event::Server(
-                                                                ServerEvent {
-                                                                    level: ServerEventLevel::Error as i32,
-                                                                    message: format!(
-                                                                        "session subscription '{}' failed to load materialized side inputs: {}",
-                                                                        event_name, error
-                                                                    ),
-                                                                },
-                                                            )),
-                                                        };
-                                                        if tx.send(Ok(event)).await.is_err() {
-                                                            break 'subscription_loop;
-                                                        }
-                                                        continue;
-                                                    }
-                                                },
-                                            ),
+                                            message.record.clone(),
                                             message.key.as_ref(),
                                             None,
+                                            &match runtime
+                                                .load_materialized_side_inputs(
+                                                    &task_domain,
+                                                    &message.key,
+                                                    &filter_map.materialized_interest,
+                                                    &materialized_stream_owner_nodes,
+                                                )
+                                                .await
+                                            {
+                                                Ok(values) => values,
+                                                Err(error) => {
+                                                    let event = SessionResponse {
+                                                        event: Some(proto::session_response::Event::Server(
+                                                            ServerEvent {
+                                                                level: ServerEventLevel::Error as i32,
+                                                                message: format!(
+                                                                    "session subscription '{}' failed to load materialized side inputs: {}",
+                                                                    event_name, error
+                                                                ),
+                                                            },
+                                                        )),
+                                                    };
+                                                    if tx.send(Ok(event)).await.is_err() {
+                                                        break 'subscription_loop;
+                                                    }
+                                                    continue;
+                                                }
+                                            },
                                             current_timestamp(),
                                         )
                                         .await
@@ -954,36 +953,14 @@ impl SessionSubscriptions {
     }
 }
 
-fn augment_subscription_record_with_side_inputs(
-    record: runtime_schema::RuntimeRecord,
-    side_inputs: &HashMap<String, runtime_schema::RuntimeValue>,
-) -> runtime_schema::RuntimeRecord {
-    if side_inputs.is_empty() {
-        return record;
-    }
-    let metadata = record.metadata().clone();
-    let mut fields = record
-        .to_remote()
-        .fields
-        .into_iter()
-        .map(|field| {
-            (
-                field.name,
-                runtime_schema::RuntimeValue::from_remote(field.value),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    for (name, value) in side_inputs {
-        fields.insert(name.clone(), value.clone());
-    }
-    runtime_schema::RuntimeRecord::from_fields_with_metadata(fields, metadata)
-}
-
 fn format_stream_message(
     message: &RelayMessage,
     sensitivity: &nervix_vm::SchemaSensitivity,
 ) -> String {
-    let payload = message.record.to_json_string_masking(sensitivity);
+    let payload = message
+        .record
+        .to_json_string_masking(sensitivity)
+        .unwrap_or_else(|error| format!("<invalid Arrow row: {error}>"));
     match message.key.as_ref() {
         Some(key) => format!("key={} payload={}", key.as_str(), payload),
         None => payload,
@@ -3038,7 +3015,7 @@ enum PendingClusterCommand {
     EntityGateRelease(oneshot::Sender<Result<(), String>>),
     DescribeMetrics(oneshot::Sender<Result<RemoteDescribeMetricsEnvelope, String>>),
     DescribeLookup(oneshot::Sender<Result<LookupDescribeEnvelope, String>>),
-    LookupQuery(oneshot::Sender<Result<Option<runtime_schema::DecodedRecord>, String>>),
+    LookupQuery(oneshot::Sender<Result<Option<runtime_schema::RuntimeRecordBatch>, String>>),
     SubscriptionInterestVisibility(oneshot::Sender<bool>),
 }
 
@@ -7366,7 +7343,10 @@ impl SessionServiceImpl {
         };
 
         match record {
-            Ok(Some(record)) => command_ok(record.to_json_string()),
+            Ok(Some(record)) => match record.row_to_json_string(0) {
+                Ok(json) => command_ok(json),
+                Err(message) => command_error(message),
+            },
             Ok(None) => command_error(format!(
                 "hash map '{}' has no entry for key {}",
                 query.name.as_str(),
@@ -7382,7 +7362,7 @@ impl SessionServiceImpl {
         name: &Identifier,
         key: &str,
         targets: Vec<String>,
-    ) -> Result<Option<runtime_schema::DecodedRecord>, String> {
+    ) -> Result<Option<runtime_schema::RuntimeRecordBatch>, String> {
         let mut errors = Vec::new();
         for target in targets {
             let correlation_id = self.next_cluster_command_correlation_id();
@@ -7429,7 +7409,7 @@ impl SessionServiceImpl {
     async fn handle_lookup_request(
         &self,
         request: RemoteLookupRequest,
-    ) -> Result<Option<runtime_schema::DecodedRecord>, String> {
+    ) -> Result<Option<runtime_schema::RuntimeRecordBatch>, String> {
         self.prepare_assigned_control_request(&request.domain, ModelKind::Lookup, &request.name)
             .await?;
         self.runtime
@@ -7441,11 +7421,11 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(
-                response
-                    .result
-                    .map(|record| record.map(runtime_schema::DecodedRecord::from_remote)),
-            );
+            let _ = sender.send(response.result.and_then(|record| {
+                record
+                    .map(|bytes| runtime_schema::RuntimeRecordBatch::from_arrow_ipc_bytes(&bytes))
+                    .transpose()
+            }));
         }
     }
 
@@ -10694,7 +10674,7 @@ impl SessionServiceImpl {
             let entry_lines = entries
                 .into_iter()
                 .map(|(key, record)| {
-                    let metadata = record.metadata();
+                    let metadata = &record.metadata;
                     format!(
                         "key={} payload={} low={} high={}",
                         if key.is_empty() {
@@ -10702,9 +10682,9 @@ impl SessionServiceImpl {
                         } else {
                             key.as_str()
                         },
-                        record.to_json_string(),
-                        metadata.ingested_at_low_watermark(),
-                        metadata.ingested_at_high_watermark()
+                        runtime_schema::remote_runtime_record_to_json_string(&record),
+                        metadata.ingested_at_low_watermark,
+                        metadata.ingested_at_high_watermark
                     )
                 })
                 .collect::<Vec<_>>();
@@ -17821,7 +17801,11 @@ impl Application {
                                         &message.peer_node_id,
                                         ControlEnvelope::LookupResponse(RemoteLookupResponse {
                                             correlation_id: request.correlation_id,
-                                            result: result.map(|record| record.map(|record| record.to_remote())),
+                                            result: result.and_then(|record| {
+                                                record
+                                                    .map(|record| record.to_arrow_ipc_bytes())
+                                                    .transpose()
+                                            }),
                                         }),
                                     )
                                     .await
@@ -19799,7 +19783,7 @@ mod tests {
     fn subscription_sampling_respects_extreme_rates() {
         let message = RelayMessage {
             key: string_branch_key("tenant", "acme"),
-            record: runtime_schema::RuntimeRecord::from_fields([]),
+            record: runtime_schema::test_runtime_row([]),
             acks: crate::runtime_ack::AckSet::empty(),
         };
         assert!(subscription_sample_passes(None, &message));
@@ -19815,7 +19799,7 @@ mod tests {
 
         let message = RelayMessage {
             key: string_branch_key("tenant", "acme"),
-            record: runtime_schema::RuntimeRecord::from_fields([(
+            record: runtime_schema::test_runtime_row([(
                 "user_id".to_string(),
                 runtime_schema::RuntimeValue::U32(42),
             )]),
@@ -19834,7 +19818,7 @@ mod tests {
 
         let no_key = RelayMessage {
             key: None,
-            record: runtime_schema::RuntimeRecord::from_fields([(
+            record: runtime_schema::test_runtime_row([(
                 "user_id".to_string(),
                 runtime_schema::RuntimeValue::U32(42),
             )]),
