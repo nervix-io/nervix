@@ -45,8 +45,8 @@ use nervix_models::{
     DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterPublishingMode,
     EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy, IcebergCatalog,
     IcebergStorageBackend, IcebergValueMapping, Identifier, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorMapping, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
     MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping,
     MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
@@ -188,15 +188,16 @@ use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
     BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputSpec,
     BranchedProcessorOutputsSpec, BranchedProcessorSpec, CompiledCorrelatorOutputProgram,
-    CompiledCorrelatorWhereProgram, CompiledReordererProgram, CompiledWindowAggregateExpr,
-    CompiledWindowAggregateProgram, CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan,
-    InferencerFlushContext, InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext,
-    PlannedGeneralError, PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
-    RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
-    RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
-    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage,
-    RuntimeInputCollector, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor,
-    WasmFlushContext, WindowBounds, WindowFlushContext,
+    CompiledCorrelatorWhereProgram, CompiledInferencerInputProgram, CompiledReordererProgram,
+    CompiledWindowAggregateExpr, CompiledWindowAggregateProgram, CorrelatorBranchState,
+    CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext, InferencerOutputBuffer,
+    IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
+    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
+    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
+    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
+    ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage, RuntimeInputCollector,
+    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
+    WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -3882,6 +3883,7 @@ impl RelayProcessorOperationNode {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                     ..
                 },
                 RelayProcessorOperationTemplate::Inferencer {
@@ -3891,6 +3893,7 @@ impl RelayProcessorOperationNode {
                     file: desired_file,
                     inputs: desired_inputs,
                     output_schema: desired_output_schema,
+                    compiled_input_program: desired_compiled_input_program,
                 },
             ) => {
                 if resource != desired_resource
@@ -3903,6 +3906,7 @@ impl RelayProcessorOperationNode {
                         "dynamic inferencer update changed its inference session".to_string()
                     );
                 }
+                *compiled_input_program = desired_compiled_input_program.clone();
                 output_routes.apply_template(desired_outputs)?;
                 Ok(())
             }
@@ -5595,6 +5599,7 @@ impl RelayProcessorNode {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                     output_buffers,
                     session,
                 } => {
@@ -5664,6 +5669,7 @@ impl RelayProcessorNode {
                                 file,
                                 inputs,
                                 output_schema,
+                                compiled_input_program,
                                 input_relays: &self.input_relays,
                                 session,
                                 materialized_state: &self.materialized_state,
@@ -5891,6 +5897,7 @@ impl RelayProcessorNode {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                     output_buffers,
                     session,
                 } => {
@@ -5918,6 +5925,7 @@ impl RelayProcessorNode {
                                 file,
                                 inputs,
                                 output_schema,
+                                compiled_input_program,
                                 input_relays: &self.input_relays,
                                 session,
                                 materialized_state: &self.materialized_state,
@@ -6408,6 +6416,7 @@ impl RelayProcessorTemplate {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                 } => {
                     let output_routes = Self::instantiate_outputs(output_routes);
                     let output_buffers = (0..output_routes.routes.len())
@@ -6420,6 +6429,7 @@ impl RelayProcessorTemplate {
                         file: file.clone(),
                         inputs: inputs.clone(),
                         output_schema: output_schema.clone(),
+                        compiled_input_program: compiled_input_program.clone(),
                         output_buffers,
                         session: None,
                     }
@@ -16197,87 +16207,6 @@ fn vm_output_value(
     )
 }
 
-fn compile_inferencer_input_mappings(
-    processor: &Identifier,
-    mappings: &[InferencerTensorMapping],
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    udfs: Option<&UdfExecutor>,
-) -> Result<VmCompiledProgram, String> {
-    let assignments = mappings
-        .iter()
-        .map(|mapping| {
-            Ok(nervix_models::Assignment {
-                target: nervix_models::AssignmentTarget::bare(
-                    Identifier::parse(&mapping.tensor).map_err(|error| {
-                        format!(
-                            "inferencer '{}' tensor name '{}' is not a valid field: {error}",
-                            processor, mapping.tensor
-                        )
-                    })?,
-                ),
-                value: mapping.expression.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let parsed = lower_route_construction(
-        &RouteConstruction {
-            assignments,
-            ..RouteConstruction::default()
-        },
-        SemanticNamespaces::new("input", "mapped_input"),
-    )
-    .map_err(|reason| {
-        format!(
-            "inferencer '{}' INPUTS mapping is invalid: {reason}",
-            processor
-        )
-    })?;
-    let output_schema = StdArc::new(arrow_schema::Schema::new(
-        mappings
-            .iter()
-            .map(|mapping| {
-                arrow_schema::Field::new(
-                    &mapping.tensor,
-                    crate::runtime_schema::arrow_data_type(&mapping.schema.message_type()),
-                    false,
-                )
-            })
-            .collect::<Vec<_>>(),
-    ));
-    let output_sensitivity = VmSchemaSensitivity::from_sensitive_fields(
-        mappings
-            .iter()
-            .filter(|mapping| {
-                expression_reads_sensitive_source(&mapping.expression, &input_sensitivity)
-            })
-            .map(|mapping| mapping.tensor.clone()),
-    );
-    compile_vm_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_schema.clone(),
-        output_sensitivity.clone(),
-        [
-            VmCompileBinding::readonly("input", input_schema).with_sensitivity(input_sensitivity),
-            VmCompileBinding::writeonly("mapped_input", output_schema)
-                .with_sensitivity(output_sensitivity),
-        ],
-        runtime_udf_compile_options(
-            udfs,
-            VmCompileOptions {
-                output_mode: VmOutputMode::ExplicitOnly,
-                ..VmCompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        format!(
-            "inferencer '{}' INPUTS compile failed: {}",
-            processor, error.message
-        )
-    })
-}
-
 fn vm_typed_batch_to_runtime_batch(batch: &VmTypedBatch) -> Result<RuntimeRecordBatch, String> {
     let record_batch = batch.to_record_batch().map_err(|error| error.to_string())?;
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
@@ -16413,6 +16342,7 @@ async fn flush_branch_inferencer_output(
         file,
         inputs,
         output_schema,
+        compiled_input_program,
         input_relays,
         session,
         materialized_state,
@@ -16566,38 +16496,10 @@ async fn flush_branch_inferencer_output(
         );
         return;
     };
-    let input_sensitivity = input_relays
-        .first()
-        .and_then(|relay| {
-            relay_schema_for_runtime(&branch.runtime, &branch.domain, relay)
-                .ok()
-                .map(|schema| schema.vm_sensitivity())
-        })
-        .unwrap_or_default();
-    let mapped_program = match compile_inferencer_input_mappings(
-        processor,
-        inputs,
-        input_batch.schema().clone(),
-        input_sensitivity,
-        branch.runtime.udf_executor(&branch.domain).as_ref(),
-    ) {
-        Ok(program) => program,
-        Err(error) => {
-            branch.runtime.handle_internal_processor_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                messages.iter().map(|message| &message.acks),
-                error,
-            );
-            return;
-        }
-    };
     let side_inputs = HashMap::default();
     let lookup_columns = HashMap::default();
     let mapped_vm_input = match project_vm_input_batch(
-        &mapped_program.input_schema,
+        &compiled_input_program.program.input_schema,
         &VmInputProjectionSources {
             carrier: &input_batch,
             namespace_batches: &[],
@@ -16623,9 +16525,8 @@ async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let mapped_program = Arc::new(mapped_program);
     let mapped_result = match execute_program_with_selection_in_context(
-        &mapped_program,
+        &compiled_input_program.program,
         &mapped_vm_input,
         &VmExecutionContext {
             now: current_timestamp(),

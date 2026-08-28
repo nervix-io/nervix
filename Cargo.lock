@@ -6785,6 +6785,7 @@ dependencies = [
  "ahash 0.8.12",
  "arrow-arith",
  "arrow-array",
+ "arrow-buffer",
  "arrow-cast",
  "arrow-ord",
  "arrow-schema",
