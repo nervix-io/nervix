@@ -1,4 +1,5 @@
 rust_toolchain_version := shell("toml get -r rust-toolchain.toml toolchain.channel")
+rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
@@ -179,7 +180,7 @@ autoinherit-check:
     git diff --exit-code
 
 cargo-clippy:
-    cargo clippy --all-features --all-targets --workspace
+    RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-features --all-targets --workspace
 
 [parallel]
 lint-inner: cargo-clippy proto-lint
