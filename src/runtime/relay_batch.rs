@@ -6,13 +6,13 @@ use triomphe::Arc;
 use super::BranchKey;
 use crate::{
     runtime_ack::AckSet,
-    runtime_schema::{CompiledSchema, RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata},
+    runtime_schema::{CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow},
 };
 
 #[derive(Debug, Clone)]
 pub struct RelayMessage {
     pub(crate) key: Option<BranchKey>,
-    pub(crate) record: RuntimeRecord,
+    pub(crate) record: RuntimeRow,
     pub(crate) acks: AckSet,
 }
 
@@ -38,24 +38,24 @@ type UnkeyedRelayBatchParts = (
 );
 
 impl RelayRecordBatch {
-    pub(super) fn runtime_records(&self) -> Result<Vec<RuntimeRecord>, String> {
-        self.batch.runtime_records(&self.metadata)
-    }
-
-    pub(super) fn runtime_record(&self, row: usize) -> Result<RuntimeRecord, String> {
-        let metadata = self.metadata.get(row).cloned().ok_or_else(|| {
-            format!(
+    pub(super) fn runtime_row(&self, row: usize) -> Result<RuntimeRow, String> {
+        if self.metadata.get(row).is_none() {
+            return Err(format!(
                 "stream batch row {row} is outside metadata with {} rows",
                 self.metadata.len()
-            )
-        })?;
-        self.batch.runtime_record(row, metadata)
+            ));
+        }
+        RuntimeRow::new(
+            Arc::new(self.batch.clone()),
+            row,
+            self.metadata[row].clone(),
+        )
     }
 
     pub(super) fn single(
         schema: Arc<CompiledSchema>,
         key: Option<BranchKey>,
-        record: RuntimeRecord,
+        record: RuntimeRow,
         acks: AckSet,
     ) -> Result<Self, String> {
         Self::from_messages(schema, vec![RelayMessage { key, record, acks }])
@@ -77,11 +77,18 @@ impl RelayRecordBatch {
             .iter()
             .map(|message| message.record.metadata().clone())
             .collect::<Vec<_>>();
-        let (records, acks): (Vec<_>, Vec<_>) = messages
+        let (batches, acks): (Vec<_>, Vec<_>) = messages
             .into_iter()
-            .map(|message| (message.record, message.acks))
+            .map(|message| (message.record.one_row_batch(), message.acks))
             .unzip();
-        let batch = schema.arrow_batch_from_records(&records)?;
+        if batches
+            .iter()
+            .any(|batch| batch.schema().as_ref() != schema.arrow_schema().as_ref())
+        {
+            return Err("stream message row schema does not match relay schema".to_string());
+        }
+        let batch_refs = batches.iter().collect::<Vec<_>>();
+        let batch = RuntimeRecordBatch::concat(&batch_refs)?;
         Ok(Self {
             key,
             keys,
@@ -193,16 +200,21 @@ impl RelayRecordBatch {
                 self,
             )));
         }
-        let records = match self.runtime_records() {
-            Ok(records) => records,
+        let batch = Arc::new(self.batch.clone());
+        let rows = match (0..row_count)
+            .zip(self.metadata.iter().cloned())
+            .map(|(row, metadata)| RuntimeRow::new(batch.clone(), row, metadata))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(rows) => rows,
             Err(error) => return Err(Box::new((error, self))),
         };
-        Ok(records
-            .into_iter()
-            .zip(self.acks)
-            .zip(self.keys)
-            .map(|((record, acks), key)| RelayMessage { key, record, acks })
-            .collect())
+        let Self { keys, acks, .. } = self;
+        let mut messages = Vec::with_capacity(row_count);
+        for ((record, acks), key) in rows.into_iter().zip(acks).zip(keys) {
+            messages.push(RelayMessage { key, record, acks });
+        }
+        Ok(messages)
     }
 
     pub(super) fn concat(batches: Vec<Self>) -> Result<Self, String> {
@@ -390,7 +402,8 @@ pub(super) fn build_stream_record_batch_preserving_acks(
         ));
     };
     let key = first.key.clone();
-    let mut records = Vec::with_capacity(messages.len());
+    let mut batches = Vec::with_capacity(messages.len());
+    let mut metadata = Vec::with_capacity(messages.len());
     let mut acks = Vec::with_capacity(messages.len());
     for message in messages {
         let RelayMessage {
@@ -406,18 +419,25 @@ pub(super) fn build_stream_record_batch_preserving_acks(
                 pending_acks,
             ));
         }
-        records.push(record);
+        metadata.push(record.metadata().clone());
+        batches.push(record.one_row_batch());
         acks.push(message_acks);
     }
-    let batch = match schema.arrow_batch_from_records(&records) {
+    if batches
+        .iter()
+        .any(|batch| batch.schema().as_ref() != schema.arrow_schema().as_ref())
+    {
+        return Err((
+            "stream message row schema does not match relay schema".to_string(),
+            acks,
+        ));
+    }
+    let batch_refs = batches.iter().collect::<Vec<_>>();
+    let batch = match RuntimeRecordBatch::concat(&batch_refs) {
         Ok(batch) => batch,
         Err(error) => return Err((error, acks)),
     };
-    let metadata = records
-        .iter()
-        .map(|record| record.metadata().clone())
-        .collect();
-    let keys = vec![key.clone(); records.len()];
+    let keys = vec![key.clone(); batches.len()];
     Ok(RelayRecordBatch {
         key,
         keys,

@@ -251,7 +251,7 @@ impl IcebergRejectedRecord {
     fn message(&self) -> Result<(RelayMessage, StructuredMessageError), (String, AckSet)> {
         let record = self
             .batch
-            .runtime_record(self.row, self.metadata.clone())
+            .runtime_row(self.row, self.metadata.clone())
             .map_err(|reason| (reason, self.acks.clone()))?;
         Ok((
             RelayMessage {
@@ -992,8 +992,11 @@ impl IcebergEmitter {
             &program.program.input_schema,
             &VmInputProjectionSources {
                 carrier: batch,
+                namespace_batches: &[],
+                strict_namespaces: &[],
                 keys,
                 side_inputs: &side_inputs,
+                ingest_metadata: None,
                 lookup_columns: &lookup_columns,
                 uninitialized: None,
             },

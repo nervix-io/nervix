@@ -1,5 +1,5 @@
 use nervix_models::{
-    Assignment, CreateBranch, OutputBranch, ProcessorInputWhere, ProcessorInputs,
+    CreateBranch, OutputBranch, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
 };
 
@@ -65,7 +65,6 @@ struct BranchEntrypoint {
     branch: Option<Identifier>,
     ttl: Option<String>,
     max_instances: Option<u64>,
-    assignments: Vec<Assignment>,
 }
 
 fn branch_policy(
@@ -97,7 +96,6 @@ fn branch_entrypoint(
         branch,
         ttl,
         max_instances,
-        assignments: branch_action.assignments().to_vec(),
     }
 }
 
@@ -356,7 +354,6 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         entrypoint.branch,
                         entrypoint.ttl,
                         entrypoint.max_instances,
-                        Vec::new(),
                         BranchInstanceAckBoundary::Preserve,
                         output
                             .flush_policy
@@ -389,7 +386,6 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         entrypoint.branch,
                         entrypoint.ttl,
                         entrypoint.max_instances,
-                        entrypoint.assignments,
                         BranchInstanceAckBoundary::Reingestor(reingestor.mode),
                         output
                             .flush_policy
@@ -425,7 +421,6 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                     branch,
                     branch_ttl,
                     branch_max_instances,
-                    output_branch_assignments,
                     output_ack_boundary,
                     output_flush_each,
                     output_max_batch_size,
@@ -438,7 +433,6 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         branch,
                         branch_ttl,
                         branch_max_instances,
-                        output_branch_assignments,
                         output_ack_boundary,
                         output_flush_each,
                         output_max_batch_size,
@@ -930,7 +924,6 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
             materialized_streams,
             processors: HashMap::default(),
         },
-        branch_assignments: spec.output_branch_assignments.clone(),
         ack_boundary: spec.output_ack_boundary,
         flush_policy: parse_branch_flush_policy(
             spec.kind.as_str(),
@@ -988,465 +981,6 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         materialized_streams,
         processors,
     })
-}
-
-#[cfg(test)]
-pub(in crate::runtime) fn resolve_concrete_branch(
-    record: &RuntimeRecord,
-    branched_by: &[Identifier],
-    owner: &Identifier,
-) -> Result<ConcreteBranch, String> {
-    if branched_by.is_empty() {
-        return Ok(ConcreteBranch::Root);
-    }
-
-    let mut fields = Vec::with_capacity(branched_by.len());
-    for field_name in branched_by {
-        let Some(value) = record.value(field_name.as_str()) else {
-            return Err(format!(
-                "branch field '{}' is missing for '{}'",
-                field_name.as_str(),
-                owner.as_str()
-            ));
-        };
-        fields.push((field_name.clone(), value.clone()));
-    }
-
-    BranchKey::from_fields(fields).map(ConcreteBranch::Key)
-}
-
-pub(in crate::runtime) fn resolve_concrete_branch_from_assignments(
-    output: &RuntimeRecord,
-    input: Option<&RuntimeRecord>,
-    branch_key: Option<&BranchKey>,
-    assignments: &[Assignment],
-    owner: &Identifier,
-    udfs: Option<&UdfExecutor>,
-) -> Result<ConcreteBranch, String> {
-    if assignments.is_empty() {
-        return Ok(branch_key
-            .cloned()
-            .map(ConcreteBranch::Key)
-            .unwrap_or(ConcreteBranch::Root));
-    }
-
-    let mut fields = Vec::<(Identifier, RuntimeValue)>::with_capacity(assignments.len());
-    let mut initialized = HashMap::<Identifier, RuntimeValue>::default();
-    for (index, assignment) in assignments.iter().enumerate() {
-        let value =
-            evaluate_branch_expression(&assignment.value, output, input, &initialized, udfs)
-                .map_err(|reason| {
-                    format!(
-                        "branch SET assignment {index} for '{}' failed: {reason}",
-                        owner.as_str()
-                    )
-                })?;
-        if let Some((_, current)) = fields
-            .iter_mut()
-            .find(|(field, _)| field == &assignment.target.field)
-        {
-            *current = value.clone();
-        } else {
-            fields.push((assignment.target.field.clone(), value.clone()));
-        }
-        initialized.insert(assignment.target.field.clone(), value);
-    }
-
-    BranchKey::from_fields(fields).map(ConcreteBranch::Key)
-}
-
-pub(in crate::runtime) fn assignments_contain_udf(assignments: &[Assignment]) -> bool {
-    assignments
-        .iter()
-        .any(|assignment| expression_contains_udf(&assignment.value))
-}
-
-pub(in crate::runtime) async fn resolve_concrete_branch_from_assignments_blocking(
-    output: &RuntimeRecord,
-    input: Option<&RuntimeRecord>,
-    branch_key: Option<&BranchKey>,
-    assignments: &[Assignment],
-    owner: &Identifier,
-    udfs: Option<&UdfExecutor>,
-) -> Result<ConcreteBranch, String> {
-    if !assignments_contain_udf(assignments) {
-        return resolve_concrete_branch_from_assignments(
-            output,
-            input,
-            branch_key,
-            assignments,
-            owner,
-            udfs,
-        );
-    }
-
-    let output = output.clone();
-    let input = input.cloned();
-    let branch_key = branch_key.cloned();
-    let assignments = assignments.to_vec();
-    let owner = owner.clone();
-    let udfs = udfs.cloned();
-    tokio::task::spawn_blocking(move || {
-        resolve_concrete_branch_from_assignments(
-            &output,
-            input.as_ref(),
-            branch_key.as_ref(),
-            &assignments,
-            &owner,
-            udfs.as_ref(),
-        )
-    })
-    .await
-    .map_err(|error| format!("branch UDF execution task failed: {error}"))?
-}
-
-fn evaluate_branch_expression(
-    expression: &nervix_models::Expression,
-    output: &RuntimeRecord,
-    input: Option<&RuntimeRecord>,
-    initialized: &HashMap<Identifier, RuntimeValue>,
-    udfs: Option<&UdfExecutor>,
-) -> Result<RuntimeValue, String> {
-    use nervix_models::{Expression, FieldScope, Literal, ParseAsType, UnaryOperator};
-
-    match expression {
-        Expression::Literal(Literal::I64(value)) => Ok(RuntimeValue::I64(*value)),
-        Expression::Literal(Literal::F64(value)) => {
-            Ok(RuntimeValue::F64(OrderedFloat(value.value())))
-        }
-        Expression::Literal(Literal::Bool(value)) => Ok(RuntimeValue::Bool(*value)),
-        Expression::Literal(Literal::String(value)) => Ok(RuntimeValue::String(value.clone())),
-        Expression::Literal(Literal::Null) => {
-            Err("NULL cannot be used as a concrete branch-key value".to_string())
-        }
-        Expression::Field(reference) => match &reference.scope {
-            FieldScope::Bare | FieldScope::Branch => {
-                initialized.get(&reference.field).cloned().ok_or_else(|| {
-                    format!(
-                        "branch field '{}' has not been initialized",
-                        reference.field.as_str()
-                    )
-                })
-            }
-            FieldScope::Message | FieldScope::Output => output
-                .value(reference.field.as_str())
-                .cloned()
-                .ok_or_else(|| format!("field '{}' is missing", reference.field.as_str())),
-            FieldScope::Input => input
-                .unwrap_or(output)
-                .value(reference.field.as_str())
-                .cloned()
-                .ok_or_else(|| format!("input field '{}' is missing", reference.field.as_str())),
-            FieldScope::RelayState { relay } => output
-                .value(&format!(
-                    "relay_state.{}.{}",
-                    relay.as_str(),
-                    reference.field.as_str()
-                ))
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "materialized state field 'relay_state.{}.{}' is missing",
-                        relay.as_str(),
-                        reference.field.as_str()
-                    )
-                }),
-            scope => Err(format!(
-                "scope '{scope:?}' is unavailable during branch construction"
-            )),
-        },
-        Expression::Unary {
-            operator,
-            expression,
-        } => {
-            let value = evaluate_branch_expression(expression, output, input, initialized, udfs)?;
-            match operator {
-                UnaryOperator::Negate => negate_runtime_value(value),
-                UnaryOperator::Not => match value {
-                    RuntimeValue::Bool(value) => Ok(RuntimeValue::Bool(!value)),
-                    other => Err(format!(
-                        "NOT expects BOOL, found {}",
-                        runtime_value_type_name(&other)
-                    )),
-                },
-            }
-        }
-        Expression::Binary {
-            operator,
-            left,
-            right,
-        } => {
-            let left = evaluate_branch_expression(left, output, input, initialized, udfs)?;
-            let right = evaluate_branch_expression(right, output, input, initialized, udfs)?;
-            let operator = match operator {
-                nervix_models::BinaryOperator::Add => BinaryOp::Add,
-                nervix_models::BinaryOperator::Subtract => BinaryOp::Sub,
-                nervix_models::BinaryOperator::Multiply => BinaryOp::Mul,
-                nervix_models::BinaryOperator::Divide => BinaryOp::Div,
-                nervix_models::BinaryOperator::Remainder => BinaryOp::Rem,
-                nervix_models::BinaryOperator::Equal => BinaryOp::Eq,
-                nervix_models::BinaryOperator::NotEqual => BinaryOp::NotEq,
-                nervix_models::BinaryOperator::GreaterThan => BinaryOp::Gt,
-                nervix_models::BinaryOperator::LessThan => BinaryOp::Lt,
-                nervix_models::BinaryOperator::GreaterThanOrEqual => BinaryOp::GtEq,
-                nervix_models::BinaryOperator::LessThanOrEqual => BinaryOp::LtEq,
-                nervix_models::BinaryOperator::And => BinaryOp::And,
-                nervix_models::BinaryOperator::Or => BinaryOp::Or,
-            };
-            evaluate_runtime_binary(operator, left, right)
-        }
-        Expression::Cast { expression, target } => {
-            let value = evaluate_branch_expression(expression, output, input, initialized, udfs)?;
-            let target = match target {
-                ParseAsType::U8 => ArrowDataType::UInt8,
-                ParseAsType::I8 => ArrowDataType::Int8,
-                ParseAsType::U16 => ArrowDataType::UInt16,
-                ParseAsType::I16 => ArrowDataType::Int16,
-                ParseAsType::U32 => ArrowDataType::UInt32,
-                ParseAsType::I32 => ArrowDataType::Int32,
-                ParseAsType::U64 => ArrowDataType::UInt64,
-                ParseAsType::I64 => ArrowDataType::Int64,
-                ParseAsType::Bool => ArrowDataType::Boolean,
-                ParseAsType::String => ArrowDataType::Utf8,
-                ParseAsType::Datetime => ArrowDataType::Timestamp(
-                    arrow_schema::TimeUnit::Nanosecond,
-                    Some("+00:00".into()),
-                ),
-                ParseAsType::F32 => ArrowDataType::Float32,
-                ParseAsType::F64 => ArrowDataType::Float64,
-                other => return Err(format!("branch SET cannot cast to {other:?}")),
-            };
-            cast_runtime_value(value, &target)
-        }
-        Expression::Call {
-            function,
-            arguments,
-        } => {
-            let values = arguments
-                .iter()
-                .map(|argument| {
-                    evaluate_branch_expression(argument, output, input, initialized, udfs)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            match function.as_str().to_ascii_lowercase().as_str() {
-                "leak_sensitive" => values
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "leak_sensitive expects one argument".to_string()),
-                "lower" => unary_string_function(values, "lower", str::to_ascii_lowercase),
-                "upper" => unary_string_function(values, "upper", str::to_ascii_uppercase),
-                "trim" => unary_string_function(values, "trim", |value| value.trim().to_string()),
-                "abs" => values
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "abs expects one argument".to_string())
-                    .and_then(abs_runtime_value),
-                "length" => match values.as_slice() {
-                    [RuntimeValue::String(value)] => {
-                        Ok(RuntimeValue::I64(value.chars().count() as i64))
-                    }
-                    [other] => Err(format!(
-                        "length expects STRING, found {}",
-                        runtime_value_type_name(other)
-                    )),
-                    _ => Err("length expects one argument".to_string()),
-                },
-                "concat" => Ok(RuntimeValue::String(
-                    values
-                        .iter()
-                        .map(RuntimeValue::to_key_fragment)
-                        .collect::<String>(),
-                )),
-                other => Err(format!(
-                    "function '{other}' is unavailable during branch construction"
-                )),
-            }
-        }
-        Expression::UdfCall {
-            function,
-            arguments,
-        } => {
-            let executor = udfs.ok_or_else(|| {
-                format!(
-                    "UDF 'udf::{}' is unavailable during branch construction",
-                    function.as_str()
-                )
-            })?;
-            let signature = executor
-                .signatures()
-                .get(function.as_str())
-                .ok_or_else(|| format!("unknown UDF 'udf::{}'", function.as_str()))?;
-            let values = arguments
-                .iter()
-                .map(|argument| {
-                    evaluate_branch_expression(argument, output, input, initialized, udfs)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if values.len() != signature.arguments.len() {
-                return Err(format!(
-                    "UDF 'udf::{}' expects {} arguments, found {}",
-                    function.as_str(),
-                    signature.arguments.len(),
-                    values.len()
-                ));
-            }
-            let fields = signature
-                .arguments
-                .iter()
-                .enumerate()
-                .map(|(index, argument)| {
-                    arrow_schema::Field::new(
-                        format!("arg{index}"),
-                        argument.data_type.clone(),
-                        argument.optional,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let argument_record = RuntimeRecord::from_fields_with_metadata(
-                values
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, value)| (format!("arg{index}"), value)),
-                RuntimeRecordMetadata::from_ingested_at_watermarks(
-                    Timestamp::now(),
-                    Timestamp::now(),
-                ),
-            );
-            let argument_batch = super::vm_typed_batch_from_runtime_records(
-                std::slice::from_ref(&argument_record),
-                &StdArc::new(arrow_schema::Schema::new(fields)),
-            )?;
-            let result = executor
-                .inject_with_context(
-                    &FunctionName::Udf(function.as_str().to_string()),
-                    argument_batch.columns(),
-                    1,
-                    (0..0).into(),
-                    Timestamp::now(),
-                    &[false],
-                )
-                .map_err(|error| error.to_string())?;
-            if let Some((_, error)) = result.side_errors.into_iter().next() {
-                return Err(error.message);
-            }
-            let return_type = super::parse_as_type_from_arrow(&signature.return_type)?;
-            runtime_value_from_arrow_array(
-                result.output.to_array_ref().as_ref(),
-                &return_type,
-                signature.return_optional,
-                0,
-                function.as_str(),
-            )?
-            .ok_or_else(|| {
-                format!(
-                    "UDF 'udf::{}' returned NULL for a branch-key value",
-                    function.as_str()
-                )
-            })
-        }
-        Expression::If {
-            condition,
-            then_result,
-            else_result,
-        } => {
-            let condition =
-                evaluate_branch_expression(condition, output, input, initialized, udfs)?;
-            match condition {
-                RuntimeValue::Bool(true) => {
-                    evaluate_branch_expression(then_result, output, input, initialized, udfs)
-                }
-                RuntimeValue::Bool(false) => {
-                    evaluate_branch_expression(else_result, output, input, initialized, udfs)
-                }
-                other => Err(format!(
-                    "IF condition expects BOOL, found {}",
-                    runtime_value_type_name(&other)
-                )),
-            }
-        }
-        Expression::Case {
-            operand,
-            branches,
-            else_result,
-        } => {
-            let operand = operand
-                .as_ref()
-                .map(|operand| {
-                    evaluate_branch_expression(operand, output, input, initialized, udfs)
-                })
-                .transpose()?;
-            for branch in branches {
-                let when =
-                    evaluate_branch_expression(&branch.when, output, input, initialized, udfs)?;
-                let matches = if let Some(operand) = &operand {
-                    operand == &when
-                } else {
-                    match when {
-                        RuntimeValue::Bool(value) => value,
-                        other => {
-                            return Err(format!(
-                                "CASE WHEN condition expects BOOL, found {}",
-                                runtime_value_type_name(&other)
-                            ));
-                        }
-                    }
-                };
-                if matches {
-                    return evaluate_branch_expression(
-                        &branch.result,
-                        output,
-                        input,
-                        initialized,
-                        udfs,
-                    );
-                }
-            }
-            else_result
-                .as_ref()
-                .ok_or_else(|| {
-                    "CASE without ELSE produced NULL during branch construction".to_string()
-                })
-                .and_then(|else_result| {
-                    evaluate_branch_expression(else_result, output, input, initialized, udfs)
-                })
-        }
-        Expression::Array(_) => {
-            Err("array expressions are unavailable during branch construction".to_string())
-        }
-    }
-}
-
-fn expression_contains_udf(expression: &nervix_models::Expression) -> bool {
-    let mut contains_udf = false;
-    expression.visit_udf_calls(&mut |_, _| contains_udf = true);
-    contains_udf
-}
-
-pub(in crate::runtime) fn evaluate_constant_expression(
-    expression: &nervix_models::Expression,
-    udfs: Option<&UdfExecutor>,
-) -> Result<RuntimeValue, String> {
-    let now = Timestamp::now();
-    let empty = RuntimeRecord::from_fields_with_metadata(
-        std::iter::empty(),
-        RuntimeRecordMetadata::from_ingested_at_watermarks(now, now),
-    );
-    evaluate_branch_expression(expression, &empty, None, &HashMap::default(), udfs)
-}
-
-pub(in crate::runtime) async fn evaluate_constant_expression_blocking(
-    expression: &nervix_models::Expression,
-    udfs: Option<&UdfExecutor>,
-) -> Result<RuntimeValue, String> {
-    if !expression_contains_udf(expression) {
-        return evaluate_constant_expression(expression, udfs);
-    }
-
-    let expression = expression.clone();
-    let udfs = udfs.cloned();
-    tokio::task::spawn_blocking(move || evaluate_constant_expression(&expression, udfs.as_ref()))
-        .await
-        .map_err(|error| format!("constant UDF execution task failed: {error}"))?
 }
 
 pub(in crate::runtime) fn format_branched_by(branched_by: &[Identifier]) -> String {

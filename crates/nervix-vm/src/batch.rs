@@ -294,6 +294,32 @@ impl TypedBatch {
         })
     }
 
+    /// Builds a typed batch whose row count cannot be inferred from a column.
+    ///
+    /// Arrow permits zero-column batches with a non-zero row count. The VM needs the
+    /// same representation for programs made entirely from constants.
+    pub fn try_new_with_row_count(
+        schema: Arc<Schema>,
+        columns: Vec<TypedArray>,
+        row_count: usize,
+    ) -> Result<Self, RuntimeError> {
+        let inferred_row_count = validate_batch(&schema, &columns)?;
+        if !columns.is_empty() && inferred_row_count != row_count {
+            return Err(RuntimeError::InvalidBatch {
+                message: format!(
+                    "provided row count {row_count} does not match column row count \
+                     {inferred_row_count}"
+                ),
+            });
+        }
+        Ok(Self {
+            schema,
+            columns,
+            errors: RowErrors::new(row_count),
+            row_count,
+        })
+    }
+
     pub fn with_errors(
         schema: Arc<Schema>,
         columns: Vec<TypedArray>,
@@ -467,6 +493,21 @@ mod tests {
         assert_eq!(batch.column(1).data_type(), DataType::Float64);
         assert_eq!(batch.errors().row_count(), 2);
         assert!(batch.errors().is_error_free());
+    }
+
+    #[test]
+    fn typed_batch_preserves_explicit_row_count_without_columns() {
+        let batch = TypedBatch::try_new_with_row_count(Arc::new(Schema::empty()), Vec::new(), 3)
+            .expect("zero-column batch must build");
+
+        assert_eq!(batch.row_count(), 3);
+        assert_eq!(
+            batch
+                .to_record_batch()
+                .expect("Arrow batch must build")
+                .num_rows(),
+            3
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ struct MqttClientSettings {
 
 struct MqttBatchEntry {
     publish: Publish,
-    record: DecodedRecord,
+    record: RuntimeRecordBatch,
 }
 
 enum MqttNextPublish {
@@ -1009,7 +1009,7 @@ impl MqttIngestor {
     async fn decode_publish_record(
         context: &MqttTaskContext,
         publish: &Publish,
-    ) -> Option<DecodedRecord> {
+    ) -> Option<RuntimeRecordBatch> {
         let key = publish.topic.clone();
         let payload = publish.payload.as_ref();
 
@@ -1044,7 +1044,7 @@ impl MqttIngestor {
 
     async fn dispatch_entry(
         context: &MqttTaskContext,
-        record: DecodedRecord,
+        record: RuntimeRecordBatch,
         acks: AckSet,
         collector: &mut IngestRouteCollector,
     ) -> Result<(), String> {

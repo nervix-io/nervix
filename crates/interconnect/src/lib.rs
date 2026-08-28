@@ -11,8 +11,8 @@ use dashmap::DashMap;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use nervix_models::{
     Domain, DomainTick, Identifier, ModelKind, RemoteAckRegistration, RemoteAckResolution,
-    RemoteDecodedRecord, RemoteRuntimeElementValue, RemoteRuntimeField,
-    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, SubscriptionBinding, Timestamp,
+    RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
+    SubscriptionBinding, Timestamp,
 };
 use rand_core::OsRng;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -472,7 +472,7 @@ pub struct LookupRequest {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct LookupResponse {
     pub correlation_id: u64,
-    pub result: Result<Option<RemoteDecodedRecord>, String>,
+    pub result: Result<Option<Vec<u8>>, String>,
 }
 
 #[derive(Debug, Clone)]

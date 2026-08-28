@@ -1949,7 +1949,7 @@ impl Runtime {
         &self,
         state: &ReplicatedMaterializedRelayState,
         key: &Option<BranchKey>,
-        record: &RuntimeRecord,
+        record: &RuntimeRow,
     ) -> Result<(), String> {
         let Some((lsm, payload)) = state
             .update_last_by_timestamp(&self.metrics, key, record)
@@ -4011,49 +4011,40 @@ impl Runtime {
         program: &CompiledProgramWithMaterializedInterest,
         message: &RelayMessage,
         error: &StructuredMessageError,
-        partial_output: Option<&RuntimeRecord>,
+        partial_output: Option<&RuntimeRecordBatch>,
         materialized_state: &HashMap<String, RuntimeValue>,
         ingest_metadata: Option<&IngestFilterMapMetadata>,
         execution_now: Timestamp,
-    ) -> Result<RuntimeRecord, String> {
-        let mut fields = message
-            .record
-            .fields()
-            .map(|(name, value)| (name.to_string(), value.clone()))
-            .collect::<HashMap<_, _>>();
-        if let Some(partial_output) = partial_output {
-            for (name, value) in partial_output.fields() {
-                fields.insert(format!("partial_output.{name}"), value.clone());
-            }
-        }
-        fields.extend(
-            materialized_state
-                .iter()
-                .map(|(name, value)| (name.clone(), value.clone())),
-        );
-        fields.insert(
+    ) -> Result<RuntimeRow, String> {
+        let carrier = message.record.one_row_batch();
+        let keys = vec![message.key.clone()];
+        let namespace_batches = partial_output
+            .map(|batch| vec![("partial_output", batch)])
+            .unwrap_or_default();
+        let mut side_inputs = materialized_state.clone();
+        side_inputs.insert(
             "error.reference".to_string(),
             RuntimeValue::String(error.reference.to_string()),
         );
-        fields.insert(
+        side_inputs.insert(
             "error.code".to_string(),
             RuntimeValue::String(error.code.as_ref().to_string()),
         );
-        fields.insert(
+        side_inputs.insert(
             "error.message".to_string(),
             RuntimeValue::String(error.message.clone()),
         );
-        fields.insert(
+        side_inputs.insert(
             "error.operation".to_string(),
             RuntimeValue::String(error.operation.as_ref().to_string()),
         );
         if let Some(operation_index) = error.operation_index {
-            fields.insert(
+            side_inputs.insert(
                 "error.operation_index".to_string(),
                 RuntimeValue::U32(operation_index),
             );
         }
-        fields.insert(
+        side_inputs.insert(
             "error.fields".to_string(),
             RuntimeValue::Vec(
                 error
@@ -4063,18 +4054,21 @@ impl Runtime {
                     .collect(),
             ),
         );
-        fields.insert(
+        side_inputs.insert(
             "error.occurred_at".to_string(),
             RuntimeValue::Datetime(error.occurred_at.as_datetime().fixed_offset()),
         );
-        let record =
-            RuntimeRecord::from_fields_with_metadata(fields, message.record.metadata().clone());
-        let record =
-            augment_runtime_records_with_lookup_hash_maps(vec![record], program, execution_now)
-                .await?
-                .into_iter()
-                .next()
-                .expect("one message-error input record must remain");
+        let ingest_metadata = ingest_metadata.map(std::slice::from_ref);
+        let lookup_columns = compute_lookup_hash_map_columns(
+            program,
+            &carrier,
+            &namespace_batches,
+            &keys,
+            &side_inputs,
+            ingest_metadata,
+            execution_now,
+        )
+        .await?;
         let uninitialized = VmUninitializedInput {
             fields: program
                 .compiled
@@ -4085,11 +4079,18 @@ impl Runtime {
                 .map(|field| field.name().clone())
                 .collect(),
         };
-        let batch = vm_typed_batch_from_runtime_records_with_metadata_and_uninitialized(
-            std::slice::from_ref(&record),
-            ingest_metadata.map(std::slice::from_ref),
+        let batch = project_vm_input_batch(
             &program.compiled.input_schema,
-            Some(&uninitialized),
+            &VmInputProjectionSources {
+                carrier: &carrier,
+                namespace_batches: &namespace_batches,
+                strict_namespaces: &["partial_output"],
+                keys: &keys,
+                side_inputs: &side_inputs,
+                ingest_metadata,
+                lookup_columns: &lookup_columns,
+                uninitialized: Some(&uninitialized),
+            },
         )?;
         let result = execute_program_with_selection_in_context(
             &program.compiled,
@@ -4097,7 +4098,7 @@ impl Runtime {
             &VmExecutionContext {
                 now: execution_now,
                 injector: Some(IngestHeaderFunctionInjector::from_metadata(
-                    ingest_metadata.map(std::slice::from_ref),
+                    ingest_metadata,
                     batch.row_count(),
                 )),
             },
@@ -4118,8 +4119,8 @@ impl Runtime {
                 side_error.span
             ));
         }
-        vm_output_row_to_decoded_record(&result.batch, 0)
-            .map(|record| record.into_runtime_record(message.record.metadata().clone()))
+        let output = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])?;
+        RuntimeRow::new(Arc::new(output), 0, message.record.metadata().clone())
     }
 
     /// Builds one Arrow batch per (relay, branch key) from everything a poll group routed
@@ -4284,17 +4285,23 @@ impl Runtime {
             *slot = tracked;
             _unobserved_completions.push(completion);
         }
+        if records.iter().any(|record| record.batch().num_rows() != 1) {
+            return Err(format!(
+                "ingestor '{}' decoded a message into a batch that does not contain exactly one \
+                 row",
+                ingestor.as_str()
+            ));
+        }
+        let batch_refs = records.iter().collect::<Vec<_>>();
+        let batch = RuntimeRecordBatch::concat(&batch_refs)?;
         let mut rows = IngestGroupRows {
-            records: records
-                .into_iter()
-                .map(|record| {
-                    record.into_runtime_record(RuntimeRecordMetadata::from_ingested_at_watermarks(
-                        ingested_at,
-                        ingested_at,
-                    ))
+            batch,
+            record_metadata: (0..records.len())
+                .map(|_| {
+                    RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at)
                 })
                 .collect(),
-            metadata,
+            ingest_metadata: metadata,
             acks,
         };
 
@@ -4319,11 +4326,18 @@ impl Runtime {
                         .unwrap_or_default(),
                 )
                 .await?;
-            let outcomes = evaluate_filter_map_on_records(
+            let keys = vec![None; rows.len()];
+            let outcomes = evaluate_filter_map_on_batch(
+                ModelKind::Ingestor.as_str(),
+                ingestor,
                 filter_where,
-                augment_runtime_records_with_side_inputs(rows.records.clone(), &side_inputs),
-                None,
-                rows.metadata_rows(),
+                FilterMapOutcomeInputs {
+                    carrier: &rows.batch,
+                    record_metadata: &rows.record_metadata,
+                    keys: &keys,
+                    filter_map_metadata: rows.metadata_rows(),
+                    side_inputs: &side_inputs,
+                },
                 execution_now,
             )
             .await?;
@@ -4347,7 +4361,7 @@ impl Runtime {
                             domain,
                             ingestor,
                             output_routes,
-                            record: &rows.records[row],
+                            record: &rows.row(row)?,
                             ingest_metadata: rows.metadata_row(row),
                             acks,
                             error,
@@ -4357,10 +4371,16 @@ impl Runtime {
                     }
                 }
             }
-            for (row, record) in transformed {
-                rows.records[row] = record;
+            rows = rows.select(&keep)?;
+            if !transformed.is_empty() {
+                transformed.sort_unstable_by_key(|(row, _)| *row);
+                let batches = transformed
+                    .into_iter()
+                    .map(|(_, record)| record.one_row_batch())
+                    .collect::<Vec<_>>();
+                let batch_refs = batches.iter().collect::<Vec<_>>();
+                rows.batch = RuntimeRecordBatch::concat(&batch_refs)?;
             }
-            rows = rows.select(&keep);
         }
         if rows.is_empty() {
             return Ok(());
@@ -4376,19 +4396,30 @@ impl Runtime {
         // field of the record itself, and a paced domain admits each event on its own
         // merits. Either rejection fails the group, exactly as the per-record path did.
         let mut event_timestamps = Vec::with_capacity(rows.len());
-        for record in &rows.records {
-            let event_timestamp =
-                self.resolve_ingested_record_timestamp(domain, ingestor, timestamp_source, record)?;
+        for row in 0..rows.len() {
+            let record = rows.row(row)?;
+            let event_timestamp = self.resolve_ingested_record_timestamp(
+                domain,
+                ingestor,
+                timestamp_source,
+                &record,
+            )?;
             self.ensure_domain_allows_ingestion(domain, ingestor, event_timestamp)?;
             event_timestamps.push(event_timestamp);
         }
-        rows.records = std::mem::take(&mut rows.records)
+        rows.record_metadata = std::mem::take(&mut rows.record_metadata)
             .into_iter()
             .zip(&event_timestamps)
-            .map(|(record, event_timestamp)| record.with_ingested_at_watermarks(*event_timestamp))
+            .map(|(_, event_timestamp)| {
+                RuntimeRecordMetadata::from_ingested_at_watermarks(
+                    *event_timestamp,
+                    *event_timestamp,
+                )
+            })
             .collect();
         let physical_node_id = self.local_node_id.read().clone();
-        for (record, event_timestamp) in rows.records.iter().zip(&event_timestamps) {
+        for (row, event_timestamp) in event_timestamps.iter().enumerate() {
+            let record = rows.row(row)?;
             self.metrics
                 .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
                     domain,
@@ -4396,7 +4427,7 @@ impl Runtime {
                     node: ingestor,
                     physical_node_id: physical_node_id.as_deref(),
                     messages: 1,
-                    bytes: record.estimated_bytes(),
+                    bytes: record.estimated_bytes()?,
                     domain_timestamp: Some(*event_timestamp),
                 });
         }
@@ -4417,26 +4448,135 @@ impl Runtime {
                         &owner_nodes,
                     )
                     .await?;
-                evaluate_filter_map_on_records(
+                let keys = vec![None; rows.len()];
+                evaluate_filter_map_on_batch(
+                    ModelKind::Ingestor.as_str(),
+                    ingestor,
                     filter_map,
-                    augment_runtime_records_with_side_inputs(rows.records.clone(), &side_inputs),
-                    None,
-                    rows.metadata_rows(),
+                    FilterMapOutcomeInputs {
+                        carrier: &rows.batch,
+                        record_metadata: &rows.record_metadata,
+                        keys: &keys,
+                        filter_map_metadata: rows.metadata_rows(),
+                        side_inputs: &side_inputs,
+                    },
                     execution_now,
                 )
                 .await?
             } else {
-                rows.records
-                    .iter()
-                    .cloned()
+                (0..rows.len())
+                    .map(|row| rows.row(row))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
                     .map(SingleRecordFilterMapOutcome::Output)
                     .collect()
             };
+            let mut route_keys = (0..rows.len()).map(|_| None).collect::<Vec<_>>();
+            let mut branch_state_snapshot = HashMap::default();
+            if let Some(branch_program) = output.compiled_branch_program.as_ref() {
+                let successful = outcomes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(row, outcome)| {
+                        if let SingleRecordFilterMapOutcome::Output(record) = outcome {
+                            Some((row, record.one_row_batch()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !successful.is_empty() {
+                    let input_rows = successful.iter().map(|(row, _)| *row).collect::<Vec<_>>();
+                    let output_batches = successful
+                        .iter()
+                        .map(|(_, batch)| batch)
+                        .collect::<Vec<_>>();
+                    let output_batch = RuntimeRecordBatch::concat(&output_batches)?;
+                    let input_batch = rows.batch.take(&input_rows)?;
+                    let input_keys = vec![None; input_rows.len()];
+                    let side_inputs = self
+                        .load_materialized_side_inputs(
+                            domain,
+                            &None,
+                            &branch_program.program.materialized_interest,
+                            &owner_nodes,
+                        )
+                        .await?;
+                    branch_state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
+                    let evaluated = evaluate_output_branch_program(
+                        ingestor,
+                        branch_program,
+                        &input_batch,
+                        &output_batch,
+                        &input_keys,
+                        &side_inputs,
+                        execution_now,
+                    )
+                    .await?;
+                    for (row, key) in input_rows.into_iter().zip(evaluated) {
+                        route_keys[row] = Some(key);
+                    }
+                }
+            } else {
+                let key = match output.branch.as_ref() {
+                    Some(OutputBranch::Unbranched) | None => None,
+                    Some(OutputBranch::BranchedBy { assignments, .. })
+                        if assignments.is_empty() =>
+                    {
+                        None
+                    }
+                    Some(OutputBranch::BranchedBy { .. }) => {
+                        return Err(format!(
+                            "ingestor '{}' output '{}' has no compiled branch program",
+                            ingestor.as_str(),
+                            output.relay.as_str()
+                        ));
+                    }
+                };
+                for (row, outcome) in outcomes.iter().enumerate() {
+                    if let SingleRecordFilterMapOutcome::Output(_) = outcome {
+                        route_keys[row] = Some(Ok(key.clone()));
+                    }
+                }
+            }
             for (row, outcome) in outcomes.into_iter().enumerate() {
                 if let SingleRecordFilterMapOutcome::Filtered = outcome {
                     continue;
                 }
-                routed[row].push((output_index, outcome));
+                match outcome {
+                    SingleRecordFilterMapOutcome::Output(record) => {
+                        match route_keys[row].take().ok_or_else(|| {
+                            format!(
+                                "ingestor '{}' output '{}' has no branch result for row {}",
+                                ingestor.as_str(),
+                                output.relay.as_str(),
+                                row
+                            )
+                        })? {
+                            Ok(key) => routed[row].push((
+                                output_index,
+                                SingleRecordFilterMapOutcome::Output(record),
+                                key,
+                            )),
+                            Err(reason) => routed[row].push((
+                                output_index,
+                                SingleRecordFilterMapOutcome::MessageError {
+                                    error: structured_message_error(
+                                        MessageErrorCode::Evaluation,
+                                        reason,
+                                        MessageErrorOperation::Set,
+                                        None,
+                                        std::iter::empty(),
+                                    ),
+                                    partial_output: Some(record.one_row_batch()),
+                                    materialized_state: branch_state_snapshot.clone(),
+                                },
+                                None,
+                            )),
+                        }
+                    }
+                    outcome => routed[row].push((output_index, outcome, None)),
+                }
             }
         }
 
@@ -4449,11 +4589,11 @@ impl Runtime {
             }
             let mut route_errors = Vec::new();
             let mut route_outputs = Vec::new();
-            for (output_index, outcome) in outcomes {
+            for (output_index, outcome, key) in outcomes {
                 match outcome {
                     SingleRecordFilterMapOutcome::Filtered => {}
                     SingleRecordFilterMapOutcome::Output(record) => {
-                        route_outputs.push((output_index, record));
+                        route_outputs.push((output_index, key, record));
                     }
                     SingleRecordFilterMapOutcome::MessageError {
                         error,
@@ -4483,7 +4623,7 @@ impl Runtime {
                     policy: &output.message_error_policy,
                     message: RelayMessage {
                         key: None,
-                        record: rows.records[row].clone(),
+                        record: rows.row(row)?,
                         acks,
                     },
                     error,
@@ -4493,61 +4633,19 @@ impl Runtime {
                 })
                 .await;
             }
-            for (output_index, output_record) in route_outputs {
+            for (output_index, key, output_record) in route_outputs {
                 let acks = ack_queue
                     .pop_front()
                     .expect("ack queue must match ingestor route outcomes");
                 let output = &output_routes.routes[output_index];
                 let relay = output.relay.clone();
-                let key = match output.branch.as_ref().ok_or_else(|| {
+                output.branch.as_ref().ok_or_else(|| {
                     format!(
                         "ingestor '{}' output '{}' has no branch declaration",
                         ingestor.as_str(),
                         relay.as_str()
                     )
-                })? {
-                    nervix_models::OutputBranch::Unbranched => None,
-                    nervix_models::OutputBranch::BranchedBy { assignments, .. } => {
-                        match planning::resolve_concrete_branch_from_assignments_blocking(
-                            &output_record,
-                            Some(&rows.records[row]),
-                            None,
-                            assignments,
-                            ingestor,
-                            self.udf_executor(domain).as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(branch) => branch.into_relay_key(),
-                            Err(reason) => {
-                                self.handle_structured_message_error(MessageErrorHandling {
-                                    domain,
-                                    node_kind: ModelKind::Ingestor.as_str(),
-                                    node: ingestor,
-                                    source_route: Some(&relay),
-                                    policy: &output.message_error_policy,
-                                    message: RelayMessage {
-                                        key: None,
-                                        record: rows.records[row].clone(),
-                                        acks,
-                                    },
-                                    error: structured_message_error(
-                                        MessageErrorCode::Evaluation,
-                                        reason,
-                                        MessageErrorOperation::BranchSet,
-                                        None,
-                                        std::iter::empty(),
-                                    ),
-                                    partial_output: Some(output_record),
-                                    materialized_state: HashMap::default(),
-                                    ingest_metadata: rows.metadata_row(row),
-                                })
-                                .await;
-                                continue;
-                            }
-                        }
-                    }
-                };
+                })?;
                 collector.push(
                     relay,
                     RelayMessage {
@@ -4613,12 +4711,12 @@ impl Runtime {
         domain: &Domain,
         ingestor: &Identifier,
         timestamp_source: Option<&IngestTimestampSource>,
-        record: &RuntimeRecord,
+        record: &RuntimeRow,
     ) -> Result<Timestamp, String> {
         match timestamp_source {
             Some(IngestTimestampSource::Now) => Ok(record.metadata().ingested_at_low_watermark()),
             Some(IngestTimestampSource::At(timestamp_field)) => {
-                match record.value(timestamp_field.as_str()) {
+                match record.value(timestamp_field.as_str())? {
                     Some(RuntimeValue::Datetime(value)) => Ok(Timestamp::from(value.to_utc())),
                     Some(_) => Err(format!(
                         "TIMESTAMP field '{}' for ingestor '{}' is not DATETIME at runtime",
@@ -8126,7 +8224,7 @@ impl Runtime {
         &self,
         domain: &Domain,
         relay: &Identifier,
-    ) -> Result<Vec<(String, RuntimeRecord)>, String> {
+    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
         let mut entries = Vec::new();
         for state in self.replicated_materialized_stream_states.iter() {
             let placement = state.key();
@@ -8137,12 +8235,7 @@ impl Runtime {
                 entries.extend(
                     self.visible_materialized_stream_remote_entries(placement, state.value())
                         .into_iter()
-                        .map(|(key, record)| {
-                            (
-                                branch_key_display(&key).to_string(),
-                                RuntimeRecord::from_remote(record),
-                            )
-                        }),
+                        .map(|(key, record)| (branch_key_display(&key).to_string(), record)),
                 );
             }
         }
@@ -8175,7 +8268,7 @@ impl Runtime {
         domain: &Domain,
         relay: &Identifier,
         branch_key: &Option<BranchKey>,
-    ) -> Result<Vec<(String, RuntimeRecord)>, String> {
+    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
@@ -8187,12 +8280,7 @@ impl Runtime {
             let entries = self
                 .visible_materialized_stream_remote_entries(&placement, &state)
                 .into_iter()
-                .map(|(key, record)| {
-                    (
-                        branch_key_display(&key).to_string(),
-                        RuntimeRecord::from_remote(record),
-                    )
-                })
+                .map(|(key, record)| (branch_key_display(&key).to_string(), record))
                 .collect::<Vec<_>>();
             if !entries.is_empty() || branch_key.is_none() {
                 return Ok(entries);
@@ -8211,12 +8299,7 @@ impl Runtime {
                     .visible_materialized_stream_remote_entries(&aggregate_placement, &state)
                     .into_iter()
                     .filter(|(key, _)| key == branch_key)
-                    .map(|(key, record)| {
-                        (
-                            branch_key_display(&key).to_string(),
-                            RuntimeRecord::from_remote(record),
-                        )
-                    })
+                    .map(|(key, record)| (branch_key_display(&key).to_string(), record))
                     .collect());
             }
         }
@@ -8229,12 +8312,7 @@ impl Runtime {
                 .map(|entries| {
                     let mut visible = entries
                         .into_iter()
-                        .map(|(key, record)| {
-                            (
-                                branch_key_display(&key).to_string(),
-                                RuntimeRecord::from_remote(record),
-                            )
-                        })
+                        .map(|(key, record)| (branch_key_display(&key).to_string(), record))
                         .collect::<Vec<_>>();
                     visible.sort_by(|left, right| left.0.cmp(&right.0));
                     visible
@@ -8256,12 +8334,7 @@ impl Runtime {
                         let mut visible = entries
                             .into_iter()
                             .filter(|(key, _)| key == branch_key)
-                            .map(|(key, record)| {
-                                (
-                                    branch_key_display(&key).to_string(),
-                                    RuntimeRecord::from_remote(record),
-                                )
-                            })
+                            .map(|(key, record)| (branch_key_display(&key).to_string(), record))
                             .collect::<Vec<_>>();
                         visible.sort_by(|left, right| left.0.cmp(&right.0));
                         visible
@@ -8324,7 +8397,7 @@ impl Runtime {
         target_node_id: &str,
         domain: &Domain,
         relay: &Identifier,
-    ) -> Result<Vec<(String, RuntimeRecord)>, String> {
+    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
         self.remote_materialized_stream_state_for_branch(target_node_id, domain, relay, &None)
             .await
     }
@@ -8333,7 +8406,7 @@ impl Runtime {
         &self,
         domain: &Domain,
         relay: &Identifier,
-    ) -> Result<Vec<(String, RuntimeRecord)>, String> {
+    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
         let owner = self
             .executions
             .get(domain)
@@ -8361,7 +8434,7 @@ impl Runtime {
         domain: &Domain,
         relay: &Identifier,
         branch_key: &Option<BranchKey>,
-    ) -> Result<Vec<(String, RuntimeRecord)>, String> {
+    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
@@ -8379,12 +8452,7 @@ impl Runtime {
             .map(|entries| {
                 let mut visible = entries
                     .into_iter()
-                    .map(|(key, record)| {
-                        (
-                            branch_key_display(&key).to_string(),
-                            RuntimeRecord::from_remote(record),
-                        )
-                    })
+                    .map(|(key, record)| (branch_key_display(&key).to_string(), record))
                     .collect::<Vec<_>>();
                 visible.sort_by(|left, right| left.0.cmp(&right.0));
                 visible
@@ -8451,12 +8519,17 @@ impl Runtime {
                 continue;
             };
             for field in &relay_interest.fields {
-                let Some(value) = record.value(field) else {
+                let Some(value) = record
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == *field)
+                    .map(|field| RuntimeValue::from_remote(field.value.clone()))
+                else {
                     continue;
                 };
                 values.insert(
                     format!("relay_state.{}.{}", relay_interest.relay.as_str(), field),
-                    value.clone(),
+                    value,
                 );
             }
         }
@@ -8525,12 +8598,17 @@ impl Runtime {
             .fields()
             .iter()
             .filter_map(|field| {
-                record.value(field.name()).cloned().map(|value| {
-                    (
-                        format!("relay_state.{}.{}", relay.as_str(), field.name()),
-                        value,
-                    )
-                })
+                record
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == *field.name())
+                    .map(|stored| RuntimeValue::from_remote(stored.value.clone()))
+                    .map(|value| {
+                        (
+                            format!("relay_state.{}.{}", relay.as_str(), field.name()),
+                            value,
+                        )
+                    })
             })
             .collect();
         Ok(Some(values))
@@ -8578,11 +8656,9 @@ impl Runtime {
                         ) {
                             continue;
                         }
-                        let value = planning::evaluate_constant_expression_blocking(
-                            &assignment.value,
-                            udfs.as_ref(),
-                        )
-                        .await?;
+                        let value =
+                            evaluate_constant_expression_vm(&assignment.value, udfs.as_ref())
+                                .await?;
                         resolved.insert(
                             format!(
                                 "relay_state.{}.{}",
@@ -8741,7 +8817,7 @@ impl Runtime {
         domain: &Domain,
         name: &Identifier,
         key: &str,
-    ) -> Result<Option<DecodedRecord>, String> {
+    ) -> Result<Option<RuntimeRecordBatch>, String> {
         let Some(execution) = self.executions.get(domain) else {
             if let Some(error) = self.domain_instantiation_errors.get(domain) {
                 return Err(error.value().clone());
@@ -8766,7 +8842,11 @@ impl Runtime {
                 domain_timestamp: Some(current_timestamp()),
             });
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Lookup, name);
-        Ok(lookup.entries.get(key).cloned())
+        lookup
+            .entries
+            .get(key)
+            .map(|row| lookup.batch.slice(*row, 1))
+            .transpose()
     }
 
     pub async fn apply_changes(&self, changes: RuntimeChanges) -> Result<(), RuntimeError> {
@@ -9947,20 +10027,39 @@ impl Runtime {
                         }
                     };
 
-                    let mut source_state_by_branch =
-                        HashMap::<Option<BranchKey>, Vec<RuntimeRecord>>::default();
+                    let source_schema =
+                        match relay_schema_for_runtime(&runtime, &task_domain, &source_relay) {
+                            Ok(schema) => Some(schema),
+                            Err(error) => {
+                                state_load_failed = true;
+                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    "failed to load generator '{}' source relay '{}' schema in \
+                                     domain '{}': {}",
+                                    task_generator.as_str(),
+                                    source_relay.as_str(),
+                                    task_domain.as_str(),
+                                    error
+                                )));
+                                None
+                            }
+                        };
+                    let mut source_state_by_branch = HashMap::<
+                        Option<BranchKey>,
+                        Vec<nervix_models::RemoteRuntimeRecord>,
+                    >::default();
                     if !state_load_failed {
-                        let mut latest_state = HashMap::<String, RuntimeRecord>::default();
+                        let mut latest_state =
+                            HashMap::<String, nervix_models::RemoteRuntimeRecord>::default();
                         for (key, record) in state {
                             let replace = latest_state.get(&key).is_none_or(|existing| {
-                                let existing = existing.metadata();
-                                let candidate = record.metadata();
-                                candidate.ingested_at_high_watermark()
-                                    > existing.ingested_at_high_watermark()
-                                    || (candidate.ingested_at_high_watermark()
-                                        == existing.ingested_at_high_watermark()
-                                        && candidate.ingested_at_low_watermark()
-                                            > existing.ingested_at_low_watermark())
+                                let existing = &existing.metadata;
+                                let candidate = &record.metadata;
+                                candidate.ingested_at_high_watermark
+                                    > existing.ingested_at_high_watermark
+                                    || (candidate.ingested_at_high_watermark
+                                        == existing.ingested_at_high_watermark
+                                        && candidate.ingested_at_low_watermark
+                                            > existing.ingested_at_low_watermark)
                             });
                             if replace {
                                 latest_state.insert(key, record);
@@ -9970,7 +10069,10 @@ impl Runtime {
                             let branch_key = if source_branching.is_empty() {
                                 None
                             } else {
-                                match BranchKey::from_record(&record, source_branching.iter()) {
+                                match BranchKey::from_remote_record(
+                                    &record,
+                                    source_branching.iter(),
+                                ) {
                                     Ok(Some(key)) => Some(key),
                                     Ok(None) => {
                                         let _ = task_events.send(RuntimeEvent::Error(format!(
@@ -10051,15 +10153,33 @@ impl Runtime {
 
                             for source_record in records {
                                 tokio::task::consume_budget().await;
+                                let source_row = match source_schema
+                                    .as_ref()
+                                    .expect("successful generator state load has a source schema")
+                                    .runtime_row_from_remote(source_record.clone())
+                                {
+                                    Ok(row) => row,
+                                    Err(error) => {
+                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            "failed to decode generator '{}' source relay '{}' \
+                                             state in domain '{}': {}",
+                                            task_generator.as_str(),
+                                            source_relay.as_str(),
+                                            task_domain.as_str(),
+                                            error
+                                        )));
+                                        continue;
+                                    }
+                                };
                                 let mut values = HashMap::default();
-                                for field in source_record.to_remote().fields {
+                                for field in &source_record.fields {
                                     values.insert(
                                         format!(
                                             "relay_state.{}.{}",
                                             source_relay.as_str(),
                                             field.name
                                         ),
-                                        RuntimeValue::from_remote(field.value),
+                                        RuntimeValue::from_remote(field.value.clone()),
                                     );
                                 }
                                 if let Some(branch_key) = branch_key.as_ref() {
@@ -10141,7 +10261,7 @@ impl Runtime {
                                                         policy: &route.output.message_error_policy,
                                                         message: RelayMessage {
                                                             key: branch_key.clone(),
-                                                            record: source_record.clone(),
+                                                            record: source_row.clone(),
                                                             acks,
                                                         },
                                                         error,
@@ -10290,6 +10410,7 @@ impl Runtime {
                 udfs,
                 current_branching,
                 current_branch_schema,
+                target_branch_schema,
             ) = {
                 let Some(execution) = self.executions.get(domain) else {
                     return Err(PlannedGeneralError {
@@ -10337,6 +10458,11 @@ impl Runtime {
                         .get(from_relay)
                         .cloned()
                         .flatten(),
+                    execution
+                        .relay_branching_schemas
+                        .get(&output.relay)
+                        .cloned()
+                        .flatten(),
                 )
             };
             match compile_processor_output_filter_map_program(
@@ -10371,43 +10497,141 @@ impl Runtime {
                     });
                 }
             }
+            output.compiled_branch_program = compile_output_branch_program(
+                RuntimeCompileTarget {
+                    domain,
+                    identifier: reingestor,
+                },
+                output.branch.as_ref(),
+                RuntimeVmSchema {
+                    schema: batch.arrow_schema(),
+                    sensitivity: input_schema.vm_sensitivity(),
+                },
+                RuntimeVmSchema {
+                    schema: output_schema.arrow_schema(),
+                    sensitivity: output_schema.vm_sensitivity(),
+                },
+                target_branch_schema,
+                RuntimeVmCompileContext {
+                    available_materialized_streams: &materialized_stream_specs,
+                    available_lookups: &available_lookups,
+                    current_branching: &current_branching,
+                    current_branch_schema: current_branch_schema.as_ref(),
+                    current_branch_sensitivity: None,
+                    udfs: Some(&udfs),
+                },
+            )
+            .map_err(|error| PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason: error.to_string(),
+            })?;
         }
 
         let Some(program) = output.compiled_program.as_ref() else {
-            let can_forward_batch = self
+            let output_schema = self
                 .executions
                 .get(domain)
                 .and_then(|execution| execution.relay_schemas.get(&output.relay).cloned())
-                .map(|schema| schema.arrow_schema().as_ref() == batch.arrow_schema().as_ref())
-                .unwrap_or(true);
-            if can_forward_batch {
-                return Ok((
-                    Vec::new(),
-                    vec![pending_passthrough_output_batch(output_index, batch)],
-                    Vec::new(),
-                ));
-            }
-            let records = batch
-                .runtime_records()
+                .ok_or_else(|| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason: format!(
+                        "reingestor '{}' output relay '{}' is not instantiated",
+                        reingestor.as_str(),
+                        output.relay.as_str()
+                    ),
+                })?;
+            let projected = batch
+                .batch
+                .project(output_schema.arrow_schema())
                 .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
                     reason: format!(
-                        "reingestor '{}' failed to materialize node-local output rows: {}",
+                        "reingestor '{}' failed to project output relay '{}': {error}",
                         reingestor.as_str(),
-                        error
+                        output.relay.as_str()
                     ),
                 })?;
-            let messages = records
+            let keys = if let Some(branch_program) = output.compiled_branch_program.as_ref() {
+                let owner_nodes = self
+                    .executions
+                    .get(domain)
+                    .map(|execution| execution.materialized_stream_owner_nodes.clone())
+                    .unwrap_or_default();
+                let side_inputs = self
+                    .load_materialized_side_inputs(
+                        domain,
+                        &batch.key,
+                        &branch_program.program.materialized_interest,
+                        &owner_nodes,
+                    )
+                    .await
+                    .map_err(|error| PlannedGeneralError {
+                        acks: batch.acks.clone(),
+                        reason: format!(
+                            "reingestor '{}' failed to load branch inputs: {}",
+                            reingestor.as_str(),
+                            error
+                        ),
+                    })?;
+                let execution_now = self
+                    .current_stream_expiration_time(domain)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(current_timestamp);
+                evaluate_output_branch_program(
+                    reingestor,
+                    branch_program,
+                    &batch.batch,
+                    &projected,
+                    &batch.keys,
+                    &side_inputs,
+                    execution_now,
+                )
+                .await
+                .map_err(|reason| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason,
+                })?
                 .into_iter()
-                .enumerate()
-                .map(|(row, record)| PendingProcessorOutputMessage {
-                    row,
-                    output_index,
-                    key: batch.keys[row].clone(),
-                    record,
-                })
-                .collect();
-            return Ok((messages, Vec::new(), Vec::new()));
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|reason| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason,
+                })?
+            } else {
+                match output.branch.as_ref() {
+                    Some(OutputBranch::Unbranched) => vec![None; projected.batch().num_rows()],
+                    Some(OutputBranch::BranchedBy { assignments, .. })
+                        if assignments.is_empty() =>
+                    {
+                        batch.keys.clone()
+                    }
+                    Some(OutputBranch::BranchedBy { .. }) => {
+                        return Err(PlannedGeneralError {
+                            acks: batch.acks.clone(),
+                            reason: format!(
+                                "reingestor '{}' output '{}' has no compiled branch program",
+                                reingestor.as_str(),
+                                output.relay.as_str()
+                            ),
+                        });
+                    }
+                    None => batch.keys.clone(),
+                }
+            };
+            let input_rows = (0..projected.batch().num_rows()).collect::<Vec<_>>();
+            let pending = pending_output_batches_by_key(
+                output_index,
+                &input_rows,
+                keys,
+                projected,
+                &batch.metadata,
+            )
+            .map_err(|reason| PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason,
+            })?;
+            return Ok((Vec::new(), pending, Vec::new()));
         };
 
         let (output_schema, owner_nodes) = {
@@ -10461,8 +10685,10 @@ impl Runtime {
             program,
             FilterMapBatchInputs {
                 carrier: &batch.batch,
+                namespace_batches: &[],
                 keys: &batch.keys,
                 side_inputs: &side_inputs,
+                ingest_metadata: None,
             },
             execution_now,
             batch.acks.clone(),
@@ -10474,24 +10700,18 @@ impl Runtime {
         let mut errors = Vec::new();
         for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
             if let Some(side_error) = executed.batch.errors().row(output_row).first() {
-                let partial_output = vm_partial_output_row_to_runtime_record(
-                    &executed.batch,
-                    output_row,
-                    batch.metadata[input_row].clone(),
-                )
-                .ok();
-                let record =
-                    batch
-                        .runtime_record(input_row)
-                        .map_err(|error| PlannedGeneralError {
-                            acks: batch.acks.clone(),
-                            reason: format!(
-                                "reingestor '{}' failed to materialize FILTER-MAP error input \
-                                 row: {}",
-                                reingestor.as_str(),
-                                error
-                            ),
-                        })?;
+                let partial_output =
+                    vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();
+                let record = batch
+                    .runtime_row(input_row)
+                    .map_err(|error| PlannedGeneralError {
+                        acks: batch.acks.clone(),
+                        reason: format!(
+                            "reingestor '{}' failed to materialize FILTER-MAP error input row: {}",
+                            reingestor.as_str(),
+                            error
+                        ),
+                    })?;
                 errors.push(PendingProcessorOutputMessageError {
                     row: input_row,
                     key: batch.keys[input_row].clone(),
@@ -10544,13 +10764,87 @@ impl Runtime {
                 .iter()
                 .map(|input_row| batch.metadata[*input_row].clone())
                 .collect::<Vec<_>>();
-            vec![PendingProcessorOutputBatch {
+            let input_batch =
+                batch
+                    .batch
+                    .take(&success_input_rows)
+                    .map_err(|reason| PlannedGeneralError {
+                        acks: batch.acks.clone(),
+                        reason,
+                    })?;
+            let input_keys = success_input_rows
+                .iter()
+                .map(|row| batch.keys[*row].clone())
+                .collect::<Vec<_>>();
+            let keys = if let Some(branch_program) = output.compiled_branch_program.as_ref() {
+                let branch_side_inputs = self
+                    .load_materialized_side_inputs(
+                        domain,
+                        &batch.key,
+                        &branch_program.program.materialized_interest,
+                        &owner_nodes,
+                    )
+                    .await
+                    .map_err(|error| PlannedGeneralError {
+                        acks: batch.acks.clone(),
+                        reason: format!(
+                            "reingestor '{}' failed to load branch inputs: {}",
+                            reingestor.as_str(),
+                            error
+                        ),
+                    })?;
+                evaluate_output_branch_program(
+                    reingestor,
+                    branch_program,
+                    &input_batch,
+                    &output_batch,
+                    &input_keys,
+                    &branch_side_inputs,
+                    execution_now,
+                )
+                .await
+                .map_err(|reason| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason,
+                })?
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|reason| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason,
+                })?
+            } else {
+                match output.branch.as_ref() {
+                    Some(OutputBranch::Unbranched) => vec![None; output_batch.batch().num_rows()],
+                    Some(OutputBranch::BranchedBy { assignments, .. })
+                        if assignments.is_empty() =>
+                    {
+                        input_keys
+                    }
+                    Some(OutputBranch::BranchedBy { .. }) => {
+                        return Err(PlannedGeneralError {
+                            acks: batch.acks.clone(),
+                            reason: format!(
+                                "reingestor '{}' output '{}' has no compiled branch program",
+                                reingestor.as_str(),
+                                output.relay.as_str()
+                            ),
+                        });
+                    }
+                    None => input_keys,
+                }
+            };
+            pending_output_batches_by_key(
                 output_index,
-                input_rows: success_input_rows,
-                key: batch.key.clone(),
-                batch: output_batch,
-                metadata,
-            }]
+                &success_input_rows,
+                keys,
+                output_batch,
+                &metadata,
+            )
+            .map_err(|reason| PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason,
+            })?
         };
 
         Ok((Vec::new(), output_batches, errors))
@@ -11160,6 +11454,7 @@ impl Runtime {
                         pending: Vec::new(),
                         next_flush: None,
                         compiled_program: None,
+                        compiled_branch_program: None,
                     })
                 })
                 .collect::<Result<Vec<_>, RuntimeError>>()?,
@@ -12527,6 +12822,35 @@ impl Runtime {
                     udfs: Some(&execution.udfs),
                 },
             )?;
+            let target_branch_schema = execution
+                .relay_branching_schemas
+                .get(&output.relay)
+                .cloned()
+                .flatten();
+            let compiled_branch_program = compile_output_branch_program(
+                RuntimeCompileTarget {
+                    domain,
+                    identifier: &ingestor.name,
+                },
+                output.branch.as_ref(),
+                RuntimeVmSchema {
+                    schema: codec.schema().arrow_schema(),
+                    sensitivity: codec.schema().vm_sensitivity(),
+                },
+                RuntimeVmSchema {
+                    schema: output_schema.arrow_schema(),
+                    sensitivity: output_schema.vm_sensitivity(),
+                },
+                target_branch_schema,
+                RuntimeVmCompileContext {
+                    available_materialized_streams: &execution.materialized_stream_specs,
+                    available_lookups: &execution.lookups,
+                    current_branching: &empty_branching,
+                    current_branch_schema: None,
+                    current_branch_sensitivity: None,
+                    udfs: Some(&execution.udfs),
+                },
+            )?;
             let flush_policy = output
                 .flush_policy
                 .as_ref()
@@ -12549,6 +12873,7 @@ impl Runtime {
                 pending: Vec::new(),
                 next_flush: None,
                 compiled_program,
+                compiled_branch_program,
             });
         }
         if output_routes.base_relay().is_none() {
@@ -12628,6 +12953,7 @@ impl Runtime {
         })?;
         let mut lines = tokio::io::BufReader::new(file).lines();
         let mut entries = HashMap::new();
+        let mut batches = Vec::new();
         let mut line_number = 0usize;
         while let Some(line) = lines.next_line().await.map_err(|error| {
             format!(
@@ -12652,7 +12978,7 @@ impl Runtime {
                         error
                     )
                 })?;
-            let Some(value) = record.value(lookup.key_field.as_str()) else {
+            let Some(value) = record.value(0, lookup.key_field.as_str())? else {
                 return Err(format!(
                     "lookup '{}' line {} is missing key field '{}'",
                     lookup.name.as_str(),
@@ -12660,13 +12986,22 @@ impl Runtime {
                     lookup.key_field.as_str()
                 ));
             };
-            entries.insert(value.to_key_fragment(), record);
+            entries.insert(value.to_key_fragment(), batches.len());
+            batches.push(record);
         }
+
+        let schema = codec.schema();
+        let batch = if batches.is_empty() {
+            schema.batch_builder(0).finish()?
+        } else {
+            RuntimeRecordBatch::concat(&batches.iter().collect::<Vec<_>>())?
+        };
 
         Ok(LookupRuntime {
             model: lookup,
             resource_version,
-            schema: codec.schema(),
+            schema,
+            batch: Arc::new(batch),
             entries: Arc::new(entries),
         })
     }
