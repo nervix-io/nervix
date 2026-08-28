@@ -983,6 +983,7 @@ pub(super) struct WindowFlushContext<'a> {
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
+    pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
 
 pub(super) struct JunctionFlushContext<'a> {
@@ -993,6 +994,9 @@ pub(super) struct JunctionFlushContext<'a> {
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) input_relays: &'a [Identifier],
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
+    /// Resolved when the junction admitted this batch; a junction flushes within the same
+    /// execution, so its routes read that snapshot rather than resolving again.
+    pub(super) materialized_values: &'a HashMap<String, RuntimeValue>,
 }
 
 pub(super) struct InferencerFlushContext<'a> {
@@ -1009,6 +1013,7 @@ pub(super) struct InferencerFlushContext<'a> {
     pub(super) output_schema: &'a [InferencerTensorDeclaration],
     pub(super) input_relays: &'a [Identifier],
     pub(super) session: &'a mut Option<OnnxInferencerSession>,
+    pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
 
 pub(super) struct WasmFlushContext<'a> {
