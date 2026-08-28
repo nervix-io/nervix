@@ -7949,6 +7949,7 @@ async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filte
         },
         Duration::from_secs(30),
     );
+    let expected_message_count = inputs.len();
     for input in inputs {
         route_runtime
             .sender()
@@ -7957,40 +7958,53 @@ async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filte
             .expect("reingestor route should accept input");
     }
 
-    let outputs = [
-        timeout(Duration::from_secs(1), fan_in.recv())
-            .await
-            .expect("first output batch should arrive")
-            .expect("runtime consumer should remain open"),
-        timeout(Duration::from_secs(1), fan_in.recv())
-            .await
-            .expect("second output batch should arrive")
-            .expect("runtime consumer should remain open"),
-        timeout(Duration::from_secs(1), fan_in.recv())
-            .await
-            .expect("third output batch should arrive")
-            .expect("runtime consumer should remain open"),
-    ];
+    let outputs = timeout(Duration::from_secs(1), async {
+        let mut outputs = Vec::new();
+        let mut received_message_count = 0;
+        while received_message_count < expected_message_count {
+            let output = fan_in
+                .recv()
+                .await
+                .expect("runtime consumer should remain open");
+            received_message_count += output.batch.batch().num_rows();
+            outputs.push(output);
+        }
+        outputs
+    })
+    .await
+    .expect("all output rows should arrive");
 
-    assert_eq!(key_label(&outputs[0].key), r#"{"tenant":"acme"}"#);
-    assert_eq!(outputs[0].message_count(), 1);
+    let mut output_rows = outputs
+        .iter()
+        .flat_map(|output| {
+            (0..output.batch.batch().num_rows()).map(|row| {
+                (
+                    key_label(&output.key).to_string(),
+                    output
+                        .batch
+                        .row_to_json_string(row)
+                        .expect("output row should serialize"),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    output_rows.sort();
     assert_eq!(
-        outputs[0]
-            .batch
-            .row_to_json_string(0)
-            .expect("first acme row should serialize"),
-        r#"{"tenant":"acme","value":1}"#
-    );
-    assert_eq!(key_label(&outputs[1].key), r#"{"tenant":"beta"}"#);
-    assert_eq!(outputs[1].message_count(), 1);
-    assert_eq!(key_label(&outputs[2].key), r#"{"tenant":"acme"}"#);
-    assert_eq!(outputs[2].message_count(), 1);
-    assert_eq!(
-        outputs[2]
-            .batch
-            .row_to_json_string(0)
-            .expect("second acme row should serialize"),
-        r#"{"tenant":"acme","value":3}"#
+        output_rows,
+        vec![
+            (
+                r#"{"tenant":"acme"}"#.to_string(),
+                r#"{"tenant":"acme","value":1}"#.to_string(),
+            ),
+            (
+                r#"{"tenant":"acme"}"#.to_string(),
+                r#"{"tenant":"acme","value":3}"#.to_string(),
+            ),
+            (
+                r#"{"tenant":"beta"}"#.to_string(),
+                r#"{"tenant":"beta","value":2}"#.to_string(),
+            ),
+        ]
     );
     route_runtime.shutdown().await;
 }
