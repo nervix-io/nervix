@@ -168,6 +168,7 @@ struct CompiledJsonWireField {
 struct CompiledAvroWireField {
     ty: AvroType,
     optional: bool,
+    position: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1109,14 +1110,21 @@ pub(crate) fn remote_runtime_record_to_json_string(record: &RemoteRuntimeRecord)
 }
 
 impl RuntimeRecordBatchBuilder {
-    pub(crate) fn append(&mut self, value: Option<&RuntimeValue>) -> Result<(), String> {
-        let field = self.fields.get(self.next_column).ok_or_else(|| {
+    fn next_field_index(&self) -> Result<usize, String> {
+        let index = self.next_column;
+        self.fields.get(index).ok_or_else(|| {
             format!(
                 "Arrow batch row {} already contains all {} schema fields",
                 self.rows,
                 self.fields.len()
             )
         })?;
+        Ok(index)
+    }
+
+    pub(crate) fn append(&mut self, value: Option<&RuntimeValue>) -> Result<(), String> {
+        let index = self.next_field_index()?;
+        let field = &self.fields[index];
         if value.is_none() && !field.optional {
             return Err(format!(
                 "Arrow batch row {} is missing required field '{}'",
@@ -1124,10 +1132,55 @@ impl RuntimeRecordBatchBuilder {
             ));
         }
         append_runtime_value_to_arrow(
-            self.builders[self.next_column].as_mut(),
+            self.builders[index].as_mut(),
             &field.ty,
             value,
             &format!("Arrow batch row {} field '{}'", self.rows, field.name),
+        )?;
+        self.next_column += 1;
+        Ok(())
+    }
+
+    fn append_null(&mut self) -> Result<(), String> {
+        let index = self.next_field_index()?;
+        let field = &self.fields[index];
+        if !field.optional {
+            return Err(format!(
+                "Arrow batch row {} is missing required field '{}'",
+                self.rows, field.name
+            ));
+        }
+        append_runtime_value_to_arrow(
+            self.builders[index].as_mut(),
+            &field.ty,
+            None,
+            &format!("Arrow batch row {} field '{}'", self.rows, field.name),
+        )?;
+        self.next_column += 1;
+        Ok(())
+    }
+
+    fn append_json_value(&mut self, value: &JsonValue) -> Result<(), String> {
+        let index = self.next_field_index()?;
+        let field = &self.fields[index];
+        append_json_value_to_arrow(
+            self.builders[index].as_mut(),
+            &field.ty,
+            value,
+            &format!("field '{}'", field.name),
+        )?;
+        self.next_column += 1;
+        Ok(())
+    }
+
+    fn append_avro_value(&mut self, value: &AvroValue) -> Result<(), String> {
+        let index = self.next_field_index()?;
+        let field = &self.fields[index];
+        append_avro_value_to_arrow(
+            self.builders[index].as_mut(),
+            &field.ty,
+            value,
+            &format!("field '{}'", field.name),
         )?;
         self.next_column += 1;
         Ok(())
@@ -1524,12 +1577,14 @@ pub fn compile_codec_with_protobuf(
             let fields = schema_def
                 .fields
                 .iter()
-                .map(|field| {
+                .enumerate()
+                .map(|(position, field)| {
                     (
                         field.name.as_str().to_string(),
                         CompiledAvroWireField {
                             ty: field.ty,
                             optional: field.optional,
+                            position,
                         },
                     )
                 })
@@ -2336,7 +2391,7 @@ fn decode_json_value(
         let Some(value) = object.get(&field.name) else {
             if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
                 builder
-                    .append(None)
+                    .append_null()
                     .map_err(|reason| CodecError::InvalidCodec {
                         codec: codec.name.as_str().to_string(),
                         reason,
@@ -2351,7 +2406,7 @@ fn decode_json_value(
         if value.is_null() {
             if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
                 builder
-                    .append(None)
+                    .append_null()
                     .map_err(|reason| CodecError::InvalidCodec {
                         codec: codec.name.as_str().to_string(),
                         reason,
@@ -2373,11 +2428,11 @@ fn decode_json_value(
                 reason: format!("expected {:?}, found {}", wire_field.ty, value),
             });
         }
-        let parsed = parse_json_value(codec, &field.name, &field.ty, value)?;
         builder
-            .append(Some(&parsed))
-            .map_err(|reason| CodecError::InvalidCodec {
+            .append_json_value(value)
+            .map_err(|reason| CodecError::ParseField {
                 codec: codec.name.as_str().to_string(),
+                field: field.name.clone(),
                 reason,
             })?;
     }
@@ -2420,7 +2475,6 @@ fn decode_avro(
             codec: codec.name.as_str().to_string(),
         });
     };
-    let values = values.into_iter().collect::<HashMap<_, _>>();
 
     let mut builder = codec.schema.batch_builder(1);
     for field in codec.schema.fields() {
@@ -2432,10 +2486,10 @@ fn decode_avro(
                     codec: codec.name.as_str().to_string(),
                     reason: format!("missing wire field '{}'", field.name),
                 })?;
-        let Some(value) = values.get(&field.name) else {
+        let Some((name, value)) = values.get(wire_field.position) else {
             if field.optional && wire_field.optional {
                 builder
-                    .append(None)
+                    .append_null()
                     .map_err(|reason| CodecError::InvalidCodec {
                         codec: codec.name.as_str().to_string(),
                         reason,
@@ -2447,10 +2501,19 @@ fn decode_avro(
                 field: field.name.clone(),
             });
         };
+        if name != &field.name {
+            return Err(CodecError::InvalidCodec {
+                codec: codec.name.as_str().to_string(),
+                reason: format!(
+                    "wire field position {} contains '{}' instead of '{}'",
+                    wire_field.position, name, field.name
+                ),
+            });
+        }
         if avro_value_is_null(value) {
             if field.optional && wire_field.optional {
                 builder
-                    .append(None)
+                    .append_null()
                     .map_err(|reason| CodecError::InvalidCodec {
                         codec: codec.name.as_str().to_string(),
                         reason,
@@ -2463,11 +2526,11 @@ fn decode_avro(
                 reason: "null is incompatible with required field".to_string(),
             });
         }
-        let parsed = parse_avro_value(codec, &field.name, &field.ty, value)?;
         builder
-            .append(Some(&parsed))
-            .map_err(|reason| CodecError::InvalidCodec {
+            .append_avro_value(value)
+            .map_err(|reason| CodecError::ParseField {
                 codec: codec.name.as_str().to_string(),
+                field: field.name.clone(),
                 reason,
             })?;
     }
@@ -2480,168 +2543,234 @@ fn decode_avro(
         })
 }
 
-fn parse_json_value(
-    codec: &CompiledCodec,
-    field: &str,
+fn append_json_value_to_arrow(
+    builder: &mut dyn ArrayBuilder,
     ty: &ParseAsType,
     value: &JsonValue,
-) -> Result<RuntimeValue, CodecError> {
-    let err = |reason: String| CodecError::ParseField {
-        codec: codec.name.as_str().to_string(),
-        field: field.to_string(),
-        reason,
-    };
+    context: &str,
+) -> Result<(), String> {
+    let incompatible = || format!("{context} value {value} is incompatible with {ty:?}");
+
+    macro_rules! append_primitive {
+        ($builder:ty, $parsed:expr) => {{
+            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            typed_arrow_builder::<$builder>(builder, context)?.append_value(parsed);
+            Ok(())
+        }};
+    }
 
     match ty {
-        ParseAsType::U8 => value
-            .as_u64()
-            .and_then(|v| u8::try_from(v).ok())
-            .map(RuntimeValue::U8),
-        ParseAsType::I8 => value
-            .as_i64()
-            .and_then(|v| i8::try_from(v).ok())
-            .map(RuntimeValue::I8),
-        ParseAsType::U16 => value
-            .as_u64()
-            .and_then(|v| u16::try_from(v).ok())
-            .map(RuntimeValue::U16),
-        ParseAsType::I16 => value
-            .as_i64()
-            .and_then(|v| i16::try_from(v).ok())
-            .map(RuntimeValue::I16),
-        ParseAsType::U32 => value
-            .as_u64()
-            .and_then(|v| u32::try_from(v).ok())
-            .map(RuntimeValue::U32),
-        ParseAsType::I32 => value
-            .as_i64()
-            .and_then(|v| i32::try_from(v).ok())
-            .map(RuntimeValue::I32),
-        ParseAsType::U64 => value.as_u64().map(RuntimeValue::U64),
-        ParseAsType::I64 => value.as_i64().map(RuntimeValue::I64),
-        ParseAsType::Bool => value.as_bool().map(RuntimeValue::Bool),
-        ParseAsType::String => value.as_str().map(|v| RuntimeValue::String(v.to_string())),
-        ParseAsType::Datetime => value
-            .as_str()
-            .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
-            .map(RuntimeValue::Datetime),
-        ParseAsType::F32 => value
-            .as_f64()
-            .map(|v| RuntimeValue::F32(OrderedFloat(v as f32))),
-        ParseAsType::F64 => value.as_f64().map(|v| RuntimeValue::F64(OrderedFloat(v))),
-        ParseAsType::Array { element, len } => value.as_array().and_then(|values| {
+        ParseAsType::U8 => append_primitive!(
+            UInt8Builder,
+            value.as_u64().and_then(|value| u8::try_from(value).ok())
+        ),
+        ParseAsType::I8 => append_primitive!(
+            Int8Builder,
+            value.as_i64().and_then(|value| i8::try_from(value).ok())
+        ),
+        ParseAsType::U16 => append_primitive!(
+            UInt16Builder,
+            value.as_u64().and_then(|value| u16::try_from(value).ok())
+        ),
+        ParseAsType::I16 => append_primitive!(
+            Int16Builder,
+            value.as_i64().and_then(|value| i16::try_from(value).ok())
+        ),
+        ParseAsType::U32 => append_primitive!(
+            UInt32Builder,
+            value.as_u64().and_then(|value| u32::try_from(value).ok())
+        ),
+        ParseAsType::I32 => append_primitive!(
+            Int32Builder,
+            value.as_i64().and_then(|value| i32::try_from(value).ok())
+        ),
+        ParseAsType::U64 => append_primitive!(UInt64Builder, value.as_u64()),
+        ParseAsType::I64 => append_primitive!(Int64Builder, value.as_i64()),
+        ParseAsType::Bool => append_primitive!(BooleanBuilder, value.as_bool()),
+        ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
+        ParseAsType::Datetime => append_primitive!(
+            TimestampNanosecondBuilder,
+            value
+                .as_str()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .and_then(|value| value.timestamp_nanos_opt())
+        ),
+        ParseAsType::F32 => {
+            append_primitive!(Float32Builder, value.as_f64().map(|value| value as f32))
+        }
+        ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
+        ParseAsType::Array { element, len } => {
+            let values = value.as_array().ok_or_else(&incompatible)?;
             if values.len() != *len as usize {
-                return None;
+                return Err(incompatible());
             }
-            parse_json_array_values(codec, field, element, values)
-                .ok()
-                .map(RuntimeValue::Array)
-        }),
-        ParseAsType::Vec { element } => value
-            .as_array()
-            .and_then(|values| parse_json_array_values(codec, field, element, values).ok())
-            .map(RuntimeValue::Vec),
+            let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
+                builder, context,
+            )?;
+            for (index, value) in values.iter().enumerate() {
+                append_json_value_to_arrow(
+                    builder.values().as_mut(),
+                    element,
+                    value,
+                    &format!("{context}[{index}]"),
+                )?;
+            }
+            builder.append(true);
+            Ok(())
+        }
+        ParseAsType::Vec { element } => {
+            let values = value.as_array().ok_or_else(&incompatible)?;
+            let builder =
+                typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(builder, context)?;
+            for (index, value) in values.iter().enumerate() {
+                append_json_value_to_arrow(
+                    builder.values().as_mut(),
+                    element,
+                    value,
+                    &format!("{context}[{index}]"),
+                )?;
+            }
+            builder.append(true);
+            Ok(())
+        }
     }
-    .ok_or_else(|| err(format!("value {value} is incompatible with {ty:?}")))
 }
 
-fn parse_json_array_values(
-    codec: &CompiledCodec,
-    field: &str,
-    element: &ParseAsType,
-    values: &[JsonValue],
-) -> Result<Vec<RuntimeValue>, CodecError> {
-    values
-        .iter()
-        .map(|value| parse_json_value(codec, field, element, value))
-        .collect()
-}
-
-fn parse_avro_value(
-    codec: &CompiledCodec,
-    field: &str,
+fn append_avro_value_to_arrow(
+    builder: &mut dyn ArrayBuilder,
     ty: &ParseAsType,
     value: &AvroValue,
-) -> Result<RuntimeValue, CodecError> {
+    context: &str,
+) -> Result<(), String> {
     let value = avro_value_payload(value);
-    let err = |reason: String| CodecError::ParseField {
-        codec: codec.name.as_str().to_string(),
-        field: field.to_string(),
-        reason,
-    };
+    let incompatible = || format!("{context} {value:?} is incompatible with {ty:?}");
+
+    macro_rules! append_primitive {
+        ($builder:ty, $parsed:expr) => {{
+            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            typed_arrow_builder::<$builder>(builder, context)?.append_value(parsed);
+            Ok(())
+        }};
+    }
 
     match ty {
-        ParseAsType::U8 => avro_to_u64(value)
-            .and_then(|v| u8::try_from(v).ok())
-            .map(RuntimeValue::U8),
-        ParseAsType::I8 => avro_to_i64(value)
-            .and_then(|v| i8::try_from(v).ok())
-            .map(RuntimeValue::I8),
-        ParseAsType::U16 => avro_to_u64(value)
-            .and_then(|v| u16::try_from(v).ok())
-            .map(RuntimeValue::U16),
-        ParseAsType::I16 => avro_to_i64(value)
-            .and_then(|v| i16::try_from(v).ok())
-            .map(RuntimeValue::I16),
-        ParseAsType::U32 => avro_to_u64(value)
-            .and_then(|v| u32::try_from(v).ok())
-            .map(RuntimeValue::U32),
-        ParseAsType::I32 => avro_to_i64(value)
-            .and_then(|v| i32::try_from(v).ok())
-            .map(RuntimeValue::I32),
-        ParseAsType::U64 => avro_to_u64(value).map(RuntimeValue::U64),
-        ParseAsType::I64 => avro_to_i64(value).map(RuntimeValue::I64),
-        ParseAsType::Bool => match value {
-            AvroValue::Boolean(v) => Some(RuntimeValue::Bool(*v)),
-            _ => None,
-        },
-        ParseAsType::String => match value {
-            AvroValue::String(v) => Some(RuntimeValue::String(v.clone())),
-            _ => None,
-        },
-        ParseAsType::Datetime => match value {
-            AvroValue::String(v) => DateTime::parse_from_rfc3339(v)
-                .ok()
-                .map(RuntimeValue::Datetime),
-            _ => None,
-        },
-        ParseAsType::F32 => match value {
-            AvroValue::Float(v) => Some(RuntimeValue::F32(OrderedFloat(*v))),
-            _ => None,
-        },
-        ParseAsType::F64 => match value {
-            AvroValue::Float(v) => Some(RuntimeValue::F64(OrderedFloat(*v as f64))),
-            AvroValue::Double(v) => Some(RuntimeValue::F64(OrderedFloat(*v))),
-            _ => None,
-        },
-        ParseAsType::Array { element, len } => match value {
-            AvroValue::Array(values) if values.len() == *len as usize => {
-                parse_avro_array_values(codec, field, element, values)
-                    .ok()
-                    .map(RuntimeValue::Array)
+        ParseAsType::U8 => append_primitive!(
+            UInt8Builder,
+            avro_to_u64(value).and_then(|value| u8::try_from(value).ok())
+        ),
+        ParseAsType::I8 => append_primitive!(
+            Int8Builder,
+            avro_to_i64(value).and_then(|value| i8::try_from(value).ok())
+        ),
+        ParseAsType::U16 => append_primitive!(
+            UInt16Builder,
+            avro_to_u64(value).and_then(|value| u16::try_from(value).ok())
+        ),
+        ParseAsType::I16 => append_primitive!(
+            Int16Builder,
+            avro_to_i64(value).and_then(|value| i16::try_from(value).ok())
+        ),
+        ParseAsType::U32 => append_primitive!(
+            UInt32Builder,
+            avro_to_u64(value).and_then(|value| u32::try_from(value).ok())
+        ),
+        ParseAsType::I32 => append_primitive!(
+            Int32Builder,
+            avro_to_i64(value).and_then(|value| i32::try_from(value).ok())
+        ),
+        ParseAsType::U64 => append_primitive!(UInt64Builder, avro_to_u64(value)),
+        ParseAsType::I64 => append_primitive!(Int64Builder, avro_to_i64(value)),
+        ParseAsType::Bool => append_primitive!(
+            BooleanBuilder,
+            if let AvroValue::Boolean(value) = value {
+                Some(*value)
+            } else {
+                None
             }
-            _ => None,
-        },
-        ParseAsType::Vec { element } => match value {
-            AvroValue::Array(values) => parse_avro_array_values(codec, field, element, values)
-                .ok()
-                .map(RuntimeValue::Vec),
-            _ => None,
-        },
+        ),
+        ParseAsType::String => append_primitive!(
+            StringBuilder,
+            if let AvroValue::String(value) = value {
+                Some(value.as_str())
+            } else {
+                None
+            }
+        ),
+        ParseAsType::Datetime => append_primitive!(
+            TimestampNanosecondBuilder,
+            if let AvroValue::String(value) = value {
+                DateTime::parse_from_rfc3339(value)
+                    .ok()
+                    .and_then(|value| value.timestamp_nanos_opt())
+            } else {
+                None
+            }
+        ),
+        ParseAsType::F32 => append_primitive!(
+            Float32Builder,
+            if let AvroValue::Float(value) = value {
+                Some(*value)
+            } else {
+                None
+            }
+        ),
+        ParseAsType::F64 => append_primitive!(
+            Float64Builder,
+            match value {
+                AvroValue::Float(value) => Some(f64::from(*value)),
+                AvroValue::Double(value) => Some(*value),
+                _ => None,
+            }
+        ),
+        ParseAsType::Array { element, len } => {
+            let AvroValue::Array(values) = value else {
+                return Err(incompatible());
+            };
+            if values.len() != *len as usize {
+                return Err(incompatible());
+            }
+            let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
+                builder, context,
+            )?;
+            for (index, value) in values.iter().enumerate() {
+                append_avro_value_to_arrow(
+                    builder.values().as_mut(),
+                    element,
+                    value,
+                    &format!("{context}[{index}]"),
+                )?;
+            }
+            builder.append(true);
+            Ok(())
+        }
+        ParseAsType::Vec { element } => {
+            let AvroValue::Array(values) = value else {
+                return Err(incompatible());
+            };
+            let builder =
+                typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(builder, context)?;
+            for (index, value) in values.iter().enumerate() {
+                append_avro_value_to_arrow(
+                    builder.values().as_mut(),
+                    element,
+                    value,
+                    &format!("{context}[{index}]"),
+                )?;
+            }
+            builder.append(true);
+            Ok(())
+        }
     }
-    .ok_or_else(|| err(format!("value {value:?} is incompatible with {ty:?}")))
 }
 
-fn parse_avro_array_values(
-    codec: &CompiledCodec,
-    field: &str,
-    element: &ParseAsType,
-    values: &[AvroValue],
-) -> Result<Vec<RuntimeValue>, CodecError> {
-    values
-        .iter()
-        .map(|value| parse_avro_value(codec, field, element, value))
-        .collect()
+fn typed_arrow_builder<'a, T: 'static>(
+    builder: &'a mut dyn ArrayBuilder,
+    context: &str,
+) -> Result<&'a mut T, String> {
+    builder
+        .as_any_mut()
+        .downcast_mut::<T>()
+        .ok_or_else(|| format!("{context} has an incompatible Arrow builder"))
 }
 
 fn avro_value_payload(value: &AvroValue) -> &AvroValue {
@@ -4232,6 +4361,33 @@ mod tests {
         assert_eq!(
             single_batch_value(&decoded, "latency"),
             Some(RuntimeValue::F64(OrderedFloat(12.5)))
+        );
+    }
+
+    #[test]
+    fn avro_codec_decodes_wire_fields_into_internal_arrow_order() {
+        let compiled_schema = Arc::new(compile_schema(&schema()));
+        let mut wire_schema = avro_wire_schema();
+        let WireSchemaDefinition::Avro(wire_schema_model) = &mut wire_schema else {
+            unreachable!("avro_wire_schema returns AVRO");
+        };
+        wire_schema_model.fields.rotate_left(2);
+        let compiled_codec =
+            compile_codec(&codec("avro_codec"), compiled_schema, Some(&wire_schema))
+                .expect("codec should compile");
+
+        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
+        let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
+
+        assert_eq!(decoded.batch().schema().field(0).name(), "user_id");
+        assert_eq!(decoded.batch().schema().field(1).name(), "tenant");
+        assert_eq!(
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
         );
     }
 
