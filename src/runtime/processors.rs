@@ -479,7 +479,7 @@ pub(super) struct CompiledWindowAggregateAssignment {
 
 #[derive(Debug, Clone)]
 pub(super) enum CompiledWindowAggregateExpr {
-    Scalar(Box<VmCompiledProgram>),
+    Scalar(Arc<VmCompiledProgram>),
     Array {
         items: Vec<CompiledWindowAggregateExpr>,
         fixed_size: bool,
@@ -616,7 +616,7 @@ impl CompiledWindowAggregateProgram {
                         },
                     ),
                 )
-                .map(|program| CompiledWindowAggregateExpr::Scalar(Box::new(program)))
+                .map(|program| CompiledWindowAggregateExpr::Scalar(Arc::new(program)))
                 .map_err(|error| format!("window aggregate VM compile failed: {}", error.message))
             }
             WindowAggregateExpr::Array(items) => {
@@ -779,14 +779,14 @@ impl RelayProcessorOutputNode {
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledReordererProgram {
-    pub(super) program: VmCompiledProgram,
+    pub(super) program: Arc<VmCompiledProgram>,
     pub(super) key_column_offset: usize,
     pub(super) key_count: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledCorrelatorWhereProgram {
-    pub(super) program: VmCompiledProgram,
+    pub(super) program: Arc<VmCompiledProgram>,
 }
 
 #[derive(Debug, Clone)]

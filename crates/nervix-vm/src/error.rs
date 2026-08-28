@@ -30,6 +30,87 @@ pub struct SideError {
     pub span: Span,
 }
 
+/// Row-aligned side errors recorded while a program executes.
+///
+/// Executions that record no error are the common case, so the per-row storage is
+/// materialized only when the first error arrives. Until then the channel carries just a
+/// row count, which keeps construction and cloning independent of the batch row count.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowErrors {
+    row_count: usize,
+    rows: Vec<Vec<SideError>>,
+}
+
+/// Per-row error counts captured before a conditional instruction runs.
+#[derive(Debug, Clone)]
+pub struct RowErrorLengths(Vec<usize>);
+
+impl RowErrors {
+    pub fn new(row_count: usize) -> Self {
+        Self {
+            row_count,
+            rows: Vec::new(),
+        }
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    /// True when no row carries an error.
+    pub fn is_error_free(&self) -> bool {
+        self.rows.iter().all(Vec::is_empty)
+    }
+
+    pub fn row(&self, row: usize) -> &[SideError] {
+        self.rows.get(row).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn get(&self, row: usize) -> Option<&[SideError]> {
+        (row < self.row_count).then(|| self.row(row))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &[SideError]> {
+        (0..self.row_count).map(|row| self.row(row))
+    }
+
+    pub fn push(&mut self, row: usize, error: SideError) {
+        if self.rows.is_empty() {
+            self.rows = vec![Vec::new(); self.row_count];
+        }
+        self.rows[row].push(error);
+    }
+
+    /// Builds the channel for a filtered batch, keeping only `rows` in the order given.
+    pub fn select_rows(&self, rows: &[usize]) -> Self {
+        if self.rows.is_empty() {
+            return Self::new(rows.len());
+        }
+        Self {
+            row_count: rows.len(),
+            rows: rows.iter().map(|&row| self.row(row).to_vec()).collect(),
+        }
+    }
+
+    pub fn row_lengths(&self) -> RowErrorLengths {
+        RowErrorLengths(self.rows.iter().map(Vec::len).collect())
+    }
+
+    /// Drops errors recorded past `lengths` for every row the instruction did not select,
+    /// so a conditional arm cannot leak errors from a branch it did not take.
+    pub fn restore_unselected(
+        &mut self,
+        lengths: &RowErrorLengths,
+        selected: impl Fn(usize) -> bool,
+    ) {
+        for (row, errors) in self.rows.iter_mut().enumerate() {
+            if !selected(row) {
+                errors.truncate(lengths.0.get(row).copied().unwrap_or_default());
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message} at {span}")]
 pub struct CompileError {

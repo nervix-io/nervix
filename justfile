@@ -88,8 +88,9 @@ bench *args:
 # Build the reusable harness and forward its CLI arguments. This is enough for container subjects
 # such as Vector; local Nervix has a dedicated recipe below because it also builds the server.
 benchmark *args:
+    just build_mode=release build-server
     cargo build --release --package nervix-benchmark --bins
-    "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }}
+    "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }} --server-binary={{ cargo_target_dir }}/server/release/nervix-server
 
 # Focused validation for the benchmark framework without building product binaries.
 test-benchmark-framework *args:

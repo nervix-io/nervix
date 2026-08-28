@@ -33,7 +33,7 @@ use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
     batch::{TypedArray, TypedBatch},
-    error::{ErrorCode, RuntimeError, SideError},
+    error::{ErrorCode, RowErrors, RuntimeError, SideError},
     ir::{
         CompiledProgram, InputBinding, Instruction, InstructionKind, RegisterLayout,
         RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
@@ -570,7 +570,7 @@ impl RegisterBank {
 }
 
 pub async fn execute_program(
-    program: &CompiledProgram,
+    program: &triomphe::Arc<CompiledProgram>,
     batch: &TypedBatch,
 ) -> Result<TypedBatch, RuntimeError> {
     execute_program_in_context(program, batch, &ExecutionContext::default())
@@ -667,7 +667,7 @@ impl Default for ExecutionContext {
 }
 
 pub async fn execute_program_in_context(
-    program: &CompiledProgram,
+    program: &triomphe::Arc<CompiledProgram>,
     batch: &TypedBatch,
     context: &ExecutionContext,
 ) -> Result<ExecutionResult, RuntimeError> {
@@ -675,14 +675,14 @@ pub async fn execute_program_in_context(
 }
 
 pub async fn execute_program_with_selection(
-    program: &CompiledProgram,
+    program: &triomphe::Arc<CompiledProgram>,
     batch: &TypedBatch,
 ) -> Result<ExecutionResult, RuntimeError> {
     execute_program_with_selection_in_context(program, batch, &ExecutionContext::default()).await
 }
 
 pub async fn execute_program_with_selection_in_context(
-    program: &CompiledProgram,
+    program: &triomphe::Arc<CompiledProgram>,
     batch: &TypedBatch,
     context: &ExecutionContext,
 ) -> Result<ExecutionResult, RuntimeError> {
@@ -755,12 +755,10 @@ fn execute_program_with_selection_in_context_sync(
     let mut registers = RegisterBank::new(&program.layouts);
     registers.load_input_batch(&program.inputs, batch)?;
 
-    let mut row_errors = batch.errors().to_vec();
+    let mut row_errors = batch.errors().clone();
 
     for instruction in &program.instructions {
-        let baseline = instruction
-            .error_mask
-            .map(|_| row_errors.iter().map(Vec::len).collect::<Vec<_>>());
+        let baseline = instruction.error_mask.map(|_| row_errors.row_lengths());
         instruction.execute(
             &mut registers,
             batch.row_count(),
@@ -770,11 +768,7 @@ fn execute_program_with_selection_in_context_sync(
         )?;
         if let (Some(mask_reg), Some(baseline)) = (instruction.error_mask, baseline) {
             let mask = registers.boolean(mask_reg)?;
-            for (row, previous_len) in baseline.into_iter().enumerate() {
-                if !row_selected(mask, row) {
-                    row_errors[row].truncate(previous_len);
-                }
-            }
+            row_errors.restore_unselected(&baseline, |row| row_selected(mask, row));
         }
     }
 
@@ -822,10 +816,12 @@ fn execute_program_with_selection_in_context_sync(
         for invocation in &mut invocations {
             invocation.arguments = filter_columns(&invocation.arguments, predicate)?;
         }
+        let selected = selected_rows(predicate);
+        let filtered_errors = row_errors.select_rows(&selected);
         (
             filter_columns(&columns, predicate)?,
-            filter_errors(&row_errors, predicate),
-            selected_rows(predicate),
+            filtered_errors,
+            selected,
         )
     } else {
         (columns, row_errors, (0..batch.row_count()).collect())
@@ -844,7 +840,7 @@ impl Instruction {
         &self,
         registers: &mut RegisterBank,
         row_count: usize,
-        row_errors: &mut [Vec<SideError>],
+        row_errors: &mut RowErrors,
         context: &ExecutionContext,
         default_injector: Option<&triomphe::Arc<Box<dyn FunctionInjector>>>,
     ) -> Result<(), RuntimeError> {
@@ -983,7 +979,7 @@ impl Instruction {
                             row_count,
                         });
                     }
-                    row_errors[row].push(side_error);
+                    row_errors.push(row, side_error);
                 }
                 registers.set_array(*dst, output)
             }
@@ -1015,7 +1011,7 @@ impl Instruction {
         registers: &RegisterBank,
         input: RegisterRef,
         op: UnaryOp,
-        row_errors: &mut [Vec<SideError>],
+        row_errors: &mut RowErrors,
     ) -> Result<TypedArray, RuntimeError> {
         match op {
             UnaryOp::Neg => match input.ty {
@@ -1060,7 +1056,7 @@ impl Instruction {
         left: RegisterRef,
         right: RegisterRef,
         op: BinaryOp,
-        row_errors: &mut [Vec<SideError>],
+        row_errors: &mut RowErrors,
     ) -> Result<TypedArray, RuntimeError> {
         match left.ty {
             RegisterType::UInt8 => execute_binary_u8(
@@ -1352,7 +1348,7 @@ fn try_execute_neg_kernel(input: &dyn Array) -> Option<ArrayRef> {
 
 fn sanitize_float32_non_finite(
     input: &Float32Array,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
     message: &str,
 ) -> Float32Array {
@@ -1375,7 +1371,7 @@ fn sanitize_float32_non_finite(
 
 fn sanitize_float64_non_finite(
     input: &Float64Array,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
     message: &str,
 ) -> Float64Array {
@@ -1471,11 +1467,7 @@ fn write_null_literal(
     registers.set_array(dst, typed)
 }
 
-fn execute_neg_i64(
-    input: &Int64Array,
-    row_errors: &mut [Vec<SideError>],
-    span: Span,
-) -> Int64Array {
+fn execute_neg_i64(input: &Int64Array, row_errors: &mut RowErrors, span: Span) -> Int64Array {
     if let Some(output) = try_execute_neg_kernel(input) {
         let TypedArray::Int64(output) =
             array_ref_to_typed_array(output).expect("int64 neg kernel must produce Int64 output")
@@ -1522,7 +1514,7 @@ macro_rules! define_checked_neg {
         $(
             fn $fn_name(
                 input: &$array,
-                row_errors: &mut [Vec<SideError>],
+                row_errors: &mut RowErrors,
                 span: Span,
             ) -> $array {
                 if let Some(output) = try_execute_neg_kernel(input) {
@@ -1586,7 +1578,7 @@ macro_rules! define_integer_binary {
                 left: &$array,
                 right: &$array,
                 op: BinaryOp,
-                row_errors: &mut [Vec<SideError>],
+                row_errors: &mut RowErrors,
                 span: Span,
             ) -> Result<TypedArray, RuntimeError> {
                 match op {
@@ -1647,17 +1639,9 @@ macro_rules! define_integer_binary {
                     | BinaryOp::Gt
                     | BinaryOp::Lt
                     | BinaryOp::GtEq
-                    | BinaryOp::LtEq => {
-                        let mut builder = BooleanBuilder::new();
-                        for row in 0..left.len() {
-                            if left.is_null(row) || right.is_null(row) {
-                                builder.append_null();
-                            } else {
-                                builder.append_value(compare_values(left.value(row), right.value(row), op));
-                            }
-                        }
-                        Ok(TypedArray::Boolean(builder.finish()))
-                    }
+                    | BinaryOp::LtEq => Ok(TypedArray::Boolean(compare_with_arrow_ord(
+                        left, right, op, "numeric",
+                    )?)),
                     BinaryOp::And | BinaryOp::Or => Err(RuntimeError::InvalidRegisterType {
                         reg: RegisterRef::new(RegisterSpace::Temp, RegisterType::$reg_ty, 0),
                         expected: "BooleanArray",
@@ -1686,7 +1670,7 @@ macro_rules! define_float_binary {
                 left: &$array,
                 right: &$array,
                 op: BinaryOp,
-                row_errors: &mut [Vec<SideError>],
+                row_errors: &mut RowErrors,
                 span: Span,
             ) -> Result<TypedArray, RuntimeError> {
                 match op {
@@ -1745,18 +1729,22 @@ macro_rules! define_float_binary {
                         }
                         Ok(TypedArray::$typed_variant(builder.finish()))
                     }
+                    // The arrow comparison kernels order floats by the IEEE 754 total order,
+                    // which makes NaN equal to itself and greater than every other value.
+                    // Float comparisons here keep Rust's IEEE semantics, where any comparison
+                    // against NaN is false, so they evaluate row by row instead.
                     BinaryOp::Eq
                     | BinaryOp::NotEq
                     | BinaryOp::Gt
                     | BinaryOp::Lt
                     | BinaryOp::GtEq
                     | BinaryOp::LtEq => {
-                        let mut builder = BooleanBuilder::new();
+                        let mut builder = BooleanBuilder::with_capacity(left.len());
                         for row in 0..left.len() {
                             if left.is_null(row) || right.is_null(row) {
                                 builder.append_null();
                             } else {
-                                builder.append_value(compare_values(left.value(row), right.value(row), op));
+                                builder.append_value(compare_floats(left.value(row), right.value(row), op));
                             }
                         }
                         Ok(TypedArray::Boolean(builder.finish()))
@@ -1872,7 +1860,7 @@ fn execute_cast(
     registers: &RegisterBank,
     input: RegisterRef,
     target: RegisterType,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     let input = registers.read_array(input)?;
@@ -1884,7 +1872,7 @@ fn execute_builtin(
     registers: &RegisterBank,
     inputs: &[RegisterRef],
     row_count: usize,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
     context: &ExecutionContext,
 ) -> Result<TypedArray, RuntimeError> {
@@ -2319,32 +2307,36 @@ fn execute_list_item(
     }
 }
 
+/// A string builder sized for an output shaped like `input`, so appending rows does not
+/// repeatedly grow and copy the offset and value buffers.
+fn string_builder_like(input: &StringArray) -> StringBuilder {
+    StringBuilder::with_capacity(input.len(), input.values().len())
+}
+
+/// ASCII case conversion never changes a value's byte length, and never touches a byte of a
+/// multi-byte sequence because those are all outside the ASCII range. Offsets and validity
+/// therefore carry over unchanged and only the value bytes are rewritten, which keeps the
+/// whole operation one pass over the buffer instead of an allocation per row.
+fn execute_ascii_case(input: &StringArray, convert: fn(&u8) -> u8) -> StringArray {
+    let values = input.values().iter().map(convert).collect::<Vec<u8>>();
+    StringArray::try_new(
+        input.offsets().clone(),
+        values.into(),
+        input.nulls().cloned(),
+    )
+    .expect("ascii case conversion preserves utf8 values, offsets and validity")
+}
+
 fn execute_lower(input: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-        } else {
-            builder.append_value(input.value(row).to_ascii_lowercase());
-        }
-    }
-    builder.finish()
+    execute_ascii_case(input, u8::to_ascii_lowercase)
 }
 
 fn execute_upper(input: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-        } else {
-            builder.append_value(input.value(row).to_ascii_uppercase());
-        }
-    }
-    builder.finish()
+    execute_ascii_case(input, u8::to_ascii_uppercase)
 }
 
 fn execute_trim(input: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
     for row in 0..input.len() {
         if input.is_null(row) {
             builder.append_null();
@@ -2356,7 +2348,7 @@ fn execute_trim(input: &StringArray) -> StringArray {
 }
 
 fn execute_length(input: &StringArray) -> Int64Array {
-    let mut builder = Int64Builder::new();
+    let mut builder = Int64Builder::with_capacity(input.len());
     for row in 0..input.len() {
         if input.is_null(row) {
             builder.append_null();
@@ -2399,7 +2391,7 @@ define_identity_abs!(
 macro_rules! define_checked_abs {
     ($(($fn_name:ident, $array:ty, $builder:ty));+ $(;)?) => {
         $(
-            fn $fn_name(input: &$array, row_errors: &mut [Vec<SideError>], span: Span) -> $array {
+            fn $fn_name(input: &$array, row_errors: &mut RowErrors, span: Span) -> $array {
                 let mut builder = <$builder>::new();
                 for row in 0..input.len() {
                     if input.is_null(row) {
@@ -2433,11 +2425,7 @@ define_checked_abs!(
     (execute_abs_i64, Int64Array, Int64Builder)
 );
 
-fn execute_abs_f32(
-    input: &Float32Array,
-    row_errors: &mut [Vec<SideError>],
-    span: Span,
-) -> Float32Array {
+fn execute_abs_f32(input: &Float32Array, row_errors: &mut RowErrors, span: Span) -> Float32Array {
     let zero = Float32Array::new_scalar(0.0);
     let input_datum = input as &dyn Datum;
     let zero_datum = &zero as &dyn Datum;
@@ -2459,11 +2447,7 @@ fn execute_abs_f32(
     )
 }
 
-fn execute_abs_f64(
-    input: &Float64Array,
-    row_errors: &mut [Vec<SideError>],
-    span: Span,
-) -> Float64Array {
+fn execute_abs_f64(input: &Float64Array, row_errors: &mut RowErrors, span: Span) -> Float64Array {
     let zero = Float64Array::new_scalar(0.0);
     let input_datum = input as &dyn Datum;
     let zero_datum = &zero as &dyn Datum;
@@ -2627,7 +2611,7 @@ fn execute_is_null_typed(input: &TypedArray) -> BooleanArray {
 
 fn execute_abs_typed(
     input: &TypedArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     match input {
@@ -2657,7 +2641,7 @@ fn execute_abs_typed(
 
 fn execute_unary_math_f64(
     input: &TypedArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
     function: &str,
     op: impl Fn(f64) -> f64,
@@ -2687,7 +2671,7 @@ fn execute_unary_math_f64(
 
 fn execute_ceil(
     input: &TypedArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     match input {
@@ -2757,7 +2741,7 @@ fn execute_ceil(
 
 fn execute_floor(
     input: &TypedArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     match input {
@@ -2830,7 +2814,7 @@ fn execute_floor(
 
 fn execute_round(
     input: &TypedArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     match input {
@@ -3033,7 +3017,7 @@ fn execute_md5(input: &StringArray) -> StringArray {
 
 fn execute_log(
     values: &[TypedArray],
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     let mut builder = Float64Builder::new();
@@ -3072,7 +3056,7 @@ fn execute_log(
 fn execute_pow(
     left: &TypedArray,
     right: &TypedArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     let mut builder = Float64Builder::new();
@@ -3102,19 +3086,45 @@ fn execute_pow(
     Ok(TypedArray::Float64(builder.finish()))
 }
 
+/// Compiles regex patterns for a batch, reusing the previous compilation while the pattern
+/// text is unchanged. A pattern column is normally one broadcast literal, so this compiles
+/// once per batch instead of once per row.
+#[derive(Default)]
+struct RegexCache {
+    entry: Option<(String, Result<Regex, regex::Error>)>,
+}
+
+impl RegexCache {
+    fn compile(&mut self, pattern: &str) -> &Result<Regex, regex::Error> {
+        if self
+            .entry
+            .as_ref()
+            .is_none_or(|(cached, _)| cached != pattern)
+        {
+            self.entry = Some((pattern.to_string(), Regex::new(pattern)));
+        }
+        &self
+            .entry
+            .as_ref()
+            .expect("regex cache entry was just populated")
+            .1
+    }
+}
+
 fn execute_regexp_like(
     input: &StringArray,
     pattern: &StringArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> BooleanArray {
-    let mut builder = BooleanBuilder::new();
+    let mut builder = BooleanBuilder::with_capacity(input.len());
+    let mut cache = RegexCache::default();
     for row in 0..input.len() {
         if input.is_null(row) || pattern.is_null(row) {
             builder.append_null();
             continue;
         }
-        match Regex::new(pattern.value(row)) {
+        match cache.compile(pattern.value(row)) {
             Ok(regex) => builder.append_value(regex.is_match(input.value(row))),
             Err(error) => {
                 builder.append_null();
@@ -3135,16 +3145,17 @@ fn execute_regexp_replace(
     input: &StringArray,
     pattern: &StringArray,
     replacement: &StringArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> StringArray {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
+    let mut cache = RegexCache::default();
     for row in 0..input.len() {
         if input.is_null(row) || pattern.is_null(row) || replacement.is_null(row) {
             builder.append_null();
             continue;
         }
-        match Regex::new(pattern.value(row)) {
+        match cache.compile(pattern.value(row)) {
             Ok(regex) => {
                 let value = regex
                     .replace_all(input.value(row), replacement.value(row))
@@ -3169,16 +3180,17 @@ fn execute_regexp_replace(
 fn execute_regexp_substr(
     input: &StringArray,
     pattern: &StringArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> StringArray {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
+    let mut cache = RegexCache::default();
     for row in 0..input.len() {
         if input.is_null(row) || pattern.is_null(row) {
             builder.append_null();
             continue;
         }
-        match Regex::new(pattern.value(row)) {
+        match cache.compile(pattern.value(row)) {
             Ok(regex) => match regex.find(input.value(row)) {
                 Some(matched) => builder.append_value(matched.as_str()),
                 None => builder.append_null(),
@@ -3481,7 +3493,7 @@ enum CastScalar {
 fn cast_typed_array(
     input: TypedArray,
     target: RegisterType,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     if input.data_type() == target.data_type() {
@@ -3520,10 +3532,10 @@ fn cast_requires_custom_semantics(input: &TypedArray, target: RegisterType) -> b
 fn annotate_cast_failures(
     input: &TypedArray,
     output: &TypedArray,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) {
-    for row in 0..row_errors.len() {
+    for row in 0..row_errors.row_count() {
         if !typed_array_is_null(input, row) && typed_array_is_null(output, row) {
             push_error(
                 row_errors,
@@ -3539,7 +3551,7 @@ fn annotate_cast_failures(
 fn cast_typed_array_fallback(
     input: TypedArray,
     target: RegisterType,
-    row_errors: &mut [Vec<SideError>],
+    row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     if input.data_type() == target.data_type() {
@@ -3856,17 +3868,8 @@ fn filter_columns(
         .collect()
 }
 
-fn filter_errors(errors: &[Vec<SideError>], predicate: &BooleanArray) -> Vec<Vec<SideError>> {
-    errors
-        .iter()
-        .enumerate()
-        .filter(|(row, _)| row_selected(predicate, *row))
-        .map(|(_, errors)| errors.clone())
-        .collect()
-}
-
 fn filter_boolean(values: &BooleanArray, predicate: &BooleanArray) -> BooleanArray {
-    let mut builder = BooleanBuilder::new();
+    let mut builder = BooleanBuilder::with_capacity(values.len());
     for row in 0..values.len() {
         if row_selected(predicate, row) {
             if values.is_null(row) {
@@ -3891,7 +3894,7 @@ fn row_selected(predicate: &BooleanArray, row: usize) -> bool {
     !predicate.is_null(row) && predicate.value(row)
 }
 
-fn compare_values<T: PartialOrd + PartialEq>(left: T, right: T, op: BinaryOp) -> bool {
+fn compare_floats<T: PartialOrd + PartialEq>(left: T, right: T, op: BinaryOp) -> bool {
     match op {
         BinaryOp::Eq => left == right,
         BinaryOp::NotEq => left != right,
@@ -3903,18 +3906,15 @@ fn compare_values<T: PartialOrd + PartialEq>(left: T, right: T, op: BinaryOp) ->
     }
 }
 
-fn push_error(
-    row_errors: &mut [Vec<SideError>],
-    row: usize,
-    code: ErrorCode,
-    message: &str,
-    span: Span,
-) {
-    row_errors[row].push(SideError {
-        code,
-        message: message.to_string(),
-        span,
-    });
+fn push_error(row_errors: &mut RowErrors, row: usize, code: ErrorCode, message: &str, span: Span) {
+    row_errors.push(
+        row,
+        SideError {
+            code,
+            message: message.to_string(),
+            span,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -4104,10 +4104,10 @@ mod tests {
         assert!(div.is_null(1));
         assert_eq!(parsed.value(0), 12);
         assert!(parsed.is_null(1));
-        assert!(output.errors()[0].is_empty());
-        assert_eq!(output.errors()[1].len(), 2);
-        assert_eq!(output.errors()[1][0].span, div_span);
-        assert_eq!(output.errors()[1][1].span, cast_span);
+        assert!(output.errors().row(0).is_empty());
+        assert_eq!(output.errors().row(1).len(), 2);
+        assert_eq!(output.errors().row(1)[0].span, div_span);
+        assert_eq!(output.errors().row(1)[1].span, cast_span);
     }
 
     #[test]
@@ -4148,11 +4148,11 @@ mod tests {
         assert!(result.is_null(1));
         assert_eq!(result.value(2), 5);
         assert_eq!(result.value(3), 0);
-        assert!(output.errors()[0].is_empty());
-        assert_eq!(output.errors()[1].len(), 1);
-        assert_eq!(output.errors()[1][0].code, ErrorCode::DivisionByZero);
-        assert!(output.errors()[2].is_empty());
-        assert!(output.errors()[3].is_empty());
+        assert!(output.errors().row(0).is_empty());
+        assert_eq!(output.errors().row(1).len(), 1);
+        assert_eq!(output.errors().row(1)[0].code, ErrorCode::DivisionByZero);
+        assert!(output.errors().row(2).is_empty());
+        assert!(output.errors().row(3).is_empty());
     }
 
     #[test]
@@ -4471,8 +4471,8 @@ mod tests {
         assert!(neg.is_null(1));
         assert!(lt.value(0));
         assert!(!lt.value(1));
-        assert_eq!(output.errors()[1].len(), 1);
-        assert_eq!(output.errors()[1][0].code, ErrorCode::Overflow);
+        assert_eq!(output.errors().row(1).len(), 1);
+        assert_eq!(output.errors().row(1)[0].code, ErrorCode::Overflow);
     }
 
     #[test]
@@ -4710,8 +4710,8 @@ mod tests {
         assert!(b_from_s.is_null(1));
         assert!(f_from_s.is_null(0));
         assert!(f_from_s.value(1).is_nan());
-        assert_eq!(output.errors()[0].len(), 1);
-        assert_eq!(output.errors()[1].len(), 1);
+        assert_eq!(output.errors().row(0).len(), 1);
+        assert_eq!(output.errors().row(1).len(), 1);
     }
 
     #[test]
@@ -4804,7 +4804,7 @@ mod tests {
         assert!(ends.value(0));
         assert!(ends.value(1));
         assert!(ends.is_null(2));
-        assert!(output.errors().iter().all(Vec::is_empty));
+        assert!(output.errors().is_error_free());
     }
 
     #[test]
@@ -4859,10 +4859,10 @@ mod tests {
         assert_eq!(float_abs.value(0), 1.5);
         assert_eq!(float_abs.value(1), 2.25);
         assert!(float_abs.is_null(2));
-        assert_eq!(output.errors()[0].len(), 0);
-        assert_eq!(output.errors()[1].len(), 1);
-        assert_eq!(output.errors()[1][0].code, ErrorCode::Overflow);
-        assert_eq!(output.errors()[1][0].span, int_abs_span);
+        assert_eq!(output.errors().row(0).len(), 0);
+        assert_eq!(output.errors().row(1).len(), 1);
+        assert_eq!(output.errors().row(1)[0].code, ErrorCode::Overflow);
+        assert_eq!(output.errors().row(1)[0].span, int_abs_span);
     }
 
     #[test]
@@ -4939,7 +4939,7 @@ mod tests {
         assert_eq!(u64_sum.value(0), 102);
         assert_eq!(f32_sum.value(0), 4.0);
         assert_eq!(f32_text.value(0), "2.5");
-        assert!(output.errors()[0].is_empty());
+        assert!(output.errors().row(0).is_empty());
     }
 
     #[test]
@@ -5025,7 +5025,99 @@ mod tests {
         assert!(!u64_lt.value(1));
         assert!(f32_lte.value(0));
         assert!(!f32_lte.value(1));
-        assert!(output.errors().iter().all(Vec::is_empty));
+        assert!(output.errors().is_error_free());
+    }
+
+    #[test]
+    fn converts_ascii_case_over_sliced_and_multibyte_values() {
+        let input = StringArray::from(vec![
+            Some("skipped"),
+            Some("MiXeD"),
+            None,
+            Some("grüßen-ok"),
+        ]);
+        // A sliced column still points at the full value buffer, so offsets and validity have
+        // to stay aligned with the untouched bytes ahead of the slice.
+        let sliced = input.slice(1, 3);
+
+        let upper = execute_ascii_case(&sliced, u8::to_ascii_uppercase);
+        let lower = execute_ascii_case(&sliced, u8::to_ascii_lowercase);
+
+        assert_eq!(upper.len(), 3);
+        assert_eq!(upper.value(0), "MIXED");
+        assert!(upper.is_null(1));
+        // Case conversion is ASCII-only, so the multi-byte characters pass through unchanged.
+        assert_eq!(upper.value(2), "GRüßEN-OK");
+        assert_eq!(lower.value(0), "mixed");
+        assert!(lower.is_null(1));
+        assert_eq!(lower.value(2), "grüßen-ok");
+    }
+
+    #[test]
+    fn compares_nan_floats_with_ieee_semantics() {
+        let parsed = parse_program(
+            "SET input.eq = input.left = input.right, input.neq = input.left != input.right, \
+             input.gt = input.left > input.right, input.lt = input.left < input.right;",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("left", DataType::Float64, true),
+            Field::new("right", DataType::Float64, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("eq", DataType::Boolean, true),
+                Field::new("neq", DataType::Boolean, true),
+                Field::new("gt", DataType::Boolean, true),
+                Field::new("lt", DataType::Boolean, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Float64(Float64Array::from(vec![
+                    Some(f64::NAN),
+                    Some(f64::NAN),
+                    Some(1.0),
+                ])),
+                TypedArray::Float64(Float64Array::from(vec![
+                    Some(f64::NAN),
+                    Some(1.0),
+                    Some(1.0),
+                ])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+        let TypedArray::Boolean(eq) = output_column(&output, "eq") else {
+            panic!("eq must be Boolean");
+        };
+        let TypedArray::Boolean(neq) = output_column(&output, "neq") else {
+            panic!("neq must be Boolean");
+        };
+        let TypedArray::Boolean(gt) = output_column(&output, "gt") else {
+            panic!("gt must be Boolean");
+        };
+        let TypedArray::Boolean(lt) = output_column(&output, "lt") else {
+            panic!("lt must be Boolean");
+        };
+
+        // NaN is unordered against every value including itself, so only `!=` holds.
+        assert!(!eq.value(0));
+        assert!(neq.value(0));
+        assert!(!gt.value(0));
+        assert!(!lt.value(0));
+        assert!(!eq.value(1));
+        assert!(neq.value(1));
+        assert!(!gt.value(1));
+        assert!(!lt.value(1));
+        assert!(eq.value(2));
+        assert!(!neq.value(2));
+        assert!(output.errors().is_error_free());
     }
 
     #[test]
@@ -5092,7 +5184,7 @@ mod tests {
         assert_eq!(occurred_text.value(0), "2026-04-07T12:34:56+00:00");
         assert_eq!(occurred_roundtrip.value(0), expected_occured_nanos);
         assert_eq!(occurred_nanos.value(0), expected_occured_nanos);
-        assert!(output.errors()[0].is_empty());
+        assert!(output.errors().row(0).is_empty());
     }
 
     #[test]
@@ -5346,7 +5438,7 @@ mod tests {
         assert!(regex_ok.value(0));
         assert_eq!(regex_replaced.value(0), "XX");
         assert_eq!(regex_piece.value(0), "hello");
-        assert!(output.errors()[0].is_empty());
+        assert!(output.errors().row(0).is_empty());
     }
 
     #[test]
@@ -5473,7 +5565,7 @@ mod tests {
         assert_eq!(round_value.value(0), 2.0);
         assert_eq!(sqrt_value.value(0), 3.0);
         assert!((tan_value.value(0) - 0.5f64.tan()).abs() < 1e-12);
-        assert!(output.errors()[0].is_empty());
+        assert!(output.errors().row(0).is_empty());
     }
 
     #[test]
@@ -5565,6 +5657,7 @@ mod tests {
             ],
         )
         .expect("batch must build");
+        let compiled = triomphe::Arc::new(compiled);
         let (release_tx, release_rx) = mpsc::channel();
         let context = ExecutionContext {
             now: Timestamp::from_unix_nanos(1),

@@ -4092,7 +4092,7 @@ impl Runtime {
             Some(&uninitialized),
         )?;
         let result = execute_program_with_selection_in_context(
-            program.compiled.as_ref(),
+            &program.compiled,
             &batch,
             &VmExecutionContext {
                 now: execution_now,
@@ -4110,7 +4110,7 @@ impl Runtime {
                 result.batch.row_count()
             ));
         }
-        if let Some(side_error) = result.batch.errors()[0].first() {
+        if let Some(side_error) = result.batch.errors().row(0).first() {
             return Err(format!(
                 "message-error SET failed with {}: {} at {}",
                 side_error.code.as_str(),
@@ -10473,7 +10473,7 @@ impl Runtime {
         let mut success_input_rows = Vec::new();
         let mut errors = Vec::new();
         for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
-            if let Some(side_error) = executed.batch.errors()[output_row].first() {
+            if let Some(side_error) = executed.batch.errors().row(output_row).first() {
                 let partial_output = vm_partial_output_row_to_runtime_record(
                     &executed.batch,
                     output_row,

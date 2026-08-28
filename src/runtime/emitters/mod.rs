@@ -1300,7 +1300,7 @@ async fn sql_mapped_batch_values(
     let row_count = output.row_count();
     let mut rows = Vec::with_capacity(row_count);
     for row in 0..row_count {
-        if let Some(side_error) = output.errors()[row].first() {
+        if let Some(side_error) = output.errors().row(row).first() {
             rows.push(Err(program.structured_side_error(
                 format!(
                     "{} VALUES side error {}: {} at {}",
@@ -1364,7 +1364,7 @@ async fn execute_sql_values_program(
     )
     .map_err(|error| Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error))?;
     let result = execute_program_with_selection_in_context(
-        program.program.as_ref(),
+        &program.program,
         &input,
         &VmExecutionContext {
             now: execution_now,
