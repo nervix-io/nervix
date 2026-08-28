@@ -439,6 +439,7 @@ impl Runtime {
             schedule_publication_faults: hooks.schedule_publication_faults,
             #[cfg(feature = "testing")]
             transaction_binding_drops: hooks.transaction_binding_drops,
+            #[cfg(feature = "testing")]
             transaction_commit_pauses: hooks.transaction_commit_pauses,
             #[cfg(feature = "testing")]
             entity_gate_pauses: hooks.entity_gate_pauses,
