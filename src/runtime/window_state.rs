@@ -18,6 +18,7 @@ pub(super) struct WindowEntrySnapshot {
     pub(super) timestamp: Timestamp,
     pub(super) key: Option<Vec<nervix_models::RemoteRuntimeField>>,
     pub(super) record: nervix_models::RemoteRuntimeRecord,
+    pub(super) aggregate_inputs: Vec<Option<nervix_models::RemoteRuntimeValue>>,
 }
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -133,18 +134,21 @@ impl ReplicatedWindowProcessorState {
     pub(super) fn restore_state(
         &self,
         program: &WindowAggregateProgram,
+        input_schema: &crate::runtime_schema::CompiledSchema,
     ) -> Result<WindowProcessorState, String> {
         let Some(snapshot) = self.snapshot.lock().clone() else {
             return Ok(WindowProcessorState::new(program));
         };
-        WindowProcessorState::from_snapshot(program, snapshot)
+        WindowProcessorState::from_snapshot(program, input_schema, snapshot)
     }
 
     pub(super) fn replace_state(
         &self,
         state: &WindowProcessorState,
     ) -> Result<(u64, Vec<u8>), RuntimePersistenceError> {
-        let snapshot = state.to_snapshot();
+        let snapshot = state
+            .to_snapshot()
+            .map_err(RuntimePersistenceError::EncodeState)?;
         let payload = encode_window_processor_snapshot(&snapshot)?;
         *self.snapshot.lock() = Some(snapshot);
         let lsm = self

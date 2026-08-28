@@ -395,13 +395,8 @@ mod tests {
             name: identifier("message_error"),
             fields: Vec::new(),
         }));
-        let batch = RelayRecordBatch::single(
-            schema,
-            None,
-            RuntimeRecord::from_fields([]),
-            AckSet::empty(),
-        )
-        .expect("message-error batch must build");
+        let batch = RelayRecordBatch::single(schema, None, test_runtime_row([]), AckSet::empty())
+            .expect("message-error batch must build");
         let (source_acks, completion) = AckSet::root();
         (
             MessageErrorDelivery {

@@ -21,9 +21,7 @@ use super::{
 };
 use crate::{
     runtime_ack::AckSet,
-    runtime_schema::{
-        CompiledSchema, RuntimeRecord, RuntimeRecordMetadata, RuntimeValue, compile_schema,
-    },
+    runtime_schema::{CompiledSchema, RuntimeRecordMetadata, RuntimeValue, compile_schema},
 };
 
 /// The externally observable result of one benchmark driver step.
@@ -214,14 +212,23 @@ fn benchmark_schema() -> triomphe::Arc<CompiledSchema> {
 
 fn benchmark_batch() -> RelayRecordBatch {
     let watermark = Timestamp::from_unix_nanos(1);
-    RelayRecordBatch::single(
-        benchmark_schema(),
-        None,
-        RuntimeRecord::from_fields_with_metadata(
-            [("value".to_string(), RuntimeValue::I64(1))],
-            RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
-        ),
-        AckSet::empty(),
-    )
-    .expect("benchmark batch must build")
+    let schema = benchmark_schema();
+    let mut builder = schema.batch_builder(1);
+    builder
+        .append(Some(&RuntimeValue::I64(1)))
+        .expect("benchmark value must match its schema");
+    builder
+        .finish_row()
+        .expect("benchmark row must be complete");
+    let record = builder
+        .finish()
+        .and_then(|batch| {
+            batch.runtime_row(
+                0,
+                RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
+            )
+        })
+        .expect("benchmark Arrow row must build");
+    RelayRecordBatch::single(schema, None, record, AckSet::empty())
+        .expect("benchmark batch must build")
 }

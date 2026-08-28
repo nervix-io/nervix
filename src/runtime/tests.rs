@@ -66,11 +66,71 @@ use crate::{
     metrics::RuntimeMetrics,
     resource::ResourceStore,
     runtime_ack::{AckOutcome, AckSet},
-    runtime_schema::{RuntimeRecord, RuntimeRecordMetadata, RuntimeValue, compile_schema},
+    runtime_schema::{
+        RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue, compile_schema,
+        test_runtime_row,
+    },
 };
 
 fn identifier(raw: &str) -> Identifier {
     Identifier::parse(raw).expect("valid identifier")
+}
+
+fn row_value(row: &RuntimeRow, field: &str) -> Option<RuntimeValue> {
+    row.value(field).expect("Arrow row value must be readable")
+}
+
+fn batch_value(batch: &RuntimeRecordBatch, field: &str) -> Option<RuntimeValue> {
+    assert_eq!(batch.batch().num_rows(), 1, "expected one Arrow row");
+    batch
+        .value(0, field)
+        .expect("Arrow batch value must be readable")
+}
+
+fn vm_input_from_test_rows(
+    rows: &[RuntimeRow],
+    schema: &StdArc<ArrowSchema>,
+) -> Result<super::VmTypedBatch, String> {
+    let batches = rows
+        .iter()
+        .map(RuntimeRow::one_row_batch)
+        .collect::<Vec<_>>();
+    let carrier = RuntimeRecordBatch::concat(&batches.iter().collect::<Vec<_>>())?;
+    let keys = vec![None; rows.len()];
+    let side_inputs = HashMap::default();
+    let lookup_columns = HashMap::default();
+    super::project_vm_input_batch(
+        schema,
+        &super::VmInputProjectionSources {
+            carrier: &carrier,
+            namespace_batches: &[],
+            strict_namespaces: &[],
+            keys: &keys,
+            side_inputs: &side_inputs,
+            ingest_metadata: None,
+            lookup_columns: &lookup_columns,
+            uninitialized: None,
+        },
+    )
+}
+
+async fn execute_filter_map_for_test(
+    program: &super::CompiledProgramWithMaterializedInterest,
+    record: RuntimeRow,
+    branch_key: Option<&BranchKey>,
+    metadata: Option<&super::IngestFilterMapMetadata>,
+    now: Timestamp,
+) -> Result<Option<RuntimeRow>, String> {
+    super::execute_filter_map_on_record(
+        &identifier("test_filter_map"),
+        program,
+        record,
+        branch_key,
+        metadata,
+        &HashMap::default(),
+        now,
+    )
+    .await
 }
 
 #[test]
@@ -311,6 +371,19 @@ fn compile_window_aggregate_for_test(
         None,
     )
     .expect("window aggregate should compile")
+}
+
+fn window_inputs(
+    aggregate: &nervix_nspl::window_processor::aggregate::WindowAggregateProgram,
+    value: RuntimeValue,
+) -> Vec<super::WindowAggregateInput> {
+    aggregate
+        .demands()
+        .iter()
+        .map(|_| super::WindowAggregateInput {
+            value: Some(value.clone()),
+        })
+        .collect()
 }
 
 fn branch_key(fields: impl IntoIterator<Item = (Identifier, RuntimeValue)>) -> Option<BranchKey> {
@@ -782,30 +855,34 @@ async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array(
                 Timestamp::now(),
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
+                    record: test_runtime_row([(
                         "latency".to_string(),
                         RuntimeValue::F64(OrderedFloat(value)),
                     )]),
                     acks: AckSet::empty(),
                 },
+                window_inputs(&aggregate, RuntimeValue::F64(OrderedFloat(value))),
             )
             .expect("aggregate state should accept message");
     }
 
     let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::F64, &output_schema);
-    let record = evaluate_window_aggregate(&compiled, &state)
+    let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
         .await
         .expect("aggregate should evaluate");
 
-    assert_eq!(record.value("count"), Some(&RuntimeValue::I64(3)));
-    assert_eq!(record.value("adjusted_count"), Some(&RuntimeValue::I64(5)));
+    assert_eq!(batch_value(&record, "count"), Some(RuntimeValue::I64(3)));
     assert_eq!(
-        record.value("p50"),
-        Some(&RuntimeValue::F64(OrderedFloat(25.0)))
+        batch_value(&record, "adjusted_count"),
+        Some(RuntimeValue::I64(5))
     );
     assert_eq!(
-        record.value("latencies"),
-        Some(&RuntimeValue::Array(vec![
+        batch_value(&record, "p50"),
+        Some(RuntimeValue::F64(OrderedFloat(25.0)))
+    );
+    assert_eq!(
+        batch_value(&record, "latencies"),
+        Some(RuntimeValue::Array(vec![
             RuntimeValue::F64(OrderedFloat(25.0)),
             RuntimeValue::F64(OrderedFloat(35.0)),
         ]))
@@ -857,32 +934,30 @@ async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
                 Timestamp::now(),
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
-                        "latency".to_string(),
-                        RuntimeValue::I64(value),
-                    )]),
+                    record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(value))]),
                     acks: AckSet::empty(),
                 },
+                window_inputs(&aggregate, RuntimeValue::I64(value)),
             )
             .expect("aggregate state should accept message");
     }
 
     let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-    let record = evaluate_window_aggregate(&compiled, &state)
+    let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
         .await
         .expect("aggregate should evaluate");
 
     assert_eq!(
-        record.value("p50"),
-        Some(&RuntimeValue::F64(OrderedFloat(25.0)))
+        batch_value(&record, "p50"),
+        Some(RuntimeValue::F64(OrderedFloat(25.0)))
     );
     assert_eq!(
-        record.value("p90"),
-        Some(&RuntimeValue::F64(OrderedFloat(35.0)))
+        batch_value(&record, "p90"),
+        Some(RuntimeValue::F64(OrderedFloat(35.0)))
     );
     assert_eq!(
-        record.value("p50_other_range"),
-        Some(&RuntimeValue::F64(OrderedFloat(30.0)))
+        batch_value(&record, "p50_other_range"),
+        Some(RuntimeValue::F64(OrderedFloat(30.0)))
     );
 }
 
@@ -897,12 +972,13 @@ fn window_advance_removes_step_messages() {
                 Timestamp::now(),
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
+                    record: test_runtime_row([(
                         "latency".to_string(),
                         RuntimeValue::I64(sequence as i64),
                     )]),
                     acks: AckSet::empty(),
                 },
+                window_inputs(&aggregate, RuntimeValue::I64(sequence as i64)),
             )
             .expect("aggregate state should accept message");
     }
@@ -945,12 +1021,10 @@ async fn linear_histogram_zero_delay_removes_step_values_immediately() {
                 timestamp,
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
-                        "latency".to_string(),
-                        RuntimeValue::I64(value),
-                    )]),
+                    record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(value))]),
                     acks: AckSet::empty(),
                 },
+                window_inputs(&aggregate, RuntimeValue::I64(value)),
             )
             .expect("aggregate state should accept message");
     }
@@ -964,13 +1038,13 @@ async fn linear_histogram_zero_delay_removes_step_values_immediately() {
     )
     .expect("window should advance");
     let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-    let record = evaluate_window_aggregate(&compiled, &state)
+    let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
         .await
         .expect("aggregate should evaluate");
 
     assert_eq!(
-        record.value("p0"),
-        Some(&RuntimeValue::F64(OrderedFloat(95.0)))
+        batch_value(&record, "p0"),
+        Some(RuntimeValue::F64(OrderedFloat(95.0)))
     );
 }
 
@@ -999,12 +1073,10 @@ async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
                 timestamp,
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
-                        "latency".to_string(),
-                        RuntimeValue::I64(value),
-                    )]),
+                    record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(value))]),
                     acks: AckSet::empty(),
                 },
+                window_inputs(&aggregate, RuntimeValue::I64(value)),
             )
             .expect("aggregate state should accept message");
     }
@@ -1018,12 +1090,12 @@ async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
     )
     .expect("window should advance");
     let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-    let retained = evaluate_window_aggregate(&compiled, &state)
+    let retained = evaluate_window_aggregate(&compiled, &state, &output_schema)
         .await
         .expect("aggregate should evaluate while delay retains value");
     assert_eq!(
-        retained.value("p0"),
-        Some(&RuntimeValue::F64(OrderedFloat(15.0)))
+        batch_value(&retained, "p0"),
+        Some(RuntimeValue::F64(OrderedFloat(15.0)))
     );
 
     state
@@ -1032,20 +1104,18 @@ async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
             Timestamp::from_unix_nanos(2_000_000_000),
             RelayMessage {
                 key: None,
-                record: RuntimeRecord::from_fields([(
-                    "latency".to_string(),
-                    RuntimeValue::I64(90),
-                )]),
+                record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(90))]),
                 acks: AckSet::empty(),
             },
+            window_inputs(&aggregate, RuntimeValue::I64(90)),
         )
         .expect("aggregate state should accept message before delay expires");
-    let still_retained = evaluate_window_aggregate(&compiled, &state)
+    let still_retained = evaluate_window_aggregate(&compiled, &state, &output_schema)
         .await
         .expect("aggregate should evaluate before delay expires");
     assert_eq!(
-        still_retained.value("p0"),
-        Some(&RuntimeValue::F64(OrderedFloat(15.0)))
+        batch_value(&still_retained, "p0"),
+        Some(RuntimeValue::F64(OrderedFloat(15.0)))
     );
 
     state
@@ -1054,20 +1124,18 @@ async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
             Timestamp::from_unix_nanos(4_000_000_000),
             RelayMessage {
                 key: None,
-                record: RuntimeRecord::from_fields([(
-                    "latency".to_string(),
-                    RuntimeValue::I64(90),
-                )]),
+                record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(90))]),
                 acks: AckSet::empty(),
             },
+            window_inputs(&aggregate, RuntimeValue::I64(90)),
         )
         .expect("aggregate state should accept message after delay expires");
-    let expired = evaluate_window_aggregate(&compiled, &state)
+    let expired = evaluate_window_aggregate(&compiled, &state, &output_schema)
         .await
         .expect("aggregate should evaluate after delay expires");
     assert_eq!(
-        expired.value("p0"),
-        Some(&RuntimeValue::F64(OrderedFloat(95.0)))
+        batch_value(&expired, "p0"),
+        Some(RuntimeValue::F64(OrderedFloat(95.0)))
     );
 }
 
@@ -1096,12 +1164,10 @@ async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() 
                 timestamp,
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
-                        "latency".to_string(),
-                        RuntimeValue::I64(value),
-                    )]),
+                    record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(value))]),
                     acks: AckSet::empty(),
                 },
+                window_inputs(&aggregate, RuntimeValue::I64(value)),
             )
             .expect("aggregate state should accept message");
     }
@@ -1132,12 +1198,12 @@ async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() 
     assert_eq!(state.next_timeout_deadline(), None);
 
     let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-    let record = evaluate_window_aggregate(&compiled, &state)
+    let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
         .await
         .expect("aggregate should evaluate after timeout purge");
     assert_eq!(
-        record.value("p0"),
-        Some(&RuntimeValue::F64(OrderedFloat(95.0)))
+        batch_value(&record, "p0"),
+        Some(RuntimeValue::F64(OrderedFloat(95.0)))
     );
 }
 
@@ -1191,12 +1257,10 @@ async fn window_aggregate_state_updates_first_last_min_max_and_sum() {
                 Timestamp::now(),
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
-                        "latency".to_string(),
-                        RuntimeValue::I64(value),
-                    )]),
+                    record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(value))]),
                     acks: AckSet::empty(),
                 },
+                window_inputs(&aggregate, RuntimeValue::I64(value)),
             )
             .expect("aggregate state should accept message");
     }
@@ -1207,34 +1271,64 @@ async fn window_aggregate_state_updates_first_last_min_max_and_sum() {
         "FIRST/LAST and MIN/MAX should each share one physical structure"
     );
     let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-    let record = evaluate_window_aggregate(&compiled, &state)
+    let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
         .await
         .expect("aggregate should evaluate");
 
-    assert_eq!(record.value("first_latency"), Some(&RuntimeValue::I64(30)));
-    assert_eq!(record.value("last_latency"), Some(&RuntimeValue::I64(20)));
-    assert_eq!(record.value("min_latency"), Some(&RuntimeValue::I64(10)));
-    assert_eq!(record.value("max_latency"), Some(&RuntimeValue::I64(30)));
-    assert_eq!(record.value("total_latency"), Some(&RuntimeValue::I64(60)));
+    assert_eq!(
+        batch_value(&record, "first_latency"),
+        Some(RuntimeValue::I64(30))
+    );
+    assert_eq!(
+        batch_value(&record, "last_latency"),
+        Some(RuntimeValue::I64(20))
+    );
+    assert_eq!(
+        batch_value(&record, "min_latency"),
+        Some(RuntimeValue::I64(10))
+    );
+    assert_eq!(
+        batch_value(&record, "max_latency"),
+        Some(RuntimeValue::I64(30))
+    );
+    assert_eq!(
+        batch_value(&record, "total_latency"),
+        Some(RuntimeValue::I64(60))
+    );
 
     advance_window(&mut state, &aggregate, Some(1), None, Timestamp::now())
         .expect("window should advance");
-    let record = evaluate_window_aggregate(&compiled, &state)
+    let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
         .await
         .expect("aggregate should evaluate after removal");
 
-    assert_eq!(record.value("first_latency"), Some(&RuntimeValue::I64(10)));
-    assert_eq!(record.value("last_latency"), Some(&RuntimeValue::I64(20)));
-    assert_eq!(record.value("min_latency"), Some(&RuntimeValue::I64(10)));
-    assert_eq!(record.value("max_latency"), Some(&RuntimeValue::I64(20)));
-    assert_eq!(record.value("total_latency"), Some(&RuntimeValue::I64(30)));
+    assert_eq!(
+        batch_value(&record, "first_latency"),
+        Some(RuntimeValue::I64(10))
+    );
+    assert_eq!(
+        batch_value(&record, "last_latency"),
+        Some(RuntimeValue::I64(20))
+    );
+    assert_eq!(
+        batch_value(&record, "min_latency"),
+        Some(RuntimeValue::I64(10))
+    );
+    assert_eq!(
+        batch_value(&record, "max_latency"),
+        Some(RuntimeValue::I64(20))
+    );
+    assert_eq!(
+        batch_value(&record, "total_latency"),
+        Some(RuntimeValue::I64(30))
+    );
 }
 
 #[test]
 fn window_message_timestamp_uses_low_watermark() {
     let message = RelayMessage {
         key: None,
-        record: RuntimeRecord::from_fields([]).with_metadata(
+        record: test_runtime_row([]).with_metadata(
             RuntimeRecordMetadata::from_ingested_at_watermarks(
                 Timestamp::from_unix_nanos(10),
                 Timestamp::from_unix_nanos(20),
@@ -1263,12 +1357,13 @@ fn window_output_metadata_uses_window_low_and_emit_high_watermark() {
                 timestamp,
                 RelayMessage {
                     key: None,
-                    record: RuntimeRecord::from_fields([(
+                    record: test_runtime_row([(
                         "latency".to_string(),
                         RuntimeValue::I64(timestamp.unix_nanos()),
                     )]),
                     acks: AckSet::empty(),
                 },
+                window_inputs(&aggregate, RuntimeValue::I64(timestamp.unix_nanos())),
             )
             .expect("aggregate state should accept message");
     }
@@ -1326,23 +1421,26 @@ async fn window_processor_state_snapshot_roundtrips_entries_and_accumulators() {
                 timestamp,
                 RelayMessage {
                     key: string_branch_key("tenant", "acme"),
-                    record: RuntimeRecord::from_fields([(
-                        "latency".to_string(),
-                        RuntimeValue::I64(value),
-                    )])
-                    .with_metadata(
-                        RuntimeRecordMetadata::from_ingested_at_watermarks(timestamp, timestamp),
-                    ),
+                    record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(value))])
+                        .with_metadata(RuntimeRecordMetadata::from_ingested_at_watermarks(
+                            timestamp, timestamp,
+                        )),
                     acks: AckSet::empty(),
                 },
+                window_inputs(&aggregate, RuntimeValue::I64(value)),
             )
             .expect("window should accept message");
     }
 
-    let restored = WindowProcessorState::from_snapshot(&aggregate, state.to_snapshot())
-        .expect("snapshot should restore");
+    let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
+    let restored = WindowProcessorState::from_snapshot(
+        &aggregate,
+        input_schema.as_ref(),
+        state.to_snapshot().expect("snapshot should encode"),
+    )
+    .expect("snapshot should restore");
     let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-    let record = evaluate_window_aggregate(&compiled, &restored)
+    let record = evaluate_window_aggregate(&compiled, &restored, &output_schema)
         .await
         .expect("restored aggregate should evaluate");
 
@@ -1351,11 +1449,14 @@ async fn window_processor_state_snapshot_roundtrips_entries_and_accumulators() {
         key_label(&restored.entries.front().unwrap().message.key),
         r#"{"tenant":"acme"}"#
     );
-    assert_eq!(record.value("count"), Some(&RuntimeValue::I64(2)));
-    assert_eq!(record.value("first_latency"), Some(&RuntimeValue::I64(10)));
+    assert_eq!(batch_value(&record, "count"), Some(RuntimeValue::I64(2)));
     assert_eq!(
-        record.value("p50"),
-        Some(&RuntimeValue::F64(OrderedFloat(35.0)))
+        batch_value(&record, "first_latency"),
+        Some(RuntimeValue::I64(10))
+    );
+    assert_eq!(
+        batch_value(&record, "p50"),
+        Some(RuntimeValue::F64(OrderedFloat(35.0)))
     );
 }
 
@@ -1407,7 +1508,7 @@ fn test_optional_schema(fields: &[(&str, ParseAsType, bool)]) -> Arc<super::Comp
 
 fn wasm_input_for_records(
     schema: &Arc<super::CompiledSchema>,
-    records: Vec<RuntimeRecord>,
+    records: Vec<RuntimeRow>,
 ) -> (WasmEnvelope, super::WasmAckMap) {
     let messages = records
         .into_iter()
@@ -1430,7 +1531,7 @@ fn wasm_input_for_values(
 ) -> (WasmEnvelope, super::WasmAckMap) {
     let records = values
         .iter()
-        .map(|value| RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I32(*value))]))
+        .map(|value| test_runtime_row([("value".to_string(), RuntimeValue::I32(*value))]))
         .collect();
     wasm_input_for_records(schema, records)
 }
@@ -1477,6 +1578,7 @@ fn validate_wasm_test_output_groups(
                 pending: Vec::new(),
                 next_flush: None,
                 compiled_program: None,
+                compiled_branch_program: None,
             })
             .collect(),
     };
@@ -1731,7 +1833,7 @@ fn wasm_identity_references_support_every_internal_arrow_field_kind() {
             },
         ),
     ]);
-    let record = RuntimeRecord::from_fields([
+    let record = test_runtime_row([
         ("u8".to_string(), RuntimeValue::U8(1)),
         ("i8".to_string(), RuntimeValue::I8(-2)),
         ("u16".to_string(), RuntimeValue::U16(3)),
@@ -3675,10 +3777,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
             schema.clone(),
             vec![RelayMessage {
                 key: string_branch_key("tenant", tenant),
-                record: RuntimeRecord::from_fields([(
-                    "user_id".to_string(),
-                    RuntimeValue::I64(user_id),
-                )]),
+                record: test_runtime_row([("user_id".to_string(), RuntimeValue::I64(user_id))]),
                 acks: AckSet::empty(),
             }],
         )
@@ -3789,7 +3888,7 @@ fn quiesce_test_batch() -> super::RelayRecordBatch {
     super::RelayRecordBatch::single(
         test_schema(&[("value", ParseAsType::I64)]),
         None,
-        RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I64(1))]),
+        test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]),
         AckSet::empty(),
     )
     .expect("quiesce test batch should build")
@@ -3919,7 +4018,7 @@ async fn processor_handoff_drains_ready_batches_from_every_input() {
         super::RelayRecordBatch::single(
             schema.clone(),
             key,
-            RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I64(value))]),
+            test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]),
             AckSet::empty(),
         )
         .expect("processor input batch should build")
@@ -4792,7 +4891,7 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     let batch = super::RelayRecordBatch::single(
         schema,
         string_branch_key("customer", "42"),
-        RuntimeRecord::from_fields([(
+        test_runtime_row([(
             "customer_id".to_string(),
             RuntimeValue::String("42".to_string()),
         )]),
@@ -4845,7 +4944,7 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
     let batch = super::RelayRecordBatch::single(
         schema,
         u32_branch_key("user_id", 52),
-        RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(52))]),
+        test_runtime_row([("user_id".to_string(), RuntimeValue::U32(52))]),
         acks.clone(),
     )
     .expect("batch should build");
@@ -4889,7 +4988,7 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
     let batch = super::RelayRecordBatch::single(
         schema,
         u32_branch_key("user_id", 52),
-        RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(52))]),
+        test_runtime_row([("user_id".to_string(), RuntimeValue::U32(52))]),
         acks.clone(),
     )
     .expect("batch should build");
@@ -4958,7 +5057,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
     let batch = super::RelayRecordBatch::single(
         schema,
         u32_branch_key("user_id", 52),
-        RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(52))]),
+        test_runtime_row([("user_id".to_string(), RuntimeValue::U32(52))]),
         acks.clone(),
     )
     .expect("batch should build");
@@ -5080,6 +5179,7 @@ fn flush_immediate_schedules_100_microsecond_system_timeout() {
         pending: Vec::new(),
         next_flush: None,
         compiled_program: None,
+        compiled_branch_program: None,
     };
 
     assert_eq!(output.schedule_input_flush(now, u64::MAX), Some(false));
@@ -5110,7 +5210,7 @@ fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
     let left = super::RelayRecordBatch::single(
         schema.clone(),
         u32_branch_key("user_id", 42),
-        RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(42))])
+        test_runtime_row([("user_id".to_string(), RuntimeValue::U32(42))])
             .with_ingested_at_watermarks(Timestamp::from_unix_nanos(100)),
         AckSet::empty(),
     )
@@ -5118,7 +5218,7 @@ fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
     let right = super::RelayRecordBatch::single(
         schema,
         u32_branch_key("user_id", 42),
-        RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(43))])
+        test_runtime_row([("user_id".to_string(), RuntimeValue::U32(43))])
             .with_ingested_at_watermarks(Timestamp::from_unix_nanos(200)),
         AckSet::empty(),
     )
@@ -5143,25 +5243,19 @@ fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
 }
 
 #[test]
-fn relay_fanout_shares_arrow_columns_and_materializes_rows_only_on_demand() {
+fn relay_fanout_shares_arrow_columns_and_exposes_row_views() {
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let batch = super::RelayRecordBatch::from_messages(
         schema,
         vec![
             RelayMessage {
                 key: u32_branch_key("user_id", 42),
-                record: RuntimeRecord::from_fields([(
-                    "user_id".to_string(),
-                    RuntimeValue::U32(42),
-                )]),
+                record: test_runtime_row([("user_id".to_string(), RuntimeValue::U32(42))]),
                 acks: AckSet::empty(),
             },
             RelayMessage {
                 key: u32_branch_key("user_id", 42),
-                record: RuntimeRecord::from_fields([(
-                    "user_id".to_string(),
-                    RuntimeValue::U32(43),
-                )]),
+                record: test_runtime_row([("user_id".to_string(), RuntimeValue::U32(43))]),
                 acks: AckSet::empty(),
             },
         ],
@@ -5178,10 +5272,10 @@ fn relay_fanout_shares_arrow_columns_and_materializes_rows_only_on_demand() {
             output.batch.batch().column(0)
         ));
     }
-    let records = fanout[0]
-        .runtime_records()
-        .expect("a node may explicitly materialize local rows");
-    assert_eq!(records[1].value("user_id"), Some(&RuntimeValue::U32(43)));
+    let row = fanout[0]
+        .runtime_row(1)
+        .expect("a node may address an Arrow row view");
+    assert_eq!(row_value(&row, "user_id"), Some(RuntimeValue::U32(43)));
 }
 
 #[tokio::test]
@@ -5235,10 +5329,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
         },
     );
     let batch_ipc = schema
-        .arrow_batch_from_records(&[RuntimeRecord::from_fields([(
-            "user_id".to_string(),
-            RuntimeValue::U32(42),
-        )])])
+        .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(42))]])
         .expect("batch should build")
         .to_arrow_ipc_bytes()
         .expect("batch ipc should serialize");
@@ -5252,7 +5343,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             key: BranchKey::to_remote_key(&key),
             batch_ipc,
             metadata: vec![
-                RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(42))])
+                test_runtime_row([("user_id".to_string(), RuntimeValue::U32(42))])
                     .with_ingested_at_watermarks(Timestamp::from_unix_nanos(42))
                     .metadata()
                     .to_remote(),
@@ -5363,7 +5454,7 @@ async fn materializer_shutdown_drains_every_ready_relay_batch() {
                 super::RelayRecordBatch::single(
                     schema.clone(),
                     key,
-                    RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I64(value))])
+                    test_runtime_row([("value".to_string(), RuntimeValue::I64(value))])
                         .with_ingested_at_watermarks(Timestamp::from_unix_nanos(value)),
                     AckSet::empty(),
                 )
@@ -5468,7 +5559,7 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
 #[test]
 fn runtime_uses_configured_timestamp_field_when_present() {
     let runtime = super::Runtime::new();
-    let record = RuntimeRecord::from_fields([(
+    let record = test_runtime_row([(
         "occurred_at".to_string(),
         RuntimeValue::Datetime(
             chrono::DateTime::parse_from_rfc3339("2026-04-07T12:34:56Z").expect("valid timestamp"),
@@ -5498,8 +5589,8 @@ fn runtime_uses_configured_timestamp_field_when_present() {
 #[test]
 fn runtime_uses_ingested_watermark_for_timestamp_now() {
     let runtime = super::Runtime::new();
-    let record = RuntimeRecord::from_fields([])
-        .with_ingested_at_watermarks(Timestamp::from_unix_nanos(9_876_543));
+    let record =
+        test_runtime_row([]).with_ingested_at_watermarks(Timestamp::from_unix_nanos(9_876_543));
 
     let timestamp = runtime
         .resolve_ingested_record_timestamp(
@@ -5525,8 +5616,7 @@ fn paced_domain_requires_explicit_timestamp_source() {
             &domain("paced"),
             &identifier("ing"),
             None,
-            &RuntimeRecord::from_fields([])
-                .with_ingested_at_watermarks(Timestamp::from_unix_nanos(1)),
+            &test_runtime_row([]).with_ingested_at_watermarks(Timestamp::from_unix_nanos(1)),
         )
         .expect_err("paced domain should require explicit timestamp source");
 
@@ -5744,7 +5834,7 @@ async fn direct_fanout_subscription_uses_configured_buffer_capacity() {
             super::RelayRecordBatch::single(
                 schema.clone(),
                 string_branch_key("branch", "first"),
-                RuntimeRecord::from_fields([]),
+                test_runtime_row([]),
                 AckSet::empty(),
             )
             .expect("first batch should build"),
@@ -5761,7 +5851,7 @@ async fn direct_fanout_subscription_uses_configured_buffer_capacity() {
                     super::RelayRecordBatch::single(
                         schema,
                         string_branch_key("branch", "second"),
-                        RuntimeRecord::from_fields([]),
+                        test_runtime_row([]),
                         AckSet::empty(),
                     )
                     .expect("second batch should build"),
@@ -5827,7 +5917,7 @@ async fn relay_boundary_fanout_resize_preserves_existing_subscription_receiver()
             super::RelayRecordBatch::single(
                 schema,
                 string_branch_key("branch", "after_resize"),
-                RuntimeRecord::from_fields([]),
+                test_runtime_row([]),
                 AckSet::empty(),
             )
             .expect("batch should build"),
@@ -5842,102 +5932,16 @@ async fn relay_boundary_fanout_resize_preserves_existing_subscription_receiver()
     assert_eq!(key_label(&batch.key), r#"{"branch":"after_resize"}"#);
 }
 
-#[test]
-fn resolve_concrete_branch_returns_root_for_empty_branching() {
-    let record = RuntimeRecord::from_fields([
-        (
-            "tenant".to_string(),
-            RuntimeValue::String("acme".to_string()),
-        ),
-        ("user_id".to_string(), RuntimeValue::U32(42)),
-    ]);
-
-    assert_eq!(
-        super::resolve_concrete_branch(&record, &[], &identifier("ing"))
-            .expect("root branch should resolve"),
-        super::ConcreteBranch::Root
-    );
-}
-
-#[test]
-fn resolve_concrete_branch_uses_branch_values() {
-    let record = RuntimeRecord::from_fields([
-        (
-            "tenant".to_string(),
-            RuntimeValue::String("acme".to_string()),
-        ),
-        ("user_id".to_string(), RuntimeValue::U32(42)),
-    ]);
-
-    assert_eq!(
-        super::resolve_concrete_branch(
-            &record,
-            &[identifier("tenant"), identifier("user_id")],
-            &identifier("ing")
-        )
-        .expect("keyed branch should resolve"),
-        super::ConcreteBranch::Key(concrete_branch_key([
-            (
-                identifier("tenant"),
-                RuntimeValue::String("acme".to_string()),
-            ),
-            (identifier("user_id"), RuntimeValue::U32(42)),
-        ]))
-    );
-}
-
-#[test]
-fn empty_branch_assignments_preserve_incoming_key() {
-    let record = RuntimeRecord::from_fields([(
-        "tenant".to_string(),
-        RuntimeValue::String("message-tenant".to_string()),
-    )]);
-    let branch_key = concrete_branch_key([(
-        identifier("tenant"),
-        RuntimeValue::String("branch-tenant".to_string()),
-    )]);
-
-    assert_eq!(
-        super::resolve_concrete_branch_from_assignments(
-            &record,
-            None,
-            Some(&branch_key),
-            &[],
-            &identifier("reingestor"),
-            None,
-        )
-        .expect("preserved branch should resolve"),
-        super::ConcreteBranch::Key(concrete_branch_key([(
-            identifier("tenant"),
-            RuntimeValue::String("branch-tenant".to_string()),
-        )]))
-    );
-}
-
-#[test]
-fn resolve_concrete_branch_errors_when_branch_field_is_missing() {
-    let record = RuntimeRecord::from_fields([(
-        "tenant".to_string(),
-        RuntimeValue::String("acme".to_string()),
-    )]);
-
-    let error =
-        super::resolve_concrete_branch(&record, &[identifier("user_id")], &identifier("ing"))
-            .expect_err("missing branch field should fail");
-
-    assert!(error.contains("branch field 'user_id' is missing"));
-    assert!(error.contains("'ing'"));
-}
-
 #[tokio::test]
 async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
-    let source = RuntimeRecord::from_fields([("input_id".to_string(), RuntimeValue::U32(7))]);
+    let source = test_runtime_row([("input_id".to_string(), RuntimeValue::U32(7))]);
     let message = RelayMessage {
         key: None,
         record: source,
         acks: AckSet::empty(),
     };
-    let partial_output = RuntimeRecord::from_fields([("total".to_string(), RuntimeValue::I64(41))]);
+    let partial_output =
+        test_runtime_row([("total".to_string(), RuntimeValue::I64(41))]).one_row_batch();
     let materialized_state = HashMap::from_iter([(
         "relay_state.profiles.plan".to_string(),
         RuntimeValue::String("pro".to_string()),
@@ -6016,18 +6020,21 @@ async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
     .await
     .expect("message-error SET should execute through the VM");
 
-    assert_eq!(output.value("input_id"), Some(&RuntimeValue::U32(7)));
-    assert_eq!(output.value("attempted"), Some(&RuntimeValue::I64(41)));
+    assert_eq!(row_value(&output, "input_id"), Some(RuntimeValue::U32(7)));
+    assert_eq!(row_value(&output, "attempted"), Some(RuntimeValue::I64(41)));
     assert_eq!(
-        output.value("plan"),
-        Some(&RuntimeValue::String("pro".to_string()))
+        row_value(&output, "plan"),
+        Some(RuntimeValue::String("pro".to_string()))
     );
     assert_eq!(
-        output.value("operation"),
-        Some(&RuntimeValue::String("set".to_string()))
+        row_value(&output, "operation"),
+        Some(RuntimeValue::String("set".to_string()))
     );
-    assert_eq!(output.value("operation_index"), Some(&RuntimeValue::U32(2)));
-    let Some(RuntimeValue::String(digest)) = output.value("message_digest") else {
+    assert_eq!(
+        row_value(&output, "operation_index"),
+        Some(RuntimeValue::U32(2))
+    );
+    let Some(RuntimeValue::String(digest)) = row_value(&output, "message_digest") else {
         panic!("message digest should be a string");
     };
     assert_eq!(digest.len(), 32);
@@ -6063,25 +6070,26 @@ fn message_error_routes_preserve_branch_identity_without_reconstruction() {
 
 #[test]
 fn correlator_runtime_rows_use_only_left_and_right_scopes() {
-    let left = RuntimeRecord::from_fields([
+    let left = test_runtime_row([
         ("id".to_string(), RuntimeValue::U32(1)),
         (
             "relay_state.profiles.status".to_string(),
             RuntimeValue::String("active".to_string()),
         ),
     ]);
-    let right = RuntimeRecord::from_fields([("id".to_string(), RuntimeValue::U32(2))]);
+    let right = test_runtime_row([("id".to_string(), RuntimeValue::U32(2))]);
 
-    let combined = super::correlator_combined_record(&left, &right);
+    let combined = super::correlator_input_row(&left, &right)
+        .expect("correlator inputs should form one Arrow row");
 
-    assert_eq!(combined.value("left.id"), Some(&RuntimeValue::U32(1)));
-    assert_eq!(combined.value("right.id"), Some(&RuntimeValue::U32(2)));
+    assert_eq!(row_value(&combined, "left.id"), Some(RuntimeValue::U32(1)));
+    assert_eq!(row_value(&combined, "right.id"), Some(RuntimeValue::U32(2)));
     assert_eq!(
-        combined.value("relay_state.profiles.status"),
-        Some(&RuntimeValue::String("active".to_string()))
+        row_value(&combined, "left.relay_state.profiles.status"),
+        Some(RuntimeValue::String("active".to_string()))
     );
-    assert_eq!(combined.value("left.relay_state.profiles.status"), None);
-    assert_eq!(combined.value("id"), None);
+    assert_eq!(row_value(&combined, "relay_state.profiles.status"), None);
+    assert_eq!(row_value(&combined, "id"), None);
 }
 
 #[tokio::test]
@@ -6128,20 +6136,20 @@ async fn correlator_output_reads_branch_and_declared_materialized_state() {
     }
     .compile()
     .expect("correlator output should compile with branch and materialized state bindings");
-    let left = RuntimeRecord::from_fields([
-        ("id".to_string(), RuntimeValue::U32(7)),
-        (
-            "relay_state.profiles.status".to_string(),
-            RuntimeValue::String("active".to_string()),
-        ),
-    ]);
-    let right = RuntimeRecord::from_fields([("score".to_string(), RuntimeValue::I64(42))]);
-    let combined = super::correlator_combined_record(&left, &right);
+    let left = test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]);
+    let right = test_runtime_row([("score".to_string(), RuntimeValue::I64(42))]);
+    let combined = super::correlator_input_row(&left, &right)
+        .expect("correlator inputs should form one Arrow row");
+    let materialized_state = HashMap::from_iter([(
+        "relay_state.profiles.status".to_string(),
+        RuntimeValue::String("active".to_string()),
+    )]);
     let message = match super::evaluate_correlator_output_message(
         &identifier("join_profiles"),
         &program,
         string_branch_key("tenant", "acme"),
         combined,
+        &materialized_state,
         AckSet::empty(),
         super::current_timestamp(),
     )
@@ -6153,14 +6161,17 @@ async fn correlator_output_reads_branch_and_declared_materialized_state() {
     };
 
     assert_eq!(
-        message.record.value("tenant"),
-        Some(&RuntimeValue::String("acme".to_string()))
+        row_value(&message.record, "tenant"),
+        Some(RuntimeValue::String("acme".to_string()))
     );
     assert_eq!(
-        message.record.value("status"),
-        Some(&RuntimeValue::String("active".to_string()))
+        row_value(&message.record, "status"),
+        Some(RuntimeValue::String("active".to_string()))
     );
-    assert_eq!(message.record.value("score"), Some(&RuntimeValue::I64(42)));
+    assert_eq!(
+        row_value(&message.record, "score"),
+        Some(RuntimeValue::I64(42))
+    );
 }
 
 #[test]
@@ -7829,7 +7840,7 @@ async fn branched_root_without_children_acks_success() {
         super::RelayRecordBatch::single(
             schema,
             string_branch_key("tenant", "acme"),
-            RuntimeRecord::from_fields([(
+            test_runtime_row([(
                 "tenant".to_string(),
                 RuntimeValue::String("acme".to_string()),
             )]),
@@ -7848,7 +7859,7 @@ async fn branched_root_without_children_acks_success() {
 }
 
 #[tokio::test]
-async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
+async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filters() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let root_relay = identifier("tenant_orders");
@@ -7885,45 +7896,47 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
         materialized_streams: HashSet::default(),
         processors: HashMap::default(),
     };
-    let input = super::RelayRecordBatch::from_messages(
-        schema.clone(),
-        vec![
-            RelayMessage {
-                key: string_branch_key("site", "north"),
-                record: RuntimeRecord::from_fields([
-                    (
-                        "tenant".to_string(),
-                        RuntimeValue::String("acme".to_string()),
-                    ),
-                    ("value".to_string(), RuntimeValue::U32(1)),
-                ]),
-                acks: AckSet::empty(),
-            },
-            RelayMessage {
-                key: string_branch_key("site", "north"),
-                record: RuntimeRecord::from_fields([
-                    (
-                        "tenant".to_string(),
-                        RuntimeValue::String("beta".to_string()),
-                    ),
-                    ("value".to_string(), RuntimeValue::U32(2)),
-                ]),
-                acks: AckSet::empty(),
-            },
-            RelayMessage {
-                key: string_branch_key("site", "north"),
-                record: RuntimeRecord::from_fields([
-                    (
-                        "tenant".to_string(),
-                        RuntimeValue::String("acme".to_string()),
-                    ),
-                    ("value".to_string(), RuntimeValue::U32(3)),
-                ]),
-                acks: AckSet::empty(),
-            },
-        ],
-    )
-    .expect("batch should build");
+    let inputs = [
+        super::RelayRecordBatch::single(
+            schema.clone(),
+            string_branch_key("tenant", "acme"),
+            test_runtime_row([
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String("acme".to_string()),
+                ),
+                ("value".to_string(), RuntimeValue::U32(1)),
+            ]),
+            AckSet::empty(),
+        )
+        .expect("acme batch should build"),
+        super::RelayRecordBatch::single(
+            schema.clone(),
+            string_branch_key("tenant", "beta"),
+            test_runtime_row([
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String("beta".to_string()),
+                ),
+                ("value".to_string(), RuntimeValue::U32(2)),
+            ]),
+            AckSet::empty(),
+        )
+        .expect("beta batch should build"),
+        super::RelayRecordBatch::single(
+            schema.clone(),
+            string_branch_key("tenant", "acme"),
+            test_runtime_row([
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String("acme".to_string()),
+                ),
+                ("value".to_string(), RuntimeValue::U32(3)),
+            ]),
+            AckSet::empty(),
+        )
+        .expect("second acme batch should build"),
+    ];
     let route_runtime = super::IngestorRouteRuntime::new(
         runtime,
         domain,
@@ -7931,34 +7944,68 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
         StdArc::new(ArcSwapOption::from(None)),
         super::IngestorRouteTemplate {
             branch: template,
-            branch_assignments: branch_mappings(&["tenant"]),
             ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
             flush_policy: super::RuntimeFlushPolicy::Immediate,
         },
         Duration::from_secs(30),
     );
-    route_runtime
-        .sender()
-        .send(input)
-        .await
-        .expect("reingestor route should accept input");
-
-    let mut outputs = [
-        timeout(Duration::from_secs(1), fan_in.recv())
+    let expected_message_count = inputs.len();
+    for input in inputs {
+        route_runtime
+            .sender()
+            .send(input)
             .await
-            .expect("first output batch should arrive")
-            .expect("runtime consumer should remain open"),
-        timeout(Duration::from_secs(1), fan_in.recv())
-            .await
-            .expect("second output batch should arrive")
-            .expect("runtime consumer should remain open"),
-    ];
-    outputs.sort_by(|left, right| key_label(&left.key).cmp(key_label(&right.key)));
+            .expect("reingestor route should accept input");
+    }
 
-    assert_eq!(key_label(&outputs[0].key), r#"{"tenant":"acme"}"#);
-    assert_eq!(outputs[0].message_count(), 2);
-    assert_eq!(key_label(&outputs[1].key), r#"{"tenant":"beta"}"#);
-    assert_eq!(outputs[1].message_count(), 1);
+    let outputs = timeout(Duration::from_secs(1), async {
+        let mut outputs = Vec::new();
+        let mut received_message_count = 0;
+        while received_message_count < expected_message_count {
+            let output = fan_in
+                .recv()
+                .await
+                .expect("runtime consumer should remain open");
+            received_message_count += output.batch.batch().num_rows();
+            outputs.push(output);
+        }
+        outputs
+    })
+    .await
+    .expect("all output rows should arrive");
+
+    let mut output_rows = outputs
+        .iter()
+        .flat_map(|output| {
+            (0..output.batch.batch().num_rows()).map(|row| {
+                (
+                    key_label(&output.key).to_string(),
+                    output
+                        .batch
+                        .row_to_json_string(row)
+                        .expect("output row should serialize"),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    output_rows.sort();
+    assert_eq!(
+        output_rows,
+        vec![
+            (
+                r#"{"tenant":"acme"}"#.to_string(),
+                r#"{"tenant":"acme","value":1}"#.to_string(),
+            ),
+            (
+                r#"{"tenant":"acme"}"#.to_string(),
+                r#"{"tenant":"acme","value":3}"#.to_string(),
+            ),
+            (
+                r#"{"tenant":"beta"}"#.to_string(),
+                r#"{"tenant":"beta","value":2}"#.to_string(),
+            ),
+        ]
+    );
     route_runtime.shutdown().await;
 }
 
@@ -8005,7 +8052,6 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         ingestor: identifier("tenant_partition"),
         template: super::IngestorRouteTemplate {
             branch: template.clone(),
-            branch_assignments: branch_mappings(&["tenant"]),
             ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Detached),
             flush_policy: super::RuntimeFlushPolicy::Immediate,
         },
@@ -8014,23 +8060,23 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
     };
 
     for round in 0..3 {
-        let messages = (0..64)
-            .map(|index| RelayMessage {
-                key: string_branch_key("site", "north"),
-                record: RuntimeRecord::from_fields([
+        let mut prepared = Vec::new();
+        for index in 0..64 {
+            let input = super::RelayRecordBatch::single(
+                schema.clone(),
+                string_branch_key("tenant", &format!("tenant-{index}")),
+                test_runtime_row([
                     (
                         "tenant".to_string(),
                         RuntimeValue::String(format!("tenant-{index}")),
                     ),
                     ("value".to_string(), RuntimeValue::U32(round * 64 + index)),
                 ]),
-                acks: AckSet::empty(),
-            })
-            .collect::<Vec<_>>();
-        let input = super::RelayRecordBatch::from_messages(schema.clone(), messages)
-            .expect("batch should build");
-
-        let prepared = route_task.prepare_input(input).await;
+                AckSet::empty(),
+            )
+            .expect("single-branch batch should build");
+            prepared.extend(route_task.prepare_input(input).await);
+        }
         super::BranchExecutionRuntime::dispatch_prepared_inputs(
             super::BranchExecutionDispatchContext {
                 runtime_handle: &runtime,
@@ -8061,6 +8107,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
         ("tenant", ParseAsType::String),
         ("user_id", ParseAsType::U32),
     ]);
+    let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
     let (execution_shutdown, _) = watch::channel(false);
     runtime.executions.insert(
         domain.clone(),
@@ -8082,8 +8129,10 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             .into_iter()
             .collect(),
             relay_services: HashMap::default(),
-            relay_branchings: HashMap::default(),
-            relay_branching_schemas: HashMap::default(),
+            relay_branchings: [(relay.clone(), vec![identifier("tenant")])]
+                .into_iter()
+                .collect(),
+            relay_branching_schemas: [(relay.clone(), Some(branch_schema))].into_iter().collect(),
             materialized_stream_specs: HashMap::default(),
             materialized_stream_owner_nodes: HashMap::default(),
             branched_ingestors: HashMap::default(),
@@ -8127,7 +8176,6 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
                 materialized_streams: HashSet::default(),
                 processors: HashMap::default(),
             },
-            branch_assignments: branch_mappings(&["tenant"]),
             ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
             flush_policy: super::RuntimeFlushPolicy::Immediate,
         },
@@ -8175,8 +8223,8 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
                 schema,
                 vec![
                     RelayMessage {
-                        key: string_branch_key("site", "north"),
-                        record: RuntimeRecord::from_fields([
+                        key: None,
+                        record: test_runtime_row([
                             (
                                 "tenant".to_string(),
                                 RuntimeValue::String("acme".to_string()),
@@ -8186,8 +8234,8 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
                         acks: acme_acks.attached(),
                     },
                     RelayMessage {
-                        key: string_branch_key("site", "north"),
-                        record: RuntimeRecord::from_fields([
+                        key: None,
+                        record: test_runtime_row([
                             (
                                 "tenant".to_string(),
                                 RuntimeValue::String("beta".to_string()),
@@ -8252,7 +8300,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
                 .expect("output batch should expand")
         })
         .filter_map(|output| match output.record.value("tenant") {
-            Some(RuntimeValue::String(tenant)) => Some(tenant.clone()),
+            Ok(Some(RuntimeValue::String(tenant))) => Some(tenant),
             _ => None,
         })
         .collect::<HashSet<_>>();
@@ -8345,7 +8393,7 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
         super::RelayRecordBatch::single(
             schema.clone(),
             None,
-            RuntimeRecord::from_fields([
+            test_runtime_row([
                 (
                     "tenant".to_string(),
                     RuntimeValue::String("acme".to_string()),
@@ -8383,11 +8431,13 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
         .expect("force flush should publish buffered output")
         .expect("reingestor output should remain open");
     assert_eq!(
-        forced
-            .runtime_record(0)
-            .expect("forced output should contain a record")
-            .value("user_id"),
-        Some(&RuntimeValue::U32(1))
+        row_value(
+            &forced
+                .runtime_row(0)
+                .expect("forced output should contain an Arrow row"),
+            "user_id",
+        ),
+        Some(RuntimeValue::U32(1))
     );
     forced.ack_success();
     assert_eq!(
@@ -8438,11 +8488,13 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
         .expect("shutdown should publish buffered output")
         .expect("reingestor output should remain open");
     assert_eq!(
-        stopped
-            .runtime_record(0)
-            .expect("shutdown output should contain a record")
-            .value("user_id"),
-        Some(&RuntimeValue::U32(2))
+        row_value(
+            &stopped
+                .runtime_row(0)
+                .expect("shutdown output should contain an Arrow row"),
+            "user_id",
+        ),
+        Some(RuntimeValue::U32(2))
     );
     stopped.ack_success();
     assert_eq!(
@@ -8490,11 +8542,12 @@ fn branch_runtime_detach_removes_relay_presence_without_deleting_materialized_st
     );
     materialized_state.entries.insert(
         branch_key.clone(),
-        RuntimeRecord::from_fields([(
+        test_runtime_row([(
             "tenant".to_string(),
             RuntimeValue::String("acme".to_string()),
         )])
-        .to_remote(),
+        .to_remote()
+        .expect("materialized fixture should persist"),
     );
     let branch = super::BranchRuntime {
         key: branch_key.clone(),
@@ -8570,7 +8623,7 @@ async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
             super::RelayRecordBatch::single(
                 schema,
                 branch_key.clone(),
-                RuntimeRecord::from_fields([(
+                test_runtime_row([(
                     "tenant".to_string(),
                     RuntimeValue::String("acme".to_string()),
                 )]),
@@ -8652,7 +8705,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
             super::RelayRecordBatch::single(
                 schema,
                 None,
-                RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(42))]),
+                test_runtime_row([("user_id".to_string(), RuntimeValue::U32(42))]),
                 AckSet::empty(),
             )
             .expect("ingestor output batch should build"),
@@ -8707,7 +8760,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             super::RelayRecordBatch::single(
                 schema.clone(),
                 string_branch_key("tenant", tenant),
-                RuntimeRecord::from_fields([
+                test_runtime_row([
                     (
                         "tenant".to_string(),
                         RuntimeValue::String(tenant.to_string()),
@@ -8746,7 +8799,6 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
                     materialized_streams: HashSet::default(),
                     processors: HashMap::default(),
                 },
-                branch_assignments: Vec::new(),
                 ack_boundary,
                 flush_policy: super::RuntimeFlushPolicy::Each {
                     interval: Duration::from_secs(10),
@@ -8816,7 +8868,7 @@ fn relay_batch_estimated_bytes_counts_arrow_payload_buffers() {
     let batch = super::RelayRecordBatch::single(
         schema,
         None,
-        RuntimeRecord::from_fields([
+        test_runtime_row([
             (
                 "tenant".to_string(),
                 RuntimeValue::String("acme".to_string()),
@@ -8892,7 +8944,7 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
             super::RelayRecordBatch::single(
                 schema.clone(),
                 string_branch_key("tenant", &tenant),
-                RuntimeRecord::from_fields([("tenant".to_string(), RuntimeValue::String(tenant))]),
+                test_runtime_row([("tenant".to_string(), RuntimeValue::String(tenant))]),
                 AckSet::empty(),
             )
             .expect("branch input batch should build")
@@ -8965,6 +9017,22 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         ("city_name", ParseAsType::String),
         ("region_name", ParseAsType::String),
     ]);
+    let lookup_batch = lookup_schema
+        .batch_from_test_rows([[
+            (
+                "normalized_title".to_string(),
+                RuntimeValue::String("mr".to_string()),
+            ),
+            (
+                "city_name".to_string(),
+                RuntimeValue::String("Chicago".to_string()),
+            ),
+            (
+                "region_name".to_string(),
+                RuntimeValue::String("IL".to_string()),
+            ),
+        ]])
+        .expect("lookup fixture should build as Arrow");
     let lookup = Arc::new(super::LookupRuntime {
         model: CreateLookup {
             name: identifier("titles_by_normalized"),
@@ -8975,19 +9043,8 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         },
         resource_version: 1,
         schema: lookup_schema,
-        entries: Arc::new(HashMap::from_iter([(
-            "mr".to_string(),
-            crate::runtime_schema::DecodedRecord::from_fields([
-                (
-                    "city_name".to_string(),
-                    RuntimeValue::String("Chicago".to_string()),
-                ),
-                (
-                    "region_name".to_string(),
-                    RuntimeValue::String("IL".to_string()),
-                ),
-            ]),
-        )])),
+        batch: Arc::new(lookup_batch),
+        entries: Arc::new(HashMap::from_iter([("mr".to_string(), 0)])),
     });
     let lookups = HashMap::from_iter([(identifier("titles_by_normalized"), lookup)]);
     let output_schema = Arc::new(compile_schema(&CreateSchema {
@@ -9066,7 +9123,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         vec![
             RelayMessage {
                 key: string_branch_key("tenant", "acme"),
-                record: RuntimeRecord::from_fields([
+                record: test_runtime_row([
                     ("id".to_string(), RuntimeValue::String("hit-1".to_string())),
                     ("active".to_string(), RuntimeValue::Bool(true)),
                     ("title".to_string(), RuntimeValue::String("MR".to_string())),
@@ -9075,7 +9132,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
             },
             RelayMessage {
                 key: string_branch_key("tenant", "acme"),
-                record: RuntimeRecord::from_fields([
+                record: test_runtime_row([
                     ("id".to_string(), RuntimeValue::String("miss-1".to_string())),
                     ("active".to_string(), RuntimeValue::Bool(true)),
                     (
@@ -9108,12 +9165,12 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
 
     assert_eq!(messages.len(), 1);
     assert_eq!(
-        messages[0].record.value("city"),
-        Some(&RuntimeValue::String("Chicago".to_string()))
+        row_value(&messages[0].record, "city"),
+        Some(RuntimeValue::String("Chicago".to_string()))
     );
     assert_eq!(
-        messages[0].record.value("region"),
-        Some(&RuntimeValue::String("IL".to_string()))
+        row_value(&messages[0].record, "region"),
+        Some(RuntimeValue::String("IL".to_string()))
     );
 }
 
@@ -9160,7 +9217,7 @@ async fn filter_map_can_read_branch_namespace() {
         input_schema,
         vec![RelayMessage {
             key: string_branch_key("tenant", "acme"),
-            record: RuntimeRecord::from_fields([
+            record: test_runtime_row([
                 (
                     "tenant".to_string(),
                     RuntimeValue::String("acme".to_string()),
@@ -9205,12 +9262,12 @@ async fn filter_map_can_read_branch_namespace() {
 
     assert_eq!(messages.len(), 1);
     assert_eq!(
-        messages[0].record.value("branch_tenant"),
-        Some(&RuntimeValue::String("acme".to_string()))
+        row_value(&messages[0].record, "branch_tenant"),
+        Some(RuntimeValue::String("acme".to_string()))
     );
     assert_eq!(
-        messages[0].record.value("amount"),
-        Some(&RuntimeValue::I64(8))
+        row_value(&messages[0].record, "amount"),
+        Some(RuntimeValue::I64(8))
     );
 }
 
@@ -9262,7 +9319,7 @@ async fn projection_can_read_branch_namespace() {
         input_schema,
         vec![RelayMessage {
             key: string_branch_key("tenant", "acme"),
-            record: RuntimeRecord::from_fields([
+            record: test_runtime_row([
                 (
                     "tenant".to_string(),
                     RuntimeValue::String("acme".to_string()),
@@ -9304,12 +9361,12 @@ async fn projection_can_read_branch_namespace() {
 
     assert_eq!(messages.len(), 1);
     assert_eq!(
-        messages[0].record.value("branch_tenant"),
-        Some(&RuntimeValue::String("acme".to_string()))
+        row_value(&messages[0].record, "branch_tenant"),
+        Some(RuntimeValue::String("acme".to_string()))
     );
     assert_eq!(
-        messages[0].record.value("amount"),
-        Some(&RuntimeValue::I64(8))
+        row_value(&messages[0].record, "amount"),
+        Some(RuntimeValue::I64(8))
     );
     assert_eq!(
         messages[0].key.as_ref(),
@@ -9360,7 +9417,7 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
         schema,
         vec![RelayMessage {
             key: None,
-            record: RuntimeRecord::from_fields([("vector".to_string(), expected.clone())]),
+            record: test_runtime_row([("vector".to_string(), expected.clone())]),
             acks: AckSet::empty(),
         }],
     )
@@ -9381,9 +9438,9 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
     assert!(plan.message_errors.is_empty());
     let output = plan.batch.expect("array output batch should exist");
     let record = output
-        .runtime_record(0)
+        .runtime_row(0)
         .expect("array output row should materialize at the test boundary");
-    assert_eq!(record.value("vector"), Some(&expected));
+    assert_eq!(row_value(&record, "vector"), Some(expected));
 }
 
 #[tokio::test]
@@ -9424,7 +9481,7 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
         vec![
             RelayMessage {
                 key: None,
-                record: RuntimeRecord::from_fields([
+                record: test_runtime_row([
                     ("amount".to_string(), RuntimeValue::I64(7)),
                     ("denominator".to_string(), RuntimeValue::I64(0)),
                 ]),
@@ -9432,7 +9489,7 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
             },
             RelayMessage {
                 key: None,
-                record: RuntimeRecord::from_fields([
+                record: test_runtime_row([
                     ("amount".to_string(), RuntimeValue::I64(10)),
                     ("denominator".to_string(), RuntimeValue::I64(2)),
                 ]),
@@ -9460,11 +9517,11 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
         .expect("the successful row should remain in the output batch");
     assert_eq!(successful.message_count(), 1);
     let successful_record = successful
-        .runtime_record(0)
+        .runtime_row(0)
         .expect("successful output row should materialize at the test boundary");
     assert_eq!(
-        successful_record.value("amount"),
-        Some(&RuntimeValue::I64(5))
+        row_value(&successful_record, "amount"),
+        Some(RuntimeValue::I64(5))
     );
     let [error] = plan.message_errors.as_slice() else {
         panic!("expected exactly one planned message error");
@@ -9482,11 +9539,10 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
         vec!["input.denominator", "output.amount"]
     );
     assert_eq!(
-        error
-            .partial_output
-            .as_ref()
-            .and_then(|output| output.value("amount")),
-        Some(&RuntimeValue::I64(7)),
+        error.partial_output.as_ref().and_then(|output| output
+            .value(0, "amount")
+            .expect("partial output is readable")),
+        Some(RuntimeValue::I64(7)),
         "partial output: {:?}; error: {}",
         error.partial_output,
         error.error.message
@@ -9649,7 +9705,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
             let (acks, _completion) = AckSet::root();
             RelayMessage {
                 key: None,
-                record: RuntimeRecord::from_fields([
+                record: test_runtime_row([
                     (
                         "tenant".to_string(),
                         RuntimeValue::String("acme".to_string()),
@@ -9682,12 +9738,12 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
         .expect("selected emitter output must remain a batch");
     assert_eq!(output.batch.batch().num_rows(), 1);
     let output_record = output
-        .runtime_record(0)
+        .runtime_row(0)
         .expect("test may inspect the selected output row");
     assert_eq!(plan.source_rows, vec![0]);
     assert_eq!(
-        output_record.value("normalized"),
-        Some(&RuntimeValue::String("fast-lane".to_string()))
+        row_value(&output_record, "normalized"),
+        Some(RuntimeValue::String("fast-lane".to_string()))
     );
     assert_eq!(
         plan.headers,
@@ -9751,7 +9807,7 @@ async fn sqs_fifo_group_expression_evaluates_per_source_row_in_order() {
             let (acks, _completion) = AckSet::root();
             RelayMessage {
                 key: None,
-                record: RuntimeRecord::from_fields([
+                record: test_runtime_row([
                     (
                         "tenant".to_string(),
                         RuntimeValue::String(tenant.to_string()),
@@ -9786,6 +9842,66 @@ async fn sqs_fifo_group_expression_evaluates_per_source_row_in_order() {
             Ok(Some("acme-ap".to_string())),
         ]
     );
+}
+
+#[tokio::test]
+async fn filter_map_on_runtime_row_evaluates_only_selected_arrow_row() {
+    let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
+    let where_clause = expression("input.value = (3 AS U32)");
+    let program = super::compile_session_filter_map_program(
+        &domain("default"),
+        &identifier("selected_row_subscription"),
+        Some(&where_clause),
+        schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+            udfs: None,
+        },
+    )
+    .expect("subscription filter must compile")
+    .expect("WHERE clause must produce a program");
+    let rows = [
+        test_runtime_row([
+            (
+                "tenant".to_string(),
+                RuntimeValue::String("acme".to_string()),
+            ),
+            ("value".to_string(), RuntimeValue::U32(1)),
+        ]),
+        test_runtime_row([
+            (
+                "tenant".to_string(),
+                RuntimeValue::String("acme".to_string()),
+            ),
+            ("value".to_string(), RuntimeValue::U32(3)),
+        ]),
+    ];
+    let row_batches = rows
+        .iter()
+        .map(RuntimeRow::one_row_batch)
+        .collect::<Vec<_>>();
+    let batch = RuntimeRecordBatch::concat(&row_batches.iter().collect::<Vec<_>>())
+        .expect("multi-row Arrow batch should build");
+    let selected = RuntimeRow::new(Arc::new(batch), 1, rows[1].metadata().clone())
+        .expect("second Arrow row should be addressable");
+
+    let output = execute_filter_map_for_test(
+        &program,
+        selected,
+        None,
+        None,
+        Timestamp::from_unix_nanos(1),
+    )
+    .await
+    .expect("selected row filter-map must execute")
+    .expect("second Arrow row must pass the filter");
+
+    assert_eq!(row_value(&output, "value"), Some(RuntimeValue::U32(3)));
 }
 
 #[tokio::test]
@@ -9933,7 +10049,7 @@ async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
     .expect("filter-map must compile")
     .expect("program must exist");
 
-    let record = RuntimeRecord::from_fields([
+    let record = test_runtime_row([
         (
             "tenant".to_string(),
             RuntimeValue::String("acme".to_string()),
@@ -9962,47 +10078,45 @@ async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
         ),
     ]);
 
-    let output = super::execute_filter_map_on_record(
-        &program,
-        record,
-        None,
-        None,
-        Timestamp::from_unix_nanos(1),
-    )
-    .await
-    .expect("filter-map must execute")
-    .expect("record must not be filtered out");
+    let output =
+        execute_filter_map_for_test(&program, record, None, None, Timestamp::from_unix_nanos(1))
+            .await
+            .expect("filter-map must execute")
+            .expect("record must not be filtered out");
 
     assert_eq!(
-        output.value("tenant"),
-        Some(&RuntimeValue::String("acme".to_string()))
+        row_value(&output, "tenant"),
+        Some(RuntimeValue::String("acme".to_string()))
     );
-    assert_eq!(output.value("u8_next"), Some(&RuntimeValue::U8(6)));
-    assert_eq!(output.value("i8_abs"), Some(&RuntimeValue::I8(7)));
-    assert_eq!(output.value("u16_keep"), Some(&RuntimeValue::U16(9)));
-    assert_eq!(output.value("i16_prev"), Some(&RuntimeValue::I16(11)));
-    assert_eq!(output.value("u32_same"), Some(&RuntimeValue::U32(42)));
-    assert_eq!(output.value("i32_neg"), Some(&RuntimeValue::I32(11)));
-    assert_eq!(output.value("u64_next"), Some(&RuntimeValue::U64(102)));
-    assert_eq!(output.value("i64_keep"), Some(&RuntimeValue::I64(-64)));
+    assert_eq!(row_value(&output, "u8_next"), Some(RuntimeValue::U8(6)));
+    assert_eq!(row_value(&output, "i8_abs"), Some(RuntimeValue::I8(7)));
+    assert_eq!(row_value(&output, "u16_keep"), Some(RuntimeValue::U16(9)));
+    assert_eq!(row_value(&output, "i16_prev"), Some(RuntimeValue::I16(11)));
+    assert_eq!(row_value(&output, "u32_same"), Some(RuntimeValue::U32(42)));
+    assert_eq!(row_value(&output, "i32_neg"), Some(RuntimeValue::I32(11)));
+    assert_eq!(row_value(&output, "u64_next"), Some(RuntimeValue::U64(102)));
+    assert_eq!(row_value(&output, "i64_keep"), Some(RuntimeValue::I64(-64)));
     assert_eq!(
-        output.value("f32_next"),
-        Some(&RuntimeValue::F32(OrderedFloat(4.0)))
+        row_value(&output, "f32_next"),
+        Some(RuntimeValue::F32(OrderedFloat(4.0)))
     );
     assert_eq!(
-        output.value("f64_keep"),
-        Some(&RuntimeValue::F64(OrderedFloat(7.25)))
+        row_value(&output, "f64_keep"),
+        Some(RuntimeValue::F64(OrderedFloat(7.25)))
     );
-    assert_eq!(output.value("bool_copy"), Some(&RuntimeValue::Bool(true)));
     assert_eq!(
-        output.value("occurred_text"),
-        Some(&RuntimeValue::String(
+        row_value(&output, "bool_copy"),
+        Some(RuntimeValue::Bool(true))
+    );
+    assert_eq!(
+        row_value(&output, "occurred_text"),
+        Some(RuntimeValue::String(
             "2026-04-07T12:34:56+00:00".to_string()
         ))
     );
     assert_eq!(
-        output.value("occurred_copy"),
-        Some(&RuntimeValue::Datetime(
+        row_value(&output, "occurred_copy"),
+        Some(RuntimeValue::Datetime(
             chrono::DateTime::parse_from_rfc3339("2026-04-07T12:34:56Z").expect("valid timestamp"),
         ))
     );
@@ -10024,7 +10138,7 @@ async fn reorderer_key_program_evaluates_direct_u32_field() {
     )
     .expect("reorderer key program should compile");
     let records = vec![
-        RuntimeRecord::from_fields([
+        test_runtime_row([
             (
                 "tenant".to_string(),
                 RuntimeValue::String("acme".to_string()),
@@ -10035,7 +10149,7 @@ async fn reorderer_key_program_evaluates_direct_u32_field() {
                 RuntimeValue::String("third".to_string()),
             ),
         ]),
-        RuntimeRecord::from_fields([
+        test_runtime_row([
             (
                 "tenant".to_string(),
                 RuntimeValue::String("acme".to_string()),
@@ -10047,7 +10161,7 @@ async fn reorderer_key_program_evaluates_direct_u32_field() {
             ),
         ]),
     ];
-    let input = super::vm_typed_batch_from_runtime_records(&records, &program.program.input_schema)
+    let input = vm_input_from_test_rows(&records, &program.program.input_schema)
         .expect("VM input batch should build");
     let output = super::execute_program_with_selection_in_context(
         &program.program,
@@ -10092,7 +10206,7 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
     .expect("reorderer key program should compile");
     let records = (0..=super::VM_SPAWN_BLOCKING_ROW_THRESHOLD)
         .map(|sequence| {
-            RuntimeRecord::from_fields([
+            test_runtime_row([
                 (
                     "tenant".to_string(),
                     RuntimeValue::String("acme".to_string()),
@@ -10105,7 +10219,7 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
             ])
         })
         .collect::<Vec<_>>();
-    let input = super::vm_typed_batch_from_runtime_records(&records, &program.program.input_schema)
+    let input = vm_input_from_test_rows(&records, &program.program.input_schema)
         .expect("VM input batch should build");
 
     let output = super::execute_program_with_selection_in_context(
@@ -10195,9 +10309,9 @@ async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
     .expect("filter-map must compile")
     .expect("program must exist");
 
-    let output = super::execute_filter_map_on_record(
+    let output = execute_filter_map_for_test(
         &program,
-        RuntimeRecord::from_fields([(
+        test_runtime_row([(
             "tenant".to_string(),
             RuntimeValue::String("acme".to_string()),
         )]),
@@ -10210,11 +10324,11 @@ async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
     .expect("record must not be filtered out");
 
     assert_eq!(
-        output.value("tenant"),
-        Some(&RuntimeValue::String("acme".to_string()))
+        row_value(&output, "tenant"),
+        Some(RuntimeValue::String("acme".to_string()))
     );
-    assert!(output.value("raw").is_none());
-    assert!(output.value("normalized").is_none());
+    assert!(row_value(&output, "raw").is_none());
+    assert!(row_value(&output, "normalized").is_none());
 }
 
 #[tokio::test]
@@ -10293,7 +10407,7 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     .expect("filter-map must compile")
     .expect("program must exist");
 
-    let record = RuntimeRecord::from_fields([
+    let record = test_runtime_row([
         (
             "tenant".to_string(),
             RuntimeValue::String("acme".to_string()),
@@ -10310,7 +10424,7 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
         Vec::new(),
     );
 
-    let output = super::execute_filter_map_on_record(
+    let output = execute_filter_map_for_test(
         &program,
         record,
         None,
@@ -10322,20 +10436,18 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     .expect("record must not be filtered out");
 
     assert_eq!(
-        output.value("tenant"),
-        Some(&RuntimeValue::String("acme".to_string()))
+        row_value(&output, "tenant"),
+        Some(RuntimeValue::String("acme".to_string()))
     );
     assert_eq!(
-        output.value("topic"),
-        Some(&RuntimeValue::String(
-            "logic_notifications_t123".to_string()
-        ))
+        row_value(&output, "topic"),
+        Some(RuntimeValue::String("logic_notifications_t123".to_string()))
     );
-    assert_eq!(output.value("partition"), Some(&RuntimeValue::I32(2)));
-    assert_eq!(output.value("offset"), Some(&RuntimeValue::I64(42)));
-    assert!(output.value("active").is_none());
-    assert!(output.value("amount").is_none());
-    assert!(output.value("raw").is_none());
+    assert_eq!(row_value(&output, "partition"), Some(RuntimeValue::I32(2)));
+    assert_eq!(row_value(&output, "offset"), Some(RuntimeValue::I64(42)));
+    assert!(row_value(&output, "active").is_none());
+    assert!(row_value(&output, "amount").is_none());
+    assert!(row_value(&output, "raw").is_none());
 }
 
 #[tokio::test]
@@ -10408,7 +10520,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     )
     .expect("header filter-map must compile")
     .expect("program must exist");
-    let record = RuntimeRecord::from_fields([
+    let record = test_runtime_row([
         (
             "tenant".to_string(),
             RuntimeValue::String("acme".to_string()),
@@ -10425,7 +10537,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         ("route".to_string(), "secondary".to_string()),
     ]);
 
-    let output = super::execute_filter_map_on_record(
+    let output = execute_filter_map_for_test(
         &program,
         record.clone(),
         None,
@@ -10437,10 +10549,10 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     .expect("record must be selected");
 
     assert_eq!(
-        output.value("first"),
-        Some(&RuntimeValue::String("primary".to_string()))
+        row_value(&output, "first"),
+        Some(RuntimeValue::String("primary".to_string()))
     );
-    assert_eq!(output.value("total"), Some(&RuntimeValue::I64(2)));
+    assert_eq!(row_value(&output, "total"), Some(RuntimeValue::I64(2)));
 
     let top_filter = super::compile_expression_filter_program(
         super::RuntimeCompileTarget {
@@ -10469,7 +10581,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     .expect("top FILTER WHERE must compile")
     .expect("program must exist");
     assert!(
-        super::execute_filter_map_on_record(
+        execute_filter_map_for_test(
             &top_filter,
             record,
             None,
@@ -10504,7 +10616,7 @@ async fn finalized_output_filter_reads_constructed_output_values() {
     .expect("finalized output filter must compile")
     .expect("program must exist");
 
-    let selected = RuntimeRecord::from_fields([
+    let selected = test_runtime_row([
         (
             "tenant".to_string(),
             RuntimeValue::String("acme".to_string()),
@@ -10512,7 +10624,7 @@ async fn finalized_output_filter_reads_constructed_output_values() {
         ("total".to_string(), RuntimeValue::I64(130)),
     ]);
     assert!(
-        super::execute_filter_map_on_record(
+        execute_filter_map_for_test(
             &program,
             selected,
             None,
@@ -10524,7 +10636,7 @@ async fn finalized_output_filter_reads_constructed_output_values() {
         .is_some()
     );
 
-    let rejected = RuntimeRecord::from_fields([
+    let rejected = test_runtime_row([
         (
             "tenant".to_string(),
             RuntimeValue::String("acme".to_string()),
@@ -10532,7 +10644,7 @@ async fn finalized_output_filter_reads_constructed_output_values() {
         ("total".to_string(), RuntimeValue::I64(99)),
     ]);
     assert!(
-        super::execute_filter_map_on_record(
+        execute_filter_map_for_test(
             &program,
             rejected,
             None,
@@ -10615,10 +10727,10 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
     };
 
     assert_eq!(
-        output.value("tenant"),
-        Some(&RuntimeValue::String("acme".to_string()))
+        row_value(&output, "tenant"),
+        Some(RuntimeValue::String("acme".to_string()))
     );
-    assert_eq!(output.value("amount"), Some(&RuntimeValue::I64(8)));
+    assert_eq!(row_value(&output, "amount"), Some(RuntimeValue::I64(8)));
 }
 
 #[tokio::test]
@@ -10722,16 +10834,16 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
     ));
 
     let (acks, completion) = AckSet::root();
-    let retained = super::RelayRecordBatch::single(
-        state_schema,
-        None,
-        RuntimeRecord::from_fields([(
+    let retained_row = state_schema
+        .batch_from_test_rows([[(
             "status".to_string(),
             RuntimeValue::String("pending".to_string()),
-        )]),
-        acks,
-    )
-    .expect("required-wait test batch must build");
+        )]])
+        .expect("required-wait test Arrow batch must build")
+        .runtime_row(0, RuntimeRecordMetadata::test())
+        .expect("required-wait test Arrow row must build");
+    let retained = super::RelayRecordBatch::single(state_schema, None, retained_row, acks)
+        .expect("required-wait test batch must build");
     let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
     assert!(
         runtime

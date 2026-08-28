@@ -29,9 +29,8 @@ pub use quiesce::{
     DynamicModelUpdate, ModelChangeAspect, ModelChangeAspects, QuiesceLevel, StatePurge,
 };
 pub use remote::{
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteDecodedRecord,
-    RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
-    RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
+    RemoteRuntimeField, RemoteRuntimeRecord, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
 };
 pub use resource::{
     ResourceId, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceVersion,

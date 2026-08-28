@@ -148,7 +148,7 @@ impl PulsarIngestor {
 
                 struct PulsarBatchEntry {
                     message: PulsarMessage<Vec<u8>>,
-                    record: DecodedRecord,
+                    record: RuntimeRecordBatch,
                     filter_map_metadata: IngestFilterMapMetadata,
                 }
 
@@ -915,7 +915,7 @@ impl PulsarIngestor {
         domain: &Domain,
         ingestor: &Identifier,
         message: &PulsarMessage<Vec<u8>>,
-    ) -> Result<DecodedRecord, CodecError> {
+    ) -> Result<RuntimeRecordBatch, CodecError> {
         let key = message.key().unwrap_or_default();
         let payload = message.payload.data.clone();
 

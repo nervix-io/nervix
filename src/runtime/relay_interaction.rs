@@ -869,7 +869,7 @@ mod tests {
             RuntimeInputCollectPolicy, force_flush::DomainForceFlush,
         },
         runtime_ack::{AckOutcome, AckSet},
-        runtime_schema::{CompiledSchema, RuntimeRecord, RuntimeValue, compile_schema},
+        runtime_schema::{CompiledSchema, RuntimeValue, compile_schema, test_runtime_row},
     };
 
     fn schema() -> triomphe::Arc<CompiledSchema> {
@@ -897,7 +897,7 @@ mod tests {
         RelayRecordBatch::single(
             schema(),
             key,
-            RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::I64(value))])
+            test_runtime_row([("value".to_string(), RuntimeValue::I64(value))])
                 .with_ingested_at_watermarks(Timestamp::from_unix_nanos(value)),
             acks,
         )
@@ -917,11 +917,8 @@ mod tests {
         RelayRecordBatch::single(
             alternate_schema,
             None,
-            RuntimeRecord::from_fields([(
-                "value".to_string(),
-                RuntimeValue::String("two".to_string()),
-            )])
-            .with_ingested_at_watermarks(Timestamp::from_unix_nanos(2)),
+            test_runtime_row([("value".to_string(), RuntimeValue::String("two".to_string()))])
+                .with_ingested_at_watermarks(Timestamp::from_unix_nanos(2)),
             acks,
         )
         .expect("alternate test batch must build")
@@ -938,11 +935,11 @@ mod tests {
     }
 
     fn value(batch: &RelayRecordBatch) -> i64 {
-        let record = batch.runtime_record(0).expect("one row");
-        let Some(RuntimeValue::I64(value)) = record.value("value") else {
+        let record = batch.runtime_row(0).expect("one row");
+        let Ok(Some(RuntimeValue::I64(value))) = record.value("value") else {
             panic!("test value must be I64")
         };
-        *value
+        value
     }
 
     fn source(
@@ -1323,11 +1320,11 @@ mod tests {
             match event(&mut interaction, None).await {
                 RelayInteractionEvent::Batch { batch, .. } => {
                     for row in 0..batch.message_count() as usize {
-                        let record = batch.runtime_record(row).expect("row must exist");
-                        let Some(RuntimeValue::I64(value)) = record.value("value") else {
+                        let record = batch.runtime_row(row).expect("row must exist");
+                        let Ok(Some(RuntimeValue::I64(value))) = record.value("value") else {
                             panic!("row value must be I64")
                         };
-                        rows.push(*value);
+                        rows.push(value);
                     }
                 }
                 RelayInteractionEvent::ForceFlush(completion) => {

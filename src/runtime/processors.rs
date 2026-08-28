@@ -2,12 +2,12 @@ use std::{collections::VecDeque, sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use nervix_models::{
-    AckMode, Assignment, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+    AckMode, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     ErrorPolicies, Identifier, InferencerTensorDeclaration, InferencerTensorMapping,
     MessageErrorPolicy, ModelKind, StructuredMessageError, Timestamp, WindowBound,
 };
 use nervix_nspl::{
-    vm_program::{FieldRef, Program as VmProgram, SpannedNode},
+    vm_program::{FieldRef, Program as VmProgram, Span, SpannedNode},
     window_processor::aggregate::{WindowAggregateExpr, WindowAggregateProgram},
 };
 use nervix_roto::UdfExecutor;
@@ -16,24 +16,23 @@ use nervix_vm::{
     CompiledProgram as VmCompiledProgram, InstructionKind as VmInstructionKind,
     OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program,
+    infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
 };
 use nervix_wasm::{CompiledWasmProcessor, WasmBranchInstance};
 use ordered_float::OrderedFloat;
 use triomphe::Arc;
 
 use super::{
-    BranchRuntime, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
-    RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
-    ReplicatedDeduplicatorState, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
-    RuntimeFlushPolicy, RuntimeInputCollectPolicy, SharedActiveGraph, WindowProcessorState,
-    inferencer::OnnxInferencerSession,
+    BranchRuntime, CompiledBranchProgram, CompiledDeduplicatorKeyProgram,
+    CompiledProgramWithMaterializedInterest, RelayBoundaryServices, RelayMessage, RelayRecordBatch,
+    RelayRegistry, ReplicatedDeduplicatorState, ReplicatedWasmProcessorState,
+    ReplicatedWindowProcessorState, RuntimeFlushPolicy, RuntimeInputCollectPolicy,
+    SharedActiveGraph, WindowProcessorState, inferencer::OnnxInferencerSession,
 };
 use crate::{
     registry::ActiveGraph,
     runtime_ack::AckSet,
-    runtime_schema::{
-        CompiledSchema, RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
-    },
+    runtime_schema::{CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue},
 };
 
 pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
@@ -54,7 +53,6 @@ pub(super) struct BranchedIngestorSpec {
     pub(super) branch: Option<Identifier>,
     pub(super) branch_ttl: Option<String>,
     pub(super) branch_max_instances: Option<u64>,
-    pub(super) output_branch_assignments: Vec<Assignment>,
     pub(super) output_ack_boundary: BranchInstanceAckBoundary,
     pub(super) output_flush_each: String,
     pub(super) output_max_batch_size: Option<String>,
@@ -226,7 +224,6 @@ pub(super) struct BranchInstanceTemplate {
 #[derive(Debug, Clone)]
 pub(super) struct IngestorRouteTemplate {
     pub(super) branch: BranchInstanceTemplate,
-    pub(super) branch_assignments: Vec<Assignment>,
     pub(super) ack_boundary: BranchInstanceAckBoundary,
     pub(super) flush_policy: RuntimeFlushPolicy,
 }
@@ -466,6 +463,8 @@ impl RelayProcessorOperationNode {
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledWindowAggregateProgram {
+    pub(super) input_program: Arc<VmCompiledProgram>,
+    pub(super) input_fields: Vec<Option<String>>,
     pub(super) assignments: Vec<CompiledWindowAggregateAssignment>,
     pub(super) demand_types: Vec<arrow_schema::DataType>,
     pub(super) demand_offset: usize,
@@ -509,6 +508,8 @@ impl CompiledWindowAggregateProgram {
                 input_relay.as_str()
             )
         })?;
+        let (input_program, input_fields) =
+            Self::compile_inputs(aggregate, input_schema.arrow_schema(), udfs)?;
         let bindings = vec![
             VmCompileBinding::readonly("input", input_schema.arrow_schema())
                 .with_sensitivity(input_schema.vm_sensitivity()),
@@ -557,10 +558,105 @@ impl CompiledWindowAggregateProgram {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
+            input_program,
+            input_fields,
             assignments,
             demand_types,
             demand_offset: 0,
         })
+    }
+
+    fn compile_inputs(
+        aggregate: &WindowAggregateProgram,
+        input_schema: StdArc<arrow_schema::Schema>,
+        udfs: Option<&UdfExecutor>,
+    ) -> Result<(Arc<VmCompiledProgram>, Vec<Option<String>>), String> {
+        const OUTPUT_NAMESPACE: &str = "window_input";
+        let span: Span = (0..0).into();
+        let input_fields = aggregate
+            .demands()
+            .iter()
+            .map(|demand| {
+                demand
+                    .input
+                    .as_ref()
+                    .map(|_| format!("demand_{}", demand.id))
+            })
+            .collect::<Vec<_>>();
+        let set = aggregate
+            .demands()
+            .iter()
+            .filter_map(|demand| {
+                let input = demand.input.as_ref()?;
+                Some((
+                    FieldRef {
+                        relay: OUTPUT_NAMESPACE.to_string(),
+                        field: format!("demand_{}", demand.id),
+                    },
+                    SpannedNode {
+                        inner: input.clone(),
+                        span,
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        let program = SpannedNode {
+            inner: VmProgram {
+                filter: None,
+                branch_filters: Vec::new(),
+                set,
+                invoke: Vec::new(),
+            },
+            span,
+        };
+        let empty_output = StdArc::new(arrow_schema::Schema::empty());
+        let infer_bindings = vec![
+            VmCompileBinding::writeonly(OUTPUT_NAMESPACE, empty_output),
+            VmCompileBinding::readonly("input", input_schema.clone()),
+        ];
+        let signatures = udfs
+            .map(|executor| executor.signatures().clone())
+            .unwrap_or_default();
+        let inferred =
+            infer_vm_set_expr_types_for_bindings_with_udfs(&program, infer_bindings, signatures)
+                .map_err(|error| {
+                    format!(
+                        "window aggregate input VM type inference failed: {}",
+                        error.message
+                    )
+                })?;
+        let output_schema = StdArc::new(arrow_schema::Schema::new(
+            inferred
+                .into_iter()
+                .map(|(name, data_type, nullable)| {
+                    arrow_schema::Field::new(name, data_type, nullable)
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let compile_bindings = vec![
+            VmCompileBinding::writeonly(OUTPUT_NAMESPACE, output_schema.clone()),
+            VmCompileBinding::readonly("input", input_schema),
+        ];
+        let compiled = compile_vm_program(
+            &program,
+            output_schema,
+            VmSchemaSensitivity::default(),
+            compile_bindings,
+            super::runtime_udf_compile_options(
+                udfs,
+                VmCompileOptions {
+                    output_mode: VmOutputMode::ExplicitOnly,
+                    ..VmCompileOptions::default()
+                },
+            ),
+        )
+        .map_err(|error| {
+            format!(
+                "window aggregate input VM compile failed: {}",
+                error.message
+            )
+        })?;
+        Ok((Arc::new(compiled), input_fields))
     }
 
     pub(super) fn with_demand_offset(mut self, demand_offset: usize) -> Self {
@@ -723,6 +819,7 @@ pub(super) struct RelayProcessorOutputNode {
     pub(super) pending: Vec<RelayRecordBatch>,
     pub(super) next_flush: Option<Timestamp>,
     pub(super) compiled_program: Option<CompiledProgramWithMaterializedInterest>,
+    pub(super) compiled_branch_program: Option<CompiledBranchProgram>,
 }
 
 impl RelayProcessorOutputNode {
@@ -868,6 +965,7 @@ pub(super) struct CorrelatorBranchState {
 pub(super) struct CorrelatorPendingMessage {
     pub(super) received_at: Timestamp,
     pub(super) message: RelayMessage,
+    pub(super) materialized_state: HashMap<String, RuntimeValue>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -945,7 +1043,7 @@ impl std::fmt::Debug for WasmCompiledBranchProcessor {
 pub(super) struct PlannedMessageError {
     pub(super) message: RelayMessage,
     pub(super) error: StructuredMessageError,
-    pub(super) partial_output: Option<RuntimeRecord>,
+    pub(super) partial_output: Option<RuntimeRecordBatch>,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
 }
 

@@ -1,6 +1,6 @@
 use std::{io::Cursor, sync::Arc as StdArc};
 
-use ahash::{HashMap, HashMapExt, HashSet};
+use ahash::{HashMap, HashSet};
 use apache_avro::{
     Schema as AvroSchema, from_avro_datum, to_avro_datum, types::Value as AvroValue,
 };
@@ -20,14 +20,15 @@ use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
     Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
 };
-use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter_record_batch};
+use arrow_select::{
+    concat::concat as concat_arrow_arrays, filter::filter_record_batch, take::take,
+};
 use chrono::{DateTime, FixedOffset};
 use nervix_models::{
     AvroType, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
-    CreateWireSchema, Identifier, JsonType, ParseAsType, RemoteDecodedRecord,
-    RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
-    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, Timestamp, WireSchemaDefinition,
-    WireSchemaField, WireSchemaStrictness,
+    CreateWireSchema, Identifier, JsonType, ParseAsType, RemoteRuntimeElementValue,
+    RemoteRuntimeField, RemoteRuntimeRecord, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
+    Timestamp, WireSchemaDefinition, WireSchemaField, WireSchemaStrictness,
 };
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
@@ -169,25 +170,29 @@ struct CompiledAvroWireField {
     optional: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeRecord {
-    fields: HashMap<String, RuntimeValue>,
-    metadata: RuntimeRecordMetadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DecodedRecord {
-    fields: HashMap<String, RuntimeValue>,
-}
-
-pub trait RuntimeRecordValues {
-    fn value(&self, name: &str) -> Option<&RuntimeValue>;
-}
-
 #[derive(Debug, Clone)]
 pub struct RuntimeRecordBatch {
     schema: StdArc<ArrowSchema>,
     batch: RecordBatch,
+}
+
+pub(crate) struct RuntimeRecordBatchBuilder {
+    schema: StdArc<ArrowSchema>,
+    fields: Vec<CompiledSchemaField>,
+    builders: Vec<Box<dyn ArrayBuilder>>,
+    rows: usize,
+    next_column: usize,
+}
+
+/// A shared view of one row in an Arrow payload batch.
+///
+/// This is the only in-memory representation of an individual schemaful payload. It keeps the
+/// carrier columns shared and materializes only explicitly requested scalar boundary values.
+#[derive(Debug, Clone)]
+pub struct RuntimeRow {
+    batch: Arc<RuntimeRecordBatch>,
+    row: usize,
+    metadata: RuntimeRecordMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,50 +357,93 @@ impl CompiledSchema {
         }
     }
 
-    pub fn arrow_batch_from_records(
-        &self,
-        records: &[RuntimeRecord],
-    ) -> Result<RuntimeRecordBatch, String> {
-        let columns = self
-            .fields
-            .iter()
-            .map(|field| self.build_arrow_column(field, records))
-            .collect::<Result<Vec<_>, _>>()?;
-        let batch = if columns.is_empty() {
-            RecordBatch::try_new_with_options(
-                self.arrow_schema.clone(),
-                columns,
-                &RecordBatchOptions::new().with_row_count(Some(records.len())),
-            )
-        } else {
-            RecordBatch::try_new(self.arrow_schema.clone(), columns)
-        }
-        .map_err(|error| error.to_string())?;
-        Ok(RuntimeRecordBatch {
+    pub(crate) fn batch_builder(&self, capacity: usize) -> RuntimeRecordBatchBuilder {
+        RuntimeRecordBatchBuilder {
             schema: self.arrow_schema.clone(),
-            batch,
-        })
+            fields: self.fields.clone(),
+            builders: self
+                .fields
+                .iter()
+                .map(|field| make_builder(&arrow_data_type(&field.ty), capacity))
+                .collect(),
+            rows: 0,
+            next_column: 0,
+        }
     }
 
-    pub fn decoded_records_from_arrow_batch(
+    #[cfg(test)]
+    pub(crate) fn batch_from_test_rows(
         &self,
-        batch: &RuntimeRecordBatch,
-    ) -> Result<Vec<DecodedRecord>, String> {
-        self.decoded_records_from_arrow_batch_excluding(batch, &HashSet::default())
+        rows: impl IntoIterator<Item = impl IntoIterator<Item = (String, RuntimeValue)>>,
+    ) -> Result<RuntimeRecordBatch, String> {
+        let rows = rows
+            .into_iter()
+            .map(|row| row.into_iter().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let mut builder = self.batch_builder(rows.len());
+        for (row_index, row) in rows.iter().enumerate() {
+            for (field_index, (name, _)) in row.iter().enumerate() {
+                if row[..field_index]
+                    .iter()
+                    .any(|(earlier_name, _)| earlier_name == name)
+                {
+                    return Err(format!(
+                        "test Arrow row {row_index} contains duplicate field '{name}'"
+                    ));
+                }
+                if !self.fields.iter().any(|field| field.name == *name) {
+                    return Err(format!(
+                        "test Arrow row {row_index} contains unknown field '{name}'"
+                    ));
+                }
+            }
+            for field in &self.fields {
+                builder.append(
+                    row.iter()
+                        .find(|(name, _)| *name == field.name)
+                        .map(|(_, value)| value),
+                )?;
+            }
+            builder.finish_row()?;
+        }
+        builder.finish()
     }
 
-    pub(crate) fn decoded_records_from_arrow_batch_excluding(
+    pub(crate) fn runtime_row_from_remote(
         &self,
-        batch: &RuntimeRecordBatch,
-        excluded_columns: &HashSet<usize>,
-    ) -> Result<Vec<DecodedRecord>, String> {
-        self.validate_arrow_batch(batch)?;
-
-        (0..batch.batch.num_rows())
-            .map(|row_index| {
-                self.decoded_record_from_arrow_batch_excluding(batch, row_index, excluded_columns)
-            })
-            .collect()
+        record: RemoteRuntimeRecord,
+    ) -> Result<RuntimeRow, String> {
+        let metadata = RuntimeRecordMetadata::from_remote(record.metadata);
+        let mut seen = HashSet::default();
+        for field in &record.fields {
+            if !seen.insert(field.name.as_str()) {
+                return Err(format!(
+                    "persisted runtime record contains duplicate field '{}'",
+                    field.name
+                ));
+            }
+            if !self
+                .fields
+                .iter()
+                .any(|expected| expected.name == field.name)
+            {
+                return Err(format!(
+                    "persisted runtime record contains unknown field '{}'",
+                    field.name
+                ));
+            }
+        }
+        let mut builder = self.batch_builder(1);
+        for expected in &self.fields {
+            let value = record
+                .fields
+                .iter()
+                .find(|field| field.name == expected.name)
+                .map(|field| RuntimeValue::from_remote(field.value.clone()));
+            builder.append(value.as_ref())?;
+        }
+        builder.finish_row()?;
+        builder.finish()?.runtime_row(0, metadata)
     }
 
     fn validate_arrow_batch(&self, batch: &RuntimeRecordBatch) -> Result<(), String> {
@@ -410,31 +458,6 @@ impl CompiledSchema {
             ));
         }
         Ok(())
-    }
-
-    fn decoded_record_from_arrow_batch_excluding(
-        &self,
-        batch: &RuntimeRecordBatch,
-        row_index: usize,
-        excluded_columns: &HashSet<usize>,
-    ) -> Result<DecodedRecord, String> {
-        let mut fields = HashMap::with_capacity(self.fields.len());
-        for (column_index, field) in self.fields.iter().enumerate() {
-            if excluded_columns.contains(&column_index) {
-                continue;
-            }
-            let value = runtime_value_from_arrow_array(
-                batch.batch.column(column_index).as_ref(),
-                &field.ty,
-                field.optional,
-                row_index,
-                &field.name,
-            )?;
-            if let Some(value) = value {
-                fields.insert(field.name.clone(), value);
-            }
-        }
-        Ok(DecodedRecord { fields })
     }
 
     pub fn arrow_batch_from_ipc_bytes(&self, bytes: &[u8]) -> Result<RuntimeRecordBatch, String> {
@@ -459,68 +482,93 @@ impl CompiledSchema {
             batch,
         })
     }
+}
 
-    fn build_arrow_column(
-        &self,
-        field: &CompiledSchemaField,
-        records: &[RuntimeRecord],
-    ) -> Result<ArrayRef, String> {
-        match &field.ty {
-            ParseAsType::U8 => Ok(StdArc::new(UInt8Array::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_u8)?,
-            ))),
-            ParseAsType::I8 => Ok(StdArc::new(Int8Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_i8,
-            )?))),
-            ParseAsType::U16 => Ok(StdArc::new(UInt16Array::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_u16)?,
-            ))),
-            ParseAsType::I16 => Ok(StdArc::new(Int16Array::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_i16)?,
-            ))),
-            ParseAsType::U32 => Ok(StdArc::new(UInt32Array::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_u32)?,
-            ))),
-            ParseAsType::I32 => Ok(StdArc::new(Int32Array::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_i32)?,
-            ))),
-            ParseAsType::U64 => Ok(StdArc::new(UInt64Array::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_u64)?,
-            ))),
-            ParseAsType::I64 => Ok(StdArc::new(Int64Array::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_i64)?,
-            ))),
-            ParseAsType::Bool => Ok(StdArc::new(BooleanArray::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_bool)?,
-            ))),
-            ParseAsType::String => Ok(StdArc::new(StringArray::from(
-                collect_optional_typed_values(records, field, |value| {
-                    value.as_string().map(str::to_owned)
-                })?,
-            ))),
-            ParseAsType::Datetime => Ok(StdArc::new(
-                TimestampNanosecondArray::from(collect_optional_typed_values(
-                    records,
-                    field,
-                    |value| {
-                        value
-                            .as_datetime()
-                            .and_then(|value| value.timestamp_nanos_opt())
-                    },
-                )?)
-                .with_timezone_utc(),
-            )),
-            ParseAsType::F32 => Ok(StdArc::new(Float32Array::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_f32)?,
-            ))),
-            ParseAsType::F64 => Ok(StdArc::new(Float64Array::from(
-                collect_optional_typed_values(records, field, RuntimeValue::as_f64)?,
-            ))),
-            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
-                build_recursive_arrow_column(records, field)
-            }
+#[cfg(test)]
+pub(crate) fn test_runtime_row(
+    fields: impl IntoIterator<Item = (String, RuntimeValue)>,
+) -> RuntimeRow {
+    let fields = fields.into_iter().collect::<Vec<_>>();
+    for (field_index, (name, _)) in fields.iter().enumerate() {
+        assert!(
+            !fields[..field_index]
+                .iter()
+                .any(|(earlier_name, _)| earlier_name == name),
+            "test Arrow row contains duplicate field '{name}'"
+        );
+    }
+    let arrow_fields = fields
+        .iter()
+        .map(|(name, value)| {
+            test_runtime_value_arrow_type(value)
+                .map(|data_type| ArrowField::new(name, data_type, false))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("test Arrow row fields must have inferable types");
+    let schema = StdArc::new(ArrowSchema::new(arrow_fields));
+    let columns = fields
+        .iter()
+        .zip(schema.fields())
+        .map(|((_, value), field)| runtime_value_arrow_array(field.data_type(), Some(value), 1))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("test Arrow row values must match their inferred types");
+    let batch = if columns.is_empty() {
+        RecordBatch::try_new_with_options(
+            schema.clone(),
+            columns,
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+    } else {
+        RecordBatch::try_new(schema.clone(), columns)
+    }
+    .expect("test Arrow row batch must be valid");
+    RuntimeRecordBatch::from_record_batch(schema, batch)
+        .and_then(|batch| batch.runtime_row(0, RuntimeRecordMetadata::test()))
+        .expect("test Arrow row view must be valid")
+}
+
+#[cfg(test)]
+fn test_runtime_value_arrow_type(value: &RuntimeValue) -> Result<ArrowDataType, String> {
+    match value {
+        RuntimeValue::U8(_) => Ok(ArrowDataType::UInt8),
+        RuntimeValue::I8(_) => Ok(ArrowDataType::Int8),
+        RuntimeValue::U16(_) => Ok(ArrowDataType::UInt16),
+        RuntimeValue::I16(_) => Ok(ArrowDataType::Int16),
+        RuntimeValue::U32(_) => Ok(ArrowDataType::UInt32),
+        RuntimeValue::I32(_) => Ok(ArrowDataType::Int32),
+        RuntimeValue::U64(_) => Ok(ArrowDataType::UInt64),
+        RuntimeValue::I64(_) => Ok(ArrowDataType::Int64),
+        RuntimeValue::Bool(_) => Ok(ArrowDataType::Boolean),
+        RuntimeValue::String(_) => Ok(ArrowDataType::Utf8),
+        RuntimeValue::Datetime(_) => Ok(ArrowDataType::Timestamp(
+            ArrowTimeUnit::Nanosecond,
+            Some("+00:00".into()),
+        )),
+        RuntimeValue::F32(_) => Ok(ArrowDataType::Float32),
+        RuntimeValue::F64(_) => Ok(ArrowDataType::Float64),
+        RuntimeValue::Array(values) => {
+            let element = values
+                .first()
+                .ok_or_else(|| "cannot infer an empty test ARRAY element type".to_string())?;
+            Ok(ArrowDataType::FixedSizeList(
+                ArrowFieldRef::new(ArrowField::new(
+                    "item",
+                    test_runtime_value_arrow_type(element)?,
+                    false,
+                )),
+                i32::try_from(values.len())
+                    .map_err(|_| "test ARRAY length exceeds i32".to_string())?,
+            ))
+        }
+        RuntimeValue::Vec(values) => {
+            let element = values
+                .first()
+                .ok_or_else(|| "cannot infer an empty test VEC element type".to_string())?;
+            Ok(ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
+                "item",
+                test_runtime_value_arrow_type(element)?,
+                false,
+            ))))
         }
     }
 }
@@ -652,122 +700,6 @@ impl CompiledCodecBatchEncoder<'_> {
     }
 }
 
-impl RuntimeRecord {
-    pub(crate) fn from_fields_with_metadata(
-        fields: impl IntoIterator<Item = (String, RuntimeValue)>,
-        metadata: RuntimeRecordMetadata,
-    ) -> Self {
-        Self {
-            fields: fields.into_iter().collect(),
-            metadata,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_fields(fields: impl IntoIterator<Item = (String, RuntimeValue)>) -> Self {
-        Self::from_fields_with_metadata(fields, RuntimeRecordMetadata::test())
-    }
-
-    pub fn to_json_string(&self) -> String {
-        let mut keys = self.fields.keys().cloned().collect::<Vec<_>>();
-        keys.sort();
-
-        let mut json = JsonMap::new();
-        for key in keys {
-            if let Some(value) = self.fields.get(&key) {
-                json.insert(key, value.to_json_value());
-            }
-        }
-
-        JsonValue::Object(json).to_string()
-    }
-
-    pub fn to_json_string_masking(&self, sensitivity: &nervix_vm::SchemaSensitivity) -> String {
-        let mut keys = self.fields.keys().cloned().collect::<Vec<_>>();
-        keys.sort();
-
-        let mut json = JsonMap::new();
-        for key in keys {
-            if let Some(value) = self.fields.get(&key) {
-                let json_value = if sensitivity.is_sensitive(&key) {
-                    JsonValue::String("<masked>".to_string())
-                } else {
-                    value.to_json_value()
-                };
-                json.insert(key, json_value);
-            }
-        }
-
-        JsonValue::Object(json).to_string()
-    }
-
-    pub fn value(&self, name: &str) -> Option<&RuntimeValue> {
-        self.fields.get(name)
-    }
-
-    pub(crate) fn fields(&self) -> impl Iterator<Item = (&str, &RuntimeValue)> {
-        self.fields
-            .iter()
-            .map(|(name, value)| (name.as_str(), value))
-    }
-
-    pub(crate) fn estimated_bytes(&self) -> u64 {
-        self.fields()
-            .map(|(name, value)| {
-                u64::try_from(name.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(value.estimated_bytes())
-            })
-            .sum::<u64>()
-            .saturating_add(32)
-    }
-
-    pub fn metadata(&self) -> &RuntimeRecordMetadata {
-        &self.metadata
-    }
-
-    pub fn with_metadata(mut self, metadata: RuntimeRecordMetadata) -> Self {
-        self.metadata = metadata;
-        self
-    }
-
-    pub fn with_ingested_at_watermarks(mut self, watermark: Timestamp) -> Self {
-        self.metadata.ingested_at_low_watermark = watermark;
-        self.metadata.ingested_at_high_watermark = watermark;
-        self
-    }
-
-    pub fn to_remote(&self) -> RemoteRuntimeRecord {
-        let mut names = self.fields.keys().cloned().collect::<Vec<_>>();
-        names.sort();
-        let fields = names
-            .into_iter()
-            .filter_map(|name| {
-                self.fields.get(&name).map(|value| RemoteRuntimeField {
-                    name,
-                    value: value.to_remote(),
-                })
-            })
-            .collect();
-        RemoteRuntimeRecord {
-            fields,
-            metadata: self.metadata.to_remote(),
-        }
-    }
-
-    pub fn from_remote(record: RemoteRuntimeRecord) -> Self {
-        let fields = record
-            .fields
-            .into_iter()
-            .map(|field| (field.name, RuntimeValue::from_remote(field.value)))
-            .collect();
-        Self {
-            fields,
-            metadata: RuntimeRecordMetadata::from_remote(record.metadata),
-        }
-    }
-}
-
 impl RuntimeValue {
     pub(crate) fn estimated_bytes(&self) -> u64 {
         match self {
@@ -781,73 +713,6 @@ impl RuntimeValue {
                 .map(Self::estimated_bytes)
                 .fold(0_u64, u64::saturating_add),
         }
-    }
-}
-
-impl RuntimeRecordValues for RuntimeRecord {
-    fn value(&self, name: &str) -> Option<&RuntimeValue> {
-        self.fields.get(name)
-    }
-}
-
-impl DecodedRecord {
-    pub(crate) fn from_fields(fields: impl IntoIterator<Item = (String, RuntimeValue)>) -> Self {
-        Self {
-            fields: fields.into_iter().collect(),
-        }
-    }
-
-    pub fn to_json_string(&self) -> String {
-        let mut keys = self.fields.keys().cloned().collect::<Vec<_>>();
-        keys.sort();
-
-        let mut json = JsonMap::new();
-        for key in keys {
-            if let Some(value) = self.fields.get(&key) {
-                json.insert(key, value.to_json_value());
-            }
-        }
-
-        JsonValue::Object(json).to_string()
-    }
-
-    pub fn value(&self, name: &str) -> Option<&RuntimeValue> {
-        self.fields.get(name)
-    }
-
-    pub fn into_runtime_record(self, metadata: RuntimeRecordMetadata) -> RuntimeRecord {
-        RuntimeRecord::from_fields_with_metadata(self.fields, metadata)
-    }
-
-    pub fn to_remote(&self) -> RemoteDecodedRecord {
-        let mut names = self.fields.keys().cloned().collect::<Vec<_>>();
-        names.sort();
-        let fields = names
-            .into_iter()
-            .filter_map(|name| {
-                self.fields.get(&name).map(|value| RemoteRuntimeField {
-                    name,
-                    value: value.to_remote(),
-                })
-            })
-            .collect();
-        RemoteDecodedRecord { fields }
-    }
-
-    pub fn from_remote(record: RemoteDecodedRecord) -> Self {
-        Self {
-            fields: record
-                .fields
-                .into_iter()
-                .map(|field| (field.name, RuntimeValue::from_remote(field.value)))
-                .collect(),
-        }
-    }
-}
-
-impl RuntimeRecordValues for DecodedRecord {
-    fn value(&self, name: &str) -> Option<&RuntimeValue> {
-        self.fields.get(name)
     }
 }
 
@@ -873,60 +738,156 @@ impl RuntimeRecordBatch {
         &self.batch
     }
 
-    pub(crate) fn runtime_record(
+    pub(crate) fn value(&self, row: usize, name: &str) -> Result<Option<RuntimeValue>, String> {
+        if row >= self.batch.num_rows() {
+            return Err(format!(
+                "Arrow batch row {row} is outside batch with {} rows",
+                self.batch.num_rows()
+            ));
+        }
+        let column_index = match self.schema.index_of(name) {
+            Ok(index) => index,
+            Err(_) => return Ok(None),
+        };
+        let field = self.schema.field(column_index);
+        runtime_value_from_arrow_array(
+            self.batch.column(column_index).as_ref(),
+            &parse_as_type_from_arrow(field.data_type())?,
+            field.is_nullable(),
+            row,
+            name,
+        )
+    }
+
+    pub(crate) fn row_to_json_string(&self, row: usize) -> Result<String, String> {
+        self.row_to_json_string_masking(row, &nervix_vm::SchemaSensitivity::default())
+    }
+
+    fn row_to_json_string_masking(
+        &self,
+        row: usize,
+        sensitivity: &nervix_vm::SchemaSensitivity,
+    ) -> Result<String, String> {
+        if row >= self.batch.num_rows() {
+            return Err(format!(
+                "Arrow batch row {row} is outside batch with {} rows",
+                self.batch.num_rows()
+            ));
+        }
+        let mut json = JsonMap::new();
+        let mut fields = self.schema.fields().iter().collect::<Vec<_>>();
+        fields.sort_by(|left, right| left.name().cmp(right.name()));
+        for field in fields {
+            if let Some(value) = self.value(row, field.name())? {
+                let value = if sensitivity.is_sensitive(field.name()) {
+                    JsonValue::String("<masked>".to_string())
+                } else {
+                    value.to_json_value()
+                };
+                json.insert(field.name().clone(), value);
+            }
+        }
+        Ok(JsonValue::Object(json).to_string())
+    }
+
+    pub(crate) fn slice(&self, offset: usize, length: usize) -> Result<Self, String> {
+        let end = offset.checked_add(length).ok_or_else(|| {
+            format!("Arrow batch slice offset {offset} and length {length} overflow")
+        })?;
+        if end > self.batch.num_rows() {
+            return Err(format!(
+                "Arrow batch slice {offset}..{end} is outside batch with {} rows",
+                self.batch.num_rows()
+            ));
+        }
+        Ok(Self {
+            schema: self.schema.clone(),
+            batch: self.batch.slice(offset, length),
+        })
+    }
+
+    pub(crate) fn take(&self, rows: &[usize]) -> Result<Self, String> {
+        let indices = UInt64Array::from(
+            rows.iter()
+                .map(|row| {
+                    if *row >= self.batch.num_rows() {
+                        return Err(format!(
+                            "Arrow batch row {row} is outside batch with {} rows",
+                            self.batch.num_rows()
+                        ));
+                    }
+                    u64::try_from(*row).map_err(|_| format!("Arrow row index {row} exceeds u64"))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        );
+        let columns = self
+            .batch
+            .columns()
+            .iter()
+            .map(|column| take(column.as_ref(), &indices, None).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let batch = if columns.is_empty() {
+            RecordBatch::try_new_with_options(
+                self.schema.clone(),
+                columns,
+                &RecordBatchOptions::new().with_row_count(Some(rows.len())),
+            )
+        } else {
+            RecordBatch::try_new(self.schema.clone(), columns)
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(Self {
+            schema: self.schema.clone(),
+            batch,
+        })
+    }
+
+    pub(crate) fn runtime_row(
         &self,
         row: usize,
         metadata: RuntimeRecordMetadata,
-    ) -> Result<RuntimeRecord, String> {
-        if row >= self.batch.num_rows() {
-            return Err(format!(
-                "arrow batch row {row} is outside batch with {} rows",
-                self.batch.num_rows()
-            ));
-        }
-        let fields = self
-            .schema
-            .fields()
-            .iter()
-            .enumerate()
-            .map(|(column_index, field)| {
-                let field_name = field.name().clone();
-                let column = self.batch.column(column_index);
-                parse_as_type_from_arrow(field.data_type())
-                    .and_then(|ty| {
-                        runtime_value_from_arrow_array(
-                            column.as_ref(),
-                            &ty,
-                            field.is_nullable(),
-                            row,
-                            &field_name,
-                        )
-                    })
-                    .map(|value| value.map(|value| (field_name, value)))
-            })
-            .collect::<Result<Vec<_>, String>>()?
-            .into_iter()
-            .flatten();
-        Ok(RuntimeRecord::from_fields_with_metadata(fields, metadata))
+    ) -> Result<RuntimeRow, String> {
+        RuntimeRow::new(Arc::new(self.clone()), row, metadata)
     }
 
-    pub(crate) fn runtime_records(
-        &self,
-        metadata: &[RuntimeRecordMetadata],
-    ) -> Result<Vec<RuntimeRecord>, String> {
-        if metadata.len() != self.batch.num_rows() {
-            return Err(format!(
-                "arrow batch metadata count {} does not match row count {}",
-                metadata.len(),
-                self.batch.num_rows()
-            ));
-        }
-        metadata
+    pub(crate) fn project(&self, schema: StdArc<ArrowSchema>) -> Result<Self, String> {
+        let columns = schema
+            .fields()
             .iter()
-            .cloned()
-            .enumerate()
-            .map(|(row, metadata)| self.runtime_record(row, metadata))
-            .collect()
+            .map(|field| {
+                let index = self
+                    .schema
+                    .index_of(field.name())
+                    .map_err(|_| format!("Arrow payload is missing field '{}'", field.name()))?;
+                let column = self.batch.column(index);
+                if column.data_type() != field.data_type() {
+                    return Err(format!(
+                        "Arrow payload field '{}' expected {:?}, found {:?}",
+                        field.name(),
+                        field.data_type(),
+                        column.data_type()
+                    ));
+                }
+                if !field.is_nullable() && column.null_count() > 0 {
+                    return Err(format!(
+                        "required Arrow payload field '{}' contains null values",
+                        field.name()
+                    ));
+                }
+                Ok(column.clone())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let batch = if columns.is_empty() {
+            RecordBatch::try_new_with_options(
+                schema.clone(),
+                columns,
+                &RecordBatchOptions::new().with_row_count(Some(self.batch.num_rows())),
+            )
+        } else {
+            RecordBatch::try_new(schema.clone(), columns)
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(Self { schema, batch })
     }
 
     pub(crate) fn filter(&self, predicate: &BooleanArray) -> Result<Self, String> {
@@ -958,34 +919,26 @@ impl RuntimeRecordBatch {
         Ok(bytes)
     }
 
-    pub fn from_arrow_ipc_bytes(
-        expected_schema: StdArc<ArrowSchema>,
-        bytes: &[u8],
-    ) -> Result<Self, String> {
+    pub fn from_arrow_ipc_bytes(bytes: &[u8]) -> Result<Self, String> {
         let reader =
             StreamReader::try_new(Cursor::new(bytes), None).map_err(|error| error.to_string())?;
-        if reader.schema().as_ref() != expected_schema.as_ref() {
-            return Err("arrow IPC schema does not match expected schema".to_string());
-        }
+        let schema = reader.schema();
         let batches = reader
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
         if batches.is_empty() {
             let batch = RecordBatch::try_new_with_options(
-                expected_schema.clone(),
+                schema.clone(),
                 Vec::new(),
                 &RecordBatchOptions::new().with_row_count(Some(0)),
             )
             .map_err(|error| error.to_string())?;
-            return Ok(Self {
-                schema: expected_schema,
-                batch,
-            });
+            return Ok(Self { schema, batch });
         }
         let runtime_batches = batches
             .into_iter()
             .map(|batch| Self {
-                schema: expected_schema.clone(),
+                schema: schema.clone(),
                 batch,
             })
             .collect::<Vec<_>>();
@@ -1043,6 +996,188 @@ impl RuntimeRecordBatch {
     }
 }
 
+impl RuntimeRow {
+    pub(crate) fn new(
+        batch: Arc<RuntimeRecordBatch>,
+        row: usize,
+        metadata: RuntimeRecordMetadata,
+    ) -> Result<Self, String> {
+        if row >= batch.batch.num_rows() {
+            return Err(format!(
+                "Arrow batch row {row} is outside batch with {} rows",
+                batch.batch.num_rows()
+            ));
+        }
+        Ok(Self {
+            batch,
+            row,
+            metadata,
+        })
+    }
+
+    pub(crate) fn batch(&self) -> &Arc<RuntimeRecordBatch> {
+        &self.batch
+    }
+
+    pub(crate) fn index(&self) -> usize {
+        self.row
+    }
+
+    pub(crate) fn metadata(&self) -> &RuntimeRecordMetadata {
+        &self.metadata
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_metadata(mut self, metadata: RuntimeRecordMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_ingested_at_watermarks(mut self, watermark: Timestamp) -> Self {
+        self.metadata = RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark);
+        self
+    }
+
+    pub(crate) fn value(&self, name: &str) -> Result<Option<RuntimeValue>, String> {
+        self.batch.value(self.row, name)
+    }
+
+    pub(crate) fn one_row_batch(&self) -> RuntimeRecordBatch {
+        RuntimeRecordBatch {
+            schema: self.batch.schema.clone(),
+            batch: self.batch.batch.slice(self.row, 1),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn to_json_string(&self) -> Result<String, String> {
+        self.to_json_string_masking(&nervix_vm::SchemaSensitivity::default())
+    }
+
+    pub(crate) fn to_json_string_masking(
+        &self,
+        sensitivity: &nervix_vm::SchemaSensitivity,
+    ) -> Result<String, String> {
+        self.batch.row_to_json_string_masking(self.row, sensitivity)
+    }
+
+    pub(crate) fn to_remote(&self) -> Result<RemoteRuntimeRecord, String> {
+        let mut fields = Vec::with_capacity(self.batch.schema.fields().len());
+        for field in self.batch.schema.fields() {
+            if let Some(value) = self.value(field.name())? {
+                fields.push(RemoteRuntimeField {
+                    name: field.name().clone(),
+                    value: value.to_remote(),
+                });
+            }
+        }
+        Ok(RemoteRuntimeRecord {
+            fields,
+            metadata: self.metadata.to_remote(),
+        })
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> Result<u64, String> {
+        let mut bytes = 32_u64;
+        for field in self.batch.schema.fields() {
+            if let Some(value) = self.value(field.name())? {
+                bytes = bytes
+                    .saturating_add(u64::try_from(field.name().len()).unwrap_or(u64::MAX))
+                    .saturating_add(value.estimated_bytes());
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+pub(crate) fn remote_runtime_record_to_json_string(record: &RemoteRuntimeRecord) -> String {
+    let mut fields = record.fields.iter().collect::<Vec<_>>();
+    fields.sort_by(|left, right| left.name.cmp(&right.name));
+    JsonValue::Object(
+        fields
+            .into_iter()
+            .map(|field| {
+                (
+                    field.name.clone(),
+                    RuntimeValue::from_remote(field.value.clone()).to_json_value(),
+                )
+            })
+            .collect(),
+    )
+    .to_string()
+}
+
+impl RuntimeRecordBatchBuilder {
+    pub(crate) fn append(&mut self, value: Option<&RuntimeValue>) -> Result<(), String> {
+        let field = self.fields.get(self.next_column).ok_or_else(|| {
+            format!(
+                "Arrow batch row {} already contains all {} schema fields",
+                self.rows,
+                self.fields.len()
+            )
+        })?;
+        if value.is_none() && !field.optional {
+            return Err(format!(
+                "Arrow batch row {} is missing required field '{}'",
+                self.rows, field.name
+            ));
+        }
+        append_runtime_value_to_arrow(
+            self.builders[self.next_column].as_mut(),
+            &field.ty,
+            value,
+            &format!("Arrow batch row {} field '{}'", self.rows, field.name),
+        )?;
+        self.next_column += 1;
+        Ok(())
+    }
+
+    pub(crate) fn finish_row(&mut self) -> Result<(), String> {
+        if self.next_column != self.fields.len() {
+            return Err(format!(
+                "Arrow batch row {} contains {} values for {} schema fields",
+                self.rows,
+                self.next_column,
+                self.fields.len()
+            ));
+        }
+        self.rows += 1;
+        self.next_column = 0;
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<RuntimeRecordBatch, String> {
+        if self.next_column != 0 {
+            return Err(format!(
+                "Arrow batch row {} is incomplete with {} of {} schema fields",
+                self.rows,
+                self.next_column,
+                self.fields.len()
+            ));
+        }
+        let columns = self
+            .builders
+            .iter_mut()
+            .map(|builder| builder.finish())
+            .collect::<Vec<_>>();
+        let batch = if columns.is_empty() {
+            RecordBatch::try_new_with_options(
+                self.schema.clone(),
+                columns,
+                &RecordBatchOptions::new().with_row_count(Some(self.rows)),
+            )
+        } else {
+            RecordBatch::try_new(self.schema.clone(), columns)
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(RuntimeRecordBatch {
+            schema: self.schema,
+            batch,
+        })
+    }
+}
+
 pub(crate) fn parse_as_type_from_arrow(data_type: &ArrowDataType) -> Result<ParseAsType, String> {
     match data_type {
         ArrowDataType::UInt8 => Ok(ParseAsType::U8),
@@ -1070,6 +1205,19 @@ pub(crate) fn parse_as_type_from_arrow(data_type: &ArrowDataType) -> Result<Pars
             "runtime record materialization does not support Arrow type {other:?}"
         )),
     }
+}
+
+pub(crate) fn runtime_value_arrow_array(
+    data_type: &ArrowDataType,
+    value: Option<&RuntimeValue>,
+    len: usize,
+) -> Result<ArrayRef, String> {
+    let ty = parse_as_type_from_arrow(data_type)?;
+    let mut builder = make_builder(data_type, len);
+    for _ in 0..len {
+        append_runtime_value_to_arrow(builder.as_mut(), &ty, value, "runtime scalar column")?;
+    }
+    Ok(builder.finish())
 }
 
 impl RuntimeRecordMetadata {
@@ -1243,110 +1391,6 @@ impl RuntimeValue {
             Self::Array(values) | Self::Vec(values) => {
                 JsonValue::Array(values.iter().map(RuntimeValue::to_json_value).collect())
             }
-        }
-    }
-
-    fn as_u8(&self) -> Option<u8> {
-        if let Self::U8(value) = self {
-            Some(*value)
-        } else {
-            None
-        }
-    }
-
-    fn as_i8(&self) -> Option<i8> {
-        if let Self::I8(value) = self {
-            Some(*value)
-        } else {
-            None
-        }
-    }
-
-    fn as_u16(&self) -> Option<u16> {
-        if let Self::U16(value) = self {
-            Some(*value)
-        } else {
-            None
-        }
-    }
-
-    fn as_i16(&self) -> Option<i16> {
-        if let Self::I16(value) = self {
-            Some(*value)
-        } else {
-            None
-        }
-    }
-
-    fn as_u32(&self) -> Option<u32> {
-        if let Self::U32(value) = self {
-            Some(*value)
-        } else {
-            None
-        }
-    }
-
-    fn as_i32(&self) -> Option<i32> {
-        if let Self::I32(value) = self {
-            Some(*value)
-        } else {
-            None
-        }
-    }
-
-    fn as_u64(&self) -> Option<u64> {
-        if let Self::U64(value) = self {
-            Some(*value)
-        } else {
-            None
-        }
-    }
-
-    fn as_i64(&self) -> Option<i64> {
-        if let Self::I64(value) = self {
-            Some(*value)
-        } else {
-            None
-        }
-    }
-
-    fn as_bool(&self) -> Option<bool> {
-        if let Self::Bool(value) = self {
-            Some(*value)
-        } else {
-            None
-        }
-    }
-
-    fn as_string(&self) -> Option<&str> {
-        if let Self::String(value) = self {
-            Some(value.as_str())
-        } else {
-            None
-        }
-    }
-
-    fn as_datetime(&self) -> Option<&DateTime<FixedOffset>> {
-        if let Self::Datetime(value) = self {
-            Some(value)
-        } else {
-            None
-        }
-    }
-
-    fn as_f32(&self) -> Option<f32> {
-        if let Self::F32(value) = self {
-            Some(value.into_inner())
-        } else {
-            None
-        }
-    }
-
-    fn as_f64(&self) -> Option<f64> {
-        if let Self::F64(value) = self {
-            Some(value.into_inner())
-        } else {
-            None
         }
     }
 }
@@ -1636,7 +1680,7 @@ fn compile_json_wire_schema(schema_def: &CreateWireSchema<JsonType>) -> Compiled
 pub fn decode_with_codec(
     codec: &CompiledCodec,
     payload: &[u8],
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     match &codec.wire_schema {
         CompiledWireSchema::Json(wire_schema) => decode_json(codec, wire_schema, payload),
         CompiledWireSchema::Cbor(wire_schema) => decode_cbor(codec, wire_schema, payload),
@@ -1649,7 +1693,7 @@ pub fn decode_with_codec(
 pub(crate) fn decode_with_codec_owned(
     codec: &CompiledCodec,
     mut payload: Vec<u8>,
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     match &codec.wire_schema {
         CompiledWireSchema::Json(wire_schema) => decode_json_mut(codec, wire_schema, &mut payload),
         CompiledWireSchema::Cbor(wire_schema) => decode_cbor(codec, wire_schema, &payload),
@@ -2122,7 +2166,7 @@ fn decode_json(
     codec: &CompiledCodec,
     wire_schema: &CompiledJsonWireSchema,
     payload: &[u8],
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     let value =
         serde_json::from_slice::<JsonValue>(payload).map_err(|source| CodecError::JsonDecode {
             codec: codec.name.as_str().to_string(),
@@ -2135,7 +2179,7 @@ fn decode_json_mut(
     codec: &CompiledCodec,
     wire_schema: &CompiledJsonWireSchema,
     payload: &mut [u8],
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     let value = simd_json::from_slice::<JsonValue>(payload).map_err(|source| {
         CodecError::SimdJsonDecode {
             codec: codec.name.as_str().to_string(),
@@ -2149,7 +2193,7 @@ fn decode_json_payload(
     codec: &CompiledCodec,
     wire_schema: &CompiledJsonWireSchema,
     value: JsonValue,
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     decode_json_value(codec, &value, Some(wire_schema))
 }
 
@@ -2157,7 +2201,7 @@ fn decode_cbor(
     codec: &CompiledCodec,
     wire_schema: &CompiledJsonWireSchema,
     payload: &[u8],
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     let value = ciborium::from_reader::<JsonValue, _>(Cursor::new(payload)).map_err(|source| {
         CodecError::CborDecode {
             codec: codec.name.as_str().to_string(),
@@ -2171,7 +2215,7 @@ fn decode_jaq_native(
     codec: &CompiledCodec,
     native: &CompiledJaqNativeCodec,
     payload: &[u8],
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     let Some(program) = native.transformations.on_ingestion.as_deref() else {
         return Err(CodecError::InvalidCodec {
             codec: codec.name.as_str().to_string(),
@@ -2196,7 +2240,7 @@ fn decode_protobuf(
     codec: &CompiledCodec,
     protobuf: &CompiledProtobufCodec,
     payload: &[u8],
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     let Some(program) = protobuf.transformations.on_ingestion.as_deref() else {
         return Err(CodecError::InvalidCodec {
             codec: codec.name.as_str().to_string(),
@@ -2259,7 +2303,7 @@ fn decode_json_value(
     codec: &CompiledCodec,
     value: &JsonValue,
     wire_schema: Option<&CompiledJsonWireSchema>,
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     let JsonValue::Object(object) = value else {
         return Err(CodecError::ExpectedObject {
             codec: codec.name.as_str().to_string(),
@@ -2279,7 +2323,7 @@ fn decode_json_value(
         }
     }
 
-    let mut fields = HashMap::new();
+    let mut builder = codec.schema.batch_builder(1);
     for field in codec.schema.fields() {
         let wire_field =
             wire_schema.and_then(|wire_schema| wire_schema.fields.get(&field.name).copied());
@@ -2291,6 +2335,12 @@ fn decode_json_value(
         }
         let Some(value) = object.get(&field.name) else {
             if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
+                builder
+                    .append(None)
+                    .map_err(|reason| CodecError::InvalidCodec {
+                        codec: codec.name.as_str().to_string(),
+                        reason,
+                    })?;
                 continue;
             }
             return Err(CodecError::MissingField {
@@ -2300,6 +2350,12 @@ fn decode_json_value(
         };
         if value.is_null() {
             if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
+                builder
+                    .append(None)
+                    .map_err(|reason| CodecError::InvalidCodec {
+                        codec: codec.name.as_str().to_string(),
+                        reason,
+                    })?;
                 continue;
             }
             return Err(CodecError::ParseField {
@@ -2318,10 +2374,20 @@ fn decode_json_value(
             });
         }
         let parsed = parse_json_value(codec, &field.name, &field.ty, value)?;
-        fields.insert(field.name.clone(), parsed);
+        builder
+            .append(Some(&parsed))
+            .map_err(|reason| CodecError::InvalidCodec {
+                codec: codec.name.as_str().to_string(),
+                reason,
+            })?;
     }
-
-    Ok(DecodedRecord::from_fields(fields))
+    builder
+        .finish_row()
+        .and_then(|()| builder.finish())
+        .map_err(|reason| CodecError::InvalidCodec {
+            codec: codec.name.as_str().to_string(),
+            reason,
+        })
 }
 
 fn run_jaq_transformation(
@@ -2341,7 +2407,7 @@ fn decode_avro(
     codec: &CompiledCodec,
     wire_schema: &CompiledAvroWireSchema,
     payload: &[u8],
-) -> Result<DecodedRecord, CodecError> {
+) -> Result<RuntimeRecordBatch, CodecError> {
     let mut cursor = Cursor::new(payload);
     let value = from_avro_datum(&wire_schema.schema, &mut cursor, None).map_err(|source| {
         CodecError::AvroDecode {
@@ -2356,7 +2422,7 @@ fn decode_avro(
     };
     let values = values.into_iter().collect::<HashMap<_, _>>();
 
-    let mut fields = HashMap::new();
+    let mut builder = codec.schema.batch_builder(1);
     for field in codec.schema.fields() {
         let wire_field =
             wire_schema
@@ -2368,6 +2434,12 @@ fn decode_avro(
                 })?;
         let Some(value) = values.get(&field.name) else {
             if field.optional && wire_field.optional {
+                builder
+                    .append(None)
+                    .map_err(|reason| CodecError::InvalidCodec {
+                        codec: codec.name.as_str().to_string(),
+                        reason,
+                    })?;
                 continue;
             }
             return Err(CodecError::MissingField {
@@ -2377,6 +2449,12 @@ fn decode_avro(
         };
         if avro_value_is_null(value) {
             if field.optional && wire_field.optional {
+                builder
+                    .append(None)
+                    .map_err(|reason| CodecError::InvalidCodec {
+                        codec: codec.name.as_str().to_string(),
+                        reason,
+                    })?;
                 continue;
             }
             return Err(CodecError::ParseField {
@@ -2386,10 +2464,20 @@ fn decode_avro(
             });
         }
         let parsed = parse_avro_value(codec, &field.name, &field.ty, value)?;
-        fields.insert(field.name.clone(), parsed);
+        builder
+            .append(Some(&parsed))
+            .map_err(|reason| CodecError::InvalidCodec {
+                codec: codec.name.as_str().to_string(),
+                reason,
+            })?;
     }
-
-    Ok(DecodedRecord::from_fields(fields))
+    builder
+        .finish_row()
+        .and_then(|()| builder.finish())
+        .map_err(|reason| CodecError::InvalidCodec {
+            codec: codec.name.as_str().to_string(),
+            reason,
+        })
 }
 
 fn parse_json_value(
@@ -2596,29 +2684,6 @@ pub(crate) fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
     }
 }
 
-fn build_recursive_arrow_column(
-    records: &[RuntimeRecord],
-    field: &CompiledSchemaField,
-) -> Result<ArrayRef, String> {
-    let mut builder = make_builder(&arrow_data_type(&field.ty), records.len());
-    for (row_index, record) in records.iter().enumerate() {
-        let value = record.value(&field.name);
-        if value.is_none() && !field.optional {
-            return Err(format!(
-                "record at row {row_index} is missing schema field '{}'",
-                field.name
-            ));
-        }
-        append_runtime_value_to_arrow(
-            builder.as_mut(),
-            &field.ty,
-            value,
-            &format!("record at row {row_index} field '{}'", field.name),
-        )?;
-    }
-    Ok(builder.finish())
-}
-
 fn append_runtime_value_to_arrow(
     builder: &mut dyn ArrayBuilder,
     ty: &ParseAsType,
@@ -2764,35 +2829,6 @@ fn append_runtime_value_to_arrow(
             Ok(())
         }
     }
-}
-
-fn collect_optional_typed_values<T>(
-    records: &[RuntimeRecord],
-    field: &CompiledSchemaField,
-    extract: impl Fn(&RuntimeValue) -> Option<T>,
-) -> Result<Vec<Option<T>>, String> {
-    records
-        .iter()
-        .enumerate()
-        .map(|(row_index, record)| {
-            let Some(value) = record.value(&field.name) else {
-                return if field.optional {
-                    Ok(None)
-                } else {
-                    Err(format!(
-                        "record at row {row_index} is missing schema field '{}'",
-                        field.name
-                    ))
-                };
-            };
-            extract(value).map(Some).ok_or_else(|| {
-                format!(
-                    "record at row {row_index} field '{}' is incompatible with {:?}",
-                    field.name, field.ty
-                )
-            })
-        })
-        .collect()
 }
 
 fn runtime_value_type_name(value: &RuntimeValue) -> &'static str {
@@ -3392,8 +3428,8 @@ mod tests {
         }
     }
 
-    fn array_record() -> RuntimeRecord {
-        RuntimeRecord::from_fields([
+    fn array_record() -> RuntimeRow {
+        test_runtime_row([
             (
                 "cpu_last_64".to_string(),
                 RuntimeValue::Array(vec![
@@ -3443,9 +3479,9 @@ mod tests {
         }
     }
 
-    fn multidimensional_array_record() -> RuntimeRecord {
+    fn multidimensional_array_record() -> RuntimeRow {
         let f32_value = |value| RuntimeValue::F32(OrderedFloat(value));
-        RuntimeRecord::from_fields([
+        test_runtime_row([
             (
                 "matrix".to_string(),
                 RuntimeValue::Array(vec![
@@ -3760,13 +3796,13 @@ mod tests {
             .expect("descriptor should be built")
     }
 
-    fn primitive_arrays_record() -> RuntimeRecord {
+    fn primitive_arrays_record() -> RuntimeRow {
         let mut fields = Vec::new();
         for (name, _, values, _) in primitive_array_cases() {
             fields.push((format!("{name}_array"), RuntimeValue::Array(values.clone())));
             fields.push((format!("{name}_vec"), RuntimeValue::Vec(values)));
         }
-        RuntimeRecord::from_fields(fields)
+        test_runtime_row(fields)
     }
 
     fn primitive_arrays_json_payload() -> Vec<u8> {
@@ -3828,12 +3864,16 @@ mod tests {
         payload
     }
 
-    fn record() -> RuntimeRecord {
-        RuntimeRecord::from_fields([
-            ("user_id".to_string(), RuntimeValue::U32(42)),
+    fn record() -> RuntimeRow {
+        record_with(42, "acme")
+    }
+
+    fn record_with(user_id: u32, tenant: &str) -> RuntimeRow {
+        test_runtime_row([
+            ("user_id".to_string(), RuntimeValue::U32(user_id)),
             (
                 "tenant".to_string(),
-                RuntimeValue::String("acme".to_string()),
+                RuntimeValue::String(tenant.to_string()),
             ),
             (
                 "created_at".to_string(),
@@ -3847,13 +3887,47 @@ mod tests {
         ])
     }
 
+    fn concat_test_rows(rows: &[RuntimeRow]) -> Result<RuntimeRecordBatch, String> {
+        let batches = rows
+            .iter()
+            .map(RuntimeRow::one_row_batch)
+            .collect::<Vec<_>>();
+        RuntimeRecordBatch::concat(&batches.iter().collect::<Vec<_>>())
+    }
+
+    fn single_batch_value(batch: &RuntimeRecordBatch, field: &str) -> Option<RuntimeValue> {
+        assert_eq!(batch.batch().num_rows(), 1, "expected one Arrow row");
+        batch.value(0, field).expect("Arrow value must be readable")
+    }
+
+    fn row_value(row: &RuntimeRow, field: &str) -> Option<RuntimeValue> {
+        row.value(field).expect("Arrow row value must be readable")
+    }
+
     fn encode_arrow_record(
         codec: &CompiledCodec,
-        record: &RuntimeRecord,
+        record: &RuntimeRow,
+    ) -> Result<Vec<u8>, CodecError> {
+        let batch = record
+            .one_row_batch()
+            .project(codec.schema.arrow_schema())
+            .map_err(|reason| CodecError::InvalidCodec {
+                codec: codec.name.as_str().to_string(),
+                reason,
+            })?;
+        let encoder = codec.batch_encoder(&batch)?;
+        let mut payload = Vec::new();
+        encoder.encode_row_into(0, &mut payload)?;
+        Ok(payload)
+    }
+
+    fn encode_test_fields(
+        codec: &CompiledCodec,
+        fields: impl IntoIterator<Item = (String, RuntimeValue)>,
     ) -> Result<Vec<u8>, CodecError> {
         let batch = codec
             .schema
-            .arrow_batch_from_records(std::slice::from_ref(record))
+            .batch_from_test_rows([fields])
             .map_err(|reason| CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason,
@@ -3878,11 +3952,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_records_roundtrip_through_arrow_batch() {
-        let compiled = compile_schema(&schema());
+    fn arrow_values_roundtrip_through_a_batch() {
         let records = vec![
             record(),
-            RuntimeRecord::from_fields([
+            test_runtime_row([
                 ("user_id".to_string(), RuntimeValue::U32(7)),
                 (
                     "tenant".to_string(),
@@ -3900,19 +3973,26 @@ mod tests {
             ]),
         ];
 
-        let batch = compiled
-            .arrow_batch_from_records(&records)
-            .expect("records should convert to arrow");
+        let batch = concat_test_rows(&records).expect("rows should concatenate as Arrow");
         assert_eq!(batch.batch().num_rows(), 2);
-
-        let roundtrip = compiled
-            .decoded_records_from_arrow_batch(&batch)
-            .expect("arrow batch should convert back to records");
-        assert_eq!(roundtrip.len(), 2);
-        assert_eq!(roundtrip[0].value("user_id"), Some(&RuntimeValue::U32(42)));
+        assert_eq!(batch.value(0, "user_id"), Ok(Some(RuntimeValue::U32(42))));
         assert_eq!(
-            roundtrip[1].value("tenant"),
-            Some(&RuntimeValue::String("beta".to_string()))
+            batch.value(1, "tenant"),
+            Ok(Some(RuntimeValue::String("beta".to_string())))
+        );
+    }
+
+    #[test]
+    fn runtime_row_is_a_shared_view_over_an_arrow_batch() {
+        let batch = record().one_row_batch();
+        let batch = Arc::new(batch);
+        let row = RuntimeRow::new(batch.clone(), 0, RuntimeRecordMetadata::test())
+            .expect("batch contains one row");
+
+        assert!(Arc::ptr_eq(row.batch(), &batch));
+        assert_eq!(
+            row.value("tenant").expect("tenant should be readable"),
+            Some(RuntimeValue::String("acme".to_string()))
         );
     }
 
@@ -3922,11 +4002,8 @@ mod tests {
         assert!(compiled.arrow_schema().field(1).is_nullable());
 
         let batch = compiled
-            .arrow_batch_from_records(&[RuntimeRecord::from_fields([(
-                "user_id".to_string(),
-                RuntimeValue::U32(42),
-            )])])
-            .expect("records should convert to arrow");
+            .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(42))]])
+            .expect("values should build an Arrow batch");
         let nickname = batch
             .batch()
             .column(1)
@@ -3935,20 +4012,14 @@ mod tests {
             .expect("nickname column should be strings");
         assert!(nickname.is_null(0));
 
-        let roundtrip = compiled
-            .decoded_records_from_arrow_batch(&batch)
-            .expect("arrow batch should convert back to records");
-        assert_eq!(roundtrip[0].value("user_id"), Some(&RuntimeValue::U32(42)));
-        assert_eq!(roundtrip[0].value("nickname"), None);
+        assert_eq!(batch.value(0, "user_id"), Ok(Some(RuntimeValue::U32(42))));
+        assert_eq!(batch.value(0, "nickname"), Ok(None));
     }
 
     #[test]
     fn runtime_arrow_batches_can_be_concatenated() {
-        let compiled = compile_schema(&schema());
-        let left = compiled
-            .arrow_batch_from_records(&[record()])
-            .expect("left batch should convert to arrow");
-        let right_record = RuntimeRecord::from_fields([
+        let left = record().one_row_batch();
+        let right_record = test_runtime_row([
             ("user_id".to_string(), RuntimeValue::U32(7)),
             (
                 "tenant".to_string(),
@@ -3964,19 +4035,20 @@ mod tests {
             ("latency".to_string(), RuntimeValue::F64(OrderedFloat(7.25))),
             ("active".to_string(), RuntimeValue::Bool(false)),
         ]);
-        let right = compiled
-            .arrow_batch_from_records(&[right_record])
-            .expect("right batch should convert to arrow");
+        let right = right_record.one_row_batch();
 
         let concatenated =
             RuntimeRecordBatch::concat(&[&left, &right]).expect("batches should concat");
 
         assert_eq!(concatenated.batch().num_rows(), 2);
-        let roundtrip = compiled
-            .decoded_records_from_arrow_batch(&concatenated)
-            .expect("concatenated batch should convert back to records");
-        assert_eq!(roundtrip[0].value("user_id"), Some(&RuntimeValue::U32(42)));
-        assert_eq!(roundtrip[1].value("user_id"), Some(&RuntimeValue::U32(7)));
+        assert_eq!(
+            concatenated.value(0, "user_id"),
+            Ok(Some(RuntimeValue::U32(42)))
+        );
+        assert_eq!(
+            concatenated.value(1, "user_id"),
+            Ok(Some(RuntimeValue::U32(7)))
+        );
     }
 
     #[test]
@@ -3991,12 +4063,18 @@ mod tests {
         let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
-        assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
         assert_eq!(
-            decoded.value("tenant"),
-            Some(&RuntimeValue::String("acme".to_string()))
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
         );
-        assert_eq!(decoded.value("active"), Some(&RuntimeValue::Bool(true)));
+        assert_eq!(
+            single_batch_value(&decoded, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "active"),
+            Some(RuntimeValue::Bool(true))
+        );
     }
 
     #[test]
@@ -4008,14 +4086,8 @@ mod tests {
             Some(&json_wire_schema()),
         )
         .expect("codec should compile");
-        let mut second = record();
-        second
-            .fields
-            .insert("user_id".to_string(), RuntimeValue::U32(7));
-        let records = [record(), second];
-        let batch = compiled_schema
-            .arrow_batch_from_records(&records)
-            .expect("records should convert to arrow");
+        let records = [record(), record_with(7, "acme")];
+        let batch = concat_test_rows(&records).expect("rows should concatenate as Arrow");
 
         let encoder = compiled_codec
             .batch_encoder(&batch)
@@ -4034,8 +4106,8 @@ mod tests {
             let decoded = decode_with_codec(&compiled_codec, payload)
                 .expect("columnar JSON payload should decode");
             assert_eq!(
-                decoded.value("user_id"),
-                Some(&RuntimeValue::U32(expected_user_id))
+                single_batch_value(&decoded, "user_id"),
+                Some(RuntimeValue::U32(expected_user_id))
             );
         }
 
@@ -4059,18 +4131,8 @@ mod tests {
             Some(&json_wire_schema()),
         )
         .expect("codec should compile");
-        let mut first = record();
-        first.fields.insert(
-            "tenant".to_string(),
-            RuntimeValue::String("a".repeat(4_096)),
-        );
-        let mut second = record();
-        second
-            .fields
-            .insert("tenant".to_string(), RuntimeValue::String("b".to_string()));
-        let batch = compiled_schema
-            .arrow_batch_from_records(&[first, second])
-            .expect("records should convert to arrow");
+        let rows = [record_with(42, &"a".repeat(4_096)), record_with(42, "b")];
+        let batch = concat_test_rows(&rows).expect("rows should concatenate as Arrow");
         let encoder = compiled_codec
             .batch_encoder(&batch)
             .expect("arrow batch should be accepted");
@@ -4090,8 +4152,8 @@ mod tests {
         let decoded = decode_with_codec(&compiled_codec, &payload)
             .expect("reused payload should contain only the second row");
         assert_eq!(
-            decoded.value("tenant"),
-            Some(&RuntimeValue::String("b".to_string()))
+            single_batch_value(&decoded, "tenant"),
+            Some(RuntimeValue::String("b".to_string()))
         );
     }
 
@@ -4127,11 +4189,11 @@ mod tests {
             compile_codec(&codec_model, compiled_schema.clone(), Some(&wire_schema))
                 .expect("codec should compile");
         let batch = compiled_schema
-            .arrow_batch_from_records(&[
-                RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::U64(1))]),
-                RuntimeRecord::from_fields([("value".to_string(), RuntimeValue::U64(u64::MAX))]),
+            .batch_from_test_rows([
+                [("value".to_string(), RuntimeValue::U64(1))],
+                [("value".to_string(), RuntimeValue::U64(u64::MAX))],
             ])
-            .expect("records should convert to arrow");
+            .expect("values should build an Arrow batch");
 
         let encoder = compiled_codec
             .batch_encoder(&batch)
@@ -4159,14 +4221,17 @@ mod tests {
         let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
-        assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
         assert_eq!(
-            decoded.value("tenant"),
-            Some(&RuntimeValue::String("acme".to_string()))
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
         );
         assert_eq!(
-            decoded.value("latency"),
-            Some(&RuntimeValue::F64(OrderedFloat(12.5)))
+            single_batch_value(&decoded, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "latency"),
+            Some(RuntimeValue::F64(OrderedFloat(12.5)))
         );
     }
 
@@ -4182,12 +4247,18 @@ mod tests {
         let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
-        assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
         assert_eq!(
-            decoded.value("tenant"),
-            Some(&RuntimeValue::String("acme".to_string()))
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
         );
-        assert_eq!(decoded.value("active"), Some(&RuntimeValue::Bool(true)));
+        assert_eq!(
+            single_batch_value(&decoded, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "active"),
+            Some(RuntimeValue::Bool(true))
+        );
     }
 
     #[test]
@@ -4206,14 +4277,15 @@ mod tests {
         )
         .expect("array payload should decode");
         assert_eq!(
-            decoded.value("cpu_last_64"),
-            array_record().value("cpu_last_64")
+            single_batch_value(&decoded, "cpu_last_64"),
+            row_value(&array_record(), "cpu_last_64")
         );
-        assert_eq!(decoded.value("labels"), array_record().value("labels"));
+        assert_eq!(
+            single_batch_value(&decoded, "labels"),
+            row_value(&array_record(), "labels")
+        );
 
-        let batch = compiled_schema
-            .arrow_batch_from_records(&[decoded.into_runtime_record(RuntimeRecordMetadata::test())])
-            .expect("arrays should convert to Arrow");
+        let batch = decoded;
         assert!(matches!(
             batch.batch().schema().field(0).data_type(),
             ArrowDataType::FixedSizeList(_, 3)
@@ -4223,23 +4295,21 @@ mod tests {
             ArrowDataType::List(_)
         ));
 
-        let roundtrip = compiled_schema
-            .decoded_records_from_arrow_batch(&batch)
-            .expect("arrays should roundtrip from Arrow");
         assert_eq!(
-            roundtrip[0].value("cpu_last_64"),
-            array_record().value("cpu_last_64")
+            single_batch_value(&batch, "cpu_last_64"),
+            row_value(&array_record(), "cpu_last_64")
         );
-        assert_eq!(roundtrip[0].value("labels"), array_record().value("labels"));
+        assert_eq!(
+            single_batch_value(&batch, "labels"),
+            row_value(&array_record(), "labels")
+        );
     }
 
     #[test]
     fn arrow_roundtrips_multidimensional_fixed_and_variable_array_shapes() {
         let schema = compile_schema(&multidimensional_array_schema());
         let expected = multidimensional_array_record();
-        let batch = schema
-            .arrow_batch_from_records(std::slice::from_ref(&expected))
-            .expect("multidimensional arrays should convert to Arrow");
+        let batch = expected.one_row_batch();
 
         let arrow_schema = batch.batch().schema();
         let ArrowDataType::FixedSizeList(matrix_rows, 2) = arrow_schema.field(0).data_type() else {
@@ -4257,10 +4327,12 @@ mod tests {
             ArrowDataType::FixedSizeList(_, 2)
         ));
 
-        let roundtrip = schema
-            .decoded_records_from_arrow_batch(&batch)
-            .expect("multidimensional arrays should roundtrip from Arrow");
-        assert_eq!(roundtrip[0].fields, expected.fields);
+        for field in schema.fields() {
+            assert_eq!(
+                single_batch_value(&batch, &field.name),
+                row_value(&expected, &field.name)
+            );
+        }
     }
 
     #[test]
@@ -4280,7 +4352,12 @@ mod tests {
         let payload = encode_arrow_record(&codec, &expected).expect("must encode nested arrays");
         let decoded = decode_with_codec(&codec, &payload).expect("must decode nested arrays");
 
-        assert_eq!(decoded.fields, expected.fields);
+        for field in codec.schema.fields() {
+            assert_eq!(
+                single_batch_value(&decoded, &field.name),
+                row_value(&expected, &field.name)
+            );
+        }
     }
 
     #[test]
@@ -4297,10 +4374,13 @@ mod tests {
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(
-            decoded.value("cpu_last_64"),
-            array_record().value("cpu_last_64")
+            single_batch_value(&decoded, "cpu_last_64"),
+            row_value(&array_record(), "cpu_last_64")
         );
-        assert_eq!(decoded.value("labels"), array_record().value("labels"));
+        assert_eq!(
+            single_batch_value(&decoded, "labels"),
+            row_value(&array_record(), "labels")
+        );
     }
 
     #[test]
@@ -4317,10 +4397,13 @@ mod tests {
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(
-            decoded.value("cpu_last_64"),
-            array_record().value("cpu_last_64")
+            single_batch_value(&decoded, "cpu_last_64"),
+            row_value(&array_record(), "cpu_last_64")
         );
-        assert_eq!(decoded.value("labels"), array_record().value("labels"));
+        assert_eq!(
+            single_batch_value(&decoded, "labels"),
+            row_value(&array_record(), "labels")
+        );
     }
 
     #[test]
@@ -4337,10 +4420,13 @@ mod tests {
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(
-            decoded.value("cpu_last_64"),
-            array_record().value("cpu_last_64")
+            single_batch_value(&decoded, "cpu_last_64"),
+            row_value(&array_record(), "cpu_last_64")
         );
-        assert_eq!(decoded.value("labels"), array_record().value("labels"));
+        assert_eq!(
+            single_batch_value(&decoded, "labels"),
+            row_value(&array_record(), "labels")
+        );
     }
 
     #[test]
@@ -4358,23 +4444,18 @@ mod tests {
             .expect("primitive array payload should decode");
         for field in compiled_schema.fields() {
             assert_eq!(
-                decoded.value(&field.name),
-                expected.value(&field.name),
+                single_batch_value(&decoded, &field.name),
+                row_value(&expected, &field.name),
                 "field {} should decode",
                 field.name
             );
         }
 
-        let batch = compiled_schema
-            .arrow_batch_from_records(&[decoded.into_runtime_record(RuntimeRecordMetadata::test())])
-            .expect("primitive arrays should convert to Arrow");
-        let roundtrip = compiled_schema
-            .decoded_records_from_arrow_batch(&batch)
-            .expect("primitive arrays should roundtrip from Arrow");
+        let batch = decoded;
         for field in compiled_schema.fields() {
             assert_eq!(
-                roundtrip[0].value(&field.name),
-                expected.value(&field.name),
+                single_batch_value(&batch, &field.name),
+                row_value(&expected, &field.name),
                 "field {} should roundtrip through Arrow",
                 field.name
             );
@@ -4401,8 +4482,8 @@ mod tests {
 
         for field in compiled_schema.fields() {
             assert_eq!(
-                decoded.value(&field.name),
-                expected.value(&field.name),
+                single_batch_value(&decoded, &field.name),
+                row_value(&expected, &field.name),
                 "field {} should roundtrip through CBOR",
                 field.name
             );
@@ -4429,8 +4510,8 @@ mod tests {
 
         for field in compiled_schema.fields() {
             assert_eq!(
-                decoded.value(&field.name),
-                expected.value(&field.name),
+                single_batch_value(&decoded, &field.name),
+                row_value(&expected, &field.name),
                 "field {} should roundtrip through TOML",
                 field.name
             );
@@ -4453,8 +4534,8 @@ mod tests {
 
         for field in compiled_schema.fields() {
             assert_eq!(
-                decoded.value(&field.name),
-                expected.value(&field.name),
+                single_batch_value(&decoded, &field.name),
+                row_value(&expected, &field.name),
                 "field {} should roundtrip through Avro",
                 field.name
             );
@@ -4512,8 +4593,11 @@ mod tests {
 
         let decoded = decode_with_codec(&compiled_codec, notification_json_payload_with_extra())
             .expect("loose wire schema should accept unknown fields");
-        assert_eq!(decoded.value("ignored"), None);
-        assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
+        assert_eq!(single_batch_value(&decoded, "ignored"), None);
+        assert_eq!(
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
+        );
     }
 
     #[test]
@@ -4528,8 +4612,11 @@ mod tests {
 
         let decoded = decode_with_codec(&compiled_codec, &notification_cbor_payload_with_extra())
             .expect("loose cbor wire schema should accept unknown fields");
-        assert_eq!(decoded.value("ignored"), None);
-        assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
+        assert_eq!(single_batch_value(&decoded, "ignored"), None);
+        assert_eq!(
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
+        );
     }
 
     #[test]
@@ -4544,13 +4631,19 @@ mod tests {
 
         let missing = decode_with_codec(&compiled_codec, br#"{"user_id":42}"#)
             .expect("missing optional field should decode");
-        assert_eq!(missing.value("user_id"), Some(&RuntimeValue::U32(42)));
-        assert_eq!(missing.value("nickname"), None);
+        assert_eq!(
+            single_batch_value(&missing, "user_id"),
+            Some(RuntimeValue::U32(42))
+        );
+        assert_eq!(single_batch_value(&missing, "nickname"), None);
 
         let explicit_null = decode_with_codec(&compiled_codec, br#"{"user_id":7,"nickname":null}"#)
             .expect("null optional field should decode");
-        assert_eq!(explicit_null.value("user_id"), Some(&RuntimeValue::U32(7)));
-        assert_eq!(explicit_null.value("nickname"), None);
+        assert_eq!(
+            single_batch_value(&explicit_null, "user_id"),
+            Some(RuntimeValue::U32(7))
+        );
+        assert_eq!(single_batch_value(&explicit_null, "nickname"), None);
     }
 
     #[test]
@@ -4563,9 +4656,9 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_arrow_record(
+        let payload = encode_test_fields(
             &compiled_codec,
-            &RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(42))]),
+            [("user_id".to_string(), RuntimeValue::U32(42))],
         )
         .expect("must encode");
         assert_eq!(
@@ -4584,61 +4677,67 @@ mod tests {
         )
         .expect("codec should compile");
 
-        let payload = encode_arrow_record(
+        let payload = encode_test_fields(
             &compiled_codec,
-            &RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(42))]),
+            [("user_id".to_string(), RuntimeValue::U32(42))],
         )
         .expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
-        assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
-        assert_eq!(decoded.value("nickname"), None);
+        assert_eq!(
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
+        );
+        assert_eq!(single_batch_value(&decoded, "nickname"), None);
     }
 
     #[test]
     fn arrow_batch_rejects_incompatible_runtime_values_before_encoding() {
         let compiled_schema = Arc::new(compile_schema(&schema()));
-        let bad_record = RuntimeRecord::from_fields([
-            ("user_id".to_string(), RuntimeValue::U32(42)),
-            (
-                "tenant".to_string(),
-                RuntimeValue::String("acme".to_string()),
-            ),
-            (
-                "created_at".to_string(),
-                RuntimeValue::Datetime(
-                    DateTime::parse_from_rfc3339("2025-01-02T03:04:05+00:00")
-                        .expect("valid timestamp"),
-                ),
-            ),
-            (
-                "latency".to_string(),
-                RuntimeValue::String("slow".to_string()),
-            ),
-            ("active".to_string(), RuntimeValue::Bool(true)),
-        ]);
-
         let err = compiled_schema
-            .arrow_batch_from_records(&[bad_record])
+            .batch_from_test_rows([[
+                ("user_id".to_string(), RuntimeValue::U32(42)),
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String("acme".to_string()),
+                ),
+                (
+                    "created_at".to_string(),
+                    RuntimeValue::Datetime(
+                        DateTime::parse_from_rfc3339("2025-01-02T03:04:05+00:00")
+                            .expect("valid timestamp"),
+                    ),
+                ),
+                (
+                    "latency".to_string(),
+                    RuntimeValue::String("slow".to_string()),
+                ),
+                ("active".to_string(), RuntimeValue::Bool(true)),
+            ]])
             .expect_err("must reject");
         assert!(err.contains("latency"));
     }
 
     #[test]
-    fn runtime_record_remote_helpers_preserve_semantics() {
+    fn persisted_runtime_record_restores_directly_into_an_arrow_row() {
         let record = record().with_ingested_at_watermarks(Timestamp::from_unix_nanos(1_234_567));
         assert_eq!(
-            record.to_json_string(),
+            record.to_json_string().expect("Arrow row should serialize"),
             r#"{"active":true,"created_at":"2025-01-02T03:04:05+00:00","latency":12.5,"tenant":"acme","user_id":42}"#
         );
 
-        let remote = record.to_remote();
-        let roundtrip = RuntimeRecord::from_remote(remote);
+        let remote = record.to_remote().expect("Arrow row should persist");
+        let roundtrip = compile_schema(&schema())
+            .runtime_row_from_remote(remote)
+            .expect("persisted row should restore into Arrow");
         assert_eq!(
-            roundtrip.value("tenant"),
-            Some(&RuntimeValue::String("acme".to_string()))
+            row_value(&roundtrip, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
         );
-        assert_eq!(roundtrip.value("user_id"), Some(&RuntimeValue::U32(42)));
+        assert_eq!(
+            row_value(&roundtrip, "user_id"),
+            Some(RuntimeValue::U32(42))
+        );
         assert_eq!(
             roundtrip.metadata().ingested_at_low_watermark(),
             Timestamp::from_unix_nanos(1_234_567)
@@ -4723,16 +4822,14 @@ mod tests {
     #[test]
     fn arrow_batch_rejects_missing_required_runtime_fields_before_encoding() {
         let compiled_schema = Arc::new(compile_schema(&schema()));
-        let partial = RuntimeRecord::from_fields([
-            ("user_id".to_string(), RuntimeValue::U32(42)),
-            (
-                "tenant".to_string(),
-                RuntimeValue::String("acme".to_string()),
-            ),
-        ]);
-
         let error = compiled_schema
-            .arrow_batch_from_records(&[partial])
+            .batch_from_test_rows([[
+                ("user_id".to_string(), RuntimeValue::U32(42)),
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String("acme".to_string()),
+                ),
+            ]])
             .expect_err("missing required field must fail before encoding");
         assert!(error.contains("created_at"));
     }
@@ -4759,10 +4856,13 @@ mod tests {
         )
         .expect("must decode");
 
-        assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
         assert_eq!(
-            decoded.value("tenant"),
-            Some(&RuntimeValue::String("acme".to_string()))
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
         );
     }
 
@@ -4850,14 +4950,17 @@ mod tests {
         ];
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
-        assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
         assert_eq!(
-            decoded.value("tenant"),
-            Some(&RuntimeValue::String("acme".to_string()))
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
         );
         assert_eq!(
-            decoded.value("payload"),
-            Some(&RuntimeValue::String("hello".to_string()))
+            single_batch_value(&decoded, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "payload"),
+            Some(RuntimeValue::String("hello".to_string()))
         );
     }
 
@@ -4871,7 +4974,7 @@ mod tests {
         assert!(!compiled_codec.requires_blocking_decode());
         assert!(compiled_codec.requires_blocking_encode());
 
-        let record = RuntimeRecord::from_fields([
+        let record = test_runtime_row([
             ("user_id".to_string(), RuntimeValue::U32(42)),
             (
                 "tenant".to_string(),
@@ -4916,12 +5019,18 @@ mod tests {
         let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
-        assert_eq!(decoded.value("user_id"), Some(&RuntimeValue::U32(42)));
         assert_eq!(
-            decoded.value("tenant"),
-            Some(&RuntimeValue::String("acme".to_string()))
+            single_batch_value(&decoded, "user_id"),
+            Some(RuntimeValue::U32(42))
         );
-        assert_eq!(decoded.value("active"), Some(&RuntimeValue::Bool(true)));
+        assert_eq!(
+            single_batch_value(&decoded, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "active"),
+            Some(RuntimeValue::Bool(true))
+        );
     }
 
     #[test]
