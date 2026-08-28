@@ -737,14 +737,36 @@ fn materialize_nodes(
                     file,
                     inputs,
                     output_schema,
-                } => RelayProcessorOperationTemplate::Inferencer {
-                    output_routes: materialize_outputs(output_routes)?,
-                    resource: resource.clone(),
-                    resource_version: *resource_version,
-                    file: file.clone(),
-                    inputs: inputs.clone(),
-                    output_schema: output_schema.clone(),
-                },
+                } => {
+                    let input_relay = node.input_relays.first().ok_or_else(|| {
+                        format!(
+                            "inferencer '{}' requires an input relay",
+                            node.processor.as_str()
+                        )
+                    })?;
+                    let input_schema = relay_schemas.get(input_relay).ok_or_else(|| {
+                        format!(
+                            "inferencer '{}' input relay '{}' has no runtime schema",
+                            node.processor.as_str(),
+                            input_relay.as_str()
+                        )
+                    })?;
+                    let compiled_input_program = CompiledInferencerInputProgram::compile(
+                        &node.processor,
+                        inputs,
+                        input_schema,
+                        udfs,
+                    )?;
+                    RelayProcessorOperationTemplate::Inferencer {
+                        output_routes: materialize_outputs(output_routes)?,
+                        resource: resource.clone(),
+                        resource_version: *resource_version,
+                        file: file.clone(),
+                        inputs: inputs.clone(),
+                        output_schema: output_schema.clone(),
+                        compiled_input_program,
+                    }
+                }
                 BranchedProcessorOperationSpec::WasmProcessor {
                     output_routes,
                     resource,
@@ -995,5 +1017,92 @@ pub(in crate::runtime) fn format_branched_by(branched_by: &[Identifier]) -> Stri
                 .collect::<Vec<_>>()
                 .join(", ")
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::{
+        CreateSchema, InferencerTensorDeclaration, InferencerTensorDimension,
+        InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+        InferencerTensorSchema, ParseAsType, SchemaField,
+    };
+    use triomphe::Arc;
+
+    use super::*;
+
+    fn identifier(value: &str) -> Identifier {
+        Identifier::parse(value).expect("test identifier must be valid")
+    }
+
+    fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
+        InferencerTensorSchema {
+            representation: InferencerTensorRepresentation::Dense,
+            element_type: InferencerTensorElementType::F32,
+            dimensions: vec![InferencerTensorDimension::Fixed(size)],
+        }
+    }
+
+    #[test]
+    fn inferencer_input_mappings_compile_when_template_is_materialized() {
+        let input_relay = identifier("features");
+        let processor = identifier("score_model");
+        let input_schema = Arc::new(compile_schema(&CreateSchema {
+            name: identifier("feature_schema"),
+            fields: vec![SchemaField {
+                name: identifier("vector"),
+                ty: ParseAsType::Array {
+                    element: Box::new(ParseAsType::F32),
+                    len: 2,
+                },
+                optional: false,
+                sensitive: false,
+            }],
+        }));
+        let node = BranchedProcessorSpec {
+            kind: ModelKind::Inferencer,
+            processor: processor.clone(),
+            input_relays: vec![input_relay.clone()],
+            input_collect_policies: HashMap::default(),
+            mode: AckMode::Attached,
+            error_policies: ErrorPolicies::handled_by_log(),
+            from_where: HashMap::default(),
+            filter_where: None,
+            materialized_state: Vec::new(),
+            operation: BranchedProcessorOperationSpec::Inferencer {
+                output_routes: BranchedProcessorOutputsSpec {
+                    routes: vec![BranchedProcessorOutputSpec {
+                        relay: identifier("scores"),
+                        construction: RouteConstruction::default(),
+                        flush_each: Some("IMMEDIATE".to_string()),
+                        max_batch_size: None,
+                        message_error_policy: MessageErrorPolicy::Log,
+                    }],
+                },
+                resource: identifier("fraud_model"),
+                resource_version: Some(1),
+                file: "models/fraud.onnx".to_string(),
+                inputs: vec![InferencerTensorMapping {
+                    tensor: "features".to_string(),
+                    schema: inferencer_tensor_schema(2),
+                    expression: nervix_nspl::parse_expression("input.missing")
+                        .expect("test expression must parse"),
+                }],
+                output_schema: vec![InferencerTensorDeclaration {
+                    tensor: "score".to_string(),
+                    schema: inferencer_tensor_schema(1),
+                }],
+            },
+        };
+        let mut relay_schemas = HashMap::default();
+        relay_schemas.insert(input_relay, input_schema);
+
+        let error = materialize_nodes(&[node], &relay_schemas, None)
+            .expect_err("invalid INPUTS mapping must fail template materialization");
+
+        assert!(
+            error.contains("inferencer 'score_model' INPUTS compile failed"),
+            "unexpected error: {error}"
+        );
     }
 }
