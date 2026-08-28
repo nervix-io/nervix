@@ -6,6 +6,11 @@
 use flatbuffers::{Allocator, FlatBufferBuilder, WIPOffset};
 use thiserror::Error;
 
+#[allow(
+    clippy::extra_unused_lifetimes,
+    mismatched_lifetime_syntaxes,
+    unused_imports
+)]
 mod generated {
     include!(concat!(
         env!("OUT_DIR"),
