@@ -10993,6 +10993,63 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
     }
 }
 
+#[then(expr = "within {string} {int} relay subscription payloads share field {string}")]
+async fn then_relay_subscription_payloads_share_field(
+    world: &mut ScenarioWorld,
+    duration: String,
+    expected_count: usize,
+    field: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session with subscription must exist");
+    let deadline = Instant::now() + duration;
+    let mut shared_values = BTreeSet::new();
+    let mut observed = Vec::with_capacity(expected_count);
+
+    while observed.len() < expected_count {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out after receiving {} of {expected_count} subscription payloads; observed \
+             {observed:?}",
+            observed.len()
+        );
+        let event = session
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for subscription payloads")
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out after receiving {} of {expected_count} subscription payloads; \
+                     observed {observed:?}",
+                    observed.len()
+                )
+            });
+        let payload = event.payload;
+        let value = serde_json::from_str::<serde_json::Value>(&payload)
+            .unwrap_or_else(|error| panic!("subscription payload is not valid JSON: {error}"));
+        let shared_value = value
+            .get(&field)
+            .unwrap_or_else(|| panic!("subscription payload {value} has no field '{field}'"))
+            .to_string();
+        shared_values.insert(shared_value);
+        observed.push(payload.clone());
+        world.last_subscription_payload = Some(payload);
+    }
+
+    assert_eq!(
+        shared_values.len(),
+        1,
+        "expected {expected_count} subscription payloads to share field '{field}', got \
+         {shared_values:?} from {observed:?}"
+    );
+}
+
 #[then(
     expr = "within {string} generated routes {string} value {int} and {string} value {int} share \
             field {string}"

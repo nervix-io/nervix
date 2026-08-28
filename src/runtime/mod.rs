@@ -235,9 +235,9 @@ use window_state::{
 
 #[cfg(test)]
 const STUPID_CHANNEL_CAPACITY_REMOVE_ME: usize = 1;
-/// Chosen operational bound for how many routed messages accumulate before an ingest
-/// group is built into one Arrow batch per (relay, branch key). This is intentionally
-/// independent of an NSPL route's flush policy.
+/// Chosen operational bound for how many decoded source rows accumulate before an
+/// ingest group executes and becomes one Arrow batch per (relay, branch key). This is
+/// intentionally independent of an NSPL route's flush policy.
 pub(crate) const INGEST_GROUP_MAX_ROWS: usize = 1024;
 /// Chosen operational bound for how long a partial source group waits when the source
 /// goes quiet. This is intentionally independent of an NSPL route's flush policy.
@@ -1362,12 +1362,19 @@ struct IngestorDependencies {
     branched_templates: HashMap<Identifier, (SharedActiveGraph, IngestorRouteTemplate)>,
 }
 
-/// One group of decoded messages to dispatch together.
+struct IngestGroupContext {
+    domain: Domain,
+    ingestor: Identifier,
+    timestamp_source: Option<IngestTimestampSource>,
+    output_routes: RelayProcessorOutputsNode,
+    filter_where: Option<CompiledProgramWithMaterializedInterest>,
+}
+
+/// Decoded messages to add to a source-owned ingest group.
 ///
-/// A group is whatever the source polled in one go; a single decoded request is a group
-/// of one. Dispatching a whole group at once is what lets the ingestor `FILTER WHERE`
-/// and each route's filter-map run as one columnar VM execution rather than one per
-/// record.
+/// A source may contribute one poll batch or several consecutive single-record polls.
+/// The collector owns the actual group boundary: request-scoped sources flush at the
+/// end of the request, while streaming sources flush at the row or idle-time bound.
 struct IngestGroupDispatch<'a> {
     domain: &'a Domain,
     ingestor: &'a Identifier,
@@ -1380,10 +1387,21 @@ struct IngestGroupDispatch<'a> {
     /// Row-aligned with `records`. An empty set is replaced by a tracked ack root.
     acks: Vec<AckSet>,
     ingested_at: Timestamp,
-    /// Routed messages always enter a source-owned collector. Sources differ only in
-    /// when they flush it: stream sources group by size/idle time, while request-scoped
-    /// sources flush at the end of the request or response.
+    /// Sources differ only in when they flush this group: stream sources use the
+    /// size/idle-time bounds, while request-scoped sources flush at request completion.
     collector: &'a mut IngestRouteCollector,
+}
+
+struct IngestGroupContribution<'a> {
+    domain: &'a Domain,
+    ingestor: &'a Identifier,
+    timestamp_source: Option<&'a IngestTimestampSource>,
+    output_routes: &'a RelayProcessorOutputsNode,
+    filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
+    records: Vec<DecodedRecord>,
+    metadata: Vec<IngestFilterMapMetadata>,
+    acks: Vec<AckSet>,
+    ingested_at: Timestamp,
 }
 
 struct RawIngestDispatch<'a> {
@@ -1409,6 +1427,78 @@ struct IngestGroupRows {
     /// Empty when the source carries no ingest metadata, otherwise row-aligned.
     metadata: Vec<IngestFilterMapMetadata>,
     acks: Vec<AckSet>,
+}
+
+#[derive(Default)]
+struct PendingIngestGroup {
+    records: Vec<DecodedRecord>,
+    /// Empty when the source carries no ingest metadata, otherwise row-aligned.
+    metadata: Vec<IngestFilterMapMetadata>,
+    acks: Vec<AckSet>,
+    ingested_at: Vec<Timestamp>,
+}
+
+impl PendingIngestGroup {
+    fn append(
+        &mut self,
+        records: Vec<DecodedRecord>,
+        metadata: Vec<IngestFilterMapMetadata>,
+        acks: Vec<AckSet>,
+        ingested_at: Timestamp,
+    ) -> Result<(), String> {
+        let row_count = records.len();
+        if !metadata.is_empty() && metadata.len() != row_count {
+            return Err(format!(
+                "received {} ingest metadata rows for {row_count} records",
+                metadata.len()
+            ));
+        }
+        if acks.len() != row_count {
+            return Err(format!(
+                "received {} ack sets for {row_count} records",
+                acks.len()
+            ));
+        }
+        if !self.records.is_empty() && self.metadata.is_empty() != metadata.is_empty() {
+            return Err("cannot mix ingest rows with and without source metadata".to_string());
+        }
+
+        self.records.extend(records);
+        self.metadata.extend(metadata);
+        self.acks.extend(acks);
+        self.ingested_at
+            .extend(std::iter::repeat_n(ingested_at, row_count));
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    fn into_rows(self) -> IngestGroupRows {
+        debug_assert_eq!(self.records.len(), self.ingested_at.len());
+        debug_assert_eq!(self.records.len(), self.acks.len());
+        debug_assert!(self.metadata.is_empty() || self.metadata.len() == self.records.len());
+        IngestGroupRows {
+            records: self
+                .records
+                .into_iter()
+                .zip(self.ingested_at)
+                .map(|(record, ingested_at)| {
+                    record.into_runtime_record(RuntimeRecordMetadata::from_ingested_at_watermarks(
+                        ingested_at,
+                        ingested_at,
+                    ))
+                })
+                .collect(),
+            metadata: self.metadata,
+            acks: self.acks,
+        }
+    }
 }
 
 impl IngestGroupRows {
@@ -1467,26 +1557,80 @@ struct IngestorFilterWhereError<'a> {
     materialized_state: HashMap<String, RuntimeValue>,
 }
 
-/// Accumulates routed ingest messages so a whole poll group can be built as one Arrow
-/// batch per (relay, branch key) instead of one batch per record.
+/// Accumulates one source ingest group before program execution, then holds its routed
+/// messages long enough to build one Arrow batch per (relay, branch key).
 #[derive(Default)]
 struct IngestRouteCollector {
+    context: Option<IngestGroupContext>,
+    pending: PendingIngestGroup,
     routed: Vec<(Identifier, RelayMessage)>,
     flush_at: Option<Instant>,
 }
 
 impl IngestRouteCollector {
-    fn push(&mut self, relay: Identifier, message: RelayMessage) {
+    fn collect(&mut self, contribution: IngestGroupContribution<'_>) -> Result<(), String> {
+        let IngestGroupContribution {
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            records,
+            metadata,
+            acks,
+            ingested_at,
+        } = contribution;
+        if records.is_empty() {
+            return Ok(());
+        }
+        if let Some(existing) = self.context.as_ref()
+            && (existing.domain != *domain || existing.ingestor != *ingestor)
+        {
+            return Err(format!(
+                "ingest group for '{}.{}' cannot collect rows for '{}.{}'",
+                existing.domain.as_str(),
+                existing.ingestor.as_str(),
+                domain.as_str(),
+                ingestor.as_str()
+            ));
+        }
+        self.pending.append(records, metadata, acks, ingested_at)?;
+        if self.context.is_none() {
+            self.context = Some(IngestGroupContext {
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+                timestamp_source: timestamp_source.cloned(),
+                output_routes: output_routes.clone(),
+                filter_where: filter_where.cloned(),
+            });
+        }
         self.flush_at = Some(Instant::now() + INGEST_GROUP_IDLE_FLUSH);
+        Ok(())
+    }
+
+    fn take_pending(&mut self) -> Option<(IngestGroupContext, IngestGroupRows)> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        self.flush_at = None;
+        let context = self
+            .context
+            .take()
+            .expect("a non-empty ingest group must retain its execution context");
+        let pending = std::mem::take(&mut self.pending);
+        Some((context, pending.into_rows()))
+    }
+
+    fn push(&mut self, relay: Identifier, message: RelayMessage) {
         self.routed.push((relay, message));
     }
 
     fn is_empty(&self) -> bool {
-        self.routed.is_empty()
+        self.pending.is_empty() && self.routed.is_empty()
     }
 
     fn len(&self) -> usize {
-        self.routed.len()
+        self.pending.len()
     }
 
     fn next_flush(&self) -> Option<Instant> {
@@ -1496,7 +1640,6 @@ impl IngestRouteCollector {
     /// Groups by (relay, branch key) preserving arrival order within each group.
     /// `RelayRecordBatch::from_messages` requires a uniform key per batch.
     fn drain_groups(&mut self) -> Vec<(Identifier, Vec<RelayMessage>)> {
-        self.flush_at = None;
         let mut groups: Vec<(Identifier, Option<BranchKey>, Vec<RelayMessage>)> = Vec::new();
         let mut group_indices: HashMap<(Identifier, Option<BranchKey>), usize> = HashMap::default();
         for (relay, message) in self.routed.drain(..) {

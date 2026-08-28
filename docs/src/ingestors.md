@@ -53,7 +53,9 @@ buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-
 At runtime, the ingestor:
 
 - decodes inbound payloads into runtime records
-- optionally executes `FILTER WHERE` against the decoded input batch
+- collects decoded records into a bounded source ingest group
+- executes `FILTER WHERE` once against that whole group
+- executes each route's ordered construction and `WHERE` program once against the surviving group
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
 - accumulates decoded rows independently for every matching destination and branch group
 - writes each route's buffered rows when its configured interval or size boundary fires, or when

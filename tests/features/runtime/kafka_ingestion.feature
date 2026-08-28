@@ -120,6 +120,64 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
+  @ingestor_group_programs
+  Scenario Outline: Kafka NO_ACK executes ingestor programs once for a collected ingest group
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "grouped_program_input_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA grouped_event (
+        user_id I64
+      );
+      CREATE SCHEMA routed_grouped_event (
+        user_id I64,
+        group_clock DATETIME
+      );
+      CREATE WIRE JSON SCHEMA grouped_event_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC grouped_event_codec
+        FROM WIRE JSON SCHEMA grouped_event_wire
+        TO SCHEMA grouped_event;
+      CREATE RELAY grouped_events SCHEMA routed_grouped_event UNBRANCHED;
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE INGESTOR grouped_event_source
+        FROM KAFKA kafka_main TOPIC grouped_program_input_{{test_id}}
+        OFFSET BY CONSUMER GROUP nervix_cucumber_grouped_program_{{test_id}}
+        MODE NO_ACK PARALLEL
+        ON QUIESCE SUSPEND DECODE USING grouped_event_codec
+        FILTER WHERE now() = now()
+        TO grouped_events
+        INHERIT ALL
+        SET group_clock = now()
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION grouped_events_subscription TO grouped_events;
+      """
+    And 16 JSON messages with user id 42 are rapidly published to "KAFKA" input "grouped_program_input_{{test_id}}"
+    And these NSPL commands are executed
+      """
+      START;
+      """
+    Then within "20s" 16 relay subscription payloads share field "group_clock"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Kafka ingestor reports transient source failures and recovers
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
