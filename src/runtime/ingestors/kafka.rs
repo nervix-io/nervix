@@ -313,10 +313,10 @@ impl KafkaIngestor {
                 let mut observed_start_version = initial_observed_start_version;
                 let mut consumer_ready = initial_consumer_ready;
                 let mut assignment_refresh_pending = false;
-                // Routed messages accumulate here across consecutive polls so a group of
-                // ingested records becomes one Arrow batch per (relay, branch key)
-                // instead of one single-row batch per record. Flushed on size or when
-                // the stream goes idle, so a partial group is never held indefinitely.
+                // Decoded records accumulate here across consecutive polls. The group
+                // executes once and becomes one Arrow batch per (relay, branch key)
+                // instead of entering the VM and downstream channel once per record.
+                // Size and idle-time bounds keep partial groups bounded.
                 let mut ingest_collector = IngestRouteCollector::default();
 
                 'ingest: loop {

@@ -4124,8 +4124,8 @@ impl Runtime {
         RuntimeRow::new(Arc::new(output), 0, message.record.metadata().clone())
     }
 
-    /// Builds one Arrow batch per (relay, branch key) from everything a poll group routed
-    /// and forwards each to its branch entrypoint.
+    /// Executes the collected ingest group, then builds one Arrow batch per (relay,
+    /// branch key) and forwards each batch to its branch entrypoint.
     ///
     /// This is the counterpart to `IngestGroupDispatch::collector`. Building the batch once per
     /// group replaces N single-row batch constructions, N channel sends, and the
@@ -4137,6 +4137,21 @@ impl Runtime {
         branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
         collector: &mut IngestRouteCollector,
     ) -> Result<(), String> {
+        if collector.is_empty() {
+            return Ok(());
+        }
+        if let Some((context, rows)) = collector.take_pending()? {
+            if context.domain != *domain || context.ingestor != *ingestor {
+                return Err(format!(
+                    "ingest group for '{}.{}' cannot flush as '{}.{}'",
+                    context.domain.as_str(),
+                    context.ingestor.as_str(),
+                    domain.as_str(),
+                    ingestor.as_str()
+                ));
+            }
+            self.execute_ingest_group(&context, rows, collector).await?;
+        }
         if collector.is_empty() {
             return Ok(());
         }
@@ -4235,13 +4250,11 @@ impl Runtime {
         first_error.map_or(Ok(()), Err)
     }
 
-    /// Dispatches a whole poll group of ingested messages.
+    /// Adds decoded records to the current source ingest group.
     ///
-    /// The ingestor `FILTER WHERE` runs once over the group and each route's filter-map
-    /// runs once over the rows that survived it, so the columnar VM is entered a fixed
-    /// number of times per group instead of twice per record. Records, ingest metadata
-    /// and acks stay row-aligned throughout: that is what lets a message error still
-    /// name the record that produced it and lets every record keep its own acks.
+    /// Program execution is deliberately deferred until `flush_ingest_collector`, so
+    /// sources that receive one record per poll still enter the columnar VM once for the
+    /// collected group rather than once per call to this method.
     pub(in crate::runtime) async fn dispatch_ingested_records(
         &self,
         dispatch: IngestGroupDispatch<'_>,
@@ -4254,58 +4267,51 @@ impl Runtime {
             filter_where,
             records,
             metadata,
-            mut acks,
+            acks,
             ingested_at,
             collector,
         } = dispatch;
-        if records.is_empty() {
-            return Ok(());
-        }
-        if !metadata.is_empty() && metadata.len() != records.len() {
-            return Err(format!(
-                "ingestor '{}' received {} ingest metadata rows for {} records",
-                ingestor.as_str(),
-                metadata.len(),
-                records.len()
-            ));
-        }
-        if acks.len() != records.len() {
-            return Err(format!(
-                "ingestor '{}' received {} ack sets for {} records",
-                ingestor.as_str(),
-                acks.len(),
-                records.len()
-            ));
-        }
+        collector
+            .collect(IngestGroupContribution {
+                domain,
+                ingestor,
+                timestamp_source,
+                output_routes,
+                filter_where,
+                records,
+                metadata,
+                acks,
+                ingested_at,
+            })
+            .map_err(|reason| format!("ingestor '{}' {reason}", ingestor.as_str()))
+    }
+
+    /// Executes one collected ingest group.
+    ///
+    /// The ingestor `FILTER WHERE` runs once over the group and each route's filter-map
+    /// runs once over the rows that survived it. Records, ingest metadata and acks stay
+    /// row-aligned throughout so message errors and acknowledgements remain attributable
+    /// to their original records.
+    async fn execute_ingest_group(
+        &self,
+        context: &IngestGroupContext,
+        mut rows: IngestGroupRows,
+        collector: &mut IngestRouteCollector,
+    ) -> Result<(), String> {
+        let domain = &context.domain;
+        let ingestor = &context.ingestor;
+        let timestamp_source = context.timestamp_source.as_ref();
+        let output_routes = &context.output_routes;
+        let filter_where = context.filter_where.as_ref();
 
         // Sources that do not track acks themselves still need a root for downstream
         // resolution to land on. Those completions are deliberately never observed.
         let mut _unobserved_completions = Vec::new();
-        for slot in acks.iter_mut().filter(|slot| slot.is_empty()) {
+        for slot in rows.acks.iter_mut().filter(|slot| slot.is_empty()) {
             let (tracked, completion) = self.tracked_ack_root(domain);
             *slot = tracked;
             _unobserved_completions.push(completion);
         }
-        if records.iter().any(|record| record.batch().num_rows() != 1) {
-            return Err(format!(
-                "ingestor '{}' decoded a message into a batch that does not contain exactly one \
-                 row",
-                ingestor.as_str()
-            ));
-        }
-        let batch_refs = records.iter().collect::<Vec<_>>();
-        let batch = RuntimeRecordBatch::concat(&batch_refs)?;
-        let mut rows = IngestGroupRows {
-            batch,
-            record_metadata: (0..records.len())
-                .map(|_| {
-                    RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at)
-                })
-                .collect(),
-            ingest_metadata: metadata,
-            acks,
-        };
-
         // One execution clock for the whole group: a batch is evaluated against the
         // state it was admitted with.
         let execution_now = self
@@ -7778,6 +7784,7 @@ impl Runtime {
             );
             metadata.push(source_metadata.clone());
         }
+        let row_count = records.len();
         self.dispatch_ingested_records(IngestGroupDispatch {
             collector,
             domain,
@@ -7788,7 +7795,7 @@ impl Runtime {
             records,
             metadata,
             ingested_at: current_timestamp(),
-            acks: vec![AckSet::empty()],
+            acks: vec![AckSet::empty(); row_count],
         })
         .await
         .map_err(|error| error.to_string())?;
