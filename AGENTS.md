@@ -390,6 +390,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - Keep parser tests near the grammar they protect.
 - Final implementation reports must name the cucumber scenario added or updated. If none was added,
   state the explicit user-approved reason.
+- After completing requested repository changes, include a proposed Conventional Commit title and
+  description in the final response. Follow Conventional Commits and select the title type from the
+  current `type-enum` in `./commitlint.config.js`.
+- When the user requests follow-up changes, regenerate both so the final response contains an
+  updated title and description that reflect the complete resulting change instead of a stale
+  earlier proposal.
 
 ## Error and Diagnostic Quality
 
