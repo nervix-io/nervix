@@ -1,6 +1,8 @@
 use std::sync::Arc as StdArc;
 
-use arrow_array::{ArrayRef, BooleanArray, Int64Array, ListArray, StringArray, types::Int64Type};
+use arrow_array::{
+    ArrayRef, BooleanArray, Float64Array, Int64Array, ListArray, StringArray, types::Int64Type,
+};
 use arrow_schema::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use nervix_nspl::vm_program::parse_program;
@@ -50,6 +52,65 @@ fn arithmetic_batch(row_count: usize) -> TypedBatch {
             TypedArray::Int64(right),
             TypedArray::Int64(divisor),
             TypedArray::Boolean(keep),
+        ],
+    )
+    .expect("benchmark batch must build")
+}
+
+fn float_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("left", DataType::Float64, true),
+        Field::new("right", DataType::Float64, true),
+        Field::new("divisor", DataType::Float64, true),
+    ]))
+}
+
+fn float_arithmetic_output_schema() -> StdArc<Schema> {
+    let mut fields = float_schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.extend([
+        Field::new("total", DataType::Float64, true),
+        Field::new("difference", DataType::Float64, true),
+        Field::new("product", DataType::Float64, true),
+        Field::new("quotient", DataType::Float64, true),
+        Field::new("remainder", DataType::Float64, true),
+    ]);
+    StdArc::new(Schema::new(fields))
+}
+
+fn nullable_cast_output_schema() -> StdArc<Schema> {
+    let mut fields = float_schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.extend([
+        Field::new("left_int", DataType::Int64, true),
+        Field::new("right_f32", DataType::Float32, true),
+    ]);
+    StdArc::new(Schema::new(fields))
+}
+
+fn float_batch(row_count: usize) -> TypedBatch {
+    let left = Float64Array::from_iter(
+        (0..row_count).map(|row| (row % 17 != 0).then_some((row % 97) as f64 + 1.25)),
+    );
+    let right = Float64Array::from_iter(
+        (0..row_count).map(|row| (row % 19 != 0).then_some((row % 13) as f64 + 0.5)),
+    );
+    let divisor = Float64Array::from_iter(
+        (0..row_count).map(|row| (row % 23 != 0).then_some((row % 7) as f64 + 1.0)),
+    );
+
+    TypedBatch::try_new(
+        float_schema(),
+        vec![
+            TypedArray::Float64(left),
+            TypedArray::Float64(right),
+            TypedArray::Float64(divisor),
         ],
     )
     .expect("benchmark batch must build")
@@ -190,6 +251,38 @@ fn compile_arithmetic(options: CompileOptions) -> Arc<CompiledProgram> {
     .expect("benchmark program must compile")
 }
 
+fn compile_float_arithmetic() -> Arc<CompiledProgram> {
+    let program = parse_program(
+        "SET input.total = input.left + input.right, input.difference = input.left - input.right, \
+         input.product = input.left * input.right, input.quotient = input.left / input.divisor, \
+         input.remainder = input.left % input.divisor;",
+    )
+    .expect("benchmark program must parse");
+    compile_program_with_options_for_bindings(
+        &program,
+        float_arithmetic_output_schema(),
+        [CompileBinding::writable("input", float_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("benchmark program must compile")
+}
+
+fn compile_nullable_casts() -> Arc<CompiledProgram> {
+    let program = parse_program(
+        "SET input.left_int = input.left AS INT64, input.right_f32 = input.right AS FLOAT32;",
+    )
+    .expect("benchmark program must parse");
+    compile_program_with_options_for_bindings(
+        &program,
+        nullable_cast_output_schema(),
+        [CompileBinding::writable("input", float_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("benchmark program must compile")
+}
+
 fn compile_string(options: CompileOptions) -> Arc<CompiledProgram> {
     let program = parse_program(
         "SET input.chosen = coalesce(input.primary, input.fallback), input.was_null = \
@@ -323,6 +416,8 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
     let arithmetic_compiled = compile_arithmetic(CompileOptions::default());
     let string_compiled = compile_string(CompileOptions::default());
     let numeric_compare_compiled = compile_numeric_compare();
+    let float_arithmetic_compiled = compile_float_arithmetic();
+    let nullable_casts_compiled = compile_nullable_casts();
     let text_transform_compiled = compile_text_transform();
     let list_compiled = compile_list();
     let runtime = benchmark_runtime();
@@ -352,6 +447,28 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
                 ))
             })
         });
+
+        let batch = float_batch(rows);
+        group.bench_with_input(BenchmarkId::new("float_arithmetic", rows), &rows, |b, _| {
+            b.iter(|| {
+                runtime.block_on(execute_program(
+                    black_box(&float_arithmetic_compiled),
+                    black_box(&batch),
+                ))
+            })
+        });
+        group.bench_with_input(
+            BenchmarkId::new("nullable_kernel_casts", rows),
+            &rows,
+            |b, _| {
+                b.iter(|| {
+                    runtime.block_on(execute_program(
+                        black_box(&nullable_casts_compiled),
+                        black_box(&batch),
+                    ))
+                })
+            },
+        );
 
         let batch = string_batch(rows);
         group.bench_with_input(BenchmarkId::new("string_builtins", rows), &rows, |b, _| {

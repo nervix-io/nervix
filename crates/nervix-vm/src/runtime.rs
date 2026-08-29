@@ -24,7 +24,7 @@ use arrow_array::{
         UInt32Type, UInt64Type,
     },
 };
-use arrow_buffer::{NullBuffer, OffsetBuffer};
+use arrow_buffer::{NullBuffer, NullBufferBuilder, OffsetBuffer};
 use arrow_cast::{
     cast::{CastOptions, cast_with_options},
     display::FormatOptions,
@@ -1679,8 +1679,49 @@ define_integer_binary!(
     (execute_binary_i64, Int64Array, Int64Builder, i64, Int64, Int64)
 );
 
+macro_rules! execute_float_arithmetic {
+    ($left:expr, $right:expr, $array:ty, $typed_variant:ident, $row_errors:expr, $span:expr, $op:expr) => {{
+        // Reuse the input validity and build values once. A new validity buffer is only needed
+        // on the exceptional path where a valid input row produces a non-finite result.
+        let input_nulls = NullBuffer::union($left.nulls(), $right.nulls());
+        let mut values = Vec::with_capacity($left.len());
+        let mut failure_nulls = None;
+        for (row, (left, right)) in $left.values().iter().zip($right.values()).enumerate() {
+            let value = $op(*left, *right);
+            if !value.is_finite() && input_nulls.as_ref().is_none_or(|nulls| nulls.is_valid(row)) {
+                let output_nulls = failure_nulls.get_or_insert_with(|| {
+                    let mut output_nulls = NullBufferBuilder::new($left.len());
+                    if let Some(input_nulls) = &input_nulls {
+                        output_nulls.append_buffer(input_nulls);
+                    } else {
+                        output_nulls.append_n_non_nulls($left.len());
+                    }
+                    output_nulls
+                });
+                output_nulls.set_bit(row, false);
+                push_error(
+                    $row_errors,
+                    row,
+                    ErrorCode::InvalidArgument,
+                    "floating-point operation produced a non-finite result",
+                    $span,
+                );
+            }
+            values.push(value);
+        }
+        let output_nulls = match failure_nulls {
+            Some(mut output_nulls) => output_nulls.finish(),
+            None => input_nulls,
+        };
+        Ok(TypedArray::$typed_variant(<$array>::new(
+            values.into(),
+            output_nulls,
+        )))
+    }};
+}
+
 macro_rules! define_float_binary {
-    ($(($fn_name:ident, $array:ty, $builder:ty, $typed_variant:ident, $reg_ty:ident));+ $(;)?) => {
+    ($(($fn_name:ident, $array:ty, $typed_variant:ident, $reg_ty:ident));+ $(;)?) => {
         $(
             fn $fn_name(
                 left: &$array,
@@ -1690,61 +1731,21 @@ macro_rules! define_float_binary {
                 span: Span,
             ) -> Result<TypedArray, RuntimeError> {
                 match op {
-                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                        if let Some(output) = try_execute_numeric_kernel(left, right, op) {
-                            let typed = array_ref_to_typed_array(output)
-                                .expect("float arithmetic kernel must produce matching float output");
-                            return Ok(match typed {
-                                TypedArray::Float32(output) => TypedArray::Float32(
-                                    sanitize_float32_non_finite(
-                                        &output,
-                                        row_errors,
-                                        span,
-                                        "floating-point operation produced a non-finite result",
-                                    ),
-                                ),
-                                TypedArray::Float64(output) => TypedArray::Float64(
-                                    sanitize_float64_non_finite(
-                                        &output,
-                                        row_errors,
-                                        span,
-                                        "floating-point operation produced a non-finite result",
-                                    ),
-                                ),
-                                _ => unreachable!("float arithmetic kernel must produce float output"),
-                            });
-                        }
-                        let mut builder = <$builder>::new();
-                        for row in 0..left.len() {
-                            if left.is_null(row) || right.is_null(row) {
-                                builder.append_null();
-                                continue;
-                            }
-                            let lhs = left.value(row);
-                            let rhs = right.value(row);
-                            let value = match op {
-                                BinaryOp::Add => lhs + rhs,
-                                BinaryOp::Sub => lhs - rhs,
-                                BinaryOp::Mul => lhs * rhs,
-                                BinaryOp::Div => lhs / rhs,
-                                BinaryOp::Rem => lhs % rhs,
-                                _ => unreachable!(),
-                            };
-                            if value.is_finite() {
-                                builder.append_value(value);
-                            } else {
-                                builder.append_null();
-                                push_error(
-                                    row_errors,
-                                    row,
-                                    ErrorCode::InvalidArgument,
-                                    "floating-point operation produced a non-finite result",
-                                    span,
-                                );
-                            }
-                        }
-                        Ok(TypedArray::$typed_variant(builder.finish()))
-                    }
+                    BinaryOp::Add => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs + rhs
+                    ),
+                    BinaryOp::Sub => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs - rhs
+                    ),
+                    BinaryOp::Mul => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs * rhs
+                    ),
+                    BinaryOp::Div => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs / rhs
+                    ),
+                    BinaryOp::Rem => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs % rhs
+                    ),
                     // The arrow comparison kernels order floats by the IEEE 754 total order,
                     // which makes NaN equal to itself and greater than every other value.
                     // Float comparisons here keep Rust's IEEE semantics, where any comparison
@@ -1776,8 +1777,8 @@ macro_rules! define_float_binary {
 }
 
 define_float_binary!(
-    (execute_binary_f32, Float32Array, Float32Builder, Float32, Float32);
-    (execute_binary_f64, Float64Array, Float64Builder, Float64, Float64)
+    (execute_binary_f32, Float32Array, Float32, Float32);
+    (execute_binary_f64, Float64Array, Float64, Float64)
 );
 
 fn execute_binary_bool(
@@ -3586,14 +3587,18 @@ fn annotate_cast_failures(
     row_errors: &mut RowErrors,
     span: Span,
 ) {
-    let input_nulls = typed_array_as_array(input).nulls();
-    let Some(output_nulls) = typed_array_as_array(output).nulls() else {
-        return;
-    };
-    if input_nulls == Some(output_nulls) {
+    let input = typed_array_as_array(input);
+    let output = typed_array_as_array(output);
+    // Casts propagate every input null, so equal cached null counts prove that the kernel did not
+    // introduce a failure without comparing the full validity buffers.
+    if input.null_count() == output.null_count() {
         return;
     }
 
+    let input_nulls = input.nulls();
+    let output_nulls = output
+        .nulls()
+        .expect("a cast that introduced nulls must have an output null buffer");
     let invalid_output = !output_nulls.inner();
     let failures = match input_nulls {
         Some(input_nulls) => input_nulls.inner() & &invalid_output,
@@ -4387,6 +4392,95 @@ mod tests {
     }
 
     #[test]
+    fn reports_non_finite_float_arithmetic_per_row() {
+        let parsed = parse_program(
+            "SET input.f64_result = input.f64_left / input.f64_right, input.f32_result = \
+             input.f32_left * input.f32_right;",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("f64_left", DataType::Float64, true),
+            Field::new("f64_right", DataType::Float64, true),
+            Field::new("f32_left", DataType::Float32, true),
+            Field::new("f32_right", DataType::Float32, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("f64_result", DataType::Float64, true),
+                Field::new("f32_result", DataType::Float32, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Float64(
+                    Float64Array::from(vec![Some(-99.0), Some(6.0), Some(1.0), None, Some(-99.0)])
+                        .slice(1, 3),
+                ),
+                TypedArray::Float64(
+                    Float64Array::from(vec![
+                        Some(-99.0),
+                        Some(3.0),
+                        Some(0.0),
+                        Some(0.0),
+                        Some(-99.0),
+                    ])
+                    .slice(1, 3),
+                ),
+                TypedArray::Float32(
+                    Float32Array::from(vec![
+                        Some(-99.0),
+                        Some(2.0),
+                        Some(f32::MAX),
+                        Some(3.0),
+                        Some(-99.0),
+                    ])
+                    .slice(1, 3),
+                ),
+                TypedArray::Float32(
+                    Float32Array::from(vec![
+                        Some(-99.0),
+                        Some(4.0),
+                        Some(2.0),
+                        Some(f32::NAN),
+                        Some(-99.0),
+                    ])
+                    .slice(1, 3),
+                ),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Float64(f64_result) = output_column(&output, "f64_result") else {
+            panic!("f64_result must be Float64");
+        };
+        let TypedArray::Float32(f32_result) = output_column(&output, "f32_result") else {
+            panic!("f32_result must be Float32");
+        };
+
+        assert_eq!(f64_result.value(0), 2.0);
+        assert_eq!(f32_result.value(0), 8.0);
+        assert!(f64_result.is_null(1));
+        assert!(f32_result.is_null(1));
+        assert!(f64_result.is_null(2));
+        assert!(f32_result.is_null(2));
+        assert!(output.errors().row(0).is_empty());
+        assert_eq!(output.errors().row(1).len(), 2);
+        assert_eq!(output.errors().row(2).len(), 1);
+        assert!(
+            output
+                .errors()
+                .row(1)
+                .iter()
+                .chain(output.errors().row(2))
+                .all(|error| error.code == ErrorCode::InvalidArgument)
+        );
+    }
+
+    #[test]
     fn executes_cast_matrix_and_reports_failures() {
         let parsed = parse_program(
             "SET input.i_from_f = input.flt AS INT64, input.i_from_b = input.flag AS INT64, \
@@ -4481,6 +4575,67 @@ mod tests {
         assert!(f_from_s.value(1).is_nan());
         assert_eq!(output.errors().row(0).len(), 1);
         assert_eq!(output.errors().row(1).len(), 1);
+    }
+
+    #[test]
+    fn kernel_casts_only_report_new_nulls() {
+        let parsed = parse_program(
+            "SET input.parsed = input.text AS INT64, input.narrowed = input.wide AS INT8;",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("wide", DataType::Int64, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("parsed", DataType::Int64, true),
+                Field::new("narrowed", DataType::Int8, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec![
+                    Some("7"),
+                    None,
+                    Some("bad"),
+                    Some("-2"),
+                ])),
+                TypedArray::Int64(Int64Array::from(vec![Some(1), None, Some(128), Some(-2)])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Int64(parsed) = output_column(&output, "parsed") else {
+            panic!("parsed must be Int64");
+        };
+        let TypedArray::Int8(narrowed) = output_column(&output, "narrowed") else {
+            panic!("narrowed must be Int8");
+        };
+
+        assert_eq!(parsed.value(0), 7);
+        assert_eq!(narrowed.value(0), 1);
+        assert!(parsed.is_null(1));
+        assert!(narrowed.is_null(1));
+        assert!(parsed.is_null(2));
+        assert!(narrowed.is_null(2));
+        assert_eq!(parsed.value(3), -2);
+        assert_eq!(narrowed.value(3), -2);
+        assert!(output.errors().row(0).is_empty());
+        assert!(output.errors().row(1).is_empty());
+        assert_eq!(output.errors().row(2).len(), 2);
+        assert!(
+            output
+                .errors()
+                .row(2)
+                .iter()
+                .all(|error| error.code == ErrorCode::CastFailed)
+        );
+        assert!(output.errors().row(3).is_empty());
     }
 
     #[test]
