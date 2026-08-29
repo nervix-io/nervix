@@ -4605,32 +4605,14 @@ impl RelayProcessorNode {
                             .collect::<Vec<_>>();
                         let dedup_key = format!("{dedup_key:?}");
                         let RelayMessage { key, record, acks } = message;
-                        match state.apply_new_key(dedup_key.clone(), execution_now, *max_time) {
-                            Ok(Some(_)) => {
-                                forwarded_entries
-                                    .push((dedup_key, RelayMessage { key, record, acks }));
-                            }
-                            Ok(None) => {
-                                debug!(
-                                    deduplicator = self.processor.as_str(),
-                                    "branched deduplicator dropped duplicate message"
-                                );
-                                acks.ack_success();
-                            }
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    std::iter::once(&acks),
-                                    format!(
-                                        "deduplicator '{}' failed to update state: {}",
-                                        self.processor.as_str(),
-                                        error
-                                    ),
-                                );
-                            }
+                        if state.reserve_new_key(dedup_key.clone(), execution_now, *max_time) {
+                            forwarded_entries.push((dedup_key, RelayMessage { key, record, acks }));
+                        } else {
+                            debug!(
+                                deduplicator = self.processor.as_str(),
+                                "branched deduplicator dropped duplicate message"
+                            );
+                            acks.ack_success();
                         }
                     }
 
