@@ -8337,7 +8337,7 @@ fn rewrite_lookup_hash_map_program(
     parsed: &nervix_nspl::vm_program::SpannedNode<Program>,
 ) -> Result<LookupHashMapRewriteResult, Report<RegistryError>> {
     let mut next_field = 0usize;
-    let mut calls = Vec::<(Identifier, String, String, String, ArrowDataType)>::new();
+    let mut calls = Vec::<(Identifier, String, Expr, String, ArrowDataType)>::new();
     let mut rewrite = |expr: &SpannedExpr| {
         rewrite_lookup_hash_map_expr(
             domain,
@@ -8397,7 +8397,7 @@ fn rewrite_lookup_hash_map_expr(
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
     expr: &SpannedExpr,
-    calls: &mut Vec<(Identifier, String, String, String, ArrowDataType)>,
+    calls: &mut Vec<(Identifier, String, Expr, String, ArrowDataType)>,
     next_field: &mut usize,
 ) -> Result<SpannedExpr, Report<RegistryError>> {
     let inner = match &expr.inner {
@@ -8479,7 +8479,9 @@ fn rewrite_lookup_hash_map_expr(
                         ),
                     }));
                 };
-                let key = format!("{:?}", args[1].inner);
+                // Matches the runtime's identity for the same call: the key expression itself,
+                // compared without its source spans.
+                let key = args[1].inner.clone();
                 let data_type = arrow_data_type_for_parse_as(&schema_field.ty);
                 let existing = calls
                     .iter()
