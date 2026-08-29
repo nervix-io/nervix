@@ -111,6 +111,7 @@ fn vm_input_from_test_rows(
             lookup_columns: &lookup_columns,
             uninitialized: None,
         },
+        None,
     )
 }
 

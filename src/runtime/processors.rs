@@ -2,12 +2,16 @@ use std::{collections::VecDeque, sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use nervix_models::{
-    AckMode, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    ErrorPolicies, Identifier, InferencerTensorDeclaration, InferencerTensorMapping,
-    MessageErrorPolicy, ModelKind, StructuredMessageError, Timestamp, WindowBound,
+    AckMode, Assignment, AssignmentTarget, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+    CorrelatorMatchPolicy, ErrorPolicies, Identifier, InferencerTensorDeclaration,
+    InferencerTensorMapping, MessageErrorPolicy, ModelKind, RouteConstruction,
+    StructuredMessageError, Timestamp, WindowBound,
 };
 use nervix_nspl::{
-    vm_program::{FieldRef, Program as VmProgram, Span, SpannedNode},
+    vm_program::{
+        FieldRef, Program as VmProgram, SemanticNamespaces, Span, SpannedNode,
+        lower_route_construction,
+    },
     window_processor::aggregate::{WindowAggregateExpr, WindowAggregateProgram},
 };
 use nervix_roto::UdfExecutor;
@@ -32,7 +36,9 @@ use super::{
 use crate::{
     registry::ActiveGraph,
     runtime_ack::AckSet,
-    runtime_schema::{CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue},
+    runtime_schema::{
+        CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, arrow_data_type,
+    },
 };
 
 pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
@@ -287,6 +293,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
+        compiled_input_program: CompiledInferencerInputProgram,
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsTemplate,
@@ -417,6 +424,7 @@ pub(super) enum RelayProcessorOperationNode {
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
+        compiled_input_program: CompiledInferencerInputProgram,
         output_buffers: Vec<InferencerOutputBuffer>,
         session: Option<OnnxInferencerSession>,
     },
@@ -433,6 +441,101 @@ pub(super) enum RelayProcessorOperationNode {
         next_ack_token: u64,
         pending: Vec<RelayRecordBatch>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CompiledInferencerInputProgram {
+    pub(super) program: Arc<VmCompiledProgram>,
+}
+
+impl CompiledInferencerInputProgram {
+    pub(super) fn compile(
+        processor: &Identifier,
+        mappings: &[InferencerTensorMapping],
+        input_schema: &CompiledSchema,
+        udfs: Option<&UdfExecutor>,
+    ) -> Result<Self, String> {
+        let assignments = mappings
+            .iter()
+            .map(|mapping| {
+                Ok(Assignment {
+                    target: AssignmentTarget::bare(Identifier::parse(&mapping.tensor).map_err(
+                        |error| {
+                            format!(
+                                "inferencer '{}' tensor name '{}' is not a valid field: {error}",
+                                processor, mapping.tensor
+                            )
+                        },
+                    )?),
+                    value: mapping.expression.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let parsed = lower_route_construction(
+            &RouteConstruction {
+                assignments,
+                ..RouteConstruction::default()
+            },
+            SemanticNamespaces::new("input", "mapped_input"),
+        )
+        .map_err(|reason| {
+            format!(
+                "inferencer '{}' INPUTS mapping is invalid: {reason}",
+                processor
+            )
+        })?;
+        let output_schema = StdArc::new(arrow_schema::Schema::new(
+            mappings
+                .iter()
+                .map(|mapping| {
+                    arrow_schema::Field::new(
+                        &mapping.tensor,
+                        arrow_data_type(&mapping.schema.message_type()),
+                        false,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let input_sensitivity = input_schema.vm_sensitivity();
+        let output_sensitivity = VmSchemaSensitivity::from_sensitive_fields(
+            mappings
+                .iter()
+                .filter(|mapping| {
+                    super::expression_reads_sensitive_source(
+                        &mapping.expression,
+                        &input_sensitivity,
+                    )
+                })
+                .map(|mapping| mapping.tensor.clone()),
+        );
+        let program = compile_vm_program(
+            &parsed,
+            output_schema.clone(),
+            output_sensitivity.clone(),
+            [
+                VmCompileBinding::readonly("input", input_schema.arrow_schema())
+                    .with_sensitivity(input_sensitivity),
+                VmCompileBinding::writeonly("mapped_input", output_schema)
+                    .with_sensitivity(output_sensitivity),
+            ],
+            super::runtime_udf_compile_options(
+                udfs,
+                VmCompileOptions {
+                    output_mode: VmOutputMode::ExplicitOnly,
+                    ..VmCompileOptions::default()
+                },
+            ),
+        )
+        .map_err(|error| {
+            format!(
+                "inferencer '{}' INPUTS compile failed: {}",
+                processor, error.message
+            )
+        })?;
+        Ok(Self {
+            program: Arc::new(program),
+        })
+    }
 }
 
 impl RelayProcessorOperationNode {
@@ -983,6 +1086,7 @@ pub(super) struct WindowFlushContext<'a> {
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
+    pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
 
 pub(super) struct JunctionFlushContext<'a> {
@@ -993,6 +1097,9 @@ pub(super) struct JunctionFlushContext<'a> {
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) input_relays: &'a [Identifier],
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
+    /// Resolved when the junction admitted this batch; a junction flushes within the same
+    /// execution, so its routes read that snapshot rather than resolving again.
+    pub(super) materialized_values: &'a HashMap<String, RuntimeValue>,
 }
 
 pub(super) struct InferencerFlushContext<'a> {
@@ -1007,8 +1114,10 @@ pub(super) struct InferencerFlushContext<'a> {
     pub(super) file: &'a str,
     pub(super) inputs: &'a [InferencerTensorMapping],
     pub(super) output_schema: &'a [InferencerTensorDeclaration],
+    pub(super) compiled_input_program: &'a CompiledInferencerInputProgram,
     pub(super) input_relays: &'a [Identifier],
     pub(super) session: &'a mut Option<OnnxInferencerSession>,
+    pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
 
 pub(super) struct WasmFlushContext<'a> {

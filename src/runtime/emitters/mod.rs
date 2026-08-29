@@ -410,7 +410,6 @@ struct EmitterBatchContext<'a> {
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     sqs_fifo_group: Option<&'a CompiledSqsFifoGroup>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
-    materialized_stream_owner_nodes: &'a HashMap<Identifier, Option<String>>,
 }
 
 #[derive(Clone)]
@@ -1366,6 +1365,7 @@ async fn execute_sql_values_program(
             lookup_columns: &lookup_columns,
             uninitialized: None,
         },
+        None,
     )
     .map_err(|error| Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error))?;
     let result = execute_program_with_selection_in_context(
@@ -3060,7 +3060,6 @@ impl EmitterTask {
             input_schema,
             input_branching,
             materialized_relay_specs: materialized_stream_specs,
-            materialized_relay_owner_nodes: materialized_stream_owner_nodes,
             lookups,
         } = deps;
         let codec = if let Some(codec_name) = &emitter.encode_using_codec {
@@ -3293,7 +3292,6 @@ impl EmitterTask {
                 filter_map: filter_map.as_ref(),
                 sqs_fifo_group: sqs_fifo_group.as_ref(),
                 materialized_state: &task_materialized_state,
-                materialized_stream_owner_nodes: &materialized_stream_owner_nodes,
             };
             loop {
                 tokio::task::consume_budget().await;
@@ -4121,7 +4119,7 @@ impl EmitterBatchContext<'_> {
             )
             .await
         {
-            Ok(Some(batch)) => batch,
+            Ok(Some(resolved)) => resolved,
             Ok(None) => return None,
             Err(error) => {
                 self.runtime.handle_internal_processor_error_for_acks(
@@ -4138,7 +4136,12 @@ impl EmitterBatchContext<'_> {
                 return None;
             }
         };
-        let batch = self.filter_source_batch(input_relay, batch).await?;
+        // The node-wide dependencies are resolved once for the batch, so every emitter program
+        // reads that snapshot instead of re-reading the state store per program.
+        let (batch, materialized_values) = batch;
+        let batch = self
+            .filter_source_batch(input_relay, batch, &materialized_values)
+            .await?;
         let execution_now = self
             .runtime
             .current_stream_expiration_time(self.domain)
@@ -4159,38 +4162,12 @@ impl EmitterBatchContext<'_> {
                 })
                 .collect(),
             Some(CompiledSqsFifoGroup::Expression(program)) => {
-                let side_inputs = match self
-                    .runtime
-                    .load_materialized_side_inputs(
-                        self.domain,
-                        &batch.key,
-                        &program.materialized_interest,
-                        self.materialized_stream_owner_nodes,
-                    )
-                    .await
-                {
-                    Ok(values) => values,
-                    Err(error) => {
-                        self.runtime.handle_general_error_for_acks(
-                            self.domain,
-                            "emitter",
-                            self.emitter,
-                            self.error_policies,
-                            batch.acks.iter(),
-                            format!(
-                                "emitter '{}' failed to load SQS FIFO GROUP side inputs: {error}",
-                                self.emitter.as_str()
-                            ),
-                        );
-                        return None;
-                    }
-                };
                 match evaluate_sqs_fifo_group_program(
                     self.emitter,
                     program,
                     &batch,
                     execution_now,
-                    &side_inputs,
+                    &materialized_values,
                 )
                 .await
                 {
@@ -4230,39 +4207,12 @@ impl EmitterBatchContext<'_> {
                 }
             };
         };
-        let side_inputs = match self
-            .runtime
-            .load_materialized_side_inputs(
-                self.domain,
-                &batch.key,
-                &filter_map.materialized_interest,
-                self.materialized_stream_owner_nodes,
-            )
-            .await
-        {
-            Ok(values) => values,
-            Err(error) => {
-                self.runtime.handle_general_error_for_acks(
-                    self.domain,
-                    "emitter",
-                    self.emitter,
-                    self.error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "emitter '{}' failed to load materialized side inputs: {}",
-                        self.emitter.as_str(),
-                        error
-                    ),
-                );
-                return None;
-            }
-        };
         match plan_emitter_filter_map_batch(
             self.emitter,
             filter_map,
             batch,
             execution_now,
-            &side_inputs,
+            &materialized_values,
         )
         .await
         {
@@ -4327,37 +4277,10 @@ impl EmitterBatchContext<'_> {
         &self,
         input_relay: &Identifier,
         batch: RelayRecordBatch,
+        side_inputs: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
         let Some(program) = self.source_filters.get(input_relay) else {
             return Some(batch);
-        };
-        let side_inputs = match self
-            .runtime
-            .load_materialized_side_inputs(
-                self.domain,
-                &batch.key,
-                &program.materialized_interest,
-                self.materialized_stream_owner_nodes,
-            )
-            .await
-        {
-            Ok(values) => values,
-            Err(error) => {
-                self.runtime.handle_general_error_for_acks(
-                    self.domain,
-                    "emitter",
-                    self.emitter,
-                    self.error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "emitter '{}' failed to load FROM WHERE side inputs for relay '{}': {}",
-                        self.emitter.as_str(),
-                        input_relay.as_str(),
-                        error
-                    ),
-                );
-                return None;
-            }
         };
         let plan = match plan_filter_map_messages(
             "emitter",
@@ -4370,7 +4293,7 @@ impl EmitterBatchContext<'_> {
                 .ok()
                 .flatten()
                 .unwrap_or_else(current_timestamp),
-            &side_inputs,
+            side_inputs,
         )
         .await
         {

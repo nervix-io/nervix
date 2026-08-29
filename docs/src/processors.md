@@ -97,8 +97,8 @@ Normal processors declare ordered node-wide dependencies after their branch decl
 USING MATERIALIZED STATE profiles REQUIRED WAIT
 USING MATERIALIZED STATE rules REQUIRED SKIP
 USING MATERIALIZED STATE preferences DEFAULT {
-  "theme" = "system",
-  "alerts" = true
+  theme = "system",
+  alerts = true
 }
 ```
 
@@ -110,6 +110,10 @@ constant record; `REQUIRED SKIP` suppresses the input successfully; and `REQUIRE
 message in memory, keeps its acknowledgement open, and applies backpressure. When state arrives,
 resolution restarts at the first declaration. Whole-branch eviction drops both state and suspended
 work.
+
+`REQUIRED SKIP` and `REQUIRED WAIT` gate a node's input. Dependencies resolve once per batch, and
+every output route of that batch reads the same resolved values, including the constants bound by
+`DEFAULT`. Routes never observe a partially resolved or per-route view of state.
 
 Defaults must initialize every required field. Omitted optional fields become typed nulls. Default
 expressions cannot contain field reads, side effects, or nondeterministic calls.
