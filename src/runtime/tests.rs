@@ -5259,6 +5259,109 @@ fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
     );
 }
 
+#[tokio::test]
+async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sidecars() {
+    let schema = test_schema(&[("sequence", ParseAsType::U32)]);
+    let batch = |rows: Vec<(u32, i64, AckSet)>| {
+        super::RelayRecordBatch::from_messages(
+            schema.clone(),
+            rows.into_iter()
+                .map(|(sequence, ingested_at, acks)| RelayMessage {
+                    key: None,
+                    record: test_runtime_row([(
+                        "sequence".to_string(),
+                        RuntimeValue::U32(sequence),
+                    )])
+                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(ingested_at)),
+                    acks,
+                })
+                .collect(),
+        )
+        .expect("test relay batch should build")
+    };
+    let (first_ordered_acks, first_ordered_completion) = AckSet::root();
+    let mut buffer = super::ReordererOutputBuffer::default();
+    buffer.push(
+        batch(vec![
+            (3, 300, AckSet::empty()),
+            (1, 100, first_ordered_acks),
+        ]),
+        Arc::new(vec![
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(3)],
+                arrival_sequence: 0,
+            },
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(1)],
+                arrival_sequence: 1,
+            },
+        ]),
+        Timestamp::from_unix_nanos(10),
+    );
+    buffer.push(
+        batch(vec![(2, 200, AckSet::empty()), (1, 101, AckSet::empty())]),
+        Arc::new(vec![
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(2)],
+                arrival_sequence: 2,
+            },
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(1)],
+                arrival_sequence: 3,
+            },
+        ]),
+        Timestamp::from_unix_nanos(20),
+    );
+
+    let ordered = buffer
+        .take_ordered_batch()
+        .expect("buffered Arrow batches should reorder");
+
+    let sequences = (0..ordered.batch.batch().num_rows())
+        .map(|row| {
+            ordered
+                .batch
+                .value(row, "sequence")
+                .expect("sequence should decode")
+                .expect("sequence should be initialized")
+        })
+        .collect::<Vec<_>>();
+    let watermarks = ordered
+        .metadata
+        .iter()
+        .map(RuntimeRecordMetadata::ingested_at_low_watermark)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        sequences,
+        [
+            RuntimeValue::U32(1),
+            RuntimeValue::U32(1),
+            RuntimeValue::U32(2),
+            RuntimeValue::U32(3),
+        ]
+    );
+    assert_eq!(
+        watermarks,
+        [
+            Timestamp::from_unix_nanos(100),
+            Timestamp::from_unix_nanos(101),
+            Timestamp::from_unix_nanos(200),
+            Timestamp::from_unix_nanos(300),
+        ]
+    );
+    assert_eq!(ordered.acks.len(), 4);
+    ordered.acks[0].ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), first_ordered_completion.wait())
+            .await
+            .expect("the first reordered row should retain its source ACK"),
+        AckOutcome::Ack
+    );
+    assert!(buffer.is_empty());
+    assert_eq!(buffer.estimated_bytes(), 0);
+}
+
 #[test]
 fn relay_fanout_shares_arrow_columns_and_exposes_row_views() {
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
