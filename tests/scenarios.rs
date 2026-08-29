@@ -1607,7 +1607,10 @@ fn build_ingestor_logic_commands(
         uppered STRING,
         regex_ok BOOL,
         regex_replaced STRING,
-        regex_piece STRING
+        regex_piece STRING,
+        unicode_chars I64,
+        unicode_trimmed STRING,
+        empty_replaced STRING
       );
 
       CREATE SCHEMA logic_notification_cast_matrix (

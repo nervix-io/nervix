@@ -30,6 +30,39 @@ pub(super) struct RelayDeliveryObservation {
     pub(super) latency_seconds: Vec<f64>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum RelayRecordBatchReorderError {
+    #[error(
+        "cannot reorder relay batch with {arrow_rows} Arrow rows, {metadata_rows} metadata rows, \
+         {branch_keys} branch keys, and {ack_sets} ACK sets"
+    )]
+    SidecarCount {
+        arrow_rows: usize,
+        metadata_rows: usize,
+        branch_keys: usize,
+        ack_sets: usize,
+    },
+    #[error("relay batch reorder has {order_rows} rows for a {batch_rows}-row batch")]
+    RowCount {
+        order_rows: usize,
+        batch_rows: usize,
+    },
+    #[error("relay batch reorder row {row} is outside {batch_rows} rows")]
+    RowOutOfBounds { row: usize, batch_rows: usize },
+    #[error("relay batch reorder contains row {row} more than once")]
+    DuplicateRow { row: usize },
+    #[error("Arrow batch reorder failed: {reason}")]
+    Arrow { reason: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub(super) struct RelayRecordBatchReorderFailure {
+    #[source]
+    pub(super) error: RelayRecordBatchReorderError,
+    pub(super) batch: RelayRecordBatch,
+}
+
 type UnkeyedRelayBatchParts = (
     RuntimeRecordBatch,
     Vec<RuntimeRecordMetadata>,
@@ -166,6 +199,81 @@ impl RelayRecordBatch {
 
     pub(super) fn into_unkeyed_parts(self) -> UnkeyedRelayBatchParts {
         (self.batch, self.metadata, self.keys, self.acks)
+    }
+
+    pub(super) fn into_reordered(
+        self,
+        row_order: &[usize],
+    ) -> Result<Self, Box<RelayRecordBatchReorderFailure>> {
+        let row_count = self.batch.batch().num_rows();
+        if self.metadata.len() != row_count
+            || self.keys.len() != row_count
+            || self.acks.len() != row_count
+        {
+            return Err(Box::new(RelayRecordBatchReorderFailure {
+                error: RelayRecordBatchReorderError::SidecarCount {
+                    arrow_rows: row_count,
+                    metadata_rows: self.metadata.len(),
+                    branch_keys: self.keys.len(),
+                    ack_sets: self.acks.len(),
+                },
+                batch: self,
+            }));
+        }
+        if row_order.len() != row_count {
+            return Err(Box::new(RelayRecordBatchReorderFailure {
+                error: RelayRecordBatchReorderError::RowCount {
+                    order_rows: row_order.len(),
+                    batch_rows: row_count,
+                },
+                batch: self,
+            }));
+        }
+        let mut seen = vec![false; row_count];
+        for &row in row_order {
+            let Some(was_seen) = seen.get_mut(row) else {
+                return Err(Box::new(RelayRecordBatchReorderFailure {
+                    error: RelayRecordBatchReorderError::RowOutOfBounds {
+                        row,
+                        batch_rows: row_count,
+                    },
+                    batch: self,
+                }));
+            };
+            if *was_seen {
+                return Err(Box::new(RelayRecordBatchReorderFailure {
+                    error: RelayRecordBatchReorderError::DuplicateRow { row },
+                    batch: self,
+                }));
+            }
+            *was_seen = true;
+        }
+        if row_order.iter().copied().eq(0..row_count) {
+            return Ok(self);
+        }
+        let reordered_batch = match self.batch.take(row_order) {
+            Ok(batch) => batch,
+            Err(reason) => {
+                return Err(Box::new(RelayRecordBatchReorderFailure {
+                    error: RelayRecordBatchReorderError::Arrow { reason },
+                    batch: self,
+                }));
+            }
+        };
+        let Self {
+            key,
+            keys,
+            metadata,
+            acks,
+            ..
+        } = self;
+        Ok(Self {
+            key,
+            keys: reorder_owned_values(keys, row_order),
+            batch: reordered_batch,
+            metadata: reorder_owned_values(metadata, row_order),
+            acks: reorder_owned_values(acks, row_order),
+        })
     }
 
     pub(crate) fn try_into_messages(self) -> Result<Vec<RelayMessage>, Box<(String, Self)>> {
@@ -366,6 +474,18 @@ impl RelayRecordBatch {
             .map(|metadata| metadata.ingested_at_high_watermark())
             .max()
     }
+}
+
+fn reorder_owned_values<T>(values: Vec<T>, row_order: &[usize]) -> Vec<T> {
+    let mut values = values.into_iter().map(Some).collect::<Vec<_>>();
+    row_order
+        .iter()
+        .map(|row| {
+            values[*row]
+                .take()
+                .expect("validated relay batch reorder must contain each row once")
+        })
+        .collect()
 }
 
 fn delivery_observation_from_timestamps(

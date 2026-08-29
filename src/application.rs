@@ -17498,22 +17498,22 @@ impl Application {
                                     }
                                     Err(error) => Err(error),
                                 };
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::StateSyncResponse(
-                                            RemoteStateSyncResponse {
-                                                correlation_id: request.correlation_id,
-                                                result: result.map(|snapshot| {
-                                                    snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
-                                                        lsm: snapshot.lsm,
-                                                        schema_fingerprint: snapshot.schema_fingerprint,
-                                                        payload: snapshot.payload,
-                                                    })
-                                                }),
-                                            },
-                                        ),
-                                    )
+                                // The request proves this authenticated connection is live. Reply
+                                // on it so state sync cannot wait for a separate reverse route.
+                                if let Err(error) = message
+                                    .reply
+                                    .send(Envelope::Control(ControlEnvelope::StateSyncResponse(
+                                        RemoteStateSyncResponse {
+                                            correlation_id: request.correlation_id,
+                                            result: result.map(|snapshot| {
+                                                snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
+                                                    lsm: snapshot.lsm,
+                                                    schema_fingerprint: snapshot.schema_fingerprint,
+                                                    payload: snapshot.payload,
+                                                })
+                                            }),
+                                        },
+                                    )))
                                     .await
                                 {
                                     warn!(error = %error, "failed to send state sync response");
