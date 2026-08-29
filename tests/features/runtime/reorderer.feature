@@ -1,5 +1,5 @@
 Feature: Reorderer
-  Scenario Outline: Reorderer emits records ordered by BY expressions with arrival tie-breaks
+  Scenario Outline: Reorderer preserves ordered output while fanning batches across routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -25,6 +25,7 @@ Feature: Reorderer
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE RELAY filtered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress
         ON edge
@@ -48,8 +49,14 @@ Feature: Reorderer
         TO ordered_notifications
         INHERIT ALL
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        TO filtered_notifications
+        INHERIT ALL
+        WHERE sequence < 0
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE tenant = 'acme';
+        CREATE SUBSCRIPTION filtered_notifications_subscription TO filtered_notifications WHERE tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
@@ -79,6 +86,7 @@ Feature: Reorderer
       "payload":"third"
       """
     And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
+    And the relay subscription does not receive a payload within "1s"
 
     Examples:
       | cluster_size | replica_count |

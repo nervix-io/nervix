@@ -194,7 +194,7 @@ use processors::{
     PlannedGeneralError, PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
     RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
     RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
-    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage,
+    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder,
     RuntimeInputCollector, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor,
     WasmFlushContext, WindowBounds, WindowFlushContext,
 };
@@ -5017,49 +5017,20 @@ impl RelayProcessorNode {
                             .collect::<Vec<_>>();
                         let sequence = *arrival_sequence;
                         *arrival_sequence = arrival_sequence.saturating_add(1);
-                        row_ordering.push((key, sequence));
+                        row_ordering.push(ReordererRowOrder {
+                            key,
+                            arrival_sequence: sequence,
+                        });
                     }
-                    let estimated_bytes = batch.estimated_bytes();
+                    let row_ordering = Arc::new(row_ordering);
                     let route_batches = batch.into_attached_fanout(output_routes.routes.len());
                     let mut due_outputs = Vec::new();
                     for (output_index, route_batch) in route_batches.into_iter().enumerate() {
-                        let messages = match route_batch.try_into_messages() {
-                            Ok(messages) => messages,
-                            Err(error_and_batch) => {
-                                let (error, batch) = *error_and_batch;
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    batch.acks.iter(),
-                                    format!(
-                                        "reorderer '{}' failed to decode arrow batch: {}",
-                                        self.processor.as_str(),
-                                        error
-                                    ),
-                                );
-                                continue;
-                            }
-                        };
                         let output_buffer = &mut output_buffers[output_index];
-                        output_buffer.estimated_bytes = output_buffer
-                            .estimated_bytes
-                            .saturating_add(estimated_bytes);
-                        output_buffer
-                            .pending
-                            .extend(messages.into_iter().enumerate().map(|(row, message)| {
-                                let (key, arrival_sequence) = &row_ordering[row];
-                                ReordererPendingMessage {
-                                    key: key.clone(),
-                                    arrival_sequence: *arrival_sequence,
-                                    received_at: execution_now,
-                                    message,
-                                }
-                            }));
+                        output_buffer.push(route_batch, Arc::clone(&row_ordering), execution_now);
                         let output = &mut output_routes.routes[output_index];
                         match output
-                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes)
+                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes())
                         {
                             Some(true) => {
                                 output.force_flush_at(execution_now);
@@ -5072,10 +5043,7 @@ impl RelayProcessorNode {
                                     self.kind.as_str(),
                                     &self.processor,
                                     &self.error_policies,
-                                    output_buffer
-                                        .pending
-                                        .iter()
-                                        .map(|entry| &entry.message.acks),
+                                    output_buffer.acks(),
                                     format!(
                                         "reorderer '{}' output '{}' has no flush policy",
                                         self.processor.as_str(),
@@ -5798,12 +5766,15 @@ impl RelayProcessorNode {
                 } => {
                     let mut due_outputs = Vec::new();
                     for (output_index, output_buffer) in output_buffers.iter().enumerate() {
-                        if output_buffer.pending.is_empty() {
+                        if output_buffer.is_empty() {
                             continue;
                         }
-                        let max_time_due = output_buffer.pending.first().is_some_and(|entry| {
-                            checked_add_duration_to_timestamp(entry.received_at, *max_time) <= now
-                        });
+                        let max_time_due =
+                            output_buffer
+                                .first_received_at()
+                                .is_some_and(|received_at| {
+                                    checked_add_duration_to_timestamp(received_at, *max_time) <= now
+                                });
                         let flush_due = output_routes.routes[output_index].flush_deadline_due(now);
                         if max_time_due || flush_due {
                             output_routes.routes[output_index].force_flush_at(now);
@@ -6131,8 +6102,8 @@ impl RelayProcessorNode {
                 ..
             } => output_buffers
                 .iter()
-                .filter_map(|buffer| buffer.pending.first())
-                .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
+                .filter_map(ReordererOutputBuffer::first_received_at)
+                .map(|received_at| checked_add_duration_to_timestamp(received_at, *max_time))
                 .min(),
             RelayProcessorOperationNode::Correlator {
                 max_time, state, ..
@@ -11287,64 +11258,23 @@ async fn flush_branch_reorderer_output(
     let branch = context.branch;
     output_routes.routes[output_index].clear_flush_deadline();
 
-    if output_buffer.pending.is_empty() {
+    if output_buffer.is_empty() {
         return;
     }
-    let Some(input_relay) = input_relays.first() else {
-        output_routes.routes[output_index].clear_flush_deadline();
-        return;
-    };
-    let mut pending = output_buffer.take_pending();
-    pending.sort_by(|left, right| {
-        left.key
-            .cmp(&right.key)
-            .then(left.arrival_sequence.cmp(&right.arrival_sequence))
-    });
-    let messages = pending
-        .drain(..)
-        .map(|entry| entry.message)
-        .collect::<Vec<_>>();
-    let input_schema = match relay_schema_for_runtime(&branch.runtime, &branch.domain, input_relay)
-    {
-        Ok(schema) => schema,
-        Err(error) => {
-            let message_error_policy = output_routes.routes[output_index]
-                .message_error_policy
-                .clone();
-            for message in messages {
-                branch
-                    .runtime
-                    .handle_message_error_with_policy(
-                        &branch.domain,
-                        node_kind,
-                        processor,
-                        &message_error_policy,
-                        message,
-                        MessageErrorFailure::new(
-                            Some(&output_routes.routes[output_index].relay),
-                            error.to_string(),
-                            MessageErrorOperation::Finalize,
-                        ),
-                    )
-                    .await;
-            }
-            output_routes.routes[output_index].clear_flush_deadline();
-            return;
-        }
-    };
-    let batch = match RelayRecordBatch::from_messages(input_schema, messages) {
+    let batch = match output_buffer.take_ordered_batch() {
         Ok(batch) => batch,
-        Err(error) => {
+        Err(failure) => {
+            let failure = *failure;
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
                 node_kind,
                 processor,
                 error_policies,
-                std::iter::empty::<&AckSet>(),
+                failure.batches.iter().flat_map(|batch| batch.acks.iter()),
                 format!(
-                    "reorderer '{}' failed to build output batch: {}",
+                    "reorderer '{}' failed to order buffered Arrow batches: {}",
                     processor.as_str(),
-                    error
+                    failure.error
                 ),
             );
             output_routes.routes[output_index].clear_flush_deadline();
