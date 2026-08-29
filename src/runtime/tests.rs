@@ -111,6 +111,7 @@ fn vm_input_from_test_rows(
             lookup_columns: &lookup_columns,
             uninitialized: None,
         },
+        None,
     )
 }
 
@@ -4693,14 +4694,12 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
     let state = runtime
         .replicated_deduplicator_state(placement.clone(), Vec::new(), 0)
         .expect("deduplicator state should initialize");
-    let (lsm, _payload) = state
-        .apply_new_key(
-            "txn-1".to_string(),
-            Timestamp::from_unix_nanos(1),
-            Duration::from_secs(600),
-        )
-        .expect("deduplicator update should succeed")
-        .expect("deduplicator key should be new");
+    assert!(state.reserve_new_key(
+        "txn-1".to_string(),
+        Timestamp::from_unix_nanos(1),
+        Duration::from_secs(600),
+    ));
+    let lsm = state.current_lsm.load(Ordering::SeqCst);
 
     let first = runtime
         .handle_state_sync_request(&placement, 0)
@@ -4714,6 +4713,26 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .await
         .expect("state sync request should succeed");
     assert!(none.is_none());
+}
+
+#[test]
+fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::Deduplicator,
+        kind: ModelKind::Deduplicator,
+        identifier: identifier("dedup_orders"),
+        schema_fingerprint: [0; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let state = super::ReplicatedDeduplicatorState::new(placement, Vec::new(), 0, None)
+        .expect("deduplicator state should initialize");
+    let seen_at = Timestamp::from_unix_nanos(1);
+    let max_time = Duration::from_secs(600);
+
+    assert!(state.reserve_new_key("txn-1".to_string(), seen_at, max_time));
+    assert!(!state.reserve_new_key("txn-1".to_string(), seen_at, max_time));
+    assert_eq!(state.current_lsm.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -4854,14 +4873,12 @@ async fn replica_quorum_waits_for_replication_ack() {
         super::ReplicatedDeduplicatorState::new(placement, vec!["node-2".to_string()], 1, None)
             .expect("replicated state should initialize"),
     );
-    let (lsm, _payload) = state
-        .apply_new_key(
-            "txn-1".to_string(),
-            Timestamp::from_unix_nanos(1),
-            Duration::from_secs(600),
-        )
-        .expect("deduplicator update should succeed")
-        .expect("deduplicator key should be new");
+    assert!(state.reserve_new_key(
+        "txn-1".to_string(),
+        Timestamp::from_unix_nanos(1),
+        Duration::from_secs(600),
+    ));
+    let lsm = state.current_lsm.load(Ordering::SeqCst);
 
     let waiter = {
         let runtime = runtime.clone();
