@@ -12109,7 +12109,10 @@ impl SessionServiceImpl {
 
     fn scheduled_node_should_follow_desired_assignment(node: &ScheduledNode) -> bool {
         if let Model::Ingestor(CreateIngestor {
-            source: IngestSource::Endpoint { .. } | IngestSource::Websockets { .. },
+            source:
+                IngestSource::Endpoint { .. }
+                | IngestSource::Websockets { .. }
+                | IngestSource::Syslog { .. },
             ..
         }) = node.config.as_ref()
         {
@@ -13284,6 +13287,7 @@ fn format_ingestor_source(source: &IngestSource) -> &'static str {
         IngestSource::Sqs { .. } => "SQS",
         IngestSource::Endpoint { .. } => "ENDPOINT",
         IngestSource::Websockets { .. } => "WEBSOCKETS",
+        IngestSource::Syslog { .. } => "SYSLOG",
     }
 }
 
@@ -13906,6 +13910,7 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             )
         }
         EmitSink::ZeroMq { client } => format!("ZEROMQ client={}", client.as_str()),
+        EmitSink::Syslog { client } => format!("SYSLOG client={}", client.as_str()),
         EmitSink::Sqs {
             client,
             queue,

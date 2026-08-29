@@ -6480,7 +6480,8 @@ impl Runtime {
                 | Model::ClientS3(_)
                 | Model::ClientGcs(_)
                 | Model::ClientAzureBlob(_)
-                | Model::ClientIcebergRest(_) => {
+                | Model::ClientIcebergRest(_)
+                | Model::ClientSyslog(_) => {
                     transports.insert(node.identifier.clone(), Arc::new((*node.config).clone()));
                 }
                 Model::Vhost(vhost) => {
@@ -9021,7 +9022,8 @@ impl Runtime {
                 | Model::ClientS3(_)
                 | Model::ClientGcs(_)
                 | Model::ClientAzureBlob(_)
-                | Model::ClientIcebergRest(_) => {
+                | Model::ClientIcebergRest(_)
+                | Model::ClientSyslog(_) => {
                     transports.insert(node.identifier.clone(), node.config.clone());
                 }
                 Model::Vhost(vhost) => {
@@ -12111,6 +12113,7 @@ impl Runtime {
             IngestSource::ZeroMq { client, .. } => client,
             IngestSource::Sqs { client, .. } => client,
             IngestSource::Websockets { client, .. } => client,
+            IngestSource::Syslog { client, .. } => client,
             IngestSource::Endpoint { endpoint, .. } => endpoint,
         };
         let source_kind = match &ingestor.source {
@@ -12455,6 +12458,7 @@ impl Runtime {
             | IngestSource::Nats { .. }
             | IngestSource::ZeroMq { .. }
             | IngestSource::Websockets { .. }
+            | IngestSource::Syslog { .. }
             | IngestSource::Endpoint { .. } => {}
         }
         Ok(())

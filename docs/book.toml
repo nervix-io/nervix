@@ -28,6 +28,7 @@ include = [
   "domains-and-time.md",
   "schemas-and-codecs.md",
   "jaq-reference.md",
+  "syslog.md",
   "resources.md",
   "relay.md",
   "ingestors.md",

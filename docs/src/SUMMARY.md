@@ -34,6 +34,7 @@
   - [Domains And Time](./domains-and-time.md)
   - [Schemas And Codecs](./schemas-and-codecs.md)
     - [JAQ Reference](./jaq-reference.md)
+  - [Syslog](./syslog.md)
   - [Resources](./resources.md)
   - [Ingestors](./ingestors.md)
   - [Runtime Nodes](./processors.md)

@@ -27,6 +27,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Roto language syntax for UDF bodies | `Roto Language Reference` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
 | Resources, uploads, mounts, and TLS files | `Resources` |
+| Syslog codec fields, UDP/TCP/TLS framing, clients, sources, and sinks | `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `NSPL Overview` and `Examples` |
@@ -132,6 +133,9 @@ relay. Do not use them to scan across branches.
 - Every codec explicitly handles any wire/internal datetime or shape difference. Every JAQ-backed
   codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
   order.
+- Every syslog codec uses only the exact fixed fields documented in `Syslog`; keep the codec
+  separate from the `TYPE SYSLOG` transport, use only `NO_ACK` source/sink modes, and configure
+  TLS identity and framing for the client direction that consumes it.
 - Every relay declares a schema and explicit branch selection.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
 - Every multi-input emitter source declares the same payload schema. Its sources may use different

@@ -147,6 +147,12 @@ pub fn create_codec_parser<'src>()
             },
         )
         .boxed();
+    let syslog_codec = kw(Identifier::Syslog)
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(kw(Identifier::Schema))
+        .ignore_then(schema_ref())
+        .map(|schema| (CodecWireFormat::Syslog, None, schema, Vec::new()))
+        .boxed();
 
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
@@ -154,7 +160,15 @@ pub fn create_codec_parser<'src>()
         .then(codec_name())
         .then_ignore(kw(Identifier::From))
         .boxed()
-        .then(choice((schemaful_codec, protobuf_codec, jaq_native_codec)).boxed())
+        .then(
+            choice((
+                schemaful_codec,
+                protobuf_codec,
+                jaq_native_codec,
+                syslog_codec,
+            ))
+            .boxed(),
+        )
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |((if_not_exists, name), (wire_format, wire_schema, schema, encoding_rules))| {
@@ -370,6 +384,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_syslog_codec_without_wire_schema() {
+        let parsed = parse_create_codec("CREATE CODEC events FROM SYSLOG TO SCHEMA syslog_event;")
+            .expect("parse should succeed");
+
+        assert_eq!(parsed.wire_format, CodecWireFormat::Syslog);
+        assert_eq!(parsed.wire_schema, None);
+        assert!(parsed.encoding_rules.is_empty());
+        assert_eq!(parsed.schema.as_str(), "syslog_event");
+    }
+
+    #[test]
+    fn rejects_syslog_codec_jaq_transformations_and_encoding_rules() {
+        assert!(
+            parse_create_codec(
+                "CREATE CODEC events FROM SYSLOG TO SCHEMA syslog_event WITH JAQ TRANSFORMATIONS \
+                 ON INGESTION '.';",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_create_codec(
+                "CREATE CODEC events FROM SYSLOG TO SCHEMA syslog_event ENCODE timestamp AS \
+                 RFC3339;",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn parses_create_codec_with_rfc3339_datetime_encoding() {
         let tokens = to_tokens(
             "CREATE CODEC orders_codec FROM WIRE JSON SCHEMA orders_wire TO SCHEMA orders ENCODE \
@@ -502,6 +545,18 @@ mod tests {
         assert!(suggestions.contains(&"XML".to_string()));
         assert!(suggestions.contains(&"CBOR".to_string()));
         assert!(suggestions.contains(&"PROTOBUF".to_string()));
+        assert!(suggestions.contains(&"SYSLOG".to_string()));
+    }
+
+    #[test]
+    fn syslog_completion_stays_on_its_codec_branch() {
+        let input = "CREATE CODEC events FROM SYSLOG ";
+        let suggestions = suggest_create_codec(input, input.len());
+
+        assert!(suggestions.contains(&"TO".to_string()));
+        assert!(!suggestions.contains(&"USING".to_string()));
+        assert!(!suggestions.contains(&"WITH".to_string()));
+        assert!(!suggestions.contains(&"ENCODE".to_string()));
     }
 
     #[test]

@@ -224,6 +224,10 @@ Current schemaful codec wire formats are:
 - `CBOR`, with an explicit CBOR wire schema
 - `AVRO`, with an explicit AVRO wire schema
 
+Current fixed-contract codec format:
+
+- [`SYSLOG`](syslog.md), which has no wire schema and uses its fixed typed field contract
+
 Current JAQ-native codec formats are:
 
 - `JSON`
@@ -256,6 +260,8 @@ Semantics:
 - no-wire codecs must use `FROM JSON|YAML|TOML|XML|CBOR ... WITH JAQ ...`
 - protobuf codecs must use `FROM PROTOBUF USING RESOURCE ... CONFIG {...} MESSAGE ... WITH JAQ ...`
 - schemaful codecs must use `FROM WIRE JSON|CBOR|AVRO SCHEMA ...` and do not carry JAQ transforms
+- syslog codecs must use `FROM SYSLOG TO SCHEMA ...` and do not carry wire schemas, JAQ
+  transformations, or field encoding rules
 - `WITH JAQ TRANSFORMATIONS` requires `ON INGESTION`, `ON EMITTING`, or both in that order
 - `ON INGESTION` runs after parsing the native/protobuf payload and must yield exactly one JSON object compatible with the internal schema
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value

@@ -737,6 +737,7 @@ pub enum Model {
     ClientZeroMq(CreateClientZeroMq),
     ClientSqs(CreateClientSqs),
     ClientWebsockets(CreateClientWebsockets),
+    ClientSyslog(CreateClientSyslog),
     ClientClickHouse(CreateClientClickHouse),
     ClientPostgres(CreateClientPostgres),
     ClientMySql(CreateClientMySql),
@@ -788,6 +789,7 @@ impl Model {
             | Self::ClientZeroMq(_)
             | Self::ClientSqs(_)
             | Self::ClientWebsockets(_)
+            | Self::ClientSyslog(_)
             | Self::ClientClickHouse(_)
             | Self::ClientPostgres(_)
             | Self::ClientMySql(_)
@@ -839,6 +841,7 @@ impl Model {
             Self::ClientZeroMq(v) => &v.name,
             Self::ClientSqs(v) => &v.name,
             Self::ClientWebsockets(v) => &v.name,
+            Self::ClientSyslog(v) => &v.name,
             Self::ClientClickHouse(v) => &v.name,
             Self::ClientPostgres(v) => &v.name,
             Self::ClientMySql(v) => &v.name,
@@ -885,6 +888,7 @@ impl Model {
             Self::ClientZeroMq(_) => Some("ZEROMQ"),
             Self::ClientSqs(_) => Some("SQS"),
             Self::ClientWebsockets(_) => Some("WEBSOCKETS"),
+            Self::ClientSyslog(_) => Some("SYSLOG"),
             Self::ClientClickHouse(_) => Some("CLICKHOUSE"),
             Self::ClientPostgres(_) => Some("POSTGRES"),
             Self::ClientMySql(_) => Some("MYSQL"),
@@ -959,6 +963,7 @@ pub enum CodecWireFormat {
     Json,
     Cbor,
     Avro,
+    Syslog,
     JaqNative {
         format: CodecJaqFormat,
         transformations: CodecJaqTransformations,
@@ -972,13 +977,13 @@ impl CodecWireFormat {
             Self::Json => Some(ModelKind::WireJsonSchema),
             Self::Cbor => Some(ModelKind::WireCborSchema),
             Self::Avro => Some(ModelKind::WireAvroSchema),
-            Self::JaqNative { .. } | Self::Protobuf(_) => None,
+            Self::Syslog | Self::JaqNative { .. } | Self::Protobuf(_) => None,
         }
     }
 
     pub fn supports_decoding(&self) -> bool {
         match self {
-            Self::Json | Self::Cbor | Self::Avro => true,
+            Self::Json | Self::Cbor | Self::Avro | Self::Syslog => true,
             Self::JaqNative {
                 transformations, ..
             }
@@ -990,7 +995,7 @@ impl CodecWireFormat {
 
     pub fn supports_encoding(&self) -> bool {
         match self {
-            Self::Json | Self::Cbor | Self::Avro => true,
+            Self::Json | Self::Cbor | Self::Avro | Self::Syslog => true,
             Self::JaqNative {
                 transformations, ..
             }
@@ -1472,6 +1477,9 @@ pub enum EmitSink {
     Sentry {
         client: Identifier,
     },
+    Syslog {
+        client: Identifier,
+    },
     Otel {
         client: Identifier,
         signal: OtelSignal,
@@ -1544,6 +1552,7 @@ impl EmitSink {
             | Self::ZeroMq { client }
             | Self::Sqs { client, .. }
             | Self::Sentry { client }
+            | Self::Syslog { client }
             | Self::Otel { client, .. }
             | Self::ClickHouse { client, .. }
             | Self::Postgres { client, .. }
@@ -1571,7 +1580,7 @@ impl EmitSink {
                 mode,
                 EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::NatsJetStream { .. }
             ),
-            Self::Redis { .. } | Self::ZeroMq { .. } => {
+            Self::Redis { .. } | Self::ZeroMq { .. } | Self::Syslog { .. } => {
                 matches!(mode, EmitterPublishingMode::NoAck { .. })
             }
             Self::Sqs { .. } => matches!(
@@ -1601,6 +1610,7 @@ impl EmitSink {
             | Self::ZeroMq { client }
             | Self::Sqs { client, .. }
             | Self::Sentry { client }
+            | Self::Syslog { client }
             | Self::Otel { client, .. }
             | Self::ClickHouse { client, .. }
             | Self::Postgres { client, .. }
@@ -1635,6 +1645,7 @@ impl EmitSink {
             | Self::ZeroMq { .. }
             | Self::Sqs { .. }
             | Self::Sentry { .. }
+            | Self::Syslog { .. }
             | Self::Otel { .. } => {}
         }
     }
@@ -1662,6 +1673,7 @@ impl EmitSink {
             Self::ZeroMq { .. } => "ZEROMQ",
             Self::Sqs { .. } => "SQS",
             Self::Sentry { .. } => "SENTRY",
+            Self::Syslog { .. } => "SYSLOG",
             Self::Otel { .. } => "OTEL",
             Self::ClickHouse { .. } => "CLICKHOUSE",
             Self::Postgres { .. } => "POSTGRES",
@@ -1694,6 +1706,7 @@ impl EmitSink {
                 | (Self::ZeroMq { .. }, Model::ClientZeroMq(_))
                 | (Self::Sqs { .. }, Model::ClientSqs(_))
                 | (Self::Sentry { .. }, Model::ClientSentry(_))
+                | (Self::Syslog { .. }, Model::ClientSyslog(_))
                 | (Self::Otel { .. }, Model::ClientOtel(_))
                 | (Self::ClickHouse { .. }, Model::ClientClickHouse(_))
                 | (Self::Postgres { .. }, Model::ClientPostgres(_))
@@ -1734,6 +1747,7 @@ impl EmitSink {
             | Self::ZeroMq { .. }
             | Self::Sqs { .. }
             | Self::Sentry { .. } => true,
+            Self::Syslog { .. } => true,
             Self::Otel { .. }
             | Self::ClickHouse { .. }
             | Self::Postgres { .. }
@@ -1763,6 +1777,7 @@ impl EmitSink {
             | Self::ZeroMq { .. }
             | Self::Sqs { .. }
             | Self::Sentry { .. }
+            | Self::Syslog { .. }
             | Self::Otel { .. } => None,
         }
     }
@@ -1783,6 +1798,7 @@ impl EmitSink {
             | Self::ZeroMq { .. }
             | Self::Sqs { .. }
             | Self::Sentry { .. }
+            | Self::Syslog { .. }
             | Self::Otel { .. }
             | Self::ClickHouse { .. }
             | Self::Postgres { .. }
@@ -1976,6 +1992,13 @@ pub struct CreateClientWebsockets {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateClientSyslog {
+    pub name: Identifier,
+    pub mount: Option<Identifier>,
+    pub config: Vec<ClientConfigEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateClientClickHouse {
     pub name: Identifier,
     pub mount: Option<Identifier>,
@@ -2050,6 +2073,7 @@ pub type PrometheusConfigEntry = ClientConfigEntry;
 pub type ZeroMqConfigEntry = ClientConfigEntry;
 pub type SqsConfigEntry = ClientConfigEntry;
 pub type WebsocketsConfigEntry = ClientConfigEntry;
+pub type SyslogConfigEntry = ClientConfigEntry;
 pub type ClickHouseConfigEntry = ClientConfigEntry;
 pub type PostgresConfigEntry = ClientConfigEntry;
 pub type MySqlConfigEntry = ClientConfigEntry;
@@ -2902,6 +2926,10 @@ pub enum IngestSource {
         mode: WebsocketsIngestMode,
         quiesce: IngestQuiesceMode,
     },
+    Syslog {
+        client: Identifier,
+        quiesce: IngestQuiesceMode,
+    },
 }
 
 impl IngestSource {
@@ -2921,7 +2949,8 @@ impl IngestSource {
             | Self::Prometheus { client, .. }
             | Self::ZeroMq { client, .. }
             | Self::Sqs { client, .. }
-            | Self::Websockets { client, .. } => client,
+            | Self::Websockets { client, .. }
+            | Self::Syslog { client, .. } => client,
             Self::Endpoint { endpoint, .. } => endpoint,
         }
     }
@@ -2946,7 +2975,8 @@ impl IngestSource {
             | Self::ZeroMq { quiesce, .. }
             | Self::Sqs { quiesce, .. }
             | Self::Endpoint { quiesce, .. }
-            | Self::Websockets { quiesce, .. } => quiesce,
+            | Self::Websockets { quiesce, .. }
+            | Self::Syslog { quiesce, .. } => quiesce,
         }
     }
 
@@ -2970,7 +3000,7 @@ impl IngestSource {
                     IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
                 )
             }
-            Self::ZeroMq { .. } => matches!(
+            Self::ZeroMq { .. } | Self::Syslog { .. } => matches!(
                 quiesce,
                 IngestQuiesceMode::Suspend
                     | IngestQuiesceMode::Buffer { .. }
@@ -3029,6 +3059,9 @@ impl IngestSource {
                 quiesce: current, ..
             }
             | Self::Websockets {
+                quiesce: current, ..
+            }
+            | Self::Syslog {
                 quiesce: current, ..
             } => *current = quiesce,
         }
