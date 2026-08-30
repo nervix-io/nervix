@@ -1,4 +1,7 @@
+#[cfg(feature = "testing")]
+use std::net::SocketAddr;
 use std::{
+    net::IpAddr,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
@@ -31,6 +34,11 @@ pub struct OtelClientFaultInjector {
 #[derive(Debug, Default)]
 pub struct SchedulePublicationFaultInjector {
     domains: DashMap<String, (), RandomState>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SyslogIngestorBindAddressOverrides {
+    hosts: DashMap<String, IpAddr, RandomState>,
 }
 
 /// Drops a node's leader-local transaction session bindings on its next transaction command, so
@@ -81,6 +89,7 @@ pub struct RuntimeTestHooks {
     pub transaction_binding_drops: Arc<TransactionBindingDropInjector>,
     pub(crate) transaction_commit_pauses: Arc<TransactionCommitPauseInjector>,
     pub(crate) entity_gate_pauses: Arc<EntityGatePauseInjector>,
+    pub(crate) syslog_ingestor_bind_address_overrides: Arc<SyslogIngestorBindAddressOverrides>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
     pub domain_drain_timeout: Option<Duration>,
     pub entity_gate_deadline: Option<Duration>,
@@ -104,6 +113,7 @@ impl Default for RuntimeTestHooks {
             transaction_binding_drops: Arc::default(),
             transaction_commit_pauses: Arc::default(),
             entity_gate_pauses: Arc::default(),
+            syslog_ingestor_bind_address_overrides: Arc::default(),
             branch_instance_expiration_scan_interval: None,
             domain_drain_timeout: None,
             entity_gate_deadline: None,
@@ -113,6 +123,12 @@ impl Default for RuntimeTestHooks {
 }
 
 impl RuntimeTestHooks {
+    pub fn set_syslog_ingestor_bind_ip(&self, node_id: impl Into<String>, host: IpAddr) {
+        self.syslog_ingestor_bind_address_overrides
+            .hosts
+            .insert(node_id.into(), host);
+    }
+
     pub fn request_leadership_transfer(&self, from_node_id: String, to_node_id: String) {
         let _ = self.leadership_transfers.send(LeadershipTransferRequest {
             from_node_id,
@@ -216,6 +232,20 @@ impl RuntimeTestHooks {
             .clone();
         pause.released.store(true, Ordering::Release);
         pause.release_notify.notify_waiters();
+    }
+}
+
+#[cfg(feature = "testing")]
+impl SyslogIngestorBindAddressOverrides {
+    pub(crate) fn resolve(&self, node_id: &str, configured: &str) -> String {
+        let Some(host) = self.hosts.get(node_id).map(|host| *host.value()) else {
+            return configured.to_string();
+        };
+        let Ok(mut addr) = configured.parse::<SocketAddr>() else {
+            return configured.to_string();
+        };
+        addr.set_ip(host);
+        addr.to_string()
     }
 }
 

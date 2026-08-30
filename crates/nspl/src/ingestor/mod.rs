@@ -647,6 +647,17 @@ fn zeromq_ingest_source_parser<'src>()
         })
 }
 
+fn syslog_ingest_source_parser<'src>()
+-> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Syslog)
+        .ignore_then(client_ref())
+        .then_ignore(kw(Identifier::Mode))
+        .then_ignore(kw(Identifier::NoAck))
+        .then_ignore(sequential_ack_window())
+        .then(flexible_quiesce_clause())
+        .map(|(client, quiesce)| IngestSource::Syslog { client, quiesce })
+}
+
 fn sqs_ingest_source_parser<'src>()
 -> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Sqs)
@@ -713,6 +724,7 @@ fn ingest_source_parser<'src>()
         nats_ingest_source_parser(),
         prometheus_ingest_source_parser(),
         zeromq_ingest_source_parser(),
+        syslog_ingest_source_parser(),
         sqs_ingest_source_parser(),
         endpoint_ingest_source_parser(),
         websockets_ingest_source_parser(),
@@ -1532,6 +1544,7 @@ mod tests {
         assert!(suggestions.contains(&"ZEROMQ".to_string()));
         assert!(suggestions.contains(&"SQS".to_string()));
         assert!(suggestions.contains(&"WEBSOCKETS".to_string()));
+        assert!(suggestions.contains(&"SYSLOG".to_string()));
     }
 
     #[test]
@@ -2180,6 +2193,61 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             }
         );
+    }
+
+    #[test]
+    fn parses_create_ingestor_syslog_no_ack_sequential() {
+        let input = r#"
+            CREATE INGESTOR syslog_events
+              FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+              ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST
+              DECODE USING syslog_codec
+              TO events INHERIT ALL UNBRANCHED
+              FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+              ON GENERAL ERROR LOG;
+        "#;
+
+        let parsed = parse_create_ingestor(input).expect("parse should succeed");
+        assert_eq!(
+            parsed.source,
+            IngestSource::Syslog {
+                client: nervix_models::Identifier::try_from("syslog_listener")
+                    .expect("valid client identifier"),
+                quiesce: IngestQuiesceMode::Buffer {
+                    max_size: "1MiB".to_string(),
+                    overflow: IngestQuiesceOverflow::DropOldest,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_syslog_parallel_ack_and_instances() {
+        assert!(
+            parse_create_ingestor(
+                "CREATE INGESTOR i FROM SYSLOG c MODE NO_ACK PARALLEL ON QUIESCE SUSPEND DECODE \
+                 USING codec TO out INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                 ON GENERAL ERROR LOG;",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_create_ingestor(
+                "CREATE INGESTOR i FROM SYSLOG c INSTANCES 2 MODE NO_ACK SEQUENTIAL ON QUIESCE \
+                 SUSPEND DECODE USING codec TO out INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn syslog_completion_offers_only_fixed_delivery_mode() {
+        let input = "CREATE INGESTOR i FROM SYSLOG c MODE ";
+        let suggestions = suggest_create_ingestor(input, input.len());
+        assert!(suggestions.contains(&"NO_ACK".to_string()));
+        assert!(!suggestions.contains(&"ACK".to_string()));
+        assert!(!suggestions.contains(&"PARALLEL".to_string()));
     }
 
     #[test]

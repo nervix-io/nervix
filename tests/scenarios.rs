@@ -62,7 +62,7 @@ use playwright_rs::{
 };
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
-use rustls_pki_types::{CertificateDer, pem::PemObject};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use tempfile::TempDir;
 use tokio_postgres::{Client as PostgresClient, NoTls};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -125,6 +125,9 @@ struct ScenarioWorld {
     test_id: String,
     zeromq_ingest_addr: String,
     zeromq_emit_addr: String,
+    syslog_ingest_addr: String,
+    syslog_emit_addr: String,
+    syslog_udp_observer: Option<tokio::net::UdpSocket>,
     placeholders: BTreeMap<String, String>,
     mqtt_ingestors_by_domain: BTreeMap<String, BTreeSet<String>>,
     avro_http_field_order: Vec<String>,
@@ -199,6 +202,7 @@ impl fmt::Debug for ScenarioWorld {
             )
             .field("mongodb_collection", &self.mongodb_collection)
             .field("mongodb_tls", &self.mongodb_tls)
+            .field("syslog_udp_observer", &self.syslog_udp_observer.is_some())
             .field("placeholder_count", &self.placeholders.len())
             .field(
                 "mqtt_ingestor_domain_count",
@@ -279,6 +283,14 @@ fn initialize_scenario_identity(world: &mut ScenarioWorld) {
     world.zeromq_emit_addr = format!(
         "tcp://127.0.0.1:{}",
         crate::common::cluster::next_port().expect("failed to allocate ZeroMQ emit port")
+    );
+    world.syslog_ingest_addr = format!(
+        "127.0.0.1:{}",
+        crate::common::cluster::next_port().expect("failed to allocate Syslog ingest port")
+    );
+    world.syslog_emit_addr = format!(
+        "127.0.0.1:{}",
+        crate::common::cluster::next_port().expect("failed to allocate Syslog emit port")
     );
 }
 
@@ -2942,6 +2954,16 @@ async fn when_node_is_started(world: &mut ScenarioWorld, node_id: String) {
         .expect("failed to start node");
 }
 
+#[when(expr = "node {string} is added to the cluster")]
+async fn when_node_is_added_to_the_cluster(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .add_node(&node_id)
+        .await
+        .expect("failed to add node");
+}
+
 #[when(expr = "leadership is transferred from node {string} to node {string}")]
 async fn when_leadership_is_transferred_from_node_to_node(
     world: &mut ScenarioWorld,
@@ -3305,7 +3327,10 @@ fn expand_placeholders(world: &ScenarioWorld, input: &str) -> String {
         .replace("{{test_id}}", &world.test_id)
         .replace("{{domain}}", &world.domain)
         .replace("{{zeromq_ingest_addr}}", &world.zeromq_ingest_addr)
-        .replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr);
+        .replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr)
+        .replace("{{syslog_ingest_addr}}", &world.syslog_ingest_addr)
+        .replace("{{syslog_emit_addr}}", &world.syslog_emit_addr)
+        .replace("{{syslog_pri}}", "<34>");
     for (key, value) in &world.placeholders {
         output = output.replace(&format!("{{{{{key}}}}}"), value);
     }
@@ -9261,6 +9286,19 @@ async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, a
     );
 }
 
+#[given(expr = "Syslog UDP emission endpoint {string} is observed")]
+async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
+    initialize_scenario_identity(world);
+    let addr = expand_placeholders(world, &addr);
+    world.syslog_udp_observer = Some(
+        tokio::net::UdpSocket::bind(&addr)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to observe Syslog UDP endpoint '{addr}': {error}")
+            }),
+    );
+}
+
 #[given(expr = "ClickHouse table {string} exists")]
 async fn given_clickhouse_table_exists(world: &mut ScenarioWorld, table: String) {
     let table = expand_placeholders(world, &table);
@@ -9981,6 +10019,214 @@ async fn when_zeromq_message_is_published(world: &mut ScenarioWorld, #[step] ste
         .publish_zeromq(&world.zeromq_ingest_addr, &payload)
         .await
         .expect("failed to publish zeromq message");
+}
+
+#[when(expr = "Syslog UDP message is published to {string}")]
+async fn when_syslog_udp_message_is_published_to(
+    world: &mut ScenarioWorld,
+    addr: String,
+    #[step] step: &Step,
+) {
+    let addr = expand_placeholders(world, &addr);
+    let payload = expand_placeholders(world, docstring(step));
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind Syslog UDP test sender");
+    socket
+        .send_to(payload.trim().as_bytes(), &addr)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to publish Syslog UDP message to '{addr}': {error}")
+        });
+}
+
+#[then(
+    expr = "node {string} eventually forwards Syslog UDP message {string} at {string} to the \
+            observed endpoint"
+)]
+async fn then_node_eventually_forwards_syslog_udp_message(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    message: String,
+    addr: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let message = expand_placeholders(world, &message);
+    let configured_addr = expand_placeholders(world, &addr);
+    let addr = world
+        .cluster()
+        .syslog_ingestor_addr(&node_id, &configured_addr)
+        .expect("failed to resolve node-local Syslog ingestor address");
+    let payload =
+        format!("<34>1 2003-10-11T22:14:15.003Z lifecycle.example test 1 ID47 - {message}");
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind Syslog UDP test sender");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = vec![0_u8; 65_535];
+
+    loop {
+        tokio::task::consume_budget().await;
+        let _ = socket.send_to(payload.as_bytes(), &addr).await;
+        let next = tokio::time::timeout(
+            Duration::from_millis(250),
+            world
+                .syslog_udp_observer
+                .as_ref()
+                .expect("a Syslog UDP observer must exist before assertion")
+                .recv_from(&mut received),
+        )
+        .await;
+        if let Ok(Ok((length, _))) = next
+            && let Ok(actual) = std::str::from_utf8(&received[..length])
+            && actual.contains(&message)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for node '{node_id}' Syslog UDP traffic to reach the observed \
+             endpoint"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[when(expr = "Syslog TCP messages are published with mixed framing to {string}")]
+async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
+    world: &mut ScenarioWorld,
+    addr: String,
+    #[step] step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let addr = expand_placeholders(world, &addr);
+    let messages = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages.len(),
+        2,
+        "mixed Syslog TCP framing step requires exactly two messages"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(stream) => break stream,
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out connecting to Syslog TCP listener '{addr}': {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    let octet_counted = messages[0].as_bytes();
+    stream
+        .write_all(octet_counted.len().to_string().as_bytes())
+        .await
+        .expect("failed to write Syslog octet count");
+    stream
+        .write_all(b" ")
+        .await
+        .expect("failed to write Syslog octet-count delimiter");
+    stream
+        .write_all(octet_counted)
+        .await
+        .expect("failed to write octet-counted Syslog message");
+    stream
+        .write_all(messages[1].as_bytes())
+        .await
+        .expect("failed to write non-transparent Syslog message");
+    stream
+        .write_all(b"\r\n")
+        .await
+        .expect("failed to terminate non-transparent Syslog message");
+    stream
+        .shutdown()
+        .await
+        .expect("failed to close Syslog TCP test sender");
+}
+
+#[when(
+    expr = "Syslog TLS message is published to {string} using identity and CA from resource \
+            directory {string}"
+)]
+async fn when_syslog_tls_message_is_published_to(
+    world: &mut ScenarioWorld,
+    addr: String,
+    ca_resource_directory: String,
+    #[step] step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    nervix_interconnect::install_rustls_crypto_provider();
+    let addr = expand_placeholders(world, &addr);
+    let parsed = url::Url::parse(&format!("syslog://{addr}"))
+        .unwrap_or_else(|error| panic!("invalid Syslog TLS test address '{addr}': {error}"));
+    let server_name = parsed
+        .host_str()
+        .expect("Syslog TLS test address must have a host")
+        .to_string();
+    let ca_pem = resource_directory_ca_pem(world, &ca_resource_directory);
+    let mut roots = RootCertStore::empty();
+    for certificate in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
+        roots
+            .add(certificate.expect("Syslog TLS test CA must contain a valid certificate"))
+            .expect("Syslog TLS test CA certificate must be accepted");
+    }
+    let identity_dir = resource_directory_path(world, &ca_resource_directory);
+    let certificate_pem = std::fs::read(identity_dir.join("tls.crt"))
+        .expect("Syslog TLS test client certificate must be readable");
+    let certificates = CertificateDer::pem_slice_iter(&certificate_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("Syslog TLS test client certificate must be valid PEM");
+    let key_pem = std::fs::read(identity_dir.join("tls.key"))
+        .expect("Syslog TLS test client key must be readable");
+    let key = PrivateKeyDer::from_pem_slice(&key_pem)
+        .expect("Syslog TLS test client key must be valid PEM");
+    let config = RustlsClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certificates, key)
+        .expect("Syslog TLS test client identity must be valid");
+    let connector = tokio_rustls::TlsConnector::from(StdArc::new(config));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let stream = loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(stream) => break stream,
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out connecting to Syslog TLS listener '{addr}': {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    let server_name =
+        ServerName::try_from(server_name).expect("Syslog TLS test server name must be valid");
+    let mut stream = connector
+        .connect(server_name, stream)
+        .await
+        .expect("failed to establish Syslog TLS test session");
+    let payload = expand_placeholders(world, docstring(step));
+    let payload = payload.trim().as_bytes();
+    stream
+        .write_all(format!("{} ", payload.len()).as_bytes())
+        .await
+        .expect("failed to write Syslog TLS octet count");
+    stream
+        .write_all(payload)
+        .await
+        .expect("failed to write Syslog TLS payload");
+    stream
+        .shutdown()
+        .await
+        .expect("failed to close Syslog TLS test sender");
 }
 
 #[when(expr = "websocket message is published to host {string} path {string}")]
@@ -11643,6 +11889,30 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
         payload_matches_expected(actual, &expected_payload),
         "expected payload fragment {} in broker payload, got: {actual}",
         expected_payload.trim()
+    );
+}
+
+#[then("the observed Syslog UDP endpoint receives a payload")]
+async fn then_observed_syslog_udp_endpoint_receives_payload(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let expected = expand_placeholders(world, docstring(step));
+    let observer = world
+        .syslog_udp_observer
+        .as_ref()
+        .expect("a Syslog UDP observer must exist before assertion");
+    let mut payload = vec![0_u8; 65_535];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(10), observer.recv_from(&mut payload))
+        .await
+        .expect("timed out waiting for Syslog UDP payload")
+        .expect("failed to receive Syslog UDP payload");
+    let actual = std::str::from_utf8(&payload[..len])
+        .expect("emitted Syslog UDP payload must be valid UTF-8");
+    assert!(
+        payload_matches_expected(actual, &expected),
+        "expected Syslog UDP payload fragment {}, got: {actual}",
+        expected.trim()
     );
 }
 

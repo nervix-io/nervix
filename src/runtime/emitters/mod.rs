@@ -17,6 +17,7 @@ mod rabbitmq;
 mod redis;
 mod sentry;
 mod sqs;
+mod syslog;
 mod zeromq;
 
 use clickhouse::ClickHouseEmitter;
@@ -36,6 +37,7 @@ use rabbitmq::RabbitMqEmitter;
 use redis::RedisEmitter;
 use sentry::SentryEmitter;
 use sqs::{SqsEmitter, SqsPublishingMode};
+use syslog::SyslogEmitter;
 use zeromq::ZeroMqEmitter;
 
 const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
@@ -1585,6 +1587,7 @@ enum SinkEmitter {
     Mqtt(MqttEmitter),
     Nats(NatsEmitter),
     ZeroMq(ZeroMqEmitter),
+    Syslog(SyslogEmitter),
     Sqs(SqsEmitter),
     Sentry(SentryEmitter),
     Otel(OtelEmitter),
@@ -1718,6 +1721,12 @@ impl SinkEmitter {
                 match ZeroMqEmitter::new(client, resolved).await {
                     Ok(emitter) => Self::ZeroMq(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("zeromq", context, &error),
+                }
+            }
+            (EmitSink::Syslog { .. }, Some(Model::ClientSyslog(client)), _) => {
+                match SyslogEmitter::new(client, resolved).await {
+                    Ok(emitter) => Self::Syslog(emitter),
+                    Err(error) => Self::missing_after_emitter_init_error("syslog", context, &error),
                 }
             }
             (EmitSink::Sqs { queue, .. }, Some(Model::ClientSqs(client)), _) => {
@@ -1996,6 +2005,7 @@ impl SinkEmitter {
             | Self::Mqtt(_)
             | Self::Nats(_)
             | Self::ZeroMq(_)
+            | Self::Syslog(_)
             | Self::Sqs(_)
             | Self::Sentry(_)
             | Self::Otel(_)
@@ -2377,6 +2387,7 @@ impl SinkEmitter {
         | EmitSink::Mqtt { .. }
         | EmitSink::Nats { .. }
         | EmitSink::ZeroMq { .. }
+        | EmitSink::Syslog { .. }
         | EmitSink::Sqs { .. }
         | EmitSink::Sentry { .. } = sink
             && codec.is_none()
@@ -2431,6 +2442,13 @@ impl SinkEmitter {
             return finish_per_record_publish(context, batches, outcome).await;
         }
         if let (Some(codec), EmitSink::ZeroMq { .. }, Self::ZeroMq(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish_records(records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::Syslog { .. }, Self::Syslog(emitter)) =
             (codec.clone(), sink, &mut *self)
         {
             let records = encode_broker_records(codec, context, batches).await?;
@@ -3030,6 +3048,7 @@ impl EmitSinkLabel for EmitSink {
             EmitSink::Mqtt { .. } => "mqtt",
             EmitSink::Nats { .. } => "nats",
             EmitSink::ZeroMq { .. } => "zeromq",
+            EmitSink::Syslog { .. } => "syslog",
             EmitSink::Sqs { .. } => "sqs",
             EmitSink::Sentry { .. } => "sentry",
             EmitSink::Otel { .. } => "otel",
@@ -3916,6 +3935,23 @@ fn resolve_emitter_client(
         (EmitSink::ZeroMq { .. }, Some(Model::ClientZeroMq(client))) => {
             Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
+        (EmitSink::Syslog { .. }, Some(Model::ClientSyslog(client))) => Some(
+            runtime
+                .resolve_client_config(domain, client.mount.as_ref(), &client.config)
+                .and_then(|resolved| {
+                    let config = crate::runtime::syslog::SyslogClientConfig::parse(
+                        &resolved.entries,
+                        crate::runtime::syslog::SyslogDirection::Emit,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    if config.protocol == crate::runtime::syslog::SyslogProtocol::Tls {
+                        config
+                            .tls_client_config()
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Ok(resolved)
+                }),
+        ),
         (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client))) => {
             Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
@@ -5531,6 +5567,7 @@ mod tests {
                 "nats",
             ),
             (EmitSink::ZeroMq { client: id.clone() }, "zeromq"),
+            (EmitSink::Syslog { client: id.clone() }, "syslog"),
             (
                 EmitSink::Sqs {
                     client: id.clone(),

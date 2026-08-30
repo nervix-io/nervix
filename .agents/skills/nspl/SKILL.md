@@ -178,6 +178,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   options between different client libraries.
 - Use only connector kinds listed in the current Ingestors and Emitters documentation. Treat
   connector syntax retained in older examples or configurations as invalid.
+- For syslog, read the dedicated `Common` → `Syslog` documentation entry. Reference the predefined
+  singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
+  client transport, and use only the documented `NO_ACK` source and sink forms.
 - For a Sentry sink, reference a `TYPE SENTRY` client containing the project DSN and use a codec
   that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other
