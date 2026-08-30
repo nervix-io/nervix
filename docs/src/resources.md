@@ -143,6 +143,7 @@ Client types that currently support TLS-oriented configuration through mounted r
 - RabbitMQ
 - Redis
 - SQS
+- Syslog
 
 `ZEROMQ` remains plain pass-through transport configuration and does not currently expose a Nervix-specific TLS helper surface.
 

@@ -39,13 +39,13 @@ use nervix_models::{
     CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
     CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPrometheus,
     CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor,
-    CreateRelay, CreateSignalingProtocol, CreateUdf, Domain, DomainConfig, DomainPace,
-    DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterPublishingMode,
-    EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy, IcebergCatalog,
-    IcebergStorageBackend, IcebergValueMapping, Identifier, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorMapping, IngestQuiesceMode, IngestQuiesceOverflow,
+    CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets,
+    CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
+    CreateUdf, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink,
+    EmitterAckWindow, EmitterPublishingMode, EndpointType, ErrorPolicies, FieldPath,
+    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
     IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
     MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping,
@@ -149,6 +149,7 @@ mod runtime_impl;
 mod schedule_delta;
 mod service_url;
 mod state_store;
+mod syslog;
 mod test_hooks;
 mod tls;
 mod wasm_state;
@@ -188,15 +189,16 @@ use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
     BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputSpec,
     BranchedProcessorOutputsSpec, BranchedProcessorSpec, CompiledCorrelatorOutputProgram,
-    CompiledCorrelatorWhereProgram, CompiledReordererProgram, CompiledWindowAggregateExpr,
-    CompiledWindowAggregateProgram, CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan,
-    InferencerFlushContext, InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext,
-    PlannedGeneralError, PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
-    RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
-    RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
-    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage,
-    RuntimeInputCollector, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor,
-    WasmFlushContext, WindowBounds, WindowFlushContext,
+    CompiledCorrelatorWhereProgram, CompiledInferencerInputProgram, CompiledReordererProgram,
+    CompiledWindowAggregateExpr, CompiledWindowAggregateProgram, CorrelatorBranchState,
+    CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext, InferencerOutputBuffer,
+    IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
+    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
+    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
+    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
+    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, RuntimeInputCollector,
+    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
+    WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -1930,6 +1932,15 @@ impl IngestFilterMapMetadata {
         metadata
     }
 
+    fn syslog(peer_addr: std::net::SocketAddr) -> Self {
+        let mut metadata = Self::default();
+        metadata.values.insert(
+            "peer_addr".to_string(),
+            RuntimeValue::String(peer_addr.to_string()),
+        );
+        metadata
+    }
+
     fn insert_header(&mut self, name: String, value: String) {
         self.headers.entry(name).or_default().push(value);
     }
@@ -3123,6 +3134,8 @@ pub struct Runtime {
     transaction_commit_pauses: Arc<test_hooks::TransactionCommitPauseInjector>,
     #[cfg(feature = "testing")]
     entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
+    #[cfg(feature = "testing")]
+    syslog_ingestor_bind_address_overrides: Arc<test_hooks::SyslogIngestorBindAddressOverrides>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,
@@ -3882,6 +3895,7 @@ impl RelayProcessorOperationNode {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                     ..
                 },
                 RelayProcessorOperationTemplate::Inferencer {
@@ -3891,6 +3905,7 @@ impl RelayProcessorOperationNode {
                     file: desired_file,
                     inputs: desired_inputs,
                     output_schema: desired_output_schema,
+                    compiled_input_program: desired_compiled_input_program,
                 },
             ) => {
                 if resource != desired_resource
@@ -3903,6 +3918,7 @@ impl RelayProcessorOperationNode {
                         "dynamic inferencer update changed its inference session".to_string()
                     );
                 }
+                *compiled_input_program = desired_compiled_input_program.clone();
                 output_routes.apply_template(desired_outputs)?;
                 Ok(())
             }
@@ -4603,32 +4619,14 @@ impl RelayProcessorNode {
                             .collect::<Vec<_>>();
                         let dedup_key = format!("{dedup_key:?}");
                         let RelayMessage { key, record, acks } = message;
-                        match state.apply_new_key(dedup_key.clone(), execution_now, *max_time) {
-                            Ok(Some(_)) => {
-                                forwarded_entries
-                                    .push((dedup_key, RelayMessage { key, record, acks }));
-                            }
-                            Ok(None) => {
-                                debug!(
-                                    deduplicator = self.processor.as_str(),
-                                    "branched deduplicator dropped duplicate message"
-                                );
-                                acks.ack_success();
-                            }
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    std::iter::once(&acks),
-                                    format!(
-                                        "deduplicator '{}' failed to update state: {}",
-                                        self.processor.as_str(),
-                                        error
-                                    ),
-                                );
-                            }
+                        if state.reserve_new_key(dedup_key.clone(), execution_now, *max_time) {
+                            forwarded_entries.push((dedup_key, RelayMessage { key, record, acks }));
+                        } else {
+                            debug!(
+                                deduplicator = self.processor.as_str(),
+                                "branched deduplicator dropped duplicate message"
+                            );
+                            acks.ack_success();
                         }
                     }
 
@@ -5019,49 +5017,20 @@ impl RelayProcessorNode {
                             .collect::<Vec<_>>();
                         let sequence = *arrival_sequence;
                         *arrival_sequence = arrival_sequence.saturating_add(1);
-                        row_ordering.push((key, sequence));
+                        row_ordering.push(ReordererRowOrder {
+                            key,
+                            arrival_sequence: sequence,
+                        });
                     }
-                    let estimated_bytes = batch.estimated_bytes();
+                    let row_ordering = Arc::new(row_ordering);
                     let route_batches = batch.into_attached_fanout(output_routes.routes.len());
                     let mut due_outputs = Vec::new();
                     for (output_index, route_batch) in route_batches.into_iter().enumerate() {
-                        let messages = match route_batch.try_into_messages() {
-                            Ok(messages) => messages,
-                            Err(error_and_batch) => {
-                                let (error, batch) = *error_and_batch;
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    batch.acks.iter(),
-                                    format!(
-                                        "reorderer '{}' failed to decode arrow batch: {}",
-                                        self.processor.as_str(),
-                                        error
-                                    ),
-                                );
-                                continue;
-                            }
-                        };
                         let output_buffer = &mut output_buffers[output_index];
-                        output_buffer.estimated_bytes = output_buffer
-                            .estimated_bytes
-                            .saturating_add(estimated_bytes);
-                        output_buffer
-                            .pending
-                            .extend(messages.into_iter().enumerate().map(|(row, message)| {
-                                let (key, arrival_sequence) = &row_ordering[row];
-                                ReordererPendingMessage {
-                                    key: key.clone(),
-                                    arrival_sequence: *arrival_sequence,
-                                    received_at: execution_now,
-                                    message,
-                                }
-                            }));
+                        output_buffer.push(route_batch, Arc::clone(&row_ordering), execution_now);
                         let output = &mut output_routes.routes[output_index];
                         match output
-                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes)
+                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes())
                         {
                             Some(true) => {
                                 output.force_flush_at(execution_now);
@@ -5074,10 +5043,7 @@ impl RelayProcessorNode {
                                     self.kind.as_str(),
                                     &self.processor,
                                     &self.error_policies,
-                                    output_buffer
-                                        .pending
-                                        .iter()
-                                        .map(|entry| &entry.message.acks),
+                                    output_buffer.acks(),
                                     format!(
                                         "reorderer '{}' output '{}' has no flush policy",
                                         self.processor.as_str(),
@@ -5595,6 +5561,7 @@ impl RelayProcessorNode {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                     output_buffers,
                     session,
                 } => {
@@ -5664,6 +5631,7 @@ impl RelayProcessorNode {
                                 file,
                                 inputs,
                                 output_schema,
+                                compiled_input_program,
                                 input_relays: &self.input_relays,
                                 session,
                                 materialized_state: &self.materialized_state,
@@ -5806,12 +5774,15 @@ impl RelayProcessorNode {
                 } => {
                     let mut due_outputs = Vec::new();
                     for (output_index, output_buffer) in output_buffers.iter().enumerate() {
-                        if output_buffer.pending.is_empty() {
+                        if output_buffer.is_empty() {
                             continue;
                         }
-                        let max_time_due = output_buffer.pending.first().is_some_and(|entry| {
-                            checked_add_duration_to_timestamp(entry.received_at, *max_time) <= now
-                        });
+                        let max_time_due =
+                            output_buffer
+                                .first_received_at()
+                                .is_some_and(|received_at| {
+                                    checked_add_duration_to_timestamp(received_at, *max_time) <= now
+                                });
                         let flush_due = output_routes.routes[output_index].flush_deadline_due(now);
                         if max_time_due || flush_due {
                             output_routes.routes[output_index].force_flush_at(now);
@@ -5891,6 +5862,7 @@ impl RelayProcessorNode {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                     output_buffers,
                     session,
                 } => {
@@ -5918,6 +5890,7 @@ impl RelayProcessorNode {
                                 file,
                                 inputs,
                                 output_schema,
+                                compiled_input_program,
                                 input_relays: &self.input_relays,
                                 session,
                                 materialized_state: &self.materialized_state,
@@ -6141,8 +6114,8 @@ impl RelayProcessorNode {
                 ..
             } => output_buffers
                 .iter()
-                .filter_map(|buffer| buffer.pending.first())
-                .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
+                .filter_map(ReordererOutputBuffer::first_received_at)
+                .map(|received_at| checked_add_duration_to_timestamp(received_at, *max_time))
                 .min(),
             RelayProcessorOperationNode::Correlator {
                 max_time, state, ..
@@ -6408,6 +6381,7 @@ impl RelayProcessorTemplate {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                 } => {
                     let output_routes = Self::instantiate_outputs(output_routes);
                     let output_buffers = (0..output_routes.routes.len())
@@ -6420,6 +6394,7 @@ impl RelayProcessorTemplate {
                         file: file.clone(),
                         inputs: inputs.clone(),
                         output_schema: output_schema.clone(),
+                        compiled_input_program: compiled_input_program.clone(),
                         output_buffers,
                         session: None,
                     }
@@ -11213,64 +11188,23 @@ async fn flush_branch_reorderer_output(
     let branch = context.branch;
     output_routes.routes[output_index].clear_flush_deadline();
 
-    if output_buffer.pending.is_empty() {
+    if output_buffer.is_empty() {
         return;
     }
-    let Some(input_relay) = input_relays.first() else {
-        output_routes.routes[output_index].clear_flush_deadline();
-        return;
-    };
-    let mut pending = output_buffer.take_pending();
-    pending.sort_by(|left, right| {
-        left.key
-            .cmp(&right.key)
-            .then(left.arrival_sequence.cmp(&right.arrival_sequence))
-    });
-    let messages = pending
-        .drain(..)
-        .map(|entry| entry.message)
-        .collect::<Vec<_>>();
-    let input_schema = match relay_schema_for_runtime(&branch.runtime, &branch.domain, input_relay)
-    {
-        Ok(schema) => schema,
-        Err(error) => {
-            let message_error_policy = output_routes.routes[output_index]
-                .message_error_policy
-                .clone();
-            for message in messages {
-                branch
-                    .runtime
-                    .handle_message_error_with_policy(
-                        &branch.domain,
-                        node_kind,
-                        processor,
-                        &message_error_policy,
-                        message,
-                        MessageErrorFailure::new(
-                            Some(&output_routes.routes[output_index].relay),
-                            error.to_string(),
-                            MessageErrorOperation::Finalize,
-                        ),
-                    )
-                    .await;
-            }
-            output_routes.routes[output_index].clear_flush_deadline();
-            return;
-        }
-    };
-    let batch = match RelayRecordBatch::from_messages(input_schema, messages) {
+    let batch = match output_buffer.take_ordered_batch() {
         Ok(batch) => batch,
-        Err(error) => {
+        Err(failure) => {
+            let failure = *failure;
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
                 node_kind,
                 processor,
                 error_policies,
-                std::iter::empty::<&AckSet>(),
+                failure.batches.iter().flat_map(|batch| batch.acks.iter()),
                 format!(
-                    "reorderer '{}' failed to build output batch: {}",
+                    "reorderer '{}' failed to order buffered Arrow batches: {}",
                     processor.as_str(),
-                    error
+                    failure.error
                 ),
             );
             output_routes.routes[output_index].clear_flush_deadline();
@@ -12177,6 +12111,9 @@ fn ingestor_filter_map_metadata_arrow_schema(
             arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
             arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
             arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
+        ]))),
+        IngestSource::Syslog { .. } => Some(StdArc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("peer_addr", ArrowDataType::Utf8, true),
         ]))),
         _ => None,
     }
@@ -16197,87 +16134,6 @@ fn vm_output_value(
     )
 }
 
-fn compile_inferencer_input_mappings(
-    processor: &Identifier,
-    mappings: &[InferencerTensorMapping],
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    udfs: Option<&UdfExecutor>,
-) -> Result<VmCompiledProgram, String> {
-    let assignments = mappings
-        .iter()
-        .map(|mapping| {
-            Ok(nervix_models::Assignment {
-                target: nervix_models::AssignmentTarget::bare(
-                    Identifier::parse(&mapping.tensor).map_err(|error| {
-                        format!(
-                            "inferencer '{}' tensor name '{}' is not a valid field: {error}",
-                            processor, mapping.tensor
-                        )
-                    })?,
-                ),
-                value: mapping.expression.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let parsed = lower_route_construction(
-        &RouteConstruction {
-            assignments,
-            ..RouteConstruction::default()
-        },
-        SemanticNamespaces::new("input", "mapped_input"),
-    )
-    .map_err(|reason| {
-        format!(
-            "inferencer '{}' INPUTS mapping is invalid: {reason}",
-            processor
-        )
-    })?;
-    let output_schema = StdArc::new(arrow_schema::Schema::new(
-        mappings
-            .iter()
-            .map(|mapping| {
-                arrow_schema::Field::new(
-                    &mapping.tensor,
-                    crate::runtime_schema::arrow_data_type(&mapping.schema.message_type()),
-                    false,
-                )
-            })
-            .collect::<Vec<_>>(),
-    ));
-    let output_sensitivity = VmSchemaSensitivity::from_sensitive_fields(
-        mappings
-            .iter()
-            .filter(|mapping| {
-                expression_reads_sensitive_source(&mapping.expression, &input_sensitivity)
-            })
-            .map(|mapping| mapping.tensor.clone()),
-    );
-    compile_vm_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_schema.clone(),
-        output_sensitivity.clone(),
-        [
-            VmCompileBinding::readonly("input", input_schema).with_sensitivity(input_sensitivity),
-            VmCompileBinding::writeonly("mapped_input", output_schema)
-                .with_sensitivity(output_sensitivity),
-        ],
-        runtime_udf_compile_options(
-            udfs,
-            VmCompileOptions {
-                output_mode: VmOutputMode::ExplicitOnly,
-                ..VmCompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        format!(
-            "inferencer '{}' INPUTS compile failed: {}",
-            processor, error.message
-        )
-    })
-}
-
 fn vm_typed_batch_to_runtime_batch(batch: &VmTypedBatch) -> Result<RuntimeRecordBatch, String> {
     let record_batch = batch.to_record_batch().map_err(|error| error.to_string())?;
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
@@ -16413,6 +16269,7 @@ async fn flush_branch_inferencer_output(
         file,
         inputs,
         output_schema,
+        compiled_input_program,
         input_relays,
         session,
         materialized_state,
@@ -16566,38 +16423,10 @@ async fn flush_branch_inferencer_output(
         );
         return;
     };
-    let input_sensitivity = input_relays
-        .first()
-        .and_then(|relay| {
-            relay_schema_for_runtime(&branch.runtime, &branch.domain, relay)
-                .ok()
-                .map(|schema| schema.vm_sensitivity())
-        })
-        .unwrap_or_default();
-    let mapped_program = match compile_inferencer_input_mappings(
-        processor,
-        inputs,
-        input_batch.schema().clone(),
-        input_sensitivity,
-        branch.runtime.udf_executor(&branch.domain).as_ref(),
-    ) {
-        Ok(program) => program,
-        Err(error) => {
-            branch.runtime.handle_internal_processor_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                messages.iter().map(|message| &message.acks),
-                error,
-            );
-            return;
-        }
-    };
     let side_inputs = HashMap::default();
     let lookup_columns = HashMap::default();
     let mapped_vm_input = match project_vm_input_batch(
-        &mapped_program.input_schema,
+        &compiled_input_program.program.input_schema,
         &VmInputProjectionSources {
             carrier: &input_batch,
             namespace_batches: &[],
@@ -16623,9 +16452,8 @@ async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let mapped_program = Arc::new(mapped_program);
     let mapped_result = match execute_program_with_selection_in_context(
-        &mapped_program,
+        &compiled_input_program.program,
         &mapped_vm_input,
         &VmExecutionContext {
             now: current_timestamp(),

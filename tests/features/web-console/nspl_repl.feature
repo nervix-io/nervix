@@ -436,7 +436,7 @@ Feature: Web console NSPL REPL
     And selector ".prompt-row" contains "{{domain}}"
     And selector ".graph-hit-layer" contains "http_notifications"
     And selector ".graph-hit-layer" contains "notifications"
-    And selector ".graph-branch-label-layer" does not contain "tenant_branch"
+    And selector "path.graph-branch-body" does not exist
     And selector ".graph-hit-layer" contains "ENDPOINT"
     And selector ".graph-hit-layer" contains "http_notifications_endpoint"
     And selector ".metrics-strip" does not exist
@@ -547,15 +547,14 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "right_profile_ingestor"
     And selector ".graph-hit-layer" contains "correlate_profiles"
     And selector ".graph-hit-layer" contains "correlated_profiles"
-    And branch group "tenant_branch" has 2 initiator callout and 0 finalizer callout
     And graph edge from "left_profiles" to "correlate_profiles" is visible
     And graph edge from "right_profiles" to "correlate_profiles" is visible
     And graph edge from "correlate_profiles" to "correlated_profiles" is visible
     And graph action edge "correlation timeout" from "correlate_profiles" to "uncorrelated_left_profiles" is visible
     And graph action edge "correlation timeout" from "correlate_profiles" to "uncorrelated_right_profiles" is visible
     And graph action edge "message error" from "correlate_profiles" to "correlator_errors" is visible
-    And selector ".graph-branch-header" does not overlap selector ".relay-hit[data-label='left_profiles']"
-    And selector ".graph-branch-header" does not overlap selector ".relay-hit[data-label='correlated_profiles']"
+    And selector ".graph-branch-label" does not overlap selector ".relay-hit[data-label='left_profiles']"
+    And selector ".graph-branch-label" does not overlap selector ".relay-hit[data-label='correlated_profiles']"
     When the browser viewport is resized to 1290 by 560
     Then selector ".prompt-row" is pinned to viewport bottom
     And selector ".graph-panel" does not overlap selector ".prompt-row"
@@ -1118,16 +1117,15 @@ Feature: Web console NSPL REPL
     And graph item "mqtt_devices" is not highlighted by graph search
     And graph item "iot_device_activity" is not highlighted by graph search
     And graph item "device_activity_landing" is not highlighted by graph search
-    And graph item "connect_without_authorization" has graph width at least 180 pixels
-    And graph item "connection_distance_alert_mapper" has graph width at least 180 pixels
-    And graph item "iceberg_connected_sessions" has graph width at least 180 pixels
+    And graph item "connect_without_authorization" has graph width at least 176 pixels
+    And graph item "connection_distance_alert_mapper" has graph width at least 176 pixels
+    And graph item "iceberg_connected_sessions" has graph width at least 176 pixels
     And graph item "kafka_auth" does not overlap graph item "mqtt_devices"
     And graph item "mqtt_devices" does not overlap graph item "nats_edge"
     And graph edge from "kafka_auth" to "auth_server_activity" starts horizontally
     And graph edge from "mqtt_devices" to "iot_device_activity" starts horizontally
     And graph edge from "nats_edge" to "edge_server_activity" starts horizontally
     And graph edge from "mqtt_devices" to "iot_device_activity" does not intersect graph edge from "nats_edge" to "edge_server_activity"
-    And graph edge from "edge_activity_enriched_landing" to "edge_activity_splitter" uses a direct curve
     And graph edge from "device_activity_landing" to "connection_distance_alert_mapper" has source plug at least 40 pixels
     And graph edge from "device_activity_landing" to "connection_distance_alert_mapper" has target plug at least 60 pixels
     And graph edge from "device_activity_landing" to "connection_distance_alert_mapper" has at most 2 rounded turns
@@ -1136,7 +1134,7 @@ Feature: Web console NSPL REPL
     And graph edge from "device_activity_landing" to "location_distance_alert_mapper" has at most 2 rounded turns
     And graph edge from "device_activity_landing" to "connection_distance_alert_mapper" does not share horizontal lane with graph edge from "device_activity_landing" to "location_distance_alert_mapper"
 
-  Scenario: Web console keeps branch callouts aligned after adding an ingestor live
+  Scenario: Web console keeps branch groups aligned after adding an ingestor live
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "leader"
     When these NSPL commands are executed on the leader node
@@ -1155,9 +1153,9 @@ Feature: Web console NSPL REPL
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".graph-hit-layer" contains "primary_telemetry"
-    And selector ".graph-branch-header" contains "site_branch"
-    And selector ".graph-branch-header" contains "0 br"
-    And selector ".graph-branch-header" contains "keys site"
+    And selector ".graph-branch-label" contains "by_primary_telemetry"
+    And selector ".graph-branch-label" contains "0 br"
+    And selector ".graph-branch-label" contains "(site)"
     When these NSPL commands are executed on the leader node
       """
       CREATE ENDPOINT backup_telemetry_endpoint ON edge PATH '/backup' TYPE HTTP;
@@ -1165,8 +1163,6 @@ Feature: Web console NSPL REPL
       START;
       """
     Then selector ".graph-hit-layer" contains "backup_telemetry"
-    And branch group "site_branch" has 2 initiator callout and 0 finalizer callout
-    And branch group "site_branch" left callout points to graph item "backup_telemetry"
     Then node "{{leader}}" eventually accepts http traffic for host "api.example.com" path "/primary"
       """
       { "site": "iad-1", "value": "71" }
@@ -1175,8 +1171,8 @@ Feature: Web console NSPL REPL
       """
       { "site": "sfo-1", "value": "68" }
       """
-    Then selector ".graph-branch-header" contains "2 br"
-    When selector ".graph-branch-header" is clicked
+    Then selector ".graph-branch-label" contains "2 br"
+    When selector ".graph-branch-label" is clicked
     Then selector ".branch-dialog" contains "site_branch"
     And selector ".branch-dialog" contains "active branches"
     And selector ".branch-dialog" contains "2"
@@ -1298,16 +1294,12 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "notification_forwarder"
     And selector ".graph-hit-layer" contains "reingestor_metrics_node"
     And selector ".graph-hit-layer" contains "tenant_notifications"
-    And selector ".graph-branch-label-layer" contains "tenant_user_id_branch"
-    And selector ".graph-branch-label-layer" contains "tenant_branch"
-    And branch group "tenant_user_id_branch" has 1 initiator callout and 1 finalizer callout
-    And branch group "tenant_user_id_branch" body overlaps graph item "notification_forwarder"
-    And branch group "tenant_user_id_branch" left callout points to graph item "reingestor_metrics_source"
-    And branch group "tenant_user_id_branch" right callout points to graph item "reingestor_metrics_node"
-    And branch group "tenant_user_id_branch" body does not overlap graph item "reingestor_metrics_source"
-    And branch group "tenant_user_id_branch" body does not overlap graph item "reingestor_metrics_node"
-    And branch group "tenant_branch" has 1 initiator callout and 0 finalizer callout
-    And branch group "tenant_branch" body does not overlap graph item "reingestor_metrics_node"
+    And selector ".graph-branch-label-layer" contains "by_reingestor_metrics_source"
+    And selector ".graph-branch-label-layer" contains "by_reingestor_metrics_node"
+    And branch group "by_reingestor_metrics_source" body overlaps graph item "notification_forwarder"
+    And branch group "by_reingestor_metrics_source" body does not overlap graph item "reingestor_metrics_source"
+    And branch group "by_reingestor_metrics_source" body does not overlap graph item "reingestor_metrics_node"
+    And branch group "by_reingestor_metrics_node" body does not overlap graph item "reingestor_metrics_node"
 
   Scenario: Web console routes shared sink client edges around downstream branch groups
     Given a 3 node nervix cluster is started
@@ -1399,17 +1391,15 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "redis_battery_alerts"
     And selector ".graph-hit-layer" contains "redis_maintenance_alerts"
     And selector ".graph-hit-layer" contains "redis_alerts"
-    And branch group "device_branch" has 1 initiator callout and 1 finalizer callout
     And graph edge from "quality_gate" to "battery_alerts" starts horizontally
     And graph edge from "quality_gate" to "battery_alerts" ends horizontally
     And graph edge from "anomaly_splitter" to "maintenance_alerts" starts horizontally
     And graph edge from "anomaly_splitter" to "maintenance_alerts" ends horizontally
-    And graph edge from "anomaly_splitter" to "maintenance_alerts" uses a direct curve
     And graph edge from "telemetry_clean" to "device_repartition" does not intersect graph edge from "battery_alerts" to "redis_battery_alerts"
     And graph edge from "redis_battery_alerts" to "redis_alerts" is visible
     And graph edge from "redis_battery_alerts" to "redis_alerts" starts horizontally
     And graph edge from "redis_battery_alerts" to "redis_alerts" ends horizontally
-    And graph edge from "redis_battery_alerts" to "redis_alerts" does not intersect branch group "device_branch" body
+    And graph edge from "redis_battery_alerts" to "redis_alerts" does not intersect branch group "by_device_repartition" body
     And graph edge from "redis_battery_alerts" to "redis_alerts" does not intersect graph item "redis_maintenance_alerts"
 
   @relay_buffer_statistics

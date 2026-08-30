@@ -17,8 +17,8 @@ use arrow_schema::{
 use error_stack::{Report, ResultExt};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use nervix_dataflow_graph::{
-    DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowMetricRef, DataflowNode,
-    DataflowNodeKind, DataflowSchemaField,
+    DataflowBranch, DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowInputSide,
+    DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind, DataflowSchemaField,
 };
 use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
@@ -1892,6 +1892,7 @@ impl DomainState {
                 | Model::ClientGcs(_)
                 | Model::ClientAzureBlob(_)
                 | Model::ClientIcebergRest(_)
+                | Model::ClientSyslog(_)
                 | Model::Vhost(_) => {}
                 Model::Udf(udf) => {
                     if !udf.has_valid_code_hash() {
@@ -2259,6 +2260,35 @@ impl DomainState {
                                 ModelKind::Client,
                             )?;
                             graph.add_edge(client, source, EdgeKind::RequiredBy);
+                        }
+                        IngestSource::Syslog { client, .. } => {
+                            let client_node = expect_kind(
+                                domain,
+                                identifier,
+                                models,
+                                &indices,
+                                client,
+                                ModelKind::Client,
+                            )?;
+                            let client_model = models
+                                .get(&RegistryKey::new(ModelKind::Client, client.clone()))
+                                .expect("validated syslog client must exist");
+                            if let Model::ClientSyslog(_) = client_model {
+                            } else {
+                                return Err(Report::new(RegistryError::InvalidModel {
+                                    domain: domain.as_str().to_string(),
+                                    identifier: identifier.as_str().to_string(),
+                                    reason: format!(
+                                        "SYSLOG ingestor requires a SYSLOG client, found {} \
+                                         client '{}'",
+                                        client_model.client_type_label().expect(
+                                            "validated client model must have a client type"
+                                        ),
+                                        client.as_str(),
+                                    ),
+                                }));
+                            }
+                            graph.add_edge(client_node, source, EdgeKind::RequiredBy);
                         }
                         IngestSource::Endpoint { endpoint, .. } => {
                             let endpoint = expect_kind(
@@ -3015,7 +3045,14 @@ impl DomainState {
                         graph.add_edge(codec, source, EdgeKind::RequiredBy);
                         let codec_model =
                             expect_codec_model(domain, identifier, models, codec_name)?;
-                        ensure_codec_supports_encoding(domain, identifier, codec_model)?;
+                        let codec_schema =
+                            schema_for_codec_model(domain, identifier, models, codec_name)?;
+                        ensure_codec_supports_encoding(
+                            domain,
+                            identifier,
+                            codec_model,
+                            codec_schema,
+                        )?;
                     }
 
                     let client_name = emitter.sink.client();
@@ -3764,7 +3801,7 @@ fn resolve_placement_member(
     models: &HashMap<RegistryKey, Model>,
 ) -> Result<ResolvedPlacementMember, Report<RegistryError>> {
     let mut eligible = Vec::new();
-    let mut endpoint_ingestor = false;
+    let mut cluster_wide_ingestor = false;
     let mut relay_without_state = false;
     let mut ineligible_kinds = Vec::new();
     for (key, model) in models.iter().filter(|(key, _)| key.identifier == *member) {
@@ -3776,10 +3813,9 @@ fn resolve_placement_member(
                 });
             }
             Model::Relay(_) => relay_without_state = true,
-            Model::Ingestor(CreateIngestor {
-                source: IngestSource::Endpoint { .. },
-                ..
-            }) => endpoint_ingestor = true,
+            Model::Ingestor(_) if model.executes_on_every_cluster_node() => {
+                cluster_wide_ingestor = true;
+            }
             _ if is_user_placement_member_model(model) => {
                 eligible.push(ResolvedPlacementMember {
                     runtime: key.clone(),
@@ -3805,9 +3841,9 @@ fn resolve_placement_member(
             "placement member '{}' is ambiguous across eligible kinds {kinds}",
             member
         )
-    } else if endpoint_ingestor {
+    } else if cluster_wide_ingestor {
         format!(
-            "placement member '{}' is not placement-eligible: endpoint-source ingestors execute \
+            "placement member '{}' is not placement-eligible: server-listener ingestors execute \
              on every cluster node",
             member
         )
@@ -3860,10 +3896,7 @@ fn is_user_placement_member_model(model: &Model) -> bool {
 fn is_placement_eligible_member_model(model: &Model) -> bool {
     match model {
         Model::Relay(relay) => relay.materialized_state.is_some(),
-        Model::Ingestor(CreateIngestor {
-            source: IngestSource::Endpoint { .. },
-            ..
-        }) => false,
+        Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
         _ => is_user_placement_member_model(model),
     }
 }
@@ -3912,10 +3945,7 @@ fn ensure_placement_member_shape_change_allowed(
 
 fn is_placement_runtime_model(model: &Model) -> bool {
     match model {
-        Model::Ingestor(CreateIngestor {
-            source: IngestSource::Endpoint { .. },
-            ..
-        }) => false,
+        Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
         Model::Materializer(_) => true,
         _ => is_user_placement_member_model(model),
     }
@@ -4476,12 +4506,7 @@ impl ActiveGraph {
                             .node_weight(target_index)
                             .expect("dataflow target node must exist");
                         included_nodes.insert(target_index);
-                        DataflowEdge::data(
-                            source.dataflow_id(),
-                            target.dataflow_id(),
-                            dataflow_edge_kind(edge_kind),
-                        )
-                        .with_metric(source.dataflow_metric_for_target(target))
+                        source.dataflow_edge_to(target, dataflow_edge_kind(edge_kind))
                     })
                     .collect::<Vec<_>>()
             })
@@ -4540,6 +4565,7 @@ impl ActiveGraph {
                 }
                 nodes.push(client_node);
             }
+            edges.extend(node.dataflow_state_link_edges());
         }
 
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -4560,7 +4586,6 @@ impl ActiveGraph {
             nodes,
             edges,
         }
-        .laid_out()
     }
 }
 
@@ -4634,8 +4659,9 @@ impl ActiveNode {
         Some(DataflowNode::new(
             format!("{}_source:{}", source_kind, source.as_str()),
             source.as_str(),
-            DataflowNodeKind::Client,
-            ingestor.source.transport_label(),
+            DataflowNodeRole::Client {
+                transport: ingestor.source.transport_label().to_string(),
+            },
         ))
     }
 
@@ -4647,9 +4673,88 @@ impl ActiveNode {
         Some(DataflowNode::new(
             format!("client_sink:{}", client.as_str()),
             client.as_str(),
-            DataflowNodeKind::Client,
-            emitter.sink.transport_label(),
+            DataflowNodeRole::Client {
+                transport: emitter.sink.transport_label().to_string(),
+            },
         ))
+    }
+
+    /// The drawn edge from this node to `target`. A generator reads its source relay as
+    /// materialized state rather than receiving its records, so that one edge becomes a state
+    /// link instead of record flow.
+    fn dataflow_edge_to(&self, target: &Self, kind: DataflowEdgeKind) -> DataflowEdge {
+        if kind == DataflowEdgeKind::Data
+            && target.kind == ModelKind::Generator
+            && target.reads_materialized_state_from(&self.identifier)
+        {
+            return DataflowEdge::data(
+                self.dataflow_id(),
+                target.dataflow_id(),
+                DataflowEdgeKind::StateLink,
+            );
+        }
+        DataflowEdge::data(self.dataflow_id(), target.dataflow_id(), kind)
+            .with_metric(self.dataflow_metric_for_target(target))
+            .with_input_side(target.correlator_input_side(&self.identifier))
+            .with_routes(self.dataflow_routes_to(target, kind))
+    }
+
+    /// Materialized-state dependencies drawn as state links. Every declaration is included; the
+    /// generator's own source relay arrives here as well as through its converted flow edge, and
+    /// the two are identical so the graph's edge deduplication keeps exactly one.
+    fn dataflow_state_link_edges(&self) -> Vec<DataflowEdge> {
+        self.config
+            .materialized_state_relays()
+            .into_iter()
+            .map(|relay| {
+                DataflowEdge::data(
+                    format!("{}:{}", ModelKind::Relay.as_str(), relay.as_str()),
+                    self.dataflow_id(),
+                    DataflowEdgeKind::StateLink,
+                )
+            })
+            .collect()
+    }
+
+    fn reads_materialized_state_from(&self, relay: &Identifier) -> bool {
+        self.config
+            .materialized_state_relays()
+            .into_iter()
+            .any(|declared| declared == relay)
+    }
+
+    /// Which side of a correlator an input relay enters. Correlators are the only nodes whose
+    /// inputs are distinguishable, and the console labels the two sides.
+    fn correlator_input_side(&self, source: &Identifier) -> Option<DataflowInputSide> {
+        let Model::Correlator(correlator) = self.config.as_ref() else {
+            return None;
+        };
+        if correlator.left.from.iter().any(|relay| relay == source) {
+            return Some(DataflowInputSide::Left);
+        }
+        correlator
+            .right
+            .from
+            .iter()
+            .any(|relay| relay == source)
+            .then_some(DataflowInputSide::Right)
+    }
+
+    /// How many declared routes this node sends to `target`. Several routes to one relay are
+    /// drawn as a single edge, so the count is what tells the reader they were collapsed.
+    fn dataflow_routes_to(&self, target: &Self, kind: DataflowEdgeKind) -> u32 {
+        if kind != DataflowEdgeKind::Data || target.kind != ModelKind::Relay {
+            return 1;
+        }
+        let Some(outputs) = self.config.output_routes() else {
+            return 1;
+        };
+        let routes = outputs
+            .routes
+            .iter()
+            .filter(|route| route.relay == target.identifier)
+            .count();
+        u32::try_from(routes).unwrap_or(u32::MAX).max(1)
     }
 
     fn dataflow_source_client_metric(&self) -> DataflowMetricRef {
@@ -4698,13 +4803,9 @@ impl ActiveNode {
         let node = DataflowNode::new(
             self.dataflow_id(),
             self.identifier.as_str(),
-            self.dataflow_kind(),
-            self.dataflow_subtype(),
+            self.dataflow_role(),
         )
-        .with_optional_branching_schema(
-            self.dataflow_branching_schema()
-                .map(|schema| schema.as_str().to_string()),
-        );
+        .with_branch(self.dataflow_branch());
         match self.config.as_ref() {
             Model::Relay(relay) => {
                 let Some(schema) = schemas.get(&relay.schema) else {
@@ -4723,26 +4824,43 @@ impl ActiveNode {
         }
     }
 
-    fn dataflow_kind(&self) -> DataflowNodeKind {
+    fn dataflow_role(&self) -> DataflowNodeRole {
         match self.kind {
-            ModelKind::Ingestor => DataflowNodeKind::Ingestor,
-            ModelKind::Emitter => DataflowNodeKind::Emitter,
-            ModelKind::Relay => DataflowNodeKind::Relay,
-            _ => DataflowNodeKind::Processor,
+            ModelKind::Ingestor => DataflowNodeRole::Ingestor {
+                transport: ingestor_subtype(self.config.as_ref()).to_string(),
+            },
+            ModelKind::Emitter => DataflowNodeRole::Emitter {
+                transport: emitter_subtype(self.config.as_ref()).to_string(),
+            },
+            ModelKind::Relay => DataflowNodeRole::Relay,
+            kind => DataflowNodeRole::Processor {
+                processor: dataflow_processor_kind(kind)
+                    .expect("every dataflow processor kind must map to a drawn processor"),
+            },
         }
     }
 
-    fn dataflow_subtype(&self) -> &str {
-        match self.kind {
-            ModelKind::Ingestor => ingestor_subtype(self.config.as_ref()),
-            ModelKind::Emitter => emitter_subtype(self.config.as_ref()),
-            ModelKind::Relay => "RELAY",
-            _ => self.kind.as_str(),
-        }
-    }
-
-    fn dataflow_branching_schema(&self) -> Option<Identifier> {
-        self.effective_branching_schema.clone()
+    /// The branch this node runs under, named as declared. Nodes that run once, outside any
+    /// branch, resolve to no branch at all.
+    fn dataflow_branch(&self) -> Option<DataflowBranch> {
+        let name = match self.config.as_ref() {
+            Model::Relay(relay) => relay.branching.branch()?,
+            model => model_branch_selection(model)?.branch_ref()?,
+        };
+        Some(DataflowBranch {
+            name: name.as_str().to_string(),
+            key_schema: self
+                .effective_branching_schema
+                .as_ref()?
+                .as_str()
+                .to_string(),
+            key_fields: self
+                .effective_branching
+                .iter()
+                .flatten()
+                .map(|field| field.as_str().to_string())
+                .collect(),
+        })
     }
 
     fn is_dataflow_node(&self) -> bool {
@@ -5020,6 +5138,7 @@ fn validate_emitter_publishing_contract(
         | EmitSink::Mqtt { .. }
         | EmitSink::Nats { .. }
         | EmitSink::ZeroMq { .. }
+        | EmitSink::Syslog { .. }
         | EmitSink::Sentry { .. }
         | EmitSink::Iceberg { .. }
         | EmitSink::ClickHouse { .. }
@@ -5250,6 +5369,21 @@ fn emitter_subtype(model: &Model) -> &str {
         return "EMITTER";
     };
     emitter.sink.transport_label()
+}
+
+const fn dataflow_processor_kind(kind: ModelKind) -> Option<DataflowProcessorKind> {
+    match kind {
+        ModelKind::Junction => Some(DataflowProcessorKind::Junction),
+        ModelKind::Deduplicator => Some(DataflowProcessorKind::Deduplicator),
+        ModelKind::Correlator => Some(DataflowProcessorKind::Correlator),
+        ModelKind::Reorderer => Some(DataflowProcessorKind::Reorderer),
+        ModelKind::WindowProcessor => Some(DataflowProcessorKind::WindowProcessor),
+        ModelKind::WasmProcessor => Some(DataflowProcessorKind::WasmProcessor),
+        ModelKind::Inferencer => Some(DataflowProcessorKind::Inferencer),
+        ModelKind::Generator => Some(DataflowProcessorKind::Generator),
+        ModelKind::Reingestor => Some(DataflowProcessorKind::Reingestor),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -6227,10 +6361,9 @@ impl AssignmentPlanner<'_> {
         }
 
         match model {
-            Model::Ingestor(CreateIngestor {
-                source: IngestSource::Endpoint { .. },
-                ..
-            }) => self.cluster_nodes.to_vec(),
+            Model::Ingestor(_) if model.executes_on_every_cluster_node() => {
+                self.cluster_nodes.to_vec()
+            }
             Model::Generator(_)
             | Model::Inferencer(_)
             | Model::Ingestor(_)
@@ -7543,20 +7676,47 @@ fn ensure_codec_supports_encoding(
     domain: &Domain,
     identifier: &Identifier,
     codec: &CreateCodec,
+    schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
-    if codec.wire_format.supports_encoding() {
-        return Ok(());
+    if !codec.wire_format.supports_encoding() {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "codec '{}' cannot be used for encoding because it does not declare an ON \
+                 EMITTING transformation",
+                codec.name.as_str()
+            ),
+        }));
     }
 
-    Err(Report::new(RegistryError::InvalidModel {
-        domain: domain.as_str().to_string(),
-        identifier: identifier.as_str().to_string(),
-        reason: format!(
-            "codec '{}' cannot be used for encoding because it does not declare an ON EMITTING \
-             transformation",
-            codec.name.as_str()
-        ),
-    }))
+    if let CodecWireFormat::Syslog = codec.wire_format {
+        let missing = ["facility", "severity", "message"]
+            .into_iter()
+            .filter(|required| {
+                !schema
+                    .fields
+                    .iter()
+                    .any(|field| field.name.as_str() == *required)
+            })
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "SYSLOG codec '{}' cannot be used for encoding because schema '{}' is missing \
+                     required field{} {}",
+                    codec.name.as_str(),
+                    schema.name.as_str(),
+                    if missing.len() == 1 { "" } else { "s" },
+                    missing.join(", "),
+                ),
+            }));
+        }
+    }
+
+    Ok(())
 }
 
 fn schema_for_codec_model<'a>(
@@ -8996,6 +9156,15 @@ fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSc
                     sensitive: false,
                 },
             ],
+        }),
+        IngestSource::Syslog { .. } => Some(CreateSchema {
+            name: Identifier::parse("ingestor_metadata").expect("valid metadata schema name"),
+            fields: vec![SchemaField {
+                name: Identifier::parse("peer_addr").expect("valid metadata field"),
+                ty: ParseAsType::String,
+                optional: true,
+                sensitive: false,
+            }],
         }),
         _ => None,
     }
@@ -10983,9 +11152,25 @@ fn ensure_codec_schema_compatibility(
     schema: &CreateSchema,
     encoding_rules: &[CodecEncodingRule],
 ) -> Result<(), Report<RegistryError>> {
-    let rfc3339_fields =
-        ensure_supported_codec_encoding_rules(domain, identifier, schema, encoding_rules)?;
+    let rfc3339_fields = if let CodecWireFormat::Syslog = wire_format {
+        if !encoding_rules.is_empty() {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "SYSLOG codecs do not support ENCODE field rules".to_string(),
+            }));
+        }
+        HashSet::new()
+    } else {
+        ensure_supported_codec_encoding_rules(domain, identifier, schema, encoding_rules)?
+    };
     match (wire_format, wire_schema) {
+        (CodecWireFormat::Syslog, None) => ensure_syslog_field_contract(domain, identifier, schema),
+        (CodecWireFormat::Syslog, Some(_)) => Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "SYSLOG codec must not reference a wire schema".to_string(),
+        })),
         (CodecWireFormat::Json, Some(WireSchemaDefinition::Json(json))) => {
             ensure_wire_field_set_matches(
                 domain,
@@ -11154,6 +11339,49 @@ fn ensure_codec_schema_compatibility(
             reason: "protobuf codec must not reference a wire schema".to_string(),
         })),
     }
+}
+
+fn ensure_syslog_field_contract(
+    domain: &Domain,
+    identifier: &Identifier,
+    schema: &CreateSchema,
+) -> Result<(), Report<RegistryError>> {
+    for field in &schema.fields {
+        let expected = match field.name.as_str() {
+            "facility" | "severity" => Some((ParseAsType::U8, false)),
+            "timestamp" => Some((ParseAsType::Datetime, true)),
+            "hostname" | "app_name" | "proc_id" | "msg_id" | "structured_data" => {
+                Some((ParseAsType::String, true))
+            }
+            "message" => Some((ParseAsType::String, false)),
+            _ => None,
+        };
+        let Some((expected_type, expected_optional)) = expected else {
+            return Err(Report::new(RegistryError::IncompatibleSchema {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "SYSLOG schema field '{}' is outside the fixed field contract",
+                    field.name.as_str()
+                ),
+            }));
+        };
+        if field.ty != expected_type || field.optional != expected_optional {
+            return Err(Report::new(RegistryError::IncompatibleSchema {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "SYSLOG field '{}' must be {}{}, found {}{}",
+                    field.name.as_str(),
+                    expected_type,
+                    if expected_optional { " OPTIONAL" } else { "" },
+                    field.ty,
+                    if field.optional { " OPTIONAL" } else { "" },
+                ),
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn ensure_supported_codec_encoding_rules(
@@ -11431,6 +11659,7 @@ fn runtime_changes_for_domain(
             IngestSource::ZeroMq { client, .. } => client,
             IngestSource::Sqs { client, .. } => client,
             IngestSource::Websockets { client, .. } => client,
+            IngestSource::Syslog { client, .. } => client,
             IngestSource::Endpoint { endpoint, .. } => endpoint,
         };
         let source_kind = match &ingestor_model.source {
@@ -11444,7 +11673,8 @@ fn runtime_changes_for_domain(
             | IngestSource::Nats { .. }
             | IngestSource::ZeroMq { .. }
             | IngestSource::Sqs { .. }
-            | IngestSource::Websockets { .. } => ModelKind::Client,
+            | IngestSource::Websockets { .. }
+            | IngestSource::Syslog { .. } => ModelKind::Client,
             IngestSource::Endpoint { .. } => ModelKind::Endpoint,
         };
         let Some(source_model) =
@@ -11552,9 +11782,9 @@ mod tests {
         BranchSelection, ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule,
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
         CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
-        CreateClientHttp, CreateClientKafka, CreateClientSqs, CreateCodec, CreateCorrelator,
-        CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
-        CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
+        CreateClientHttp, CreateClientKafka, CreateClientSqs, CreateClientSyslog, CreateCodec,
+        CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor,
+        CreateJunction, CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
         CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule,
         DropModel, EmitSink, EmitterAckWindow, EmitterPublishingMode, ErrorPolicies, Expression,
         FieldReference, FieldScope, GeneralErrorPolicy, Identifier, IngestSource,
@@ -11821,6 +12051,27 @@ mod tests {
             wire_schema: Some(Identifier::parse("event_wire").expect("valid identifier")),
             schema: Identifier::parse(schema).expect("valid identifier"),
             encoding_rules: Vec::new(),
+        })
+    }
+
+    fn syslog_codec(name: &str, schema: &str) -> Model {
+        Model::Codec(CreateCodec {
+            name: identifier(name),
+            wire_format: CodecWireFormat::Syslog,
+            wire_schema: None,
+            schema: identifier(schema),
+            encoding_rules: Vec::new(),
+        })
+    }
+
+    fn syslog_client(name: &str) -> Model {
+        Model::ClientSyslog(CreateClientSyslog {
+            name: identifier(name),
+            mount: None,
+            config: vec![ClientConfigEntry {
+                key: "protocol".to_string(),
+                value: "udp".to_string(),
+            }],
         })
     }
 
@@ -12698,6 +12949,20 @@ mod tests {
         )
         .expect_err("ZeroMQ emitters must reject write_header");
         assert!(format!("{error:#}").contains("ZEROMQ emitters do not support write_header"));
+
+        *emitter.sink = EmitSink::Syslog {
+            client: identifier("syslog_main"),
+        };
+        let error = super::effective_emitter_filter_map_schema(
+            &domain,
+            &emitter.name,
+            &HashMap::default(),
+            &emitter,
+            &schema,
+            &schema,
+        )
+        .expect_err("Syslog emitters must reject write_header");
+        assert!(format!("{error:#}").contains("SYSLOG emitters do not support write_header"));
 
         *emitter.sink = EmitSink::Kafka {
             client: identifier("kafka_main"),
@@ -14370,7 +14635,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_rejects_nonmaterialized_relay_and_endpoint_source_ingestor_members() {
+    fn placement_rejects_nonmaterialized_relay_and_cluster_wide_ingestor_members() {
         let relay_path = temp_db_path();
         let relay_registry = Registry::open(&relay_path).expect("registry should open");
         let relay_domain = Domain::parse("placement_plain_relay").expect("valid domain");
@@ -14429,12 +14694,47 @@ mod tests {
             .expect_err("an endpoint-source ingestor is not a placement member");
         assert!(
             format!("{endpoint_error:#}")
-                .contains("endpoint-source ingestors execute on every cluster node"),
+                .contains("server-listener ingestors execute on every cluster node"),
             "unexpected endpoint error: {endpoint_error:#}"
+        );
+
+        let syslog_path = temp_db_path();
+        let syslog_registry = Registry::open(&syslog_path).expect("registry should open");
+        let syslog_domain = Domain::parse("placement_syslog_ingestor").expect("valid domain");
+        let mut syslog_models = full_graph_batch();
+        let ingestor = syslog_models
+            .iter_mut()
+            .find_map(|model| match model {
+                Model::Ingestor(ingestor) if ingestor.name == identifier("ing") => Some(ingestor),
+                _ => None,
+            })
+            .expect("full graph must contain ing");
+        ingestor.source = IngestSource::Syslog {
+            client: identifier("syslog_listener"),
+            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+        };
+        syslog_models.extend([
+            syslog_client("syslog_listener"),
+            placement(
+                "syslog_member",
+                &["ing"],
+                &["emit"],
+                PlacementPolicy::RequireColocation,
+                None,
+            ),
+        ]);
+        let syslog_error = syslog_registry
+            .apply_batch(&syslog_domain, syslog_models)
+            .expect_err("a syslog ingestor is not a placement member");
+        assert!(
+            format!("{syslog_error:#}")
+                .contains("server-listener ingestors execute on every cluster node"),
+            "unexpected syslog error: {syslog_error:#}"
         );
 
         let _ = fs::remove_dir_all(relay_path);
         let _ = fs::remove_dir_all(endpoint_path);
+        let _ = fs::remove_dir_all(syslog_path);
     }
 
     #[test]
@@ -15021,6 +15321,46 @@ mod tests {
                 "periodic reconciliation must not move an unchanged random schedule"
             );
         }
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn syslog_server_ingestor_is_assigned_to_every_cluster_node() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("syslog_cluster_wide").expect("valid domain");
+        let mut models = full_graph_batch();
+        let ingestor = models
+            .iter_mut()
+            .find_map(|model| match model {
+                Model::Ingestor(ingestor) if ingestor.name == identifier("ing") => Some(ingestor),
+                _ => None,
+            })
+            .expect("full graph must contain ing");
+        ingestor.source = IngestSource::Syslog {
+            client: identifier("syslog_listener"),
+            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+        };
+        models.push(syslog_client("syslog_listener"));
+        registry
+            .apply_batch(&domain, models)
+            .expect("syslog graph should validate");
+
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let cluster_nodes = [
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ];
+        let schedule =
+            graph.schedule_for_domain(&domain, &cluster_nodes, 0, PlacementPolicy::Neutral);
+        let ingestor = scheduled_node(&schedule, ModelKind::Ingestor, "ing");
+        assert_eq!(ingestor.assigned_nodes, cluster_nodes);
+        assert_eq!(ingestor.execution_node(), None);
+        assert!(cluster_nodes.iter().all(|node| ingestor.executes_on(node)));
 
         let _ = fs::remove_dir_all(path);
     }
@@ -16123,6 +16463,143 @@ mod tests {
             err.current_context(),
             RegistryError::IncompatibleSchema { .. }
         ));
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn syslog_codec_accepts_an_exact_subset_of_its_field_contract() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    Model::Schema(CreateSchema {
+                        name: identifier("syslog_event"),
+                        fields: vec![
+                            SchemaField {
+                                name: identifier("facility"),
+                                ty: ParseAsType::U8,
+                                optional: false,
+                                sensitive: false,
+                            },
+                            SchemaField {
+                                name: identifier("timestamp"),
+                                ty: ParseAsType::Datetime,
+                                optional: true,
+                                sensitive: true,
+                            },
+                            SchemaField {
+                                name: identifier("message"),
+                                ty: ParseAsType::String,
+                                optional: false,
+                                sensitive: false,
+                            },
+                        ],
+                    }),
+                    syslog_codec("syslog_codec", "syslog_event"),
+                ],
+            )
+            .expect("an exact SYSLOG field subset should be accepted");
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn syslog_codec_rejects_fields_outside_or_mismatching_its_contract() {
+        for (field, expected_reason) in [
+            (
+                SchemaField {
+                    name: identifier("facility"),
+                    ty: ParseAsType::U16,
+                    optional: false,
+                    sensitive: false,
+                },
+                "SYSLOG field 'facility' must be U8",
+            ),
+            (
+                SchemaField {
+                    name: identifier("hostname"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+                "SYSLOG field 'hostname' must be STRING OPTIONAL",
+            ),
+            (
+                SchemaField {
+                    name: identifier("payload"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+                "SYSLOG schema field 'payload' is outside the fixed field contract",
+            ),
+        ] {
+            let path = temp_db_path();
+            let registry = Registry::open(&path).expect("registry should open");
+            let domain = Domain::parse("default").expect("valid domain");
+            let error = registry
+                .apply_batch(
+                    &domain,
+                    vec![
+                        Model::Schema(CreateSchema {
+                            name: identifier("syslog_event"),
+                            fields: vec![field],
+                        }),
+                        syslog_codec("syslog_codec", "syslog_event"),
+                    ],
+                )
+                .expect_err("invalid SYSLOG schema field must be rejected");
+            assert!(
+                format!("{error:#}").contains(expected_reason),
+                "unexpected error: {error:#}"
+            );
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+
+    #[test]
+    fn syslog_emitter_requires_priority_and_message_fields() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "syslog_codec", "syslog_out")
+        else {
+            unreachable!("emitter helper must build an emitter")
+        };
+        emitter.sink = Box::new(EmitSink::Syslog {
+            client: identifier("syslog_out"),
+        });
+
+        let error = registry
+            .apply_batch(
+                &domain,
+                vec![
+                    Model::Schema(CreateSchema {
+                        name: identifier("syslog_event"),
+                        fields: vec![SchemaField {
+                            name: identifier("message"),
+                            ty: ParseAsType::String,
+                            optional: false,
+                            sensitive: false,
+                        }],
+                    }),
+                    syslog_codec("syslog_codec", "syslog_event"),
+                    syslog_client("syslog_out"),
+                    relay("events", "syslog_event"),
+                    Model::Emitter(emitter),
+                ],
+            )
+            .expect_err("SYSLOG emitter codec must declare facility and severity");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("missing required fields facility, severity"),
+            "{rendered}"
+        );
 
         let _ = fs::remove_dir_all(path);
     }
@@ -18108,19 +18585,23 @@ mod tests {
         );
 
         let dataflow_graph = graph.to_dataflow_graph(domain.as_str());
-        let branching_schemas = dataflow_graph
+        let branches = dataflow_graph
             .nodes
             .iter()
-            .map(|node| (node.id.as_str(), node.branching_schema.as_deref()))
+            .map(|node| {
+                (
+                    node.id.as_str(),
+                    node.branch
+                        .as_ref()
+                        .map(|branch| (branch.name.as_str(), branch.key_schema.as_str())),
+                )
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(branching_schemas.get("ingestor:ing"), Some(&None));
+        assert_eq!(branches.get("ingestor:ing"), Some(&None));
+        assert_eq!(branches.get("reingestor:tenant_partition"), Some(&None));
         assert_eq!(
-            branching_schemas.get("reingestor:tenant_partition"),
-            Some(&None)
-        );
-        assert_eq!(
-            branching_schemas.get("relay:tenant_notifications"),
-            Some(&Some("tenant_branch"))
+            branches.get("relay:tenant_notifications"),
+            Some(&Some(("by_tenant_notifications", "tenant_branch")))
         );
 
         let _ = fs::remove_dir_all(path);
@@ -18722,19 +19203,26 @@ mod tests {
             node_ids.contains(&"relay:deduped_events"),
             "deduped relay missing from {node_ids:?}"
         );
-        let branching_schemas = dataflow_graph
+        let branches = dataflow_graph
             .nodes
             .iter()
-            .map(|node| (node.id.as_str(), node.branching_schema.as_deref()))
+            .map(|node| {
+                (
+                    node.id.as_str(),
+                    node.branch
+                        .as_ref()
+                        .map(|branch| (branch.name.as_str(), branch.key_schema.as_str())),
+                )
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(branching_schemas.get("ingestor:ingest_events"), Some(&None));
+        assert_eq!(branches.get("ingestor:ingest_events"), Some(&None));
         assert_eq!(
-            branching_schemas.get("relay:raw_events"),
-            Some(&Some("value_branch"))
+            branches.get("relay:raw_events"),
+            Some(&Some(("by_raw_events", "value_branch")))
         );
         assert_eq!(
-            branching_schemas.get("relay:deduped_events"),
-            Some(&Some("value_branch"))
+            branches.get("relay:deduped_events"),
+            Some(&Some(("by_raw_events", "value_branch")))
         );
         let edges = dataflow_graph
             .edges

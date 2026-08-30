@@ -47,6 +47,8 @@ use triomphe::Arc;
 
 use crate::jaq_program::{CompiledJaqProgram, JaqNativeFormat};
 
+mod syslog;
+
 #[derive(Debug, Clone)]
 pub struct CompiledSchema {
     fields: Vec<CompiledSchemaField>,
@@ -80,6 +82,7 @@ enum CompiledWireSchema {
     Avro(CompiledAvroWireSchema),
     JaqNative(CompiledJaqNativeCodec),
     Protobuf(CompiledProtobufCodec),
+    Syslog,
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +304,10 @@ pub enum CodecError {
     ProtobufDecode { codec: String, reason: String },
     #[error("failed to encode protobuf payload for codec '{codec}': {reason}")]
     ProtobufEncode { codec: String, reason: String },
+    #[error("failed to parse syslog payload for codec '{codec}': {reason}")]
+    SyslogDecode { codec: String, reason: String },
+    #[error("failed to encode syslog payload for codec '{codec}': {reason}")]
+    SyslogEncode { codec: String, reason: String },
     #[error("codec '{codec}' expected object payload")]
     ExpectedObject { codec: String },
     #[error("codec '{codec}' has invalid jaq transformation: {reason}")]
@@ -587,7 +594,8 @@ impl CompiledCodec {
             }
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
-            | CompiledWireSchema::Avro(_) => false,
+            | CompiledWireSchema::Avro(_)
+            | CompiledWireSchema::Syslog => false,
         }
     }
 
@@ -599,7 +607,8 @@ impl CompiledCodec {
             }
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
-            | CompiledWireSchema::Avro(_) => false,
+            | CompiledWireSchema::Avro(_)
+            | CompiledWireSchema::Syslog => false,
         }
     }
 
@@ -696,6 +705,7 @@ impl CompiledCodecBatchEncoder<'_> {
                         }
                     })?;
             }
+            CompiledWireSchema::Syslog => syslog::encode_row(&row, payload)?,
         }
         Ok(())
     }
@@ -1631,6 +1641,10 @@ pub fn compile_codec_with_protobuf(
                 )?,
             })
         }
+        (CodecWireFormat::Syslog, None) => {
+            syslog::validate_compiled_schema(codec, &schema)?;
+            CompiledWireSchema::Syslog
+        }
         (CodecWireFormat::Json, Some(WireSchemaDefinition::Avro(_))) => {
             return Err(CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
@@ -1703,6 +1717,12 @@ pub fn compile_codec_with_protobuf(
                 reason: "protobuf codec must not reference a wire schema".to_string(),
             });
         }
+        (CodecWireFormat::Syslog, Some(_)) => {
+            return Err(CodecError::InvalidCodec {
+                codec: codec.name.as_str().to_string(),
+                reason: "SYSLOG codec must not reference a wire schema".to_string(),
+            });
+        }
     };
 
     Ok(Arc::new(CompiledCodec {
@@ -1742,6 +1762,7 @@ pub fn decode_with_codec(
         CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, payload),
         CompiledWireSchema::JaqNative(native) => decode_jaq_native(codec, native, payload),
         CompiledWireSchema::Protobuf(protobuf) => decode_protobuf(codec, protobuf, payload),
+        CompiledWireSchema::Syslog => syslog::decode(codec, payload),
     }
 }
 
@@ -1755,6 +1776,7 @@ pub(crate) fn decode_with_codec_owned(
         CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, &payload),
         CompiledWireSchema::JaqNative(native) => decode_jaq_native(codec, native, &payload),
         CompiledWireSchema::Protobuf(protobuf) => decode_protobuf(codec, protobuf, &payload),
+        CompiledWireSchema::Syslog => syslog::decode(codec, &payload),
     }
 }
 
@@ -3261,7 +3283,7 @@ fn avro_type_name(ty: AvroType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use chrono::DateTime;
+    use chrono::{DateTime, Datelike, Utc};
     use nervix_models::{
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema,
         CreateWireSchema, Identifier, SchemaField,
@@ -3971,6 +3993,87 @@ mod tests {
         }
     }
 
+    fn syslog_schema() -> CreateSchema {
+        CreateSchema {
+            name: identifier("syslog_event"),
+            fields: vec![
+                SchemaField {
+                    name: identifier("facility"),
+                    ty: ParseAsType::U8,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: identifier("severity"),
+                    ty: ParseAsType::U8,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: identifier("timestamp"),
+                    ty: ParseAsType::Datetime,
+                    optional: true,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: identifier("hostname"),
+                    ty: ParseAsType::String,
+                    optional: true,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: identifier("app_name"),
+                    ty: ParseAsType::String,
+                    optional: true,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: identifier("proc_id"),
+                    ty: ParseAsType::String,
+                    optional: true,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: identifier("msg_id"),
+                    ty: ParseAsType::String,
+                    optional: true,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: identifier("structured_data"),
+                    ty: ParseAsType::String,
+                    optional: true,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: identifier("message"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+            ],
+        }
+    }
+
+    fn syslog_codec() -> CreateCodec {
+        CreateCodec {
+            name: identifier("syslog_codec"),
+            wire_format: CodecWireFormat::Syslog,
+            wire_schema: None,
+            schema: identifier("syslog_event"),
+            encoding_rules: Vec::new(),
+        }
+    }
+
+    fn compiled_syslog_codec() -> Arc<CompiledCodec> {
+        compile_codec(
+            &syslog_codec(),
+            Arc::new(compile_schema(&syslog_schema())),
+            None,
+        )
+        .expect("SYSLOG codec should compile")
+    }
+
     fn schemaful_cbor_codec(name: &str) -> CreateCodec {
         CreateCodec {
             name: identifier(name),
@@ -4204,6 +4307,275 @@ mod tests {
             single_batch_value(&decoded, "active"),
             Some(RuntimeValue::Bool(true))
         );
+    }
+
+    #[test]
+    fn syslog_codec_decodes_rfc5424_directly_into_arrow() {
+        let codec = compiled_syslog_codec();
+        let payload = b"<34>1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 \
+                        [exampleSDID@32473 iut=\"3\" note=\"a\\]b\"] order accepted\r\n\0";
+        let decoded = decode_with_codec(&codec, payload).expect("RFC 5424 should decode");
+
+        assert_eq!(
+            single_batch_value(&decoded, "facility"),
+            Some(RuntimeValue::U8(4))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "severity"),
+            Some(RuntimeValue::U8(2))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "timestamp"),
+            Some(RuntimeValue::Datetime(
+                DateTime::parse_from_rfc3339("2003-10-11T22:14:15.003Z").expect("valid timestamp")
+            ))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "hostname"),
+            Some(RuntimeValue::String("edge-1".to_string()))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "structured_data"),
+            Some(RuntimeValue::String(
+                "[exampleSDID@32473 iut=\"3\" note=\"a\\]b\"]".to_string()
+            ))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "message"),
+            Some(RuntimeValue::String("order accepted".to_string()))
+        );
+    }
+
+    #[test]
+    fn syslog_codec_decodes_rfc3164_and_defaults_missing_priority() {
+        let codec = compiled_syslog_codec();
+        let decoded = decode_with_codec(
+            &codec,
+            b"<13>Feb  5 17:32:18 relay.example payments: settled",
+        )
+        .expect("RFC 3164 should decode");
+        let timestamp = single_batch_value(&decoded, "timestamp")
+            .expect("RFC 3164 timestamp should be present");
+        let RuntimeValue::Datetime(timestamp) = timestamp else {
+            panic!("timestamp must be a DATETIME")
+        };
+        assert_eq!(timestamp.year(), Utc::now().year());
+        assert_eq!(timestamp.offset().local_minus_utc(), 0);
+        assert_eq!(
+            single_batch_value(&decoded, "hostname"),
+            Some(RuntimeValue::String("relay.example".to_string()))
+        );
+        assert_eq!(
+            single_batch_value(&decoded, "app_name"),
+            Some(RuntimeValue::String("payments".to_string()))
+        );
+
+        let defaulted = decode_with_codec(&codec, b"plain syslog message")
+            .expect("message without PRI should decode");
+        assert_eq!(
+            single_batch_value(&defaulted, "facility"),
+            Some(RuntimeValue::U8(1))
+        );
+        assert_eq!(
+            single_batch_value(&defaulted, "severity"),
+            Some(RuntimeValue::U8(5))
+        );
+        assert_eq!(
+            single_batch_value(&defaulted, "message"),
+            Some(RuntimeValue::String("plain syslog message".to_string()))
+        );
+    }
+
+    #[test]
+    fn syslog_codec_handles_rfc_priority_timestamp_tag_and_bom_edges() {
+        let codec = compiled_syslog_codec();
+        let malformed_priority = decode_with_codec(&codec, b"<013>plain syslog message")
+            .expect("malformed PRI should use the relay default");
+        assert_eq!(
+            single_batch_value(&malformed_priority, "facility"),
+            Some(RuntimeValue::U8(1))
+        );
+        assert_eq!(
+            single_batch_value(&malformed_priority, "severity"),
+            Some(RuntimeValue::U8(5))
+        );
+        assert_eq!(
+            single_batch_value(&malformed_priority, "message"),
+            Some(RuntimeValue::String(
+                "<013>plain syslog message".to_string()
+            ))
+        );
+
+        let tagged = decode_with_codec(
+            &codec,
+            b"<13>Feb  5 17:32:18 relay.example worker[42]: restarted",
+        )
+        .expect("RFC 3164 TAG and process suffix should decode");
+        assert_eq!(
+            single_batch_value(&tagged, "app_name"),
+            Some(RuntimeValue::String("worker".to_string()))
+        );
+        assert_eq!(
+            single_batch_value(&tagged, "message"),
+            Some(RuntimeValue::String("restarted".to_string()))
+        );
+
+        let bom = decode_with_codec(
+            &codec,
+            b"<34>1 2003-10-11T22:14:15.003Z edge app 1 ID - \xef\xbb\xbfunicode",
+        )
+        .expect("RFC 5424 UTF-8 BOM should decode");
+        assert_eq!(
+            single_batch_value(&bom, "message"),
+            Some(RuntimeValue::String("unicode".to_string()))
+        );
+
+        for timestamp in [
+            "2003-08-24T05:14:15.000000003-07:00",
+            "2003-10-11t22:14:15.003z",
+        ] {
+            let payload = format!("<34>1 {timestamp} edge app 1 ID - invalid timestamp");
+            assert!(
+                decode_with_codec(&codec, payload.as_bytes()).is_err(),
+                "RFC 5424 timestamp '{timestamp}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn syslog_codec_accepts_rfc5424_control_values_while_preserving_structured_data() {
+        let codec = compiled_syslog_codec();
+        let payload = b"<34>1 - edge app 1 ID [example@32473 note=\"line\tvalue\"] body";
+        let decoded = decode_with_codec(&codec, payload)
+            .expect("control characters are valid in an RFC 5424 PARAM-VALUE");
+        assert_eq!(
+            single_batch_value(&decoded, "structured_data"),
+            Some(RuntimeValue::String(
+                "[example@32473 note=\"line\tvalue\"]".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn syslog_codec_encodes_rfc5424_with_nilvalues() {
+        let schema_model = CreateSchema {
+            name: identifier("syslog_minimal"),
+            fields: syslog_schema()
+                .fields
+                .into_iter()
+                .filter(|field| matches!(field.name.as_str(), "facility" | "severity" | "message"))
+                .collect(),
+        };
+        let codec_model = CreateCodec {
+            schema: schema_model.name.clone(),
+            ..syslog_codec()
+        };
+        let codec = compile_codec(&codec_model, Arc::new(compile_schema(&schema_model)), None)
+            .expect("minimal encoding schema should compile");
+        let payload = encode_test_fields(
+            &codec,
+            [
+                ("facility".to_string(), RuntimeValue::U8(4)),
+                ("severity".to_string(), RuntimeValue::U8(2)),
+                (
+                    "message".to_string(),
+                    RuntimeValue::String("\u{feff}order accepted".to_string()),
+                ),
+            ],
+        )
+        .expect("SYSLOG record should encode");
+
+        assert_eq!(payload, b"<34>1 - - - - - - order accepted".to_vec());
+    }
+
+    #[test]
+    fn syslog_codec_caps_encoded_timestamp_precision_at_microseconds() {
+        let codec = compiled_syslog_codec();
+        let payload = encode_test_fields(
+            &codec,
+            [
+                ("facility".to_string(), RuntimeValue::U8(4)),
+                ("severity".to_string(), RuntimeValue::U8(2)),
+                (
+                    "timestamp".to_string(),
+                    RuntimeValue::Datetime(
+                        DateTime::parse_from_rfc3339("2003-10-11T22:14:15.123456789Z")
+                            .expect("valid test timestamp"),
+                    ),
+                ),
+                (
+                    "message".to_string(),
+                    RuntimeValue::String("precise".to_string()),
+                ),
+            ],
+        )
+        .expect("SYSLOG timestamp should encode");
+        assert_eq!(
+            payload,
+            b"<34>1 2003-10-11T22:14:15.123456Z - - - - - precise"
+        );
+    }
+
+    #[test]
+    fn syslog_codec_rejects_invalid_record_headers_and_structured_data() {
+        let codec = compiled_syslog_codec();
+        let common = || {
+            vec![
+                ("facility".to_string(), RuntimeValue::U8(4)),
+                ("severity".to_string(), RuntimeValue::U8(2)),
+                (
+                    "message".to_string(),
+                    RuntimeValue::String("order accepted".to_string()),
+                ),
+            ]
+        };
+        let mut invalid_header = common();
+        invalid_header.push((
+            "hostname".to_string(),
+            RuntimeValue::String("not valid".to_string()),
+        ));
+        let error =
+            encode_test_fields(&codec, invalid_header).expect_err("header spaces must be rejected");
+        assert!(matches!(error, CodecError::EncodeField { ref field, .. } if field == "hostname"));
+
+        let mut invalid_sd = common();
+        invalid_sd.push((
+            "structured_data".to_string(),
+            RuntimeValue::String("[example value=\"unterminated]".to_string()),
+        ));
+        let error = encode_test_fields(&codec, invalid_sd)
+            .expect_err("malformed structured data must be rejected");
+        assert!(
+            matches!(error, CodecError::EncodeField { ref field, .. } if field == "structured_data")
+        );
+
+        let mut duplicate_sd = common();
+        duplicate_sd.push((
+            "structured_data".to_string(),
+            RuntimeValue::String("[example value=\"one\"][example value=\"two\"]".to_string()),
+        ));
+        let error = encode_test_fields(&codec, duplicate_sd)
+            .expect_err("duplicate structured-data IDs must be rejected");
+        assert!(
+            matches!(error, CodecError::EncodeField { ref field, .. } if field == "structured_data")
+        );
+
+        let mut duplicate_parameter = common();
+        duplicate_parameter.push((
+            "structured_data".to_string(),
+            RuntimeValue::String("[example value=\"one\" value=\"two\"]".to_string()),
+        ));
+        let error = encode_test_fields(&codec, duplicate_parameter)
+            .expect_err("duplicate structured-data parameter names must be rejected");
+        assert!(
+            matches!(error, CodecError::EncodeField { ref field, .. } if field == "structured_data")
+        );
+
+        let mut invalid_priority = common();
+        invalid_priority[0] = ("facility".to_string(), RuntimeValue::U8(24));
+        let error = encode_test_fields(&codec, invalid_priority)
+            .expect_err("facility above 23 must be rejected");
+        assert!(matches!(error, CodecError::EncodeField { ref field, .. } if field == "facility"));
     }
 
     #[test]

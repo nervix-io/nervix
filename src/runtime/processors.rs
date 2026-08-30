@@ -2,12 +2,16 @@ use std::{collections::VecDeque, sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use nervix_models::{
-    AckMode, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    ErrorPolicies, Identifier, InferencerTensorDeclaration, InferencerTensorMapping,
-    MessageErrorPolicy, ModelKind, StructuredMessageError, Timestamp, WindowBound,
+    AckMode, Assignment, AssignmentTarget, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+    CorrelatorMatchPolicy, ErrorPolicies, Identifier, InferencerTensorDeclaration,
+    InferencerTensorMapping, MessageErrorPolicy, ModelKind, RouteConstruction,
+    StructuredMessageError, Timestamp, WindowBound,
 };
 use nervix_nspl::{
-    vm_program::{FieldRef, Program as VmProgram, Span, SpannedNode},
+    vm_program::{
+        FieldRef, Program as VmProgram, SemanticNamespaces, Span, SpannedNode,
+        lower_route_construction,
+    },
     window_processor::aggregate::{WindowAggregateExpr, WindowAggregateProgram},
 };
 use nervix_roto::UdfExecutor;
@@ -28,11 +32,14 @@ use super::{
     RelayRegistry, ReplicatedDeduplicatorState, ReplicatedWasmProcessorState,
     ReplicatedWindowProcessorState, RuntimeFlushPolicy, RuntimeInputCollectPolicy,
     SharedActiveGraph, WindowProcessorState, inferencer::OnnxInferencerSession,
+    relay_batch::RelayRecordBatchReorderError,
 };
 use crate::{
     registry::ActiveGraph,
     runtime_ack::AckSet,
-    runtime_schema::{CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue},
+    runtime_schema::{
+        CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, arrow_data_type,
+    },
 };
 
 pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
@@ -287,6 +294,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
+        compiled_input_program: CompiledInferencerInputProgram,
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsTemplate,
@@ -417,6 +425,7 @@ pub(super) enum RelayProcessorOperationNode {
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
+        compiled_input_program: CompiledInferencerInputProgram,
         output_buffers: Vec<InferencerOutputBuffer>,
         session: Option<OnnxInferencerSession>,
     },
@@ -433,6 +442,101 @@ pub(super) enum RelayProcessorOperationNode {
         next_ack_token: u64,
         pending: Vec<RelayRecordBatch>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CompiledInferencerInputProgram {
+    pub(super) program: Arc<VmCompiledProgram>,
+}
+
+impl CompiledInferencerInputProgram {
+    pub(super) fn compile(
+        processor: &Identifier,
+        mappings: &[InferencerTensorMapping],
+        input_schema: &CompiledSchema,
+        udfs: Option<&UdfExecutor>,
+    ) -> Result<Self, String> {
+        let assignments = mappings
+            .iter()
+            .map(|mapping| {
+                Ok(Assignment {
+                    target: AssignmentTarget::bare(Identifier::parse(&mapping.tensor).map_err(
+                        |error| {
+                            format!(
+                                "inferencer '{}' tensor name '{}' is not a valid field: {error}",
+                                processor, mapping.tensor
+                            )
+                        },
+                    )?),
+                    value: mapping.expression.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let parsed = lower_route_construction(
+            &RouteConstruction {
+                assignments,
+                ..RouteConstruction::default()
+            },
+            SemanticNamespaces::new("input", "mapped_input"),
+        )
+        .map_err(|reason| {
+            format!(
+                "inferencer '{}' INPUTS mapping is invalid: {reason}",
+                processor
+            )
+        })?;
+        let output_schema = StdArc::new(arrow_schema::Schema::new(
+            mappings
+                .iter()
+                .map(|mapping| {
+                    arrow_schema::Field::new(
+                        &mapping.tensor,
+                        arrow_data_type(&mapping.schema.message_type()),
+                        false,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let input_sensitivity = input_schema.vm_sensitivity();
+        let output_sensitivity = VmSchemaSensitivity::from_sensitive_fields(
+            mappings
+                .iter()
+                .filter(|mapping| {
+                    super::expression_reads_sensitive_source(
+                        &mapping.expression,
+                        &input_sensitivity,
+                    )
+                })
+                .map(|mapping| mapping.tensor.clone()),
+        );
+        let program = compile_vm_program(
+            &parsed,
+            output_schema.clone(),
+            output_sensitivity.clone(),
+            [
+                VmCompileBinding::readonly("input", input_schema.arrow_schema())
+                    .with_sensitivity(input_sensitivity),
+                VmCompileBinding::writeonly("mapped_input", output_schema)
+                    .with_sensitivity(output_sensitivity),
+            ],
+            super::runtime_udf_compile_options(
+                udfs,
+                VmCompileOptions {
+                    output_mode: VmOutputMode::ExplicitOnly,
+                    ..VmCompileOptions::default()
+                },
+            ),
+        )
+        .map_err(|error| {
+            format!(
+                "inferencer '{}' INPUTS compile failed: {}",
+                processor, error.message
+            )
+        })?;
+        Ok(Self {
+            program: Arc::new(program),
+        })
+    }
 }
 
 impl RelayProcessorOperationNode {
@@ -892,28 +996,159 @@ pub(super) struct CompiledCorrelatorOutputProgram {
 }
 
 #[derive(Debug)]
-pub(super) struct ReordererPendingMessage {
+pub(super) struct ReordererRowOrder {
     pub(super) key: Vec<ReorderKeyPart>,
     pub(super) arrival_sequence: u64,
+}
+
+#[derive(Debug)]
+struct ReordererPendingBatch {
     pub(super) received_at: Timestamp,
-    pub(super) message: RelayMessage,
+    pub(super) row_order: Arc<Vec<ReordererRowOrder>>,
+    pub(super) batch: RelayRecordBatch,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ReordererOutputBatchError {
+    #[error("reorderer buffered {arrow_rows} Arrow rows with {ordering_keys} ordering keys")]
+    OrderingKeyCount {
+        arrow_rows: usize,
+        ordering_keys: usize,
+    },
+    #[error("reorderer buffered row count overflowed usize")]
+    RowCountOverflow,
+    #[error("cannot order an empty reorderer output buffer")]
+    Empty,
+    #[error("failed to concatenate buffered reorderer batches: {reason}")]
+    Concatenate { reason: String },
+    #[error(transparent)]
+    Reorder(#[from] RelayRecordBatchReorderError),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub(super) struct ReordererOutputBatchFailure {
+    #[source]
+    pub(super) error: ReordererOutputBatchError,
+    pub(super) batches: Vec<RelayRecordBatch>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct ReordererOutputBuffer {
-    pub(super) pending: Vec<ReordererPendingMessage>,
-    pub(super) estimated_bytes: u64,
+    pending: Vec<ReordererPendingBatch>,
+    estimated_bytes: u64,
 }
 
 impl ReordererOutputBuffer {
+    pub(super) fn push(
+        &mut self,
+        batch: RelayRecordBatch,
+        row_order: Arc<Vec<ReordererRowOrder>>,
+        received_at: Timestamp,
+    ) {
+        self.estimated_bytes = self.estimated_bytes.saturating_add(batch.estimated_bytes());
+        self.pending.push(ReordererPendingBatch {
+            received_at,
+            row_order,
+            batch,
+        });
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    pub(super) fn first_received_at(&self) -> Option<Timestamp> {
+        self.pending.first().map(|pending| pending.received_at)
+    }
+
+    pub(super) fn estimated_bytes(&self) -> u64 {
+        self.estimated_bytes
+    }
+
+    pub(super) fn acks(&self) -> impl Iterator<Item = &AckSet> {
+        self.pending
+            .iter()
+            .flat_map(|pending| pending.batch.acks.iter())
+    }
+
     pub(super) fn clear(&mut self) {
         self.pending.clear();
         self.estimated_bytes = 0;
     }
 
-    pub(super) fn take_pending(&mut self) -> Vec<ReordererPendingMessage> {
+    pub(super) fn take_ordered_batch(
+        &mut self,
+    ) -> Result<RelayRecordBatch, Box<ReordererOutputBatchFailure>> {
         self.estimated_bytes = 0;
-        std::mem::take(&mut self.pending)
+        let pending = std::mem::take(&mut self.pending);
+        let row_count = pending.iter().try_fold(0_usize, |total, pending| {
+            let batch_rows = pending.batch.batch.batch().num_rows();
+            if pending.row_order.len() != batch_rows {
+                return Err(ReordererOutputBatchError::OrderingKeyCount {
+                    arrow_rows: batch_rows,
+                    ordering_keys: pending.row_order.len(),
+                });
+            }
+            total
+                .checked_add(batch_rows)
+                .ok_or(ReordererOutputBatchError::RowCountOverflow)
+        });
+        let row_count = match row_count {
+            Ok(row_count) if row_count > 0 => row_count,
+            Ok(_) => {
+                return Err(Box::new(ReordererOutputBatchFailure {
+                    error: ReordererOutputBatchError::Empty,
+                    batches: pending.into_iter().map(|pending| pending.batch).collect(),
+                }));
+            }
+            Err(error) => {
+                return Err(Box::new(ReordererOutputBatchFailure {
+                    error,
+                    batches: pending.into_iter().map(|pending| pending.batch).collect(),
+                }));
+            }
+        };
+        let mut rows = Vec::with_capacity(row_count);
+        let mut offset = 0_usize;
+        for pending in &pending {
+            rows.extend(
+                pending
+                    .row_order
+                    .iter()
+                    .enumerate()
+                    .map(|(row, order)| (offset + row, order)),
+            );
+            offset += pending.row_order.len();
+        }
+        rows.sort_by(|(left_row, left), (right_row, right)| {
+            left.key
+                .cmp(&right.key)
+                .then(left.arrival_sequence.cmp(&right.arrival_sequence))
+                .then(left_row.cmp(right_row))
+        });
+        let row_order = rows.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
+        let batches = pending
+            .into_iter()
+            .map(|pending| pending.batch)
+            .collect::<Vec<_>>();
+        let batch = match RelayRecordBatch::concat_preserving(batches) {
+            Ok(batch) => batch,
+            Err(failure) => {
+                let (reason, batches) = *failure;
+                return Err(Box::new(ReordererOutputBatchFailure {
+                    error: ReordererOutputBatchError::Concatenate { reason },
+                    batches,
+                }));
+            }
+        };
+        batch.into_reordered(&row_order).map_err(|failure| {
+            let failure = *failure;
+            Box::new(ReordererOutputBatchFailure {
+                error: failure.error.into(),
+                batches: vec![failure.batch],
+            })
+        })
     }
 }
 
@@ -1011,6 +1246,7 @@ pub(super) struct InferencerFlushContext<'a> {
     pub(super) file: &'a str,
     pub(super) inputs: &'a [InferencerTensorMapping],
     pub(super) output_schema: &'a [InferencerTensorDeclaration],
+    pub(super) compiled_input_program: &'a CompiledInferencerInputProgram,
     pub(super) input_relays: &'a [Identifier],
     pub(super) session: &'a mut Option<OnnxInferencerSession>,
     pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
