@@ -184,8 +184,6 @@ const OBSERVABILITY_READYZ_PATH: &str = "/readyz";
 const OBSERVABILITY_METRICS_PATH: &str = "/metrics";
 const WEB_CONSOLE_INDEX: &[u8] = include_bytes!("../crates/web-console/dist/index.html");
 const WEB_CONSOLE_CSS: &[u8] = include_bytes!("../crates/web-console/dist/console.css");
-const WEB_CONSOLE_ECHARTS_JS: &[u8] =
-    include_bytes!("../crates/web-console/dist/echarts-5.5.1.min.js");
 const WEB_CONSOLE_JS: &[u8] = include_bytes!("../crates/web-console/dist/nervix-web-console.js");
 const WEB_CONSOLE_WASM: &[u8] =
     include_bytes!("../crates/web-console/dist/nervix-web-console_bg.wasm");
@@ -2258,11 +2256,6 @@ async fn handle_web_console_request(
             StatusCode::OK,
             Bytes::from_static(WEB_CONSOLE_CSS),
             "text/css; charset=utf-8",
-        ),
-        (&Method::GET, "/console/echarts-5.5.1.min.js") => response_with_bytes(
-            StatusCode::OK,
-            Bytes::from_static(WEB_CONSOLE_ECHARTS_JS),
-            "text/javascript; charset=utf-8",
         ),
         (&Method::GET, "/console/nervix-web-console.js") => response_with_bytes(
             StatusCode::OK,
