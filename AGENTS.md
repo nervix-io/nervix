@@ -87,6 +87,9 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   contracts before a graph becomes active.
 - Runtime execution is materialized per concrete branch. Branch-local state, scheduling, buffering,
   and materialized views must remain visibly branch-local in types and ownership.
+- Every server-side runtime entity that binds a configured listening port executes on every live
+  Nervix node. Its listener is independent of leadership and placement and must remain present
+  across all cluster events, including leader changes, node joins, node restarts, and recovery.
 - Selected execution state may use node-owned snapshot or replication mechanisms.
 - Records, batches, payload attempts, handoff state, ACK guards, ACK tokens, and ACK maps are
   in-memory hot-path state and are never persisted.

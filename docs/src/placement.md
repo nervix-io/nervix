@@ -105,7 +105,7 @@ independently and applies the policy only where a path exists.
 
 The following user-declared runtime-node kinds are placement-eligible:
 
-- ingestors, except endpoint-source ingestors;
+- ingestors, except cluster-wide server-listener ingestors;
 - reingestors and generators;
 - junctions, deduplicators, correlators, reorderers, and window processors;
 - inferencers and WASM processors;
@@ -116,9 +116,9 @@ An ordinary relay is not a schedulable entity and cannot be a placement member. 
 relay is the exception because its name denotes the runtime node that owns its materialized state.
 See [Materialized Relay State](processors.md#materialized-relay-state) for dependency behavior.
 
-Endpoint-source ingestors execute on every cluster node and therefore cannot be constrained by a
-placement rule. Member names are unqualified; a name shared by more than one eligible entity kind
-is ambiguous and must be changed before it can be used in a placement.
+Endpoint-source and Syslog ingestors execute on every cluster node and therefore cannot be
+constrained by a placement rule. Member names are unqualified; a name shared by more than one
+eligible entity kind is ambiguous and must be changed before it can be used in a placement.
 
 Duplicate names on one side collapse. Both sides must contain at least one member after duplicate
 removal. The same runtime node may appear in `FROM` and `TO`, but it contributes coverage only when
@@ -265,7 +265,8 @@ ALTER PLACEMENT scoring_local
 A placement pins the entities named in its `FROM` and `TO` lists even when its current coverage is
 empty. Dropping a referenced runtime node is blocked until every pinning placement is altered or
 dropped. A change that would make a member ineligible, such as changing an ingestor to an endpoint
-source or removing materialized state from a referenced relay, is blocked in the same way.
+or Syslog source or removing materialized state from a referenced relay, is blocked in the same
+way.
 
 When a topology edit and its placement update depend on one another, put the complete set of model
 changes in one explicit transaction and order creation before reference. Nervix validates the
@@ -329,7 +330,7 @@ with other runtime nodes outside hard colocation groups.
 | Dropping or reshaping a member is blocked. | Alter or drop every placement named by the diagnostic before changing the member. |
 
 Creation also rejects an unknown or ambiguous member, a non-schedulable entity, an ordinary relay,
-an endpoint-source ingestor, an empty side, and `RANK 0`.
+a cluster-wide server-listener ingestor, an empty side, and `RANK 0`.
 
 ## Common Patterns
 

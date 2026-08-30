@@ -442,6 +442,8 @@ impl Runtime {
             transaction_commit_pauses: hooks.transaction_commit_pauses,
             #[cfg(feature = "testing")]
             entity_gate_pauses: hooks.entity_gate_pauses,
+            #[cfg(feature = "testing")]
+            syslog_ingestor_bind_address_overrides: hooks.syslog_ingestor_bind_address_overrides,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
             remote_dispatcher: Arc::new(RwLock::new(None)),
@@ -1317,6 +1319,17 @@ impl Runtime {
             next_remote_ack_id: self.next_remote_ack_id.clone(),
             pending_remote_acks: self.pending_remote_acks.clone(),
         }));
+    }
+
+    pub(in crate::runtime) fn syslog_ingestor_bind_addr(&self, configured: &str) -> String {
+        #[cfg(feature = "testing")]
+        if let Some(node_id) = self.local_node_id.read().as_deref() {
+            return self
+                .syslog_ingestor_bind_address_overrides
+                .resolve(node_id, configured);
+        }
+
+        configured.to_string()
     }
 
     pub fn attach_resources(

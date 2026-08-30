@@ -769,6 +769,14 @@ pub enum Model {
 }
 
 impl Model {
+    pub fn executes_on_every_cluster_node(&self) -> bool {
+        if let Self::Ingestor(ingestor) = self {
+            ingestor.source.executes_on_every_cluster_node()
+        } else {
+            false
+        }
+    }
+
     pub fn kind(&self) -> ModelKind {
         match self {
             Self::Schema(_) => ModelKind::Schema,
@@ -2933,6 +2941,23 @@ pub enum IngestSource {
 }
 
 impl IngestSource {
+    pub fn executes_on_every_cluster_node(&self) -> bool {
+        match self {
+            Self::Endpoint { .. } | Self::Syslog { .. } => true,
+            Self::Http { .. }
+            | Self::Kafka { .. }
+            | Self::Pulsar { .. }
+            | Self::Mqtt { .. }
+            | Self::Nats { .. }
+            | Self::RabbitMq { .. }
+            | Self::RedisPubSub { .. }
+            | Self::Prometheus { .. }
+            | Self::ZeroMq { .. }
+            | Self::Sqs { .. }
+            | Self::Websockets { .. } => false,
+        }
+    }
+
     pub fn transport_label(&self) -> &str {
         self.as_ref()
     }
@@ -3557,6 +3582,10 @@ pub struct ScheduledNode {
 }
 
 impl ScheduledNode {
+    fn executes_on_every_cluster_node(&self) -> bool {
+        self.config.executes_on_every_cluster_node()
+    }
+
     pub fn is_assigned_to(&self, node_id: &str) -> bool {
         self.assigned_nodes
             .iter()
@@ -3597,22 +3626,18 @@ impl ScheduledNode {
     }
 
     pub fn execution_node(&self) -> Option<&str> {
-        match self.config.as_ref() {
-            Model::Ingestor(CreateIngestor {
-                source: IngestSource::Endpoint { .. },
-                ..
-            }) => None,
-            _ => self.primary_node().or_else(|| self.assigned_single_node()),
+        if self.executes_on_every_cluster_node() {
+            None
+        } else {
+            self.primary_node().or_else(|| self.assigned_single_node())
         }
     }
 
     pub fn executes_on(&self, node_id: &str) -> bool {
-        match self.config.as_ref() {
-            Model::Ingestor(CreateIngestor {
-                source: IngestSource::Endpoint { .. },
-                ..
-            }) => self.is_assigned_to(node_id),
-            _ => self.is_primary_on(node_id),
+        if self.executes_on_every_cluster_node() {
+            self.is_assigned_to(node_id)
+        } else {
+            self.is_primary_on(node_id)
         }
     }
 }
@@ -4458,7 +4483,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_node_execution_uses_primary_except_for_endpoint_ingestors() {
+    fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() {
         let replicated_junction = ScheduledNode {
             identifier: identifier("orders_merge"),
             kind: ModelKind::Junction,
@@ -4515,6 +4540,32 @@ mod tests {
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
         };
+        let syslog_ingestor = ScheduledNode {
+            identifier: identifier("orders_syslog"),
+            kind: ModelKind::Ingestor,
+            config: Box::new(Model::Ingestor(CreateIngestor {
+                name: identifier("orders_syslog"),
+                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                    identifier("orders_out"),
+                    "100ms".to_string(),
+                    Some("1MiB".to_string()),
+                )]),
+                decode_using_codec: identifier("codec"),
+                timestamp_source: None,
+                source: IngestSource::Syslog {
+                    client: identifier("syslog_listener"),
+                    quiesce: IngestQuiesceMode::Suspend,
+                },
+                general_error_policy: GeneralErrorPolicy::Log,
+                filter_where: None,
+            })),
+            effective_branching: None,
+            effective_branching_schema: None,
+            schema_fingerprint: [0; 32],
+            kafka_partition_schedule: None,
+            primary_node: Some("node-a".to_string()),
+            assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
+        };
 
         assert_eq!(replicated_junction.execution_node(), Some("node-a"));
         assert!(replicated_junction.executes_on("node-a"));
@@ -4523,6 +4574,10 @@ mod tests {
         assert_eq!(endpoint_ingestor.execution_node(), None);
         assert!(endpoint_ingestor.executes_on("node-a"));
         assert!(endpoint_ingestor.executes_on("node-b"));
+
+        assert_eq!(syslog_ingestor.execution_node(), None);
+        assert!(syslog_ingestor.executes_on("node-a"));
+        assert!(syslog_ingestor.executes_on("node-b"));
     }
 
     #[test]

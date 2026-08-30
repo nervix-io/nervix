@@ -56,6 +56,16 @@ Feature: Syslog support
       CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
       START;
       """
+    When these NSPL commands are executed
+      """
+      SHOW CREATE CODEC syslog_codec;
+      """
+    Then the last command output contains
+      """
+      CREATE CODEC syslog_codec
+        FROM SYSLOG
+        TO SCHEMA syslog_event;
+      """
     Then within "5s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
       """
       status: running
@@ -97,7 +107,72 @@ Feature: Syslog support
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario: Invalid Syslog transport configuration fails locally owned entity startup
+  Scenario: Syslog UDP listeners follow node lifecycle, leadership, and membership
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA syslog_event (
+        facility U8,
+        severity U8,
+        message STRING
+      );
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
+      CREATE CLIENT syslog_listener
+        TYPE SYSLOG
+        CONFIG {
+          'protocol' = 'udp',
+          'addr' = '{{syslog_ingest_addr}}'
+        };
+      CREATE CLIENT syslog_forwarder
+        TYPE SYSLOG
+        CONFIG {
+          'protocol' = 'udp',
+          'addr' = '{{syslog_emit_addr}}'
+        };
+      CREATE INGESTOR syslog_intake
+        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE EMITTER syslog_forward
+        FROM syslog_events
+        TO SYSLOG syslog_forwarder
+          MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING syslog_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then node "node-1" eventually forwards Syslog UDP message "initial-node-1" at "{{syslog_ingest_addr}}" to the observed endpoint
+    And node "node-2" eventually forwards Syslog UDP message "initial-node-2" at "{{syslog_ingest_addr}}" to the observed endpoint
+    And node "node-3" eventually forwards Syslog UDP message "initial-node-3" at "{{syslog_ingest_addr}}" to the observed endpoint
+    Then node "node-1" eventually reports leader "node-1"
+    When leadership is transferred from node "node-1" to node "node-2"
+    Then node "node-1" eventually reports leader "node-2"
+    And node "node-1" eventually forwards Syslog UDP message "after-leadership-change" at "{{syslog_ingest_addr}}" to the observed endpoint
+    When node "node-3" is stopped
+    And node "node-3" is started
+    Then node "node-1" eventually reports interconnect to "node-3" as "connected"
+    And node "node-3" eventually forwards Syslog UDP message "after-node-restart" at "{{syslog_ingest_addr}}" to the observed endpoint
+    When node "node-4" is added to the cluster
+    Then node "node-1" eventually reports interconnect to "node-4" as "connected"
+    And node "node-4" eventually forwards Syslog UDP message "after-node-join" at "{{syslog_ingest_addr}}" to the observed endpoint
+
+  Scenario: Invalid Syslog transport configuration fails entity startup
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
     And the leader node is configured with these NSPL commands

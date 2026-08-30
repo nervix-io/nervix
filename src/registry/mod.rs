@@ -3801,7 +3801,7 @@ fn resolve_placement_member(
     models: &HashMap<RegistryKey, Model>,
 ) -> Result<ResolvedPlacementMember, Report<RegistryError>> {
     let mut eligible = Vec::new();
-    let mut endpoint_ingestor = false;
+    let mut cluster_wide_ingestor = false;
     let mut relay_without_state = false;
     let mut ineligible_kinds = Vec::new();
     for (key, model) in models.iter().filter(|(key, _)| key.identifier == *member) {
@@ -3813,10 +3813,9 @@ fn resolve_placement_member(
                 });
             }
             Model::Relay(_) => relay_without_state = true,
-            Model::Ingestor(CreateIngestor {
-                source: IngestSource::Endpoint { .. },
-                ..
-            }) => endpoint_ingestor = true,
+            Model::Ingestor(_) if model.executes_on_every_cluster_node() => {
+                cluster_wide_ingestor = true;
+            }
             _ if is_user_placement_member_model(model) => {
                 eligible.push(ResolvedPlacementMember {
                     runtime: key.clone(),
@@ -3842,9 +3841,9 @@ fn resolve_placement_member(
             "placement member '{}' is ambiguous across eligible kinds {kinds}",
             member
         )
-    } else if endpoint_ingestor {
+    } else if cluster_wide_ingestor {
         format!(
-            "placement member '{}' is not placement-eligible: endpoint-source ingestors execute \
+            "placement member '{}' is not placement-eligible: server-listener ingestors execute \
              on every cluster node",
             member
         )
@@ -3897,10 +3896,7 @@ fn is_user_placement_member_model(model: &Model) -> bool {
 fn is_placement_eligible_member_model(model: &Model) -> bool {
     match model {
         Model::Relay(relay) => relay.materialized_state.is_some(),
-        Model::Ingestor(CreateIngestor {
-            source: IngestSource::Endpoint { .. },
-            ..
-        }) => false,
+        Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
         _ => is_user_placement_member_model(model),
     }
 }
@@ -3949,10 +3945,7 @@ fn ensure_placement_member_shape_change_allowed(
 
 fn is_placement_runtime_model(model: &Model) -> bool {
     match model {
-        Model::Ingestor(CreateIngestor {
-            source: IngestSource::Endpoint { .. },
-            ..
-        }) => false,
+        Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
         Model::Materializer(_) => true,
         _ => is_user_placement_member_model(model),
     }
@@ -6265,10 +6258,9 @@ impl AssignmentPlanner<'_> {
         }
 
         match model {
-            Model::Ingestor(CreateIngestor {
-                source: IngestSource::Endpoint { .. },
-                ..
-            }) => self.cluster_nodes.to_vec(),
+            Model::Ingestor(_) if model.executes_on_every_cluster_node() => {
+                self.cluster_nodes.to_vec()
+            }
             Model::Generator(_)
             | Model::Inferencer(_)
             | Model::Ingestor(_)
@@ -14540,7 +14532,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_rejects_nonmaterialized_relay_and_endpoint_source_ingestor_members() {
+    fn placement_rejects_nonmaterialized_relay_and_cluster_wide_ingestor_members() {
         let relay_path = temp_db_path();
         let relay_registry = Registry::open(&relay_path).expect("registry should open");
         let relay_domain = Domain::parse("placement_plain_relay").expect("valid domain");
@@ -14599,12 +14591,47 @@ mod tests {
             .expect_err("an endpoint-source ingestor is not a placement member");
         assert!(
             format!("{endpoint_error:#}")
-                .contains("endpoint-source ingestors execute on every cluster node"),
+                .contains("server-listener ingestors execute on every cluster node"),
             "unexpected endpoint error: {endpoint_error:#}"
+        );
+
+        let syslog_path = temp_db_path();
+        let syslog_registry = Registry::open(&syslog_path).expect("registry should open");
+        let syslog_domain = Domain::parse("placement_syslog_ingestor").expect("valid domain");
+        let mut syslog_models = full_graph_batch();
+        let ingestor = syslog_models
+            .iter_mut()
+            .find_map(|model| match model {
+                Model::Ingestor(ingestor) if ingestor.name == identifier("ing") => Some(ingestor),
+                _ => None,
+            })
+            .expect("full graph must contain ing");
+        ingestor.source = IngestSource::Syslog {
+            client: identifier("syslog_listener"),
+            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+        };
+        syslog_models.extend([
+            syslog_client("syslog_listener"),
+            placement(
+                "syslog_member",
+                &["ing"],
+                &["emit"],
+                PlacementPolicy::RequireColocation,
+                None,
+            ),
+        ]);
+        let syslog_error = syslog_registry
+            .apply_batch(&syslog_domain, syslog_models)
+            .expect_err("a syslog ingestor is not a placement member");
+        assert!(
+            format!("{syslog_error:#}")
+                .contains("server-listener ingestors execute on every cluster node"),
+            "unexpected syslog error: {syslog_error:#}"
         );
 
         let _ = fs::remove_dir_all(relay_path);
         let _ = fs::remove_dir_all(endpoint_path);
+        let _ = fs::remove_dir_all(syslog_path);
     }
 
     #[test]
@@ -15191,6 +15218,46 @@ mod tests {
                 "periodic reconciliation must not move an unchanged random schedule"
             );
         }
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn syslog_server_ingestor_is_assigned_to_every_cluster_node() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("syslog_cluster_wide").expect("valid domain");
+        let mut models = full_graph_batch();
+        let ingestor = models
+            .iter_mut()
+            .find_map(|model| match model {
+                Model::Ingestor(ingestor) if ingestor.name == identifier("ing") => Some(ingestor),
+                _ => None,
+            })
+            .expect("full graph must contain ing");
+        ingestor.source = IngestSource::Syslog {
+            client: identifier("syslog_listener"),
+            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+        };
+        models.push(syslog_client("syslog_listener"));
+        registry
+            .apply_batch(&domain, models)
+            .expect("syslog graph should validate");
+
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let cluster_nodes = [
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ];
+        let schedule =
+            graph.schedule_for_domain(&domain, &cluster_nodes, 0, PlacementPolicy::Neutral);
+        let ingestor = scheduled_node(&schedule, ModelKind::Ingestor, "ing");
+        assert_eq!(ingestor.assigned_nodes, cluster_nodes);
+        assert_eq!(ingestor.execution_node(), None);
+        assert!(cluster_nodes.iter().all(|node| ingestor.executes_on(node)));
 
         let _ = fs::remove_dir_all(path);
     }

@@ -384,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_create_syslog_codec_without_wire_schema() {
+    fn parses_create_codec_from_predefined_syslog_wire_schema() {
         let parsed = parse_create_codec("CREATE CODEC events FROM SYSLOG TO SCHEMA syslog_event;")
             .expect("parse should succeed");
 

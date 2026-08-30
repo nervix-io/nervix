@@ -545,8 +545,9 @@ ON QUIESCE SUSPEND
 The client binds a UDP, TCP, or TLS listener. UDP treats one datagram as one message; TCP detects
 RFC 6587 octet-counted or LF-terminated framing per frame; TLS uses RFC 5425 octet counting.
 Messages expose optional `metadata.peer_addr`. The source takes no `INSTANCES` clause and has no
-application acknowledgment. See [Syslog](syslog.md) for the client keys, framing, TLS, limits, and
-failure semantics.
+application acknowledgment. Every live cluster node runs the listener; it is independent of the
+leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
+cluster lifecycle, framing, TLS, limits, and failure semantics.
 
 ### SQS
 

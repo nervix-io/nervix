@@ -142,6 +142,7 @@ impl SyslogIngestor {
         } else {
             None
         };
+        let bind_addr = runtime.syslog_ingestor_bind_addr(&config.addr);
 
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
@@ -198,6 +199,7 @@ impl SyslogIngestor {
                         Self::run_udp_listener(
                             &task_context,
                             &config,
+                            &bind_addr,
                             &mut backoff,
                             &mut shutdown_rx,
                         )
@@ -207,6 +209,7 @@ impl SyslogIngestor {
                         Self::run_stream_listener(
                             &task_context,
                             &config,
+                            &bind_addr,
                             tls_acceptor.clone(),
                             &mut backoff,
                             &mut shutdown_rx,
@@ -259,15 +262,16 @@ impl SyslogIngestor {
     async fn run_udp_listener(
         context: &SyslogIngestContext,
         config: &SyslogClientConfig,
+        bind_addr: &str,
         backoff: &mut RuntimeReconnectBackoff,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> Result<(), SyslogListenerError> {
         let socket =
-            UdpSocket::bind(&config.addr)
+            UdpSocket::bind(bind_addr)
                 .await
                 .map_err(|source| SyslogListenerError::Bind {
                     transport: "UDP",
-                    addr: config.addr.clone(),
+                    addr: bind_addr.to_string(),
                     source,
                 })?;
         context
@@ -338,16 +342,17 @@ impl SyslogIngestor {
     async fn run_stream_listener(
         context: &SyslogIngestContext,
         config: &SyslogClientConfig,
+        bind_addr: &str,
         tls_acceptor: Option<TlsAcceptor>,
         backoff: &mut RuntimeReconnectBackoff,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> Result<(), SyslogListenerError> {
         let listener =
-            TcpListener::bind(&config.addr)
+            TcpListener::bind(bind_addr)
                 .await
                 .map_err(|source| SyslogListenerError::Bind {
                     transport: "stream",
-                    addr: config.addr.clone(),
+                    addr: bind_addr.to_string(),
                     source,
                 })?;
         context

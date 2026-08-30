@@ -2953,6 +2953,16 @@ async fn when_node_is_started(world: &mut ScenarioWorld, node_id: String) {
         .expect("failed to start node");
 }
 
+#[when(expr = "node {string} is added to the cluster")]
+async fn when_node_is_added_to_the_cluster(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .add_node(&node_id)
+        .await
+        .expect("failed to add node");
+}
+
 #[when(expr = "leadership is transferred from node {string} to node {string}")]
 async fn when_leadership_is_transferred_from_node_to_node(
     world: &mut ScenarioWorld,
@@ -9831,6 +9841,58 @@ async fn when_syslog_udp_message_is_published_to(
         .unwrap_or_else(|error| {
             panic!("failed to publish Syslog UDP message to '{addr}': {error}")
         });
+}
+
+#[then(
+    expr = "node {string} eventually forwards Syslog UDP message {string} at {string} to the \
+            observed endpoint"
+)]
+async fn then_node_eventually_forwards_syslog_udp_message(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    message: String,
+    addr: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let message = expand_placeholders(world, &message);
+    let configured_addr = expand_placeholders(world, &addr);
+    let addr = world
+        .cluster()
+        .syslog_ingestor_addr(&node_id, &configured_addr)
+        .expect("failed to resolve node-local Syslog ingestor address");
+    let payload =
+        format!("<34>1 2003-10-11T22:14:15.003Z lifecycle.example test 1 ID47 - {message}");
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind Syslog UDP test sender");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = vec![0_u8; 65_535];
+
+    loop {
+        tokio::task::consume_budget().await;
+        let _ = socket.send_to(payload.as_bytes(), &addr).await;
+        let next = tokio::time::timeout(
+            Duration::from_millis(250),
+            world
+                .syslog_udp_observer
+                .as_ref()
+                .expect("a Syslog UDP observer must exist before assertion")
+                .recv_from(&mut received),
+        )
+        .await;
+        if let Ok(Ok((length, _))) = next
+            && let Ok(actual) = std::str::from_utf8(&received[..length])
+            && actual.contains(&message)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for node '{node_id}' Syslog UDP traffic to reach the observed \
+             endpoint"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[when(expr = "Syslog TCP messages are published with mixed framing to {string}")]

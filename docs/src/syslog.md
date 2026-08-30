@@ -2,19 +2,21 @@
 
 Nervix separates the syslog message format from syslog network transport:
 
-- a `SYSLOG` codec decodes RFC 3164 and RFC 5424 messages and encodes RFC 5424 messages
+- the predefined singleton `SYSLOG` wire schema represents the fixed syslog message format
+- a codec that uses that wire schema decodes RFC 3164 and RFC 5424 messages and encodes RFC 5424
+  messages
 - a `TYPE SYSLOG` client declares a UDP, TCP, or TLS socket endpoint
 - a `FROM SYSLOG` ingestor receives transport frames and passes each frame to its declared codec
 - a `TO SYSLOG` emitter sends codec output with the selected syslog transport framing
 
 The pieces are intentionally independent. A Kafka ingestor can decode a syslog payload with a
-`SYSLOG` codec, and a syslog listener can pass its frames to a JSON codec. Pairing the codec and
-transport creates a conventional syslog receiver or forwarder. `SYSLOG` is a reserved NSPL
-keyword.
+codec that uses the `SYSLOG` wire schema, and a syslog listener can pass its frames to a JSON codec.
+Pairing the format and transport pieces creates a conventional syslog receiver or forwarder.
+`SYSLOG` is a reserved NSPL keyword.
 
-## Codec
+## Predefined wire schema and codec
 
-Create a syslog codec without a wire schema:
+Reference the predefined wire schema directly from a codec:
 
 ```nspl
 CREATE CODEC syslog_codec
@@ -22,8 +24,9 @@ CREATE CODEC syslog_codec
   TO SCHEMA syslog_event;
 ```
 
-A syslog codec does not accept a wire-schema reference, `WITH JAQ TRANSFORMATIONS`, or
-`ENCODE <field> AS RFC3339` rules.
+`SYSLOG` itself is the reference to the singleton wire schema. It has no user-defined name or
+separate `CREATE`, `SHOW CREATE`, `ALTER`, or `DROP` lifecycle. A codec using it does not accept
+`WITH JAQ TRANSFORMATIONS` or `ENCODE <field> AS RFC3339` rules.
 
 ### Fixed field contract
 
@@ -44,7 +47,7 @@ name, type, and optionality shown here.
 
 A field outside this contract, or a field with different type or optionality, makes `CREATE CODEC`
 fail and identifies the offending field and expected shape. Fields may be marked `SENSITIVE` in
-the schema; normal sensitivity propagation and explicit external-leakage rules still apply.
+the target schema; normal sensitivity propagation and explicit external-leakage rules still apply.
 
 Fields omitted from the schema are parsed and discarded during decoding. During encoding, omitted
 optional header fields and structured data become the RFC 5424 NILVALUE `-`.
@@ -71,7 +74,8 @@ CREATE CODEC syslog_codec
 
 ### Decoding
 
-The codec detects RFC 5424 or RFC 3164 for each message. The choice is not configurable.
+A codec using the `SYSLOG` wire schema detects RFC 5424 or RFC 3164 for each message. The choice
+is not configurable.
 
 - the payload must be non-empty UTF-8 after trailing carriage returns, line feeds, and NUL bytes
   are removed
@@ -86,9 +90,10 @@ next frame.
 
 ### Encoding
 
-Encoding always produces RFC 5424 version 1 without a byte-order mark. A codec is encode-capable
-only when its schema declares `facility`, `severity`, and `message`. Graph validation rejects a
-syslog emitter using a codec that omits any of them and lists the missing fields.
+Encoding through the `SYSLOG` wire schema always produces RFC 5424 version 1 without a byte-order
+mark. A codec is encode-capable only when its target schema declares `facility`, `severity`, and
+`message`. Graph validation rejects an emitter using such a codec when any field is absent and
+lists the missing fields.
 
 Timestamps are rendered in UTC. Nanosecond values are truncated to RFC 5424's maximum six
 fractional digits, and trailing fractional zeroes are omitted.
@@ -166,8 +171,12 @@ ON QUIESCE SUSPEND
 DECODE USING <codec>
 ```
 
-Each scheduled ingestor owns one listener on its node. Routes, branch construction, flush policy,
-and error policy follow the normal ingestor contract.
+Every live Nervix node runs the listener on the client's configured `addr`. The listener is not
+leader-owned and has no placement owner: leadership changes do not move or restart it. A restarted
+node starts its listener again after restoring the active graph, and a node joining the cluster
+starts one after receiving that graph. In Kubernetes, a Service can therefore target the syslog
+port on every Nervix pod. Routes, branch construction, flush policy, and error policy follow the
+normal ingestor contract.
 
 Every received message exposes its remote socket address as optional `STRING`
 `metadata.peer_addr`. For UDP this is the datagram source; for TCP and TLS it is the connection
@@ -218,9 +227,10 @@ and `DROP` continue reading and apply the normal bounded local quiesce behavior.
 Syslog transport is at-most-once at intake. The listener sends no application acknowledgment, and
 datagrams dropped or stream data lost before intake are not recoverable.
 
-Bind and listener-level socket failures appear as the ingestor transient error and retry with the
-standard reconnect backoff. Recovery clears the error and resets the backoff. A malformed message
-body is a codec decode failure and skips only that frame.
+Bind and listener-level socket failures appear as that node's ingestor transient error and retry
+with the standard reconnect backoff. A failure on one node does not stop listeners on other nodes.
+Recovery clears the error and resets the backoff. A malformed message body is a codec decode
+failure and skips only that frame.
 
 ## Emitter
 
@@ -261,9 +271,9 @@ delivered more than once.
 
 Syslog ingestors and emitters use the standard `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` runtime
 state, transient-error, reconnect-backoff, edge-metric, and emitter-metric surfaces. `SHOW CREATE`
-renders canonical syslog declarations, and normal ALTER quiesce classification applies. Lifecycle
-transitions are info-level events; per-frame and per-connection details are debug or trace and do
-not include payload values.
+renders canonical codec, client, ingestor, and emitter declarations. Normal ALTER quiesce
+classification applies. Lifecycle transitions are info-level events; per-frame and per-connection
+details are debug or trace and do not include payload values.
 
 | Limit | Value |
 | --- | --- |
