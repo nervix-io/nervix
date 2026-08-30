@@ -17,8 +17,8 @@ use arrow_schema::{
 use error_stack::{Report, ResultExt};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use nervix_dataflow_graph::{
-    DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowMetricRef, DataflowNode,
-    DataflowNodeKind, DataflowSchemaField,
+    DataflowBranch, DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowInputSide,
+    DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind, DataflowSchemaField,
 };
 use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
@@ -4506,12 +4506,7 @@ impl ActiveGraph {
                             .node_weight(target_index)
                             .expect("dataflow target node must exist");
                         included_nodes.insert(target_index);
-                        DataflowEdge::data(
-                            source.dataflow_id(),
-                            target.dataflow_id(),
-                            dataflow_edge_kind(edge_kind),
-                        )
-                        .with_metric(source.dataflow_metric_for_target(target))
+                        source.dataflow_edge_to(target, dataflow_edge_kind(edge_kind))
                     })
                     .collect::<Vec<_>>()
             })
@@ -4570,6 +4565,7 @@ impl ActiveGraph {
                 }
                 nodes.push(client_node);
             }
+            edges.extend(node.dataflow_state_link_edges());
         }
 
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -4590,7 +4586,6 @@ impl ActiveGraph {
             nodes,
             edges,
         }
-        .laid_out()
     }
 }
 
@@ -4664,8 +4659,9 @@ impl ActiveNode {
         Some(DataflowNode::new(
             format!("{}_source:{}", source_kind, source.as_str()),
             source.as_str(),
-            DataflowNodeKind::Client,
-            ingestor.source.transport_label(),
+            DataflowNodeRole::Client {
+                transport: ingestor.source.transport_label().to_string(),
+            },
         ))
     }
 
@@ -4677,9 +4673,88 @@ impl ActiveNode {
         Some(DataflowNode::new(
             format!("client_sink:{}", client.as_str()),
             client.as_str(),
-            DataflowNodeKind::Client,
-            emitter.sink.transport_label(),
+            DataflowNodeRole::Client {
+                transport: emitter.sink.transport_label().to_string(),
+            },
         ))
+    }
+
+    /// The drawn edge from this node to `target`. A generator reads its source relay as
+    /// materialized state rather than receiving its records, so that one edge becomes a state
+    /// link instead of record flow.
+    fn dataflow_edge_to(&self, target: &Self, kind: DataflowEdgeKind) -> DataflowEdge {
+        if kind == DataflowEdgeKind::Data
+            && target.kind == ModelKind::Generator
+            && target.reads_materialized_state_from(&self.identifier)
+        {
+            return DataflowEdge::data(
+                self.dataflow_id(),
+                target.dataflow_id(),
+                DataflowEdgeKind::StateLink,
+            );
+        }
+        DataflowEdge::data(self.dataflow_id(), target.dataflow_id(), kind)
+            .with_metric(self.dataflow_metric_for_target(target))
+            .with_input_side(target.correlator_input_side(&self.identifier))
+            .with_routes(self.dataflow_routes_to(target, kind))
+    }
+
+    /// Materialized-state dependencies drawn as state links. Every declaration is included; the
+    /// generator's own source relay arrives here as well as through its converted flow edge, and
+    /// the two are identical so the graph's edge deduplication keeps exactly one.
+    fn dataflow_state_link_edges(&self) -> Vec<DataflowEdge> {
+        self.config
+            .materialized_state_relays()
+            .into_iter()
+            .map(|relay| {
+                DataflowEdge::data(
+                    format!("{}:{}", ModelKind::Relay.as_str(), relay.as_str()),
+                    self.dataflow_id(),
+                    DataflowEdgeKind::StateLink,
+                )
+            })
+            .collect()
+    }
+
+    fn reads_materialized_state_from(&self, relay: &Identifier) -> bool {
+        self.config
+            .materialized_state_relays()
+            .into_iter()
+            .any(|declared| declared == relay)
+    }
+
+    /// Which side of a correlator an input relay enters. Correlators are the only nodes whose
+    /// inputs are distinguishable, and the console labels the two sides.
+    fn correlator_input_side(&self, source: &Identifier) -> Option<DataflowInputSide> {
+        let Model::Correlator(correlator) = self.config.as_ref() else {
+            return None;
+        };
+        if correlator.left.from.iter().any(|relay| relay == source) {
+            return Some(DataflowInputSide::Left);
+        }
+        correlator
+            .right
+            .from
+            .iter()
+            .any(|relay| relay == source)
+            .then_some(DataflowInputSide::Right)
+    }
+
+    /// How many declared routes this node sends to `target`. Several routes to one relay are
+    /// drawn as a single edge, so the count is what tells the reader they were collapsed.
+    fn dataflow_routes_to(&self, target: &Self, kind: DataflowEdgeKind) -> u32 {
+        if kind != DataflowEdgeKind::Data || target.kind != ModelKind::Relay {
+            return 1;
+        }
+        let Some(outputs) = self.config.output_routes() else {
+            return 1;
+        };
+        let routes = outputs
+            .routes
+            .iter()
+            .filter(|route| route.relay == target.identifier)
+            .count();
+        u32::try_from(routes).unwrap_or(u32::MAX).max(1)
     }
 
     fn dataflow_source_client_metric(&self) -> DataflowMetricRef {
@@ -4728,13 +4803,9 @@ impl ActiveNode {
         let node = DataflowNode::new(
             self.dataflow_id(),
             self.identifier.as_str(),
-            self.dataflow_kind(),
-            self.dataflow_subtype(),
+            self.dataflow_role(),
         )
-        .with_optional_branching_schema(
-            self.dataflow_branching_schema()
-                .map(|schema| schema.as_str().to_string()),
-        );
+        .with_branch(self.dataflow_branch());
         match self.config.as_ref() {
             Model::Relay(relay) => {
                 let Some(schema) = schemas.get(&relay.schema) else {
@@ -4753,26 +4824,43 @@ impl ActiveNode {
         }
     }
 
-    fn dataflow_kind(&self) -> DataflowNodeKind {
+    fn dataflow_role(&self) -> DataflowNodeRole {
         match self.kind {
-            ModelKind::Ingestor => DataflowNodeKind::Ingestor,
-            ModelKind::Emitter => DataflowNodeKind::Emitter,
-            ModelKind::Relay => DataflowNodeKind::Relay,
-            _ => DataflowNodeKind::Processor,
+            ModelKind::Ingestor => DataflowNodeRole::Ingestor {
+                transport: ingestor_subtype(self.config.as_ref()).to_string(),
+            },
+            ModelKind::Emitter => DataflowNodeRole::Emitter {
+                transport: emitter_subtype(self.config.as_ref()).to_string(),
+            },
+            ModelKind::Relay => DataflowNodeRole::Relay,
+            kind => DataflowNodeRole::Processor {
+                processor: dataflow_processor_kind(kind)
+                    .expect("every dataflow processor kind must map to a drawn processor"),
+            },
         }
     }
 
-    fn dataflow_subtype(&self) -> &str {
-        match self.kind {
-            ModelKind::Ingestor => ingestor_subtype(self.config.as_ref()),
-            ModelKind::Emitter => emitter_subtype(self.config.as_ref()),
-            ModelKind::Relay => "RELAY",
-            _ => self.kind.as_str(),
-        }
-    }
-
-    fn dataflow_branching_schema(&self) -> Option<Identifier> {
-        self.effective_branching_schema.clone()
+    /// The branch this node runs under, named as declared. Nodes that run once, outside any
+    /// branch, resolve to no branch at all.
+    fn dataflow_branch(&self) -> Option<DataflowBranch> {
+        let name = match self.config.as_ref() {
+            Model::Relay(relay) => relay.branching.branch()?,
+            model => model_branch_selection(model)?.branch_ref()?,
+        };
+        Some(DataflowBranch {
+            name: name.as_str().to_string(),
+            key_schema: self
+                .effective_branching_schema
+                .as_ref()?
+                .as_str()
+                .to_string(),
+            key_fields: self
+                .effective_branching
+                .iter()
+                .flatten()
+                .map(|field| field.as_str().to_string())
+                .collect(),
+        })
     }
 
     fn is_dataflow_node(&self) -> bool {
@@ -5281,6 +5369,21 @@ fn emitter_subtype(model: &Model) -> &str {
         return "EMITTER";
     };
     emitter.sink.transport_label()
+}
+
+const fn dataflow_processor_kind(kind: ModelKind) -> Option<DataflowProcessorKind> {
+    match kind {
+        ModelKind::Junction => Some(DataflowProcessorKind::Junction),
+        ModelKind::Deduplicator => Some(DataflowProcessorKind::Deduplicator),
+        ModelKind::Correlator => Some(DataflowProcessorKind::Correlator),
+        ModelKind::Reorderer => Some(DataflowProcessorKind::Reorderer),
+        ModelKind::WindowProcessor => Some(DataflowProcessorKind::WindowProcessor),
+        ModelKind::WasmProcessor => Some(DataflowProcessorKind::WasmProcessor),
+        ModelKind::Inferencer => Some(DataflowProcessorKind::Inferencer),
+        ModelKind::Generator => Some(DataflowProcessorKind::Generator),
+        ModelKind::Reingestor => Some(DataflowProcessorKind::Reingestor),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18482,19 +18585,23 @@ mod tests {
         );
 
         let dataflow_graph = graph.to_dataflow_graph(domain.as_str());
-        let branching_schemas = dataflow_graph
+        let branches = dataflow_graph
             .nodes
             .iter()
-            .map(|node| (node.id.as_str(), node.branching_schema.as_deref()))
+            .map(|node| {
+                (
+                    node.id.as_str(),
+                    node.branch
+                        .as_ref()
+                        .map(|branch| (branch.name.as_str(), branch.key_schema.as_str())),
+                )
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(branching_schemas.get("ingestor:ing"), Some(&None));
+        assert_eq!(branches.get("ingestor:ing"), Some(&None));
+        assert_eq!(branches.get("reingestor:tenant_partition"), Some(&None));
         assert_eq!(
-            branching_schemas.get("reingestor:tenant_partition"),
-            Some(&None)
-        );
-        assert_eq!(
-            branching_schemas.get("relay:tenant_notifications"),
-            Some(&Some("tenant_branch"))
+            branches.get("relay:tenant_notifications"),
+            Some(&Some(("by_tenant_notifications", "tenant_branch")))
         );
 
         let _ = fs::remove_dir_all(path);
@@ -19096,19 +19203,26 @@ mod tests {
             node_ids.contains(&"relay:deduped_events"),
             "deduped relay missing from {node_ids:?}"
         );
-        let branching_schemas = dataflow_graph
+        let branches = dataflow_graph
             .nodes
             .iter()
-            .map(|node| (node.id.as_str(), node.branching_schema.as_deref()))
+            .map(|node| {
+                (
+                    node.id.as_str(),
+                    node.branch
+                        .as_ref()
+                        .map(|branch| (branch.name.as_str(), branch.key_schema.as_str())),
+                )
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(branching_schemas.get("ingestor:ingest_events"), Some(&None));
+        assert_eq!(branches.get("ingestor:ingest_events"), Some(&None));
         assert_eq!(
-            branching_schemas.get("relay:raw_events"),
-            Some(&Some("value_branch"))
+            branches.get("relay:raw_events"),
+            Some(&Some(("by_raw_events", "value_branch")))
         );
         assert_eq!(
-            branching_schemas.get("relay:deduped_events"),
-            Some(&Some("value_branch"))
+            branches.get("relay:deduped_events"),
+            Some(&Some(("by_raw_events", "value_branch")))
         );
         let edges = dataflow_graph
             .edges

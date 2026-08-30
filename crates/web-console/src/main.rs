@@ -1,18 +1,9 @@
 use std::{
-    cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use charming::{
-    Chart, WasmRenderer,
-    element::{Color, Easing, Label, LabelPosition, LineStyle},
-    series::{
-        Graph as CharmingGraphSeries, GraphCategory, GraphData, GraphLayout,
-        GraphLink as CharmingGraphLink, GraphNode as CharmingGraphNode, GraphNodeLabel,
-    },
-};
 use futures_channel::mpsc::{UnboundedSender, unbounded};
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use gloo_net::websocket::{
@@ -20,12 +11,17 @@ use gloo_net::websocket::{
 };
 use leptos::{ev, mount::mount_to_body, prelude::*};
 use nervix_dataflow_graph::{
-    DataflowEdgeKind, DataflowGraph, DataflowNodeKind, DataflowNodeStatus, DataflowSchemaField,
+    DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
+    DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
     DataflowStatistics,
 };
 use nervix_models::Statement;
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
+};
+use nervix_web_console::graph::{
+    graph_layout_edge, graph_layout_item,
+    layout::{GroupRegion, Layout, Rect},
 };
 use prost::Message as ProstMessage;
 use url::Url;
@@ -233,19 +229,19 @@ const THEMES: [ThemeView; 4] = [
     },
 ];
 
-const GRAPH_MIN_WIDTH: i32 = 1164;
-const GRAPH_MIN_HEIGHT: i32 = 360;
-const GRAPH_NODE_WIDTH: i32 = 190;
-const GRAPH_NODE_HEIGHT: i32 = 82;
-const GRAPH_NODE_CENTER_X: i32 = GRAPH_NODE_WIDTH / 2;
-const GRAPH_NODE_CENTER_Y: i32 = GRAPH_NODE_HEIGHT / 2;
-const GRAPH_EDGE_LANE_MIN_SPAN: i32 = 96;
-const GRAPH_EDGE_LANE_MIN_OVERLAP: i32 = 140;
-const GRAPH_EDGE_SHARED_ENDPOINT_LANE_MIN_OVERLAP: i32 = 48;
-const GRAPH_EDGE_LANE_GROUP_Y: i32 = 30;
-const GRAPH_EDGE_LANE_SPACING: i32 = 18;
-const GRAPH_EDGE_TURN_X: i32 = 48;
-const GRAPH_EDGE_TERMINAL_STRAIGHT: i32 = 72;
+/// The zoom range the stage allows, shared by the buttons, the wheel and the fit control.
+const GRAPH_MIN_ZOOM: f64 = 0.25;
+const GRAPH_MAX_ZOOM: f64 = 3.0;
+/// One press of a zoom button.
+const GRAPH_ZOOM_STEP: f64 = 0.1;
+/// Fitting never enlarges: a small graph is shown at its natural size, centred.
+const GRAPH_FIT_MAX_ZOOM: f64 = 1.0;
+/// Clearance kept around the graph when framing it.
+const GRAPH_FIT_PADDING: f64 = 48.0;
+/// How long a snapshot stays fresh before the freshness pill reports a stall.
+const GRAPH_FRESHNESS_TIMEOUT: Duration = Duration::from_millis(2_500);
+/// How often the freshness pill re-evaluates the age of the last snapshot.
+const GRAPH_FRESHNESS_TICK: Duration = Duration::from_millis(500);
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -576,7 +572,14 @@ fn App() -> impl IntoView {
                 <div class="console-body">
                     <Sidebar active_domain=active_domain user_selected_domain=user_selected_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details web_console_session=web_console_session.clone() run_command=run_command />
                     <section class="main-pane">
-                        <GraphPanel active_domain=active_domain domain=active_graph run_command=run_command start_subscription=start_subscription />
+                        <GraphPanel
+                            active_domain=active_domain
+                            domains=domains
+                            websocket_state=web_console_session.state
+                            domain=active_graph
+                            run_command=run_command
+                            start_subscription=start_subscription
+                        />
                         <ReplPanel
                             domain=active_domain_name
                             input=input
@@ -2583,6 +2586,7 @@ fn graph_edge_kind_from_label(label: &str) -> Option<DataflowEdgeKind> {
         "DATA" => Some(DataflowEdgeKind::Data),
         "CORRELATION_TIMEOUT" => Some(DataflowEdgeKind::CorrelationTimeout),
         "MESSAGE_ERROR" => Some(DataflowEdgeKind::MessageError),
+        "STATE_LINK" => Some(DataflowEdgeKind::StateLink),
         _ => None,
     }
 }
@@ -2590,6 +2594,8 @@ fn graph_edge_kind_from_label(label: &str) -> Option<DataflowEdgeKind> {
 #[component]
 fn GraphPanel(
     active_domain: RwSignal<Option<String>>,
+    domains: RwSignal<Vec<DomainView>>,
+    websocket_state: RwSignal<ConsoleConnectionState>,
     domain: impl Fn() -> Option<GraphView> + Copy + Send + Sync + 'static,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
     start_subscription: impl Fn(String, String, usize) + Copy + Send + Sync + 'static,
@@ -2604,6 +2610,7 @@ fn GraphPanel(
     let graph_pan_y = RwSignal::new(0.0_f64);
     let graph_drag = RwSignal::new(None::<GraphDrag>);
     let graph_moved = RwSignal::new(false);
+    let graph_hover = RwSignal::new(None::<GraphHover>);
     let fullscreen = RwSignal::new(false);
     let graph_search = RwSignal::new(String::new());
     let graph_search_focus_key = RwSignal::new(None::<(GraphTopologyKey, String)>);
@@ -2611,6 +2618,10 @@ fn GraphPanel(
     let current_graph_state = RwSignal::new(None::<GraphView>);
     let topology_graph_state = RwSignal::new(None::<GraphView>);
     let topology_key_state = RwSignal::new(None::<GraphTopologyKey>);
+    let topology_render_count = RwSignal::new(0_u64);
+    let fitted_topology_key = RwSignal::new(None::<GraphTopologyKey>);
+    let snapshot_observed_at = RwSignal::new(js_sys::Date::now());
+    let freshness_now = RwSignal::new(js_sys::Date::now());
     Effect::new(move |_| {
         let selected_domain = active_domain.get().unwrap_or_default();
         let next_graph = domain().filter(|graph| graph.id == selected_domain);
@@ -2619,12 +2630,24 @@ fn GraphPanel(
             if topology_key_state.get_untracked().as_ref() != Some(&next_key) {
                 topology_key_state.set(Some(next_key));
                 topology_graph_state.set(Some(graph.clone()));
+                topology_render_count.update(|count| *count = count.saturating_add(1));
             }
         } else {
             topology_key_state.set(None);
             topology_graph_state.set(None);
         }
+        snapshot_observed_at.set(js_sys::Date::now());
         current_graph_state.set(next_graph);
+    });
+    let freshness_interval = set_interval_with_handle(
+        move || freshness_now.set(js_sys::Date::now()),
+        GRAPH_FRESHNESS_TICK,
+    )
+    .ok();
+    on_cleanup(move || {
+        if let Some(interval) = freshness_interval {
+            interval.clear();
+        }
     });
     let visible_graph = move || {
         let selected_domain = active_domain.get().unwrap_or_default();
@@ -2647,21 +2670,40 @@ fn GraphPanel(
         let query = graph_search.get().trim().to_ascii_lowercase();
         (query.chars().count() >= 2).then_some(query)
     };
-    let focus_graph_bounds = move |graph: &GraphView, bounds: GraphBounds| {
+    let domain_lifecycle = move || {
+        let selected_domain = active_domain.get().unwrap_or_default();
+        domains
+            .get()
+            .into_iter()
+            .find(|domain| domain.id == selected_domain)
+            .map(|domain| domain.lifecycle_label())
+            .unwrap_or("STOPPED")
+    };
+    let graph_freshness = move || {
+        if websocket_state.get() != ConsoleConnectionState::Connected {
+            return "OFFLINE";
+        }
+        let age = freshness_now.get() - snapshot_observed_at.get();
+        if age <= GRAPH_FRESHNESS_TIMEOUT.as_millis() as f64 {
+            "LIVE"
+        } else {
+            "STALE"
+        }
+    };
+    let focus_graph_bounds = move |graph: &GraphView, bounds: GraphBounds, max_zoom: f64| -> bool {
         let Some(stage) = graph_stage_ref.get() else {
-            return;
+            return false;
         };
         let stage_width = f64::from(stage.client_width());
         let stage_height = f64::from(stage.client_height());
         if stage_width <= 1.0 || stage_height <= 1.0 {
-            return;
+            return false;
         }
-        let padding = 72.0_f64;
-        let available_width = (stage_width - padding * 2.0).max(stage_width * 0.4);
-        let available_height = (stage_height - padding * 2.0).max(stage_height * 0.4);
+        let available_width = (stage_width - GRAPH_FIT_PADDING * 2.0).max(stage_width * 0.4);
+        let available_height = (stage_height - GRAPH_FIT_PADDING * 2.0).max(stage_height * 0.4);
         let zoom = (available_width / bounds.width())
             .min(available_height / bounds.height())
-            .clamp(0.25, 1.6);
+            .clamp(GRAPH_MIN_ZOOM, max_zoom);
         let (center_x, center_y) = bounds.center();
         let canvas_width = f64::from(graph.canvas_width());
         let canvas_height = f64::from(graph.canvas_height());
@@ -2672,14 +2714,36 @@ fn GraphPanel(
         graph_zoom.set(zoom);
         graph_pan_x.set(stage_width / 2.0 - base_x - zoom * center_x - (1.0 - zoom) * origin_x);
         graph_pan_y.set(stage_height / 2.0 - base_y - zoom * center_y - (1.0 - zoom) * origin_y);
+        true
+    };
+    let fit_graph = move || {
+        if let Some(graph) = visible_topology_graph() {
+            focus_graph_bounds(&graph, graph.canvas_bounds(), GRAPH_FIT_MAX_ZOOM);
+        }
     };
     let focus_graph_edge = move |source: String, target: String, kind: DataflowEdgeKind| {
         let graph = current_topology_graph();
         let Some(bounds) = graph.edge_focus_bounds(&source, &target, kind) else {
             return;
         };
-        focus_graph_bounds(&graph, bounds);
+        focus_graph_bounds(&graph, bounds, GRAPH_MAX_ZOOM);
     };
+    // A newly loaded graph, and every switch to a different domain, opens framed rather than at
+    // an arbitrary zoom and pan. The stage is read reactively, so a graph that arrives before the
+    // stage is measurable is framed as soon as it is.
+    Effect::new(move |_| {
+        let Some(graph) = visible_topology_graph() else {
+            fitted_topology_key.set(None);
+            return;
+        };
+        let key = graph.topology_key();
+        if fitted_topology_key.get_untracked().as_ref() == Some(&key) {
+            return;
+        }
+        if focus_graph_bounds(&graph, graph.canvas_bounds(), GRAPH_FIT_MAX_ZOOM) {
+            fitted_topology_key.set(Some(key));
+        }
+    });
     Effect::new(move |_| {
         let Some(query) = active_graph_search() else {
             graph_search_focus_key.set(None);
@@ -2697,8 +2761,9 @@ fn GraphPanel(
         if graph_search_focus_key.get_untracked().as_ref() == Some(&key) {
             return;
         }
-        graph_search_focus_key.set(Some(key));
-        focus_graph_bounds(&graph, bounds);
+        if focus_graph_bounds(&graph, bounds, GRAPH_MAX_ZOOM) {
+            graph_search_focus_key.set(Some(key));
+        }
     });
     view! {
         <section class="graph-panel" class:fullscreen=move || fullscreen.get()>
@@ -2708,11 +2773,10 @@ fn GraphPanel(
                     <strong>"Execution Graph"</strong>
                     <span class="graph-chevron">"›"</span>
                     <span>{move || visible_graph().map(|graph| graph.id).unwrap_or_else(|| "unavailable".to_string())}</span>
-                    <span class="pill warn">{move || visible_graph().map(|graph| graph.mode).unwrap_or_else(|| "NO GRAPH".to_string())}</span>
-                    <span class="pill waiting"><i></i>{move || visible_graph().map(|graph| graph.status).unwrap_or_else(|| "ERROR".to_string())}</span>
+                    <span class="pill warn" data-lifecycle=domain_lifecycle>{domain_lifecycle}</span>
+                    <span class="pill waiting" data-freshness=graph_freshness><i></i>{graph_freshness}</span>
                 </div>
                 <div class="graph-actions">
-                    <span>{move || visible_graph().map(|graph| graph.uptime).unwrap_or_default()}</span>
                     <div class="graph-search">
                         <SidebarIcon kind="search" />
                         <input
@@ -2746,7 +2810,9 @@ fn GraphPanel(
                         <button
                             type="button"
                             title="Zoom out"
-                            on:click=move |_| graph_zoom.update(|zoom| *zoom = (*zoom - 0.1).max(0.7))
+                            on:click=move |_| graph_zoom.update(|zoom| {
+                                *zoom = (*zoom - GRAPH_ZOOM_STEP).max(GRAPH_MIN_ZOOM);
+                            })
                         >
                             <SidebarIcon kind="zoom-out" />
                         </button>
@@ -2764,9 +2830,19 @@ fn GraphPanel(
                         <button
                             type="button"
                             title="Zoom in"
-                            on:click=move |_| graph_zoom.update(|zoom| *zoom = (*zoom + 0.1).min(1.6))
+                            on:click=move |_| graph_zoom.update(|zoom| {
+                                *zoom = (*zoom + GRAPH_ZOOM_STEP).min(GRAPH_MAX_ZOOM);
+                            })
                         >
                             <SidebarIcon kind="zoom-in" />
+                        </button>
+                        <button
+                            type="button"
+                            class="graph-fit"
+                            title="Fit to view"
+                            on:click=move |_| fit_graph()
+                        >
+                            "FIT"
                         </button>
                     </div>
                     <button
@@ -2804,7 +2880,8 @@ fn GraphPanel(
                         if event.ctrl_key() || event.meta_key() {
                             event.prevent_default();
                             graph_zoom.update(|zoom| {
-                                *zoom = (*zoom - event.delta_y() * 0.001).clamp(0.25, 3.0);
+                                *zoom = (*zoom - event.delta_y() * 0.001)
+                                    .clamp(GRAPH_MIN_ZOOM, GRAPH_MAX_ZOOM);
                             });
                         }
                     }
@@ -2833,7 +2910,10 @@ fn GraphPanel(
                         }
                     }
                     on:mouseup=move |_| graph_drag.set(None)
-                    on:mouseleave=move |_| graph_drag.set(None)
+                    on:mouseleave=move |_| {
+                        graph_drag.set(None);
+                        graph_hover.set(None);
+                    }
                     on:click=move |event: ev::MouseEvent| {
                         if let Some((source, target, kind)) = graph_edge_focus_request(&event) {
                             event.prevent_default();
@@ -2844,6 +2924,7 @@ fn GraphPanel(
                 >
                     <div
                         class="graph-zoom-layer"
+                        data-render-count=move || topology_render_count.get().to_string()
                         style=move || {
                             let graph = current_topology_graph();
                             format!(
@@ -2856,7 +2937,6 @@ fn GraphPanel(
                             )
                         }
                     >
-                        <CharmingGraph domain=current_topology_graph />
                         <svg
                             class="graph-branch-layer"
                             viewBox=move || {
@@ -2866,47 +2946,20 @@ fn GraphPanel(
                             aria-hidden="true"
                             focusable="false"
                         >
-                            <For each={move || current_graph().branching_groups()} key=|group| group.id.clone() children={move |group| {
-                                let callouts = group.callout_paths();
+                            <For each={move || current_graph().groups.clone()} key=|group| {
+                                (group.branch.clone(), group.active_branches)
+                            } children={move |group| {
                                 view! {
                                     <g class="graph-branch-group">
-                                        <rect
-                                            class="graph-branch-stack graph-branch-stack-back"
-                                            x=group.stack_x(2)
-                                            y=group.stack_y(2)
-                                            width=group.width
-                                            height=group.height
-                                            rx="8"
-                                            ry="8"
-                                        />
-                                        <rect
-                                            class="graph-branch-stack graph-branch-stack-mid"
-                                            x=group.stack_x(1)
-                                            y=group.stack_y(1)
-                                            width=group.width
-                                            height=group.height
-                                            rx="8"
-                                            ry="8"
-                                        />
-                                        <rect
+                                        <path
                                             class="graph-branch-body"
-                                            x=group.x
-                                            y=group.y
-                                            width=group.width
-                                            height=group.height
-                                            rx="8"
-                                            ry="8"
-                                            data-schema=group.schema.clone()
-                                            data-x=group.x.to_string()
-                                            data-y=group.y.to_string()
-                                            data-width=group.width.to_string()
-                                            data-height=group.height.to_string()
-                                            data-left-callouts=group.initiators.len().to_string()
-                                            data-right-callouts=group.finalizers.len().to_string()
+                                            d=group.outline.clone()
+                                            stroke-width=group.outline_stroke_width()
+                                            data-branch=group.branch.clone()
+                                            data-key-schema=group.key_schema.clone()
+                                            data-key-fields=group.key_fields_data()
+                                            data-active-branches=group.active_branches.to_string()
                                         />
-                                        <For each=move || callouts.clone() key=|path| path.clone() children=|path| {
-                                            view! { <path class="graph-branch-callout" d=path /> }
-                                        } />
                                     </g>
                                 }
                             }} />
@@ -2939,22 +2992,35 @@ fn GraphPanel(
                                 >
                                     <path d="M0,0 L4,2 L0,4 z" class="graph-arrow-head"></path>
                                 </marker>
+                                <marker
+                                    id="graph-arrow-hollow"
+                                    markerWidth="5"
+                                    markerHeight="5"
+                                    refX="4.2"
+                                    refY="2.5"
+                                    orient="auto"
+                                    markerUnits="strokeWidth"
+                                >
+                                    <path d="M0.5,0.5 L4.2,2.5 L0.5,4.5 z" class="graph-arrow-head hollow"></path>
+                                </marker>
                             </defs>
                             <For each={move || current_topology_graph().edges.clone()} key=move |edge| {
-                                let graph = current_topology_graph();
                                 (
                                     edge.source.clone(),
                                     edge.target.clone(),
                                     edge.kind,
-                                    edge.path(&graph),
+                                    edge.path(),
                                 )
                             } children={move |edge| {
-                                let path = edge.path(&current_topology_graph());
+                                let path = edge.path();
                                 let source = edge.source.clone();
                                 let target = edge.target.clone();
                                 let kind = edge.kind;
                                 let kind_label = kind.as_ref().to_string();
                                 let class = format!("graph-edge {}", kind.css_class());
+                                let emphasis_edge = edge.clone();
+                                let hover_source = source.clone();
+                                let hover_target = target.clone();
                                 let messages_source = source.clone();
                                 let messages_target = target.clone();
                                 let bytes_source = source.clone();
@@ -2967,8 +3033,36 @@ fn GraphPanel(
                                 let bytes_total_target = target.clone();
                                 let batches_total_source = source.clone();
                                 let batches_total_target = target.clone();
+                                let flowing_source = source.clone();
+                                let flowing_target = target.clone();
+                                let route_summary = edge.route_summary();
                                 view! {
-                                    <g class="graph-edge-group">
+                                    <g
+                                        class="graph-edge-group"
+                                        // A pulse only travels an edge that is actually carrying
+                                        // records, so a stopped domain draws a still graph.
+                                        class:flowing=move || {
+                                            visible_graph().is_some_and(|graph| {
+                                                graph
+                                                    .edge_statistics(&flowing_source, &flowing_target, kind)
+                                                    .has_edge_activity()
+                                            })
+                                        }
+                                        class:emphasis=move || {
+                                            graph_hover
+                                                .get()
+                                                .is_some_and(|hover| hover.emphasises_edge(&emphasis_edge))
+                                        }
+                                        on:mouseenter=move |_| {
+                                            graph_hover.set(Some(GraphHover::Edge(
+                                                hover_source.clone(),
+                                                hover_target.clone(),
+                                                kind,
+                                            )));
+                                        }
+                                        on:mouseleave=move |_| graph_hover.set(None)
+                                    >
+                                        <title>{route_summary}</title>
                                         <path
                                             class="graph-edge-hit"
                                             data-kind=kind_label.clone()
@@ -2982,6 +3076,9 @@ fn GraphPanel(
                                             data-kind=kind_label
                                             data-source=source
                                             data-target=target
+                                            data-feedback=edge.feedback_data()
+                                            data-input-side=edge.input_side_data()
+                                            data-routes=edge.routes.to_string()
                                             data-messages-per-second=move || {
                                                 current_graph()
                                                     .edge_statistics(&messages_source, &messages_target, kind)
@@ -3019,7 +3116,7 @@ fn GraphPanel(
                                                     .to_string()
                                             }
                                             d=path.clone()
-                                            marker-end="url(#graph-arrow)"
+                                            marker-end=edge.marker()
                                         />
                                         <circle class="graph-pulse" r="3.2">
                                             <animateMotion
@@ -3033,7 +3130,7 @@ fn GraphPanel(
                             }} />
                         </svg>
                         <div class="graph-branch-label-layer">
-                            <For each={move || current_graph().branching_groups()} key=|group| (group.id.clone(), group.active_branches) children={move |group| {
+                            <For each={move || current_graph().groups.clone()} key=|group| (group.branch.clone(), group.active_branches) children={move |group| {
                                 view! {
                                     <BranchHeader group=group selected_branch_group=selected_branch_group />
                                 }
@@ -3043,8 +3140,7 @@ fn GraphPanel(
                             <For each={move || current_graph().relays.clone()} key=|relay| {
                                 (
                                     relay.id.clone(),
-                                    relay.x,
-                                    relay.y,
+                                    relay.rect_key(),
                                     relay.label.clone(),
                                     relay.statistics.relay_buffer_capacity,
                                     relay.statistics.relay_buffer_len_p50.map(f64::to_bits),
@@ -3061,6 +3157,9 @@ fn GraphPanel(
                             let buffer_p99 = relay.buffer_p99_data();
                             let relay_search_class = relay.clone();
                             let relay_search_data = relay.clone();
+                            let relay_dimmed = relay.clone();
+                            let relay_emphasis = relay.id.clone();
+                            let hover_id = relay.id.clone();
                             view! {
                                 <button
                                     type="button"
@@ -3069,18 +3168,35 @@ fn GraphPanel(
                                         active_graph_search()
                                             .is_some_and(|query| relay_search_class.matches_search(&query))
                                     }
+                                    class:emphasis=move || {
+                                        graph_hover
+                                            .get()
+                                            .is_some_and(|hover| hover.emphasises_item(&relay_emphasis))
+                                    }
                                     style=relay.hit_style()
                                     title=relay_title
+                                    data-item-id=relay.id.clone()
                                     data-label=relay.label.clone()
+                                    data-kind="RELAY"
+                                    data-role="RELAY"
+                                    data-status="OK"
+                                    data-relay="true"
                                     data-search-highlight=move || {
                                         active_graph_search()
                                             .is_some_and(|query| relay_search_data.matches_search(&query))
+                                            .to_string()
+                                    }
+                                    data-search-dimmed=move || {
+                                        active_graph_search()
+                                            .is_some_and(|query| !relay_dimmed.matches_search(&query))
                                             .to_string()
                                     }
                                     data-buffer-capacity=buffer_capacity
                                     data-buffer-p50=buffer_p50
                                     data-buffer-p90=buffer_p90
                                     data-buffer-p99=buffer_p99
+                                    on:mouseenter=move |_| graph_hover.set(Some(GraphHover::Item(hover_id.clone())))
+                                    on:mouseleave=move |_| graph_hover.set(None)
                                     on:click=move |_| {
                                         if !graph_moved.get() {
                                             selected_action_target.set(Some(GraphActionTarget::relay(click_relay.clone())));
@@ -3114,13 +3230,11 @@ fn GraphPanel(
                                 let title = edge.metric_summary();
                                 let source = edge.source.clone();
                                 let target = edge.target.clone();
-                                let style = current_topology_graph()
-                                    .edge_metric_style(&source, &target, edge.kind)
-                                    .unwrap_or_else(|| {
-                                        graph_position_style(edge.x1, edge.y1, 68, 16)
-                                    });
+                                let kind_label = edge.kind.as_ref().to_string();
+                                let style = edge.metric_style();
                                 let messages_rate = edge.statistics.messages_rate();
-                                let has_activity = edge.statistics.has_edge_activity();
+                                let has_activity = edge.statistics.has_edge_activity() && style.is_some();
+                                let style = style.unwrap_or_default();
                                 let messages_per_second = edge.statistics.messages_per_second.to_string();
                                 let bytes_per_second = edge.statistics.bytes_per_second.to_string();
                                 let batches_per_second = edge.statistics.batches_per_second.to_string();
@@ -3135,6 +3249,7 @@ fn GraphPanel(
                                             title=title.clone()
                                             data-source=source.clone()
                                             data-target=target.clone()
+                                            data-kind=kind_label.clone()
                                             data-messages-per-second=messages_per_second.clone()
                                             data-bytes-per-second=bytes_per_second.clone()
                                             data-batches-per-second=batches_per_second.clone()
@@ -3150,10 +3265,9 @@ fn GraphPanel(
                             <For each={move || current_graph().nodes.clone()} key=|node| {
                                 (
                                     node.id.clone(),
-                                    node.x,
-                                    node.y,
+                                    node.rect_key(),
                                     node.label.clone(),
-                                    node.subtype.clone(),
+                                    node.detail_label().to_string(),
                                     node.status,
                                     node.status_detail.clone(),
                                     node.reconnect_wait_millis,
@@ -3161,11 +3275,15 @@ fn GraphPanel(
                             } children={move |node| {
                             let class_node = node.clone();
                             let click_node = node.clone();
-                            let subtype = node.subtype.clone();
+                            let detail = node.detail_label().to_string();
+                            let detail_caption = detail.clone();
                             let label = node.label.clone();
                             let branch_summary = node.branch_summary();
                             let node_search_class = node.clone();
                             let node_search_data = node.clone();
+                            let node_dimmed = node.clone();
+                            let node_emphasis = node.id.clone();
+                            let hover_id = node.id.clone();
                             view! {
                                 <button
                                     type="button"
@@ -3174,17 +3292,32 @@ fn GraphPanel(
                                         active_graph_search()
                                             .is_some_and(|query| node_search_class.matches_search(&query))
                                     }
+                                    class:emphasis=move || {
+                                        graph_hover
+                                            .get()
+                                            .is_some_and(|hover| hover.emphasises_item(&node_emphasis))
+                                    }
                                     style=node.hit_style()
                                     title=branch_summary
+                                    data-item-id=node.id.clone()
                                     data-status=node.status_label()
                                     data-label=node.label.clone()
+                                    data-kind=node.kind_label()
+                                    data-role=detail
                                     data-search-highlight=move || {
                                         active_graph_search()
                                             .is_some_and(|query| node_search_data.matches_search(&query))
                                             .to_string()
                                     }
+                                    data-search-dimmed=move || {
+                                        active_graph_search()
+                                            .is_some_and(|query| !node_dimmed.matches_search(&query))
+                                            .to_string()
+                                    }
                                     data-status-detail=node.status_detail.clone().unwrap_or_default()
                                     data-reconnect-wait-ms=node.reconnect_wait_millis.map(|value| value.to_string()).unwrap_or_default()
+                                    on:mouseenter=move |_| graph_hover.set(Some(GraphHover::Item(hover_id.clone())))
+                                    on:mouseleave=move |_| graph_hover.set(None)
                                     on:click=move |_| {
                                         if !graph_moved.get() {
                                             selected_action_target.set(Some(GraphActionTarget::node(&click_node)));
@@ -3192,7 +3325,7 @@ fn GraphPanel(
                                     }
                                 >
                                     <span class="node-accent"></span>
-                                    <span class="node-hit-type">{subtype}</span>
+                                    <span class="node-hit-type">{detail_caption}</span>
                                     <span class="node-status"></span>
                                     <ReconnectTimer wait_millis=node.reconnect_wait_millis />
                                     <span class="node-hit-name">{label}</span>
@@ -3356,6 +3489,8 @@ fn GraphPanel(
                 <span><i class="ingestor"></i>"Ingestor"</span>
                 <span><i class="processor"></i>"Processor"</span>
                 <span><i class="emitter"></i>"Emitter"</span>
+                <span><i class="relay"></i>"Relay"</span>
+                <span><i class="client"></i>"Client"</span>
                 <em>"click graph item → actions"</em>
             </div>
         </section>
@@ -3412,21 +3547,27 @@ fn BranchHeader(
     group: GraphBranchGroup,
     selected_branch_group: RwSignal<Option<String>>,
 ) -> impl IntoView {
-    let group_id = group.id.clone();
-    let schema = group.schema.clone();
+    if group.header.is_none() {
+        return ().into_any();
+    }
+    let branch = group.branch.clone();
+    let title = group.branch.clone();
     let subtitle = group.subtitle();
     view! {
         <button
             type="button"
-            class="graph-branch-header"
-            style=group.label_style()
+            class="graph-branch-label"
+            style=group.header_style()
+            data-branch=group.branch.clone()
+            data-active-branches=group.active_branches.to_string()
             on:mousedown=move |event: ev::MouseEvent| event.stop_propagation()
-            on:click=move |_| selected_branch_group.set(Some(group_id.clone()))
+            on:click=move |_| selected_branch_group.set(Some(branch.clone()))
         >
-            <strong>{schema}</strong>
+            <strong>{title}</strong>
             <span>{subtitle}</span>
         </button>
     }
+    .into_any()
 }
 
 #[component]
@@ -3435,11 +3576,11 @@ fn BranchDetailsDialog(
     selected_branch_group: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let selected_group = move || {
-        let selected_id = selected_branch_group.get()?;
+        let selected = selected_branch_group.get()?;
         domain()
-            .branching_groups()
+            .groups
             .into_iter()
-            .find(|group| group.id == selected_id)
+            .find(|group| group.branch == selected)
     };
     view! {
         <div
@@ -3453,17 +3594,17 @@ fn BranchDetailsDialog(
                 <header class="subscribe-head">
                     <span class="live-dot"></span>
                     <span>"BRANCH"</span>
-                    <strong>{move || selected_group().map(|group| group.schema).unwrap_or_default()}</strong>
+                    <strong>{move || selected_group().map(|group| group.branch).unwrap_or_default()}</strong>
                 </header>
                 <div class="subscribe-block">
                     <p>"BRANCH KEY"</p>
                     <div class="schema-row">
                         <span>"schema"</span>
-                        <em>{move || selected_group().map(|group| group.schema).unwrap_or_default()}</em>
+                        <em>{move || selected_group().map(|group| group.key_schema).unwrap_or_default()}</em>
                     </div>
                     <For
                         each=move || selected_group()
-                            .map(|group| group.key_fields())
+                            .map(|group| group.key_fields)
                             .unwrap_or_default()
                         key=|field| field.clone()
                         children=|field| {
@@ -3490,138 +3631,6 @@ fn BranchDetailsDialog(
                 </footer>
             </section>
         </div>
-    }
-}
-
-#[component]
-fn CharmingGraph(domain: impl Fn() -> GraphView + Copy + Send + 'static) -> impl IntoView {
-    Effect::new(move || {
-        let chart = build_graph_chart(domain());
-        increment_charming_graph_render_count();
-        if let Err(error) =
-            WasmRenderer::new_opt(None, None).render("execution-graph-chart", &chart)
-        {
-            leptos::logging::error!("failed to render execution graph: {error}");
-        }
-    });
-
-    view! {
-        <div
-            id="execution-graph-chart"
-            class="charming-graph"
-            role="img"
-            aria-label="Execution graph preview"
-            data-render-count="0"
-        ></div>
-    }
-}
-
-fn increment_charming_graph_render_count() {
-    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-        return;
-    };
-    let Some(element) = document.get_element_by_id("execution-graph-chart") else {
-        return;
-    };
-    let next_count = element
-        .get_attribute("data-render-count")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or_default()
-        .saturating_add(1);
-    if let Err(error) = element.set_attribute("data-render-count", &next_count.to_string()) {
-        leptos::logging::error!("failed to update execution graph render count: {error:?}");
-    }
-}
-
-fn build_graph_chart(domain: GraphView) -> Chart {
-    let width = f64::from(domain.canvas_width());
-    let height = f64::from(domain.canvas_height());
-    let mut nodes = vec![
-        chart_anchor("__viewport_min", 0.0, 0.0),
-        chart_anchor("__viewport_max", width, height),
-    ];
-    nodes.extend(domain.nodes.iter().map(GraphViewNode::chart_node));
-    nodes.extend(domain.relays.iter().map(GraphViewRelay::chart_node));
-
-    let links = domain
-        .edges
-        .iter()
-        .map(|edge| CharmingGraphLink {
-            source: edge.source.to_string(),
-            target: edge.target.to_string(),
-            value: Some(1.0),
-        })
-        .collect::<Vec<_>>();
-
-    Chart::new()
-        .animation(true)
-        .animation_duration(650)
-        .animation_easing(Easing::CubicOut)
-        .animation_duration_update(450)
-        .color(vec![
-            Color::Value("#06b6d4".to_string()),
-            Color::Value("#885cf6".to_string()),
-            Color::Value("#f97316".to_string()),
-            Color::Value("#38bdf8".to_string()),
-        ])
-        .background_color(Color::Value("transparent".to_string()))
-        .series(
-            CharmingGraphSeries::new()
-                .name(domain.id)
-                .layout(GraphLayout::None)
-                .roam(false)
-                .edge_symbol(Some(("none".to_string(), "arrow".to_string())))
-                .label(
-                    Label::new()
-                        .show(false)
-                        .color(Color::Value("#c5cef0".to_string()))
-                        .font_size(10.0)
-                        .position(LabelPosition::Bottom),
-                )
-                .line_style(
-                    LineStyle::new()
-                        .color(Color::Value("rgba(6, 182, 212, 0)".to_string()))
-                        .width(0.0)
-                        .opacity(0.0)
-                        .curveness(0.18),
-                )
-                .data(GraphData {
-                    nodes,
-                    links,
-                    categories: vec![
-                        GraphCategory {
-                            name: "Client".to_string(),
-                        },
-                        GraphCategory {
-                            name: "Ingestor".to_string(),
-                        },
-                        GraphCategory {
-                            name: "Processor".to_string(),
-                        },
-                        GraphCategory {
-                            name: "Emitter".to_string(),
-                        },
-                        GraphCategory {
-                            name: "Relay".to_string(),
-                        },
-                        GraphCategory {
-                            name: "Viewport".to_string(),
-                        },
-                    ],
-                }),
-        )
-}
-
-fn chart_anchor(id: &str, x: f64, y: f64) -> CharmingGraphNode {
-    CharmingGraphNode {
-        id: id.to_string(),
-        name: String::new(),
-        x,
-        y,
-        value: 0.0,
-        category: 5,
-        symbol_size: 0.0,
-        label: Some(GraphNodeLabel::new().show(false)),
     }
 }
 
@@ -3975,81 +3984,92 @@ struct ThemeView {
 #[derive(Clone)]
 struct GraphView {
     id: String,
-    mode: String,
-    status: String,
-    uptime: String,
     statistics: GraphStatistics,
     nodes: Vec<GraphViewNode>,
     relays: Vec<GraphViewRelay>,
     edges: Vec<GraphViewEdge>,
+    groups: Vec<GraphBranchGroup>,
+    width: i32,
+    height: i32,
 }
 
 impl GraphView {
     fn from_dataflow_graph(graph: DataflowGraph) -> Self {
+        let layout = Layout::build(
+            &graph
+                .nodes
+                .iter()
+                .map(graph_layout_item)
+                .collect::<Vec<_>>(),
+            &graph
+                .edges
+                .iter()
+                .map(graph_layout_edge)
+                .collect::<Vec<_>>(),
+        );
+
         let mut nodes = Vec::new();
         let mut relays = Vec::new();
         for node in graph.nodes {
-            match node.kind {
-                DataflowNodeKind::Relay => relays.push(GraphViewRelay {
+            let rect = layout.items.get(&node.id).copied().unwrap_or_default();
+            let branches = node
+                .branches
+                .into_iter()
+                .map(|branch| GraphBranchStatistics {
+                    branch: branch.branch,
+                    statistics: GraphStatistics::from(branch.statistics),
+                })
+                .collect();
+            if node.role.is_relay() {
+                relays.push(GraphViewRelay {
                     id: node.id,
                     label: node.label,
-                    x: node.x + GRAPH_NODE_CENTER_X,
-                    y: node.y + GRAPH_NODE_CENTER_Y,
+                    rect,
                     schema: node.schema,
                     schema_fields: node
                         .schema_fields
                         .into_iter()
                         .map(GraphSchemaField::from)
                         .collect(),
-                    branching_schema: node.branching_schema,
+                    branch: node.branch,
                     statistics: GraphStatistics::from(node.statistics),
-                    branches: node
-                        .branches
-                        .into_iter()
-                        .map(|branch| GraphBranchStatistics {
-                            branch: branch.branch,
-                            statistics: GraphStatistics::from(branch.statistics),
-                        })
-                        .collect(),
-                }),
-                kind => nodes.push(GraphViewNode {
+                    branches,
+                });
+            } else {
+                nodes.push(GraphViewNode {
                     id: node.id,
                     label: node.label,
-                    kind: NodeKind::from_dataflow_kind(kind),
-                    subtype: node.subtype,
+                    kind: NodeKind::from_dataflow_kind(node.role.kind()),
+                    role: node.role,
                     status: node.status,
                     status_detail: node.status_detail,
                     reconnect_wait_millis: node.reconnect_wait_millis,
-                    x: node.x,
-                    y: node.y,
-                    branching_schema: node.branching_schema,
-                    branches: node
-                        .branches
-                        .into_iter()
-                        .map(|branch| GraphBranchStatistics {
-                            branch: branch.branch,
-                            statistics: GraphStatistics::from(branch.statistics),
-                        })
-                        .collect(),
-                }),
+                    rect,
+                    branch: node.branch,
+                    branches,
+                });
             }
         }
 
-        Self {
-            id: graph.domain,
-            mode: "LIVE".to_string(),
-            status: "RUNNING".to_string(),
-            uptime: String::new(),
-            statistics: GraphStatistics::from(graph.statistics),
-            nodes,
-            relays,
-            edges: graph
-                .edges
-                .into_iter()
-                .map(|edge| GraphViewEdge {
+        let routes = layout
+            .edges
+            .iter()
+            .map(|edge| ((edge.source.as_str(), edge.target.as_str()), edge))
+            .collect::<BTreeMap<_, _>>();
+        let edges = graph
+            .edges
+            .into_iter()
+            .map(|edge| {
+                let route = routes.get(&(edge.source.as_str(), edge.target.as_str()));
+                GraphViewEdge {
+                    points: route.map(|route| route.points.clone()).unwrap_or_default(),
+                    badge: route.and_then(|route| route.badge),
+                    feedback: route.is_some_and(|route| route.feedback),
                     source: edge.source,
                     target: edge.target,
                     kind: edge.kind,
+                    input_side: edge.input_side,
+                    routes: edge.routes,
                     statistics: GraphStatistics::from(edge.statistics),
                     branches: edge
                         .branches
@@ -4059,12 +4079,25 @@ impl GraphView {
                             statistics: GraphStatistics::from(branch.statistics),
                         })
                         .collect(),
-                    x1: 0,
-                    y1: 0,
-                    x2: 0,
-                    y2: 0,
-                })
-                .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let groups = layout
+            .groups
+            .iter()
+            .map(|region| GraphBranchGroup::new(region, &nodes, &relays, &edges))
+            .collect();
+
+        Self {
+            id: graph.domain,
+            statistics: GraphStatistics::from(graph.statistics),
+            nodes,
+            relays,
+            edges,
+            groups,
+            width: layout.width,
+            height: layout.height,
         }
     }
 
@@ -4094,18 +4127,6 @@ impl GraphView {
             .unwrap_or_default()
     }
 
-    fn edge_metric_style(
-        &self,
-        source: &str,
-        target: &str,
-        kind: DataflowEdgeKind,
-    ) -> Option<String> {
-        self.edges
-            .iter()
-            .find(|edge| edge.source == source && edge.target == target && edge.kind == kind)
-            .map(|edge| edge.metric_style(self))
-    }
-
     fn edge_focus_bounds(
         &self,
         source: &str,
@@ -4116,65 +4137,29 @@ impl GraphView {
             .edges
             .iter()
             .find(|edge| edge.source == source && edge.target == target && edge.kind == kind)?;
-        let ((x1, y1), (x2, y2)) = edge.endpoints(self);
-        let mut bounds = self
-            .graph_item_bounds(&edge.source)
-            .unwrap_or_else(|| GraphBounds::from_point(x1, y1));
-        bounds.include_bounds(
-            self.graph_item_bounds(&edge.target)
-                .unwrap_or_else(|| GraphBounds::from_point(x2, y2)),
-        );
-        let start = GraphRoutePoint::new(x1, y1);
-        let end = GraphRoutePoint::new(x2, y2);
-        let obstacles = self.edge_obstacles(&edge.source, &edge.target);
-        let preferred_lane = self.edge_preferred_lane(edge);
-        if should_route_with_direct_curve(preferred_lane, start, end)
-            && let Some(curve) = direct_curve(start, end, &obstacles)
-        {
-            for index in 0..=12 {
-                let (x, y) = curve_point(curve, f64::from(index) / 12.0);
-                bounds.include_point(x, y);
-            }
-        } else {
-            for point in edge.route_points_with_lane(self, preferred_lane) {
-                bounds.include_point(f64::from(point.x), f64::from(point.y));
+        let mut bounds = None::<GraphBounds>;
+        for id in [edge.source.as_str(), edge.target.as_str()] {
+            if let Some(item) = self.item_bounds(id) {
+                include(&mut bounds, item);
             }
         }
-        Some(bounds)
+        for point in &edge.points {
+            include(&mut bounds, GraphBounds::from_point(point.0, point.1));
+        }
+        bounds
     }
 
     fn search_result_bounds(&self, query: &str) -> Option<GraphBounds> {
         let mut bounds = None::<GraphBounds>;
         for node in self.nodes.iter().filter(|node| node.matches_search(query)) {
-            let node_bounds = GraphBounds::from_rect(
-                node.x,
-                node.y,
-                node.x + GRAPH_NODE_WIDTH,
-                node.y + GRAPH_NODE_HEIGHT,
-            );
-            if let Some(bounds) = &mut bounds {
-                bounds.include_bounds(node_bounds);
-            } else {
-                bounds = Some(node_bounds);
-            }
+            include(&mut bounds, GraphBounds::from_rect(node.rect));
         }
         for relay in self
             .relays
             .iter()
             .filter(|relay| relay.matches_search(query))
         {
-            let width = relay.width();
-            let relay_bounds = GraphBounds::from_rect(
-                relay.x - width / 2,
-                relay.y - 10,
-                relay.x + width / 2,
-                relay.y + 10,
-            );
-            if let Some(bounds) = &mut bounds {
-                bounds.include_bounds(relay_bounds);
-            } else {
-                bounds = Some(relay_bounds);
-            }
+            include(&mut bounds, GraphBounds::from_rect(relay.rect));
         }
         bounds
     }
@@ -4191,36 +4176,31 @@ impl GraphView {
                 .count()
     }
 
-    fn graph_item_bounds(&self, id: &str) -> Option<GraphBounds> {
+    /// The whole drawing, used to frame the graph on load and when the fit control is pressed.
+    fn canvas_bounds(&self) -> GraphBounds {
+        GraphBounds::from_rect(Rect {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        })
+    }
+
+    fn item_bounds(&self, id: &str) -> Option<GraphBounds> {
         if let Some(node) = self
             .nodes
             .iter()
-            .find(|node| Self::graph_item_matches(&node.id, &node.label, id))
+            .find(|node| Self::item_matches(&node.id, &node.label, id))
         {
-            return Some(GraphBounds::from_rect(
-                node.x,
-                node.y,
-                node.x + GRAPH_NODE_WIDTH,
-                node.y + GRAPH_NODE_HEIGHT,
-            ));
+            return Some(GraphBounds::from_rect(node.rect));
         }
-        if let Some(relay) = self
-            .relays
+        self.relays
             .iter()
-            .find(|relay| Self::graph_item_matches(&relay.id, &relay.label, id))
-        {
-            let width = relay.width();
-            return Some(GraphBounds::from_rect(
-                relay.x - width / 2,
-                relay.y - 10,
-                relay.x + width / 2,
-                relay.y + 10,
-            ));
-        }
-        None
+            .find(|relay| Self::item_matches(&relay.id, &relay.label, id))
+            .map(|relay| GraphBounds::from_rect(relay.rect))
     }
 
-    fn graph_item_matches(candidate_id: &str, candidate_label: &str, requested: &str) -> bool {
+    fn item_matches(candidate_id: &str, candidate_label: &str, requested: &str) -> bool {
         if candidate_id == requested || candidate_label == requested {
             return true;
         }
@@ -4232,214 +4212,24 @@ impl GraphView {
         false
     }
 
-    fn graph_endpoint(&self, id: &str, side: EndpointSide) -> Option<(i32, i32)> {
-        if let Some(node) = self.nodes.iter().find(|node| node.id == id) {
-            let y = node.y + GRAPH_NODE_CENTER_Y;
-            return Some(match side {
-                EndpointSide::Outgoing => (node.x + GRAPH_NODE_WIDTH, y),
-                EndpointSide::Incoming => (node.x, y),
-            });
-        }
-        if let Some(relay) = self.relays.iter().find(|relay| relay.id == id) {
-            let half_width = relay.width() / 2;
-            return Some(match side {
-                EndpointSide::Outgoing => (relay.x + half_width, relay.y),
-                EndpointSide::Incoming => (relay.x - half_width, relay.y),
-            });
-        }
-        None
+    const fn canvas_width(&self) -> i32 {
+        self.width
     }
 
-    fn edge_obstacles(&self, source: &str, target: &str) -> Vec<GraphRouteRect> {
-        let mut obstacles = self
-            .nodes
-            .iter()
-            .filter(|node| node.id != source && node.id != target)
-            .map(GraphRouteRect::from_node)
-            .chain(
-                self.relays
-                    .iter()
-                    .filter(|relay| relay.id != source && relay.id != target)
-                    .map(GraphRouteRect::from_relay),
-            )
-            .collect::<Vec<_>>();
-        obstacles.extend(
-            self.branching_groups()
-                .into_iter()
-                .filter(|group| group.is_obstacle_for_edge(source, target))
-                .map(|group| GraphRouteRect::from_branch_group(&group)),
-        );
-        obstacles
-    }
-
-    fn edge_preferred_lane(&self, edge: &GraphViewEdge) -> Option<i32> {
-        let candidate = GraphEdgeLaneCandidate::from_edge(self, edge)?;
-        let mut peers = self
-            .edges
-            .iter()
-            .filter_map(|peer| GraphEdgeLaneCandidate::from_edge(self, peer))
-            .filter(|peer| peer.overlaps_lane_group(candidate))
-            .collect::<Vec<_>>();
-        if peers.len() <= 1 {
-            return None;
-        }
-        peers.sort_by(|left, right| {
-            left.base_y
-                .cmp(&right.base_y)
-                .then_with(|| left.source.cmp(right.source))
-                .then_with(|| left.target.cmp(right.target))
-                .then_with(|| left.kind.cmp(&right.kind))
-        });
-        let index = peers
-            .iter()
-            .position(|peer| peer.same_edge(candidate))
-            .expect("candidate edge should be present in its peer group");
-        let center_offset = (peers.len().saturating_sub(1) as i32 * GRAPH_EDGE_LANE_SPACING) / 2;
-        let lane = candidate.base_y + index as i32 * GRAPH_EDGE_LANE_SPACING - center_offset;
-        Some(lane.clamp(12, self.canvas_height().saturating_sub(12)))
-    }
-
-    fn canvas_width(&self) -> i32 {
-        let node_right = self
-            .nodes
-            .iter()
-            .map(|node| node.x + GRAPH_NODE_WIDTH)
-            .max();
-        let relay_right = self
-            .relays
-            .iter()
-            .map(|relay| relay.x + relay.width() / 2)
-            .max();
-        node_right
-            .into_iter()
-            .chain(relay_right)
-            .max()
-            .unwrap_or(GRAPH_MIN_WIDTH - 48)
-            .saturating_add(48)
-            .max(GRAPH_MIN_WIDTH)
-    }
-
-    fn canvas_height(&self) -> i32 {
-        let node_bottom = self
-            .nodes
-            .iter()
-            .map(|node| node.y + GRAPH_NODE_HEIGHT)
-            .max();
-        let relay_bottom = self.relays.iter().map(|relay| relay.y + 11).max();
-        node_bottom
-            .into_iter()
-            .chain(relay_bottom)
-            .max()
-            .unwrap_or(GRAPH_MIN_HEIGHT - 32)
-            .saturating_add(32)
-            .max(GRAPH_MIN_HEIGHT)
-    }
-
-    fn branching_groups(&self) -> Vec<GraphBranchGroup> {
-        let mut adjacency = BTreeMap::<&str, Vec<&str>>::new();
-        for edge in &self.edges {
-            adjacency
-                .entry(edge.source.as_str())
-                .or_default()
-                .push(edge.target.as_str());
-        }
-
-        let node_by_id = self
-            .nodes
-            .iter()
-            .map(|node| (node.id.as_str(), node))
-            .collect::<BTreeMap<_, _>>();
-        let relay_by_id = self
-            .relays
-            .iter()
-            .map(|relay| (relay.id.as_str(), relay))
-            .collect::<BTreeMap<_, _>>();
-        let mut candidates = Vec::<GraphBranchGroupCandidate>::new();
-        for start in self.nodes.iter().filter(|node| node.starts_branch_group()) {
-            let start_relays = adjacency
-                .get(start.id.as_str())
-                .into_iter()
-                .flatten()
-                .filter_map(|id| relay_by_id.get(id).copied())
-                .filter_map(|relay| {
-                    relay
-                        .branching_schema
-                        .as_ref()
-                        .map(|schema| (relay, schema))
-                });
-            for (start_relay, schema) in start_relays {
-                let mut members = BTreeSet::<String>::new();
-                let mut finalizers = Vec::<GraphAnchor>::new();
-                let mut metric_node_ids = BTreeSet::<String>::from([start.id.clone()]);
-                let mut boundary_nodes = BTreeSet::<String>::from([start.id.clone()]);
-                let mut visited = BTreeSet::<String>::new();
-                let mut pending = VecDeque::from([start_relay.id.as_str()]);
-                while let Some(id) = pending.pop_front() {
-                    if !visited.insert(id.to_string()) {
-                        continue;
-                    }
-                    if let Some(relay) = relay_by_id.get(id) {
-                        if relay.branching_schema.as_ref() != Some(schema) {
-                            continue;
-                        }
-                        metric_node_ids.insert(relay.id.clone());
-                        members.insert(relay.id.clone());
-                        pending.extend(adjacency.get(id).into_iter().flatten().copied());
-                        continue;
-                    }
-                    let Some(node) = node_by_id.get(id) else {
-                        continue;
-                    };
-                    if node.ends_branch_group() {
-                        boundary_nodes.insert(node.id.clone());
-                        finalizers.push(GraphAnchor::incoming_node(node));
-                        continue;
-                    }
-                    metric_node_ids.insert(node.id.clone());
-                    members.insert(node.id.clone());
-                    pending.extend(adjacency.get(id).into_iter().flatten().copied());
-                }
-                candidates.push(GraphBranchGroupCandidate {
-                    schema: schema.clone(),
-                    start_id: start.id.clone(),
-                    members,
-                    metric_node_ids,
-                    boundary_nodes,
-                    initiator: GraphAnchor::outgoing_node(start),
-                    finalizers,
-                });
-            }
-        }
-        GraphBranchGroupCandidate::merge(candidates)
-            .into_iter()
-            .filter_map(|candidate| GraphBranchGroup::from_candidate(&candidate, self))
-            .collect()
-    }
-
-    fn active_branch_count(&self, node_ids: &BTreeSet<String>) -> usize {
-        self.nodes
-            .iter()
-            .filter(|node| node_ids.contains(&node.id))
-            .flat_map(|node| node.branches.iter().map(|branch| branch.branch.clone()))
-            .chain(
-                self.relays
-                    .iter()
-                    .filter(|relay| node_ids.contains(&relay.id))
-                    .flat_map(|relay| relay.branches.iter().map(|branch| branch.branch.clone())),
-            )
-            .chain(
-                self.edges
-                    .iter()
-                    .filter(|edge| {
-                        node_ids.contains(&edge.source) || node_ids.contains(&edge.target)
-                    })
-                    .flat_map(|edge| edge.branches.iter().map(|branch| branch.branch.clone())),
-            )
-            .collect::<BTreeSet<_>>()
-            .len()
+    const fn canvas_height(&self) -> i32 {
+        self.height
     }
 }
 
+fn include(bounds: &mut Option<GraphBounds>, next: GraphBounds) {
+    match bounds {
+        Some(bounds) => bounds.include_bounds(next),
+        None => *bounds = Some(next),
+    }
+}
+
+/// Everything the drawing is derived from. Geometry is a pure function of topology, so it is
+/// deliberately absent here: a graph that moves without changing shape is the same topology.
 #[derive(Clone, PartialEq, Eq)]
 struct GraphTopologyKey {
     id: String,
@@ -4452,11 +4242,8 @@ struct GraphTopologyKey {
 struct GraphNodeTopologyKey {
     id: String,
     label: String,
-    kind: NodeKind,
-    subtype: String,
-    x: i32,
-    y: i32,
-    branching_schema: Option<String>,
+    role: DataflowNodeRole,
+    branch: Option<GraphBranchTopologyKey>,
 }
 
 impl From<&GraphViewNode> for GraphNodeTopologyKey {
@@ -4464,11 +4251,8 @@ impl From<&GraphViewNode> for GraphNodeTopologyKey {
         Self {
             id: node.id.clone(),
             label: node.label.clone(),
-            kind: node.kind,
-            subtype: node.subtype.clone(),
-            x: node.x,
-            y: node.y,
-            branching_schema: node.branching_schema.clone(),
+            role: node.role.clone(),
+            branch: node.branch.as_ref().map(GraphBranchTopologyKey::from),
         }
     }
 }
@@ -4477,11 +4261,9 @@ impl From<&GraphViewNode> for GraphNodeTopologyKey {
 struct GraphRelayTopologyKey {
     id: String,
     label: String,
-    x: i32,
-    y: i32,
     schema: Option<String>,
     schema_fields: Vec<GraphSchemaFieldTopologyKey>,
-    branching_schema: Option<String>,
+    branch: Option<GraphBranchTopologyKey>,
 }
 
 impl From<&GraphViewRelay> for GraphRelayTopologyKey {
@@ -4489,15 +4271,30 @@ impl From<&GraphViewRelay> for GraphRelayTopologyKey {
         Self {
             id: relay.id.clone(),
             label: relay.label.clone(),
-            x: relay.x,
-            y: relay.y,
             schema: relay.schema.clone(),
             schema_fields: relay
                 .schema_fields
                 .iter()
                 .map(GraphSchemaFieldTopologyKey::from)
                 .collect(),
-            branching_schema: relay.branching_schema.clone(),
+            branch: relay.branch.as_ref().map(GraphBranchTopologyKey::from),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GraphBranchTopologyKey {
+    name: String,
+    key_schema: String,
+    key_fields: Vec<String>,
+}
+
+impl From<&DataflowBranch> for GraphBranchTopologyKey {
+    fn from(branch: &DataflowBranch) -> Self {
+        Self {
+            name: branch.name.clone(),
+            key_schema: branch.key_schema.clone(),
+            key_fields: branch.key_fields.clone(),
         }
     }
 }
@@ -4526,6 +4323,8 @@ struct GraphEdgeTopologyKey {
     source: String,
     target: String,
     kind: DataflowEdgeKind,
+    input_side: Option<DataflowInputSide>,
+    routes: u32,
 }
 
 impl From<&GraphViewEdge> for GraphEdgeTopologyKey {
@@ -4534,6 +4333,8 @@ impl From<&GraphViewEdge> for GraphEdgeTopologyKey {
             source: edge.source.clone(),
             target: edge.target.clone(),
             kind: edge.kind,
+            input_side: edge.input_side,
+            routes: edge.routes,
         }
     }
 }
@@ -4586,30 +4387,16 @@ struct GraphViewNode {
     id: String,
     label: String,
     kind: NodeKind,
-    subtype: String,
+    role: DataflowNodeRole,
     status: DataflowNodeStatus,
     status_detail: Option<String>,
     reconnect_wait_millis: Option<u64>,
-    x: i32,
-    y: i32,
-    branching_schema: Option<String>,
+    rect: Rect,
+    branch: Option<DataflowBranch>,
     branches: Vec<GraphBranchStatistics>,
 }
 
 impl GraphViewNode {
-    fn chart_node(&self) -> CharmingGraphNode {
-        CharmingGraphNode {
-            id: self.id.clone(),
-            name: self.label.clone(),
-            x: f64::from(self.x + GRAPH_NODE_CENTER_X),
-            y: f64::from(self.y + GRAPH_NODE_CENTER_Y),
-            value: 1.0,
-            category: self.kind.category_index(),
-            symbol_size: 0.0,
-            label: Some(GraphNodeLabel::new().show(false)),
-        }
-    }
-
     fn hit_class(&self) -> &'static str {
         match (self.kind, self.status) {
             (NodeKind::Client, DataflowNodeStatus::Ok) => "node-hit client status-ok",
@@ -4624,7 +4411,7 @@ impl GraphViewNode {
     }
 
     fn hit_style(&self) -> String {
-        graph_position_style(self.x, self.y, GRAPH_NODE_WIDTH, GRAPH_NODE_HEIGHT)
+        graph_position_style(self.rect)
     }
 
     fn matches_search(&self, query: &str) -> bool {
@@ -4641,34 +4428,47 @@ impl GraphViewNode {
         }
     }
 
-    fn starts_branch_group(&self) -> bool {
-        self.kind == NodeKind::Ingestor || self.is_reingestor()
+    fn kind_label(&self) -> String {
+        self.role.kind().as_ref().to_string()
     }
 
-    fn ends_branch_group(&self) -> bool {
-        self.kind == NodeKind::Emitter || self.is_reingestor()
+    /// The drawn rectangle as a keyable value, so a card is re-rendered exactly when it moves.
+    const fn rect_key(&self) -> (i32, i32, i32, i32) {
+        rect_key(self.rect)
     }
 
-    fn is_reingestor(&self) -> bool {
-        self.subtype.eq_ignore_ascii_case("reingestor")
+    /// The caption drawn on the card: the transport for a connector, the processor for a
+    /// processor.
+    fn detail_label(&self) -> &str {
+        self.role.detail_label()
+    }
+
+    /// The branch group this node is drawn inside. A node that constructs or collapses branches
+    /// stands on the group's border rather than within it, which is the same rule the layout
+    /// applies when it decides which items a group's bands contain.
+    fn group_branch(&self) -> Option<&str> {
+        self.branch
+            .as_ref()
+            .filter(|_| !self.role.constructs_branches() && !self.role.collapses_branches())
+            .map(|branch| branch.name.as_str())
     }
 
     fn command_kind(&self) -> &'static str {
-        match self.kind {
-            NodeKind::Client => "CLIENT",
-            NodeKind::Ingestor => "INGESTOR",
-            NodeKind::Emitter => "EMITTER",
-            NodeKind::Processor => match self.subtype.to_ascii_lowercase().as_str() {
-                "deduplicator" => "DEDUPLICATOR",
-                "correlator" => "CORRELATOR",
-                "generator" => "GENERATOR",
-                "inferencer" => "INFERENCER",
-                "reingestor" => "REINGESTOR",
-                "reorderer" => "REORDERER",
-                "junction" => "JUNCTION",
-                "wasm_processor" | "wasm processor" => "WASM PROCESSOR",
-                "window_processor" | "window processor" => "WINDOW PROCESSOR",
-                _ => "PROCESSOR",
+        match self.role.processor() {
+            Some(DataflowProcessorKind::Junction) => "JUNCTION",
+            Some(DataflowProcessorKind::Deduplicator) => "DEDUPLICATOR",
+            Some(DataflowProcessorKind::Correlator) => "CORRELATOR",
+            Some(DataflowProcessorKind::Reorderer) => "REORDERER",
+            Some(DataflowProcessorKind::WindowProcessor) => "WINDOW PROCESSOR",
+            Some(DataflowProcessorKind::WasmProcessor) => "WASM PROCESSOR",
+            Some(DataflowProcessorKind::Inferencer) => "INFERENCER",
+            Some(DataflowProcessorKind::Generator) => "GENERATOR",
+            Some(DataflowProcessorKind::Reingestor) => "REINGESTOR",
+            None => match self.kind {
+                NodeKind::Client => "CLIENT",
+                NodeKind::Ingestor => "INGESTOR",
+                NodeKind::Emitter => "EMITTER",
+                NodeKind::Processor => "PROCESSOR",
             },
         }
     }
@@ -4765,11 +4565,10 @@ impl From<DataflowStatistics> for GraphStatistics {
 struct GraphViewRelay {
     id: String,
     label: String,
-    x: i32,
-    y: i32,
+    rect: Rect,
     schema: Option<String>,
     schema_fields: Vec<GraphSchemaField>,
-    branching_schema: Option<String>,
+    branch: Option<DataflowBranch>,
     statistics: GraphStatistics,
     branches: Vec<GraphBranchStatistics>,
 }
@@ -4794,33 +4593,19 @@ impl From<DataflowSchemaField> for GraphSchemaField {
 }
 
 impl GraphViewRelay {
-    fn chart_node(&self) -> CharmingGraphNode {
-        CharmingGraphNode {
-            id: self.id.clone(),
-            name: self.label.clone(),
-            x: f64::from(self.x),
-            y: f64::from(self.y),
-            value: 1.0,
-            category: 3,
-            symbol_size: 0.0,
-            label: Some(GraphNodeLabel::new().show(false)),
-        }
+    const fn rect_key(&self) -> (i32, i32, i32, i32) {
+        rect_key(self.rect)
     }
 
     fn hit_style(&self) -> String {
-        let width = self.width();
         format!(
             "{} --relay-buffer-p50: {:.2}%; --relay-buffer-p90: {:.2}%; --relay-buffer-p99: \
              {:.2}%;",
-            graph_position_style(self.x - width / 2, self.y - 10, width, 20),
+            graph_position_style(self.rect),
             self.buffer_percent(self.statistics.relay_buffer_len_p50),
             self.buffer_percent(self.statistics.relay_buffer_len_p90),
             self.buffer_percent(self.statistics.relay_buffer_len_p99),
         )
-    }
-
-    fn width(&self) -> i32 {
-        (self.label.len() as i32 * 7 + 28).max(62)
     }
 
     fn matches_search(&self, query: &str) -> bool {
@@ -4828,6 +4613,10 @@ impl GraphViewRelay {
         query.chars().count() >= 2
             && (self.id.to_ascii_lowercase().contains(&query)
                 || self.label.to_ascii_lowercase().contains(&query))
+    }
+
+    fn group_branch(&self) -> Option<&str> {
+        self.branch.as_ref().map(|branch| branch.name.as_str())
     }
 
     fn buffer_summary(&self) -> String {
@@ -4876,307 +4665,100 @@ impl GraphViewRelay {
     }
 }
 
+/// A drawn branch group: the region the layout reserved for one branch, plus the branch identity
+/// and live branch count of the items inside it.
 #[derive(Clone)]
 struct GraphBranchGroup {
-    id: String,
-    schema: String,
-    members: BTreeSet<String>,
-    boundary_nodes: BTreeSet<String>,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
+    branch: String,
+    key_schema: String,
+    key_fields: Vec<String>,
+    outline: String,
+    header: Option<Rect>,
     active_branches: usize,
-    initiators: Vec<GraphAnchor>,
-    finalizers: Vec<GraphAnchor>,
-}
-
-struct GraphBranchGroupCandidate {
-    schema: String,
-    start_id: String,
-    members: BTreeSet<String>,
-    metric_node_ids: BTreeSet<String>,
-    boundary_nodes: BTreeSet<String>,
-    initiator: GraphAnchor,
-    finalizers: Vec<GraphAnchor>,
-}
-
-struct MergedGraphBranchGroupCandidate {
-    schema: String,
-    start_id: String,
-    members: BTreeSet<String>,
-    metric_node_ids: BTreeSet<String>,
-    boundary_nodes: BTreeSet<String>,
-    initiators: Vec<GraphAnchor>,
-    finalizers: Vec<GraphAnchor>,
-}
-
-impl GraphBranchGroupCandidate {
-    fn merge(candidates: Vec<GraphBranchGroupCandidate>) -> Vec<MergedGraphBranchGroupCandidate> {
-        let mut merged = Vec::<MergedGraphBranchGroupCandidate>::new();
-        for candidate in candidates {
-            let Some(entry) = merged.iter_mut().find(|entry| {
-                entry.schema == candidate.schema
-                    && entry
-                        .members
-                        .iter()
-                        .any(|member| candidate.members.contains(member))
-            }) else {
-                merged.push(MergedGraphBranchGroupCandidate {
-                    schema: candidate.schema,
-                    start_id: candidate.start_id,
-                    members: candidate.members,
-                    metric_node_ids: candidate.metric_node_ids,
-                    boundary_nodes: candidate.boundary_nodes,
-                    initiators: vec![candidate.initiator],
-                    finalizers: candidate.finalizers,
-                });
-                continue;
-            };
-            entry.members.extend(candidate.members);
-            entry.metric_node_ids.extend(candidate.metric_node_ids);
-            entry.boundary_nodes.extend(candidate.boundary_nodes);
-            entry.initiators.push(candidate.initiator);
-            entry.finalizers.extend(candidate.finalizers);
-        }
-        let mut index = 0;
-        while index < merged.len() {
-            let mut other = index + 1;
-            while other < merged.len() {
-                if merged[index].schema == merged[other].schema
-                    && merged[index]
-                        .members
-                        .iter()
-                        .any(|member| merged[other].members.contains(member))
-                {
-                    let removed = merged.remove(other);
-                    merged[index].members.extend(removed.members);
-                    merged[index]
-                        .metric_node_ids
-                        .extend(removed.metric_node_ids);
-                    merged[index].boundary_nodes.extend(removed.boundary_nodes);
-                    merged[index].initiators.extend(removed.initiators);
-                    merged[index].finalizers.extend(removed.finalizers);
-                } else {
-                    other += 1;
-                }
-            }
-            index += 1;
-        }
-        merged
-    }
 }
 
 impl GraphBranchGroup {
-    fn is_obstacle_for_edge(&self, source: &str, target: &str) -> bool {
-        let source_member = self.members.contains(source);
-        let target_member = self.members.contains(target);
-        let source_boundary = self.boundary_nodes.contains(source);
-        let target_boundary = self.boundary_nodes.contains(target);
-
-        !(source_member || target_member || (source_boundary && target_boundary))
-    }
-
-    fn from_candidate(
-        candidate: &MergedGraphBranchGroupCandidate,
-        graph: &GraphView,
-    ) -> Option<Self> {
-        let MergedGraphBranchGroupCandidate {
-            schema,
-            start_id,
-            members,
-            metric_node_ids,
-            boundary_nodes,
-            initiators,
-            finalizers,
-        } = candidate;
-        let mut left = i32::MAX;
-        let mut top = i32::MAX;
-        let mut right = i32::MIN;
-        let mut bottom = i32::MIN;
-
-        for node in graph.nodes.iter().filter(|node| members.contains(&node.id)) {
-            left = left.min(node.x);
-            top = top.min(node.y);
-            right = right.max(node.x + GRAPH_NODE_WIDTH);
-            bottom = bottom.max(node.y + GRAPH_NODE_HEIGHT);
-        }
-        for relay in graph
-            .relays
+    fn new(
+        region: &GroupRegion,
+        nodes: &[GraphViewNode],
+        relays: &[GraphViewRelay],
+        edges: &[GraphViewEdge],
+    ) -> Self {
+        let members = nodes
             .iter()
-            .filter(|relay| members.contains(&relay.id))
+            .filter(|node| node.group_branch() == Some(region.branch.as_str()))
+            .map(|node| node.id.as_str())
+            .chain(
+                relays
+                    .iter()
+                    .filter(|relay| relay.group_branch() == Some(region.branch.as_str()))
+                    .map(|relay| relay.id.as_str()),
+            )
+            .collect::<BTreeSet<_>>();
+
+        // The branch key is declared identically by every member, so any member states it.
+        let identity = nodes
+            .iter()
+            .filter_map(|node| node.branch.as_ref())
+            .chain(relays.iter().filter_map(|relay| relay.branch.as_ref()))
+            .find(|branch| branch.name == region.branch);
+
+        let mut active = BTreeSet::<&str>::new();
+        for node in nodes
+            .iter()
+            .filter(|node| members.contains(node.id.as_str()))
         {
-            let width = relay.width();
-            left = left.min(relay.x - width / 2);
-            top = top.min(relay.y - 10);
-            right = right.max(relay.x + width / 2);
-            bottom = bottom.max(relay.y + 10);
+            active.extend(node.branches.iter().map(|branch| branch.branch.as_str()));
         }
-
-        if left == i32::MAX {
-            for anchor in initiators.iter().chain(finalizers) {
-                left = left.min(anchor.x);
-                top = top.min(anchor.y);
-                right = right.max(anchor.x);
-                bottom = bottom.max(anchor.y);
-            }
-            if left == i32::MAX {
-                return None;
-            }
-        }
-
-        let padding_x = 18;
-        let padding_top = 54;
-        let padding_bottom = 18;
-        let anchor_gap = Self::CALLOUT_CLEARANCE;
-        let anchor_padding_y = Self::CALLOUT_HALF_HEIGHT + 6;
-        let mut box_left = left - padding_x;
-        let mut box_top = top - padding_top;
-        let mut box_right = right + padding_x;
-        let mut box_bottom = bottom + padding_bottom;
-
-        for anchor in initiators {
-            box_left = box_left.min(anchor.x + anchor_gap);
-            box_top = box_top.min(anchor.y - anchor_padding_y);
-            box_bottom = box_bottom.max(anchor.y + anchor_padding_y);
-        }
-        for anchor in finalizers {
-            box_right = box_right.max(anchor.x - anchor_gap);
-            box_top = box_top.min(anchor.y - anchor_padding_y);
-            box_bottom = box_bottom.max(anchor.y + anchor_padding_y);
-        }
-
-        box_left = box_left.max(2);
-        box_top = box_top.max(0);
-        Some(Self {
-            id: format!("{schema}:{start_id}"),
-            schema: schema.to_string(),
-            members: members.clone(),
-            boundary_nodes: boundary_nodes.clone(),
-            x: box_left,
-            y: box_top,
-            width: box_right - box_left,
-            height: box_bottom - box_top,
-            active_branches: graph.active_branch_count(metric_node_ids),
-            initiators: initiators.to_vec(),
-            finalizers: finalizers.to_vec(),
-        })
-    }
-
-    const CORNER_RADIUS: i32 = 8;
-    const CALLOUT_HALF_HEIGHT: i32 = 12;
-    const CALLOUT_GAP: i32 = 18;
-    const CALLOUT_CLEARANCE: i32 = 48;
-
-    fn callout_paths(&self) -> Vec<String> {
-        let right = self.x + self.width;
-        let mut paths = self
-            .callout_anchors(&self.initiators)
-            .into_iter()
-            .map(|anchor| {
-                format!(
-                    "M{} {} L{} {} L{} {} Z",
-                    self.x,
-                    anchor.y - Self::CALLOUT_HALF_HEIGHT,
-                    anchor.x,
-                    anchor.y,
-                    self.x,
-                    anchor.y + Self::CALLOUT_HALF_HEIGHT
-                )
-            })
-            .collect::<Vec<_>>();
-        paths.extend(
-            self.callout_anchors(&self.finalizers)
-                .into_iter()
-                .map(|anchor| {
-                    format!(
-                        "M{} {} L{} {} L{} {} Z",
-                        right,
-                        anchor.y - Self::CALLOUT_HALF_HEIGHT,
-                        anchor.x,
-                        anchor.y,
-                        right,
-                        anchor.y + Self::CALLOUT_HALF_HEIGHT
-                    )
-                }),
-        );
-        paths
-    }
-
-    fn label_style(&self) -> String {
-        let width = self.width.saturating_sub(28).clamp(96, 220);
-        graph_position_style(self.x + 14, self.y + 8, width, 30)
-    }
-
-    fn stack_x(&self, index: i32) -> i32 {
-        self.x + index * 5
-    }
-
-    fn stack_y(&self, index: i32) -> i32 {
-        self.y - index * 5
-    }
-
-    fn key_fields(&self) -> Vec<String> {
-        branch_key_fields(&self.schema)
-    }
-
-    fn subtitle(&self) -> String {
-        let fields = self.key_fields();
-        let branches = self.active_branch_header_label();
-        if fields.is_empty() {
-            format!("{branches} · singleton key")
-        } else {
-            format!("{branches} · keys {}", fields.join(", "))
-        }
-    }
-
-    fn active_branch_header_label(&self) -> String {
-        format!("{} br", self.active_branches)
-    }
-
-    fn callout_anchors(&self, anchors: &[GraphAnchor]) -> Vec<GraphAnchor> {
-        let min_y = self.y + Self::CORNER_RADIUS + Self::CALLOUT_HALF_HEIGHT;
-        let max_y = self.y + self.height - Self::CORNER_RADIUS - Self::CALLOUT_HALF_HEIGHT;
-        let mut anchors = anchors
+        for relay in relays
             .iter()
-            .map(|anchor| GraphAnchor {
-                x: anchor.x,
-                y: anchor.y.clamp(min_y, max_y),
-            })
-            .collect::<Vec<_>>();
-        anchors.sort_unstable_by_key(|anchor| (anchor.y, anchor.x));
-        anchors.dedup_by(|right, left| {
-            if (right.y - left.y).abs() < Self::CALLOUT_GAP {
-                right.y = (right.y + left.y) / 2;
-                right.x = (right.x + left.x) / 2;
-                true
-            } else {
-                false
-            }
-        });
-        anchors
-    }
-}
+            .filter(|relay| members.contains(relay.id.as_str()))
+        {
+            active.extend(relay.branches.iter().map(|branch| branch.branch.as_str()));
+        }
+        for edge in edges.iter().filter(|edge| {
+            members.contains(edge.source.as_str()) || members.contains(edge.target.as_str())
+        }) {
+            active.extend(edge.branches.iter().map(|branch| branch.branch.as_str()));
+        }
 
-#[derive(Clone, Copy)]
-struct GraphAnchor {
-    x: i32,
-    y: i32,
-}
-
-impl GraphAnchor {
-    fn outgoing_node(node: &GraphViewNode) -> Self {
         Self {
-            x: node.x + GRAPH_NODE_WIDTH,
-            y: node.y + GRAPH_NODE_CENTER_Y,
+            branch: region.branch.clone(),
+            key_schema: identity
+                .map(|branch| branch.key_schema.clone())
+                .unwrap_or_default(),
+            key_fields: identity
+                .map(|branch| branch.key_fields.clone())
+                .unwrap_or_default(),
+            outline: region.outline(),
+            header: region.header_anchor(),
+            active_branches: active.len(),
         }
     }
 
-    fn incoming_node(node: &GraphViewNode) -> Self {
-        Self {
-            x: node.x,
-            y: node.y + GRAPH_NODE_CENTER_Y,
-        }
+    fn key_fields_data(&self) -> String {
+        self.key_fields.join(",")
+    }
+
+    /// The outline weight, which grows with the number of live branches so a busy group reads as
+    /// heavier than a quiet one.
+    fn outline_stroke_width(&self) -> String {
+        let count = self.active_branches.min(8) as f64;
+        format!("{:.2}", 1.0 + count * 0.35)
+    }
+
+    fn header_style(&self) -> String {
+        self.header.map(graph_position_style).unwrap_or_default()
+    }
+
+    /// The line under the branch name: its key fields, then how many branches are live.
+    fn subtitle(&self) -> String {
+        let key = if self.key_fields.is_empty() {
+            "(singleton key)".to_string()
+        } else {
+            format!("({})", self.key_fields.join(", "))
+        };
+        format!("{key} · {} br", self.active_branches)
     }
 }
 
@@ -5200,12 +4782,12 @@ impl GraphBounds {
         }
     }
 
-    fn from_rect(left: i32, top: i32, right: i32, bottom: i32) -> Self {
+    fn from_rect(rect: Rect) -> Self {
         Self {
-            left: f64::from(left),
-            top: f64::from(top),
-            right: f64::from(right),
-            bottom: f64::from(bottom),
+            left: f64::from(rect.x),
+            top: f64::from(rect.y),
+            right: f64::from(rect.right()),
+            bottom: f64::from(rect.bottom()),
         }
     }
 
@@ -5237,385 +4819,121 @@ impl GraphBounds {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct GraphRoutePoint {
-    x: i32,
-    y: i32,
-}
-
-impl GraphRoutePoint {
-    const fn new(x: i32, y: i32) -> Self {
-        Self { x, y }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct GraphRouteRect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-    core_left: i32,
-    core_top: i32,
-    core_right: i32,
-    core_bottom: i32,
-}
-
-impl GraphRouteRect {
-    const MARGIN: i32 = 14;
-
-    fn from_node(node: &GraphViewNode) -> Self {
-        Self::new(
-            node.x,
-            node.y,
-            node.x + GRAPH_NODE_WIDTH,
-            node.y + GRAPH_NODE_HEIGHT,
-        )
-    }
-
-    fn from_relay(relay: &GraphViewRelay) -> Self {
-        let width = relay.width();
-        Self::new(
-            relay.x - width / 2,
-            relay.y - 10,
-            relay.x + width / 2,
-            relay.y + 10,
-        )
-    }
-
-    fn from_branch_group(group: &GraphBranchGroup) -> Self {
-        Self::new(
-            group.x,
-            group.y,
-            group.x + group.width,
-            group.y + group.height,
-        )
-    }
-
-    fn new(left: i32, top: i32, right: i32, bottom: i32) -> Self {
-        Self {
-            left: left - Self::MARGIN,
-            top: top - Self::MARGIN,
-            right: right + Self::MARGIN,
-            bottom: bottom + Self::MARGIN,
-            core_left: left,
-            core_top: top,
-            core_right: right,
-            core_bottom: bottom,
-        }
-    }
-
-    fn intersects_segment(self, start: GraphRoutePoint, end: GraphRoutePoint) -> bool {
-        self.intersects_bounds(start, end, self.left, self.top, self.right, self.bottom)
-    }
-
-    fn contains_core_point(self, x: f64, y: f64) -> bool {
-        x > f64::from(self.core_left)
-            && x < f64::from(self.core_right)
-            && y > f64::from(self.core_top)
-            && y < f64::from(self.core_bottom)
-    }
-
-    fn intersects_core_segment(self, start: GraphRoutePoint, end: GraphRoutePoint) -> bool {
-        self.intersects_bounds(
-            start,
-            end,
-            self.core_left,
-            self.core_top,
-            self.core_right,
-            self.core_bottom,
-        )
-    }
-
-    fn blocks_segment(
-        self,
-        start: GraphRoutePoint,
-        end: GraphRoutePoint,
-        route_start: GraphRoutePoint,
-        route_end: GraphRoutePoint,
-    ) -> bool {
-        if start == route_start || end == route_start || start == route_end || end == route_end {
-            return self.intersects_core_segment(start, end);
-        }
-        self.intersects_segment(start, end)
-    }
-
-    fn intersects_bounds(
-        self,
-        start: GraphRoutePoint,
-        end: GraphRoutePoint,
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-    ) -> bool {
-        if start.x == end.x {
-            let y_min = start.y.min(end.y);
-            let y_max = start.y.max(end.y);
-            return start.x > left && start.x < right && y_max > top && y_min < bottom;
-        }
-        if start.y == end.y {
-            let x_min = start.x.min(end.x);
-            let x_max = start.x.max(end.x);
-            return start.y > top && start.y < bottom && x_max > left && x_min < right;
-        }
-        false
-    }
-}
-
 #[derive(Clone)]
 struct GraphViewEdge {
     source: String,
     target: String,
     kind: DataflowEdgeKind,
+    input_side: Option<DataflowInputSide>,
+    routes: u32,
     statistics: GraphStatistics,
     branches: Vec<GraphBranchStatistics>,
-    x1: i32,
-    y1: i32,
-    x2: i32,
-    y2: i32,
-}
-
-#[derive(Clone, Copy)]
-struct GraphEdgeLaneCandidate<'a> {
-    source: &'a str,
-    target: &'a str,
-    kind: DataflowEdgeKind,
-    base_y: i32,
-    left: i32,
-    right: i32,
-}
-
-impl<'a> GraphEdgeLaneCandidate<'a> {
-    fn from_edge(graph: &GraphView, edge: &'a GraphViewEdge) -> Option<Self> {
-        let ((x1, y1), (x2, y2)) = edge.endpoints(graph);
-        let left = x1.min(x2);
-        let right = x1.max(x2);
-        if right - left < GRAPH_EDGE_LANE_MIN_SPAN {
-            return None;
-        }
-        Some(Self {
-            source: edge.source.as_str(),
-            target: edge.target.as_str(),
-            kind: edge.kind,
-            base_y: (y1 + y2) / 2,
-            left,
-            right,
-        })
-    }
-
-    fn overlaps_lane_group(self, other: Self) -> bool {
-        let overlap = self.horizontal_overlap(other);
-        if self.source == other.source || self.target == other.target {
-            return (self.base_y - other.base_y).abs() < GRAPH_EDGE_LANE_SPACING
-                && overlap >= GRAPH_EDGE_SHARED_ENDPOINT_LANE_MIN_OVERLAP;
-        }
-        (self.base_y - other.base_y).abs() <= GRAPH_EDGE_LANE_GROUP_Y
-            && overlap >= GRAPH_EDGE_LANE_MIN_OVERLAP
-    }
-
-    fn horizontal_overlap(self, other: Self) -> i32 {
-        self.right.min(other.right) - self.left.max(other.left)
-    }
-
-    fn same_edge(self, other: Self) -> bool {
-        self.source == other.source && self.target == other.target && self.kind == other.kind
-    }
+    /// The turns the drawn line makes, left to right, as the layout placed them.
+    points: Vec<(i32, i32)>,
+    /// Where the rate badge sits, when this edge carries traffic worth reporting.
+    badge: Option<Rect>,
+    /// A return path: it travels right to left against the flow.
+    feedback: bool,
 }
 
 impl GraphViewEdge {
-    fn endpoints(&self, domain: &GraphView) -> ((i32, i32), (i32, i32)) {
-        (
-            domain
-                .graph_endpoint(&self.source, EndpointSide::Outgoing)
-                .unwrap_or((self.x1, self.y1)),
-            domain
-                .graph_endpoint(&self.target, EndpointSide::Incoming)
-                .unwrap_or((self.x2, self.y2)),
-        )
-    }
+    /// The radius of a drawn corner. A corner between two short segments uses half of it so the
+    /// curve can never eat the segment it turns out of.
+    const CORNER_RADIUS: i32 = 10;
 
-    fn path(&self, domain: &GraphView) -> String {
-        let ((x1, y1), (x2, y2)) = self.endpoints(domain);
-        let start = GraphRoutePoint::new(x1, y1);
-        let end = GraphRoutePoint::new(x2, y2);
-        let obstacles = domain.edge_obstacles(&self.source, &self.target);
-        let preferred_lane = domain.edge_preferred_lane(self);
-        if should_route_with_direct_curve(preferred_lane, start, end)
-            && let Some(path) = direct_curve_path(start, end, &obstacles)
-        {
-            return path;
-        }
-        let points = self.route_points_with_lane(domain, preferred_lane);
-        Self::rounded_path(&points)
-    }
-
-    fn rounded_path(points: &[GraphRoutePoint]) -> String {
-        let Some(start) = points.first() else {
+    fn path(&self) -> String {
+        let Some(start) = self.points.first() else {
             return String::new();
         };
-        let mut path = format!("M{} {}", start.x, start.y);
-        if points.len() == 1 {
+        let mut path = format!("M{} {}", start.0, start.1);
+        if self.points.len() == 1 {
             return path;
         }
-        const CORNER_RADIUS: i32 = 18;
-        const ENDPOINT_CORNER_RADIUS: i32 = 8;
-        for index in 1..points.len() - 1 {
-            let previous = points[index - 1];
-            let current = points[index];
-            let next = points[index + 1];
-            let incoming = (current.x - previous.x, current.y - previous.y);
-            let outgoing = (next.x - current.x, next.y - current.y);
+        for index in 1..self.points.len() - 1 {
+            let previous = self.points[index - 1];
+            let current = self.points[index];
+            let next = self.points[index + 1];
+            let incoming = (current.0 - previous.0, current.1 - previous.1);
+            let outgoing = (next.0 - current.0, next.1 - current.1);
             let incoming_length = incoming.0.abs() + incoming.1.abs();
             let outgoing_length = outgoing.0.abs() + outgoing.1.abs();
-            let mut radius = CORNER_RADIUS
-                .min(incoming_length / 2)
-                .min(outgoing_length / 2);
-            if index == 1 || index == points.len() - 2 {
-                radius = radius.min(ENDPOINT_CORNER_RADIUS);
+            let uniform = Self::CORNER_RADIUS;
+            let radius = if incoming_length < uniform * 2 || outgoing_length < uniform * 2 {
+                uniform / 2
+            } else {
+                uniform
             }
-            if radius == 0
-                || incoming.0.signum() == outgoing.0.signum()
-                    && incoming.1.signum() == outgoing.1.signum()
-            {
-                path.push_str(&format!(" L{} {}", current.x, current.y));
+            .min(incoming_length / 2)
+            .min(outgoing_length / 2);
+            if radius == 0 {
+                path.push_str(&format!(" L{} {}", current.0, current.1));
                 continue;
             }
-            let entry = GraphRoutePoint::new(
-                current.x - incoming.0.signum() * radius,
-                current.y - incoming.1.signum() * radius,
+            let entry = (
+                current.0 - incoming.0.signum() * radius,
+                current.1 - incoming.1.signum() * radius,
             );
-            let exit = GraphRoutePoint::new(
-                current.x + outgoing.0.signum() * radius,
-                current.y + outgoing.1.signum() * radius,
+            let exit = (
+                current.0 + outgoing.0.signum() * radius,
+                current.1 + outgoing.1.signum() * radius,
             );
-            path.push_str(&format!(" L{} {}", entry.x, entry.y));
+            path.push_str(&format!(" L{} {}", entry.0, entry.1));
             path.push_str(&format!(
                 " Q{} {}, {} {}",
-                current.x, current.y, exit.x, exit.y
+                current.0, current.1, exit.0, exit.1
             ));
         }
-        let end = points.last().expect("non-empty points checked above");
-        path.push_str(&format!(" L{} {}", end.x, end.y));
+        let end = self.points.last().expect("non-empty points checked above");
+        path.push_str(&format!(" L{} {}", end.0, end.1));
         path
     }
 
-    fn metric_style(&self, domain: &GraphView) -> String {
-        let ((x1, y1), (x2, y2)) = self.endpoints(domain);
-        let start = GraphRoutePoint::new(x1, y1);
-        let end = GraphRoutePoint::new(x2, y2);
-        let obstacles = domain.edge_obstacles(&self.source, &self.target);
-        let preferred_lane = domain.edge_preferred_lane(self);
-        let ((mid_x, mid_y), (tangent_x, tangent_y)) =
-            if should_route_with_direct_curve(preferred_lane, start, end)
-                && let Some(curve) = direct_curve(start, end, &obstacles)
-            {
-                curve_midpoint(curve)
-            } else {
-                let points = self.route_points_with_lane(domain, preferred_lane);
-                Self::polyline_midpoint(&points)
-            };
-        let length = (tangent_x.powi(2) + tangent_y.powi(2)).sqrt().max(1.0);
-        let normal_x = tangent_y / length;
-        let normal_y = -tangent_x / length;
-        let width = 68;
-        let height = 16;
-        let x = (mid_x + normal_x * 12.0).round() as i32 - width / 2;
-        let y = (mid_y + normal_y * 12.0).round() as i32 - height / 2;
-        graph_position_style(x, y, width, height)
+    fn metric_style(&self) -> Option<String> {
+        self.badge.map(graph_position_style)
     }
 
-    #[cfg(test)]
-    fn route_points(&self, domain: &GraphView) -> Vec<GraphRoutePoint> {
-        self.route_points_with_lane(domain, domain.edge_preferred_lane(self))
+    /// A state dependency is looked up rather than delivered, so it ends in a hollow head.
+    const fn marker(&self) -> &'static str {
+        if self.kind.carries_records() {
+            "url(#graph-arrow)"
+        } else {
+            "url(#graph-arrow-hollow)"
+        }
     }
 
-    fn route_points_with_lane(
-        &self,
-        domain: &GraphView,
-        preferred_lane: Option<i32>,
-    ) -> Vec<GraphRoutePoint> {
-        let ((x1, y1), (x2, y2)) = self.endpoints(domain);
-        let start = GraphRoutePoint::new(x1, y1);
-        let end = GraphRoutePoint::new(x2, y2);
-        let obstacles = domain.edge_obstacles(&self.source, &self.target);
-        route_graph_edge(
-            start,
-            end,
-            &obstacles,
-            domain.canvas_width(),
-            domain.canvas_height(),
-            preferred_lane,
-        )
-        .unwrap_or_else(|| {
-            let mid_x = (x1 + x2) / 2;
-            if let Some(lane) = preferred_lane {
-                vec![
-                    start,
-                    GraphRoutePoint::new(mid_x, y1),
-                    GraphRoutePoint::new(mid_x, lane),
-                    GraphRoutePoint::new(mid_x, y2),
-                    end,
-                ]
-            } else {
-                vec![
-                    start,
-                    GraphRoutePoint::new(mid_x, y1),
-                    GraphRoutePoint::new(mid_x, y2),
-                    end,
-                ]
-            }
-        })
-    }
-
-    fn polyline_midpoint(points: &[GraphRoutePoint]) -> ((f64, f64), (f64, f64)) {
-        let Some(first) = points.first() else {
-            return ((0.0, 0.0), (1.0, 0.0));
+    /// What this line stands for, reported on hover whether or not it is carrying traffic.
+    fn route_summary(&self) -> String {
+        let side = match self.input_side {
+            Some(DataflowInputSide::Left) => " into LEFT",
+            Some(DataflowInputSide::Right) => " into RIGHT",
+            None => "",
         };
-        if points.len() == 1 {
-            return ((f64::from(first.x), f64::from(first.y)), (1.0, 0.0));
-        }
-        let total = points
-            .windows(2)
-            .map(|window| {
-                let start = window[0];
-                let end = window[1];
-                (end.x - start.x).abs() + (end.y - start.y).abs()
-            })
-            .sum::<i32>()
-            .max(1);
-        let target = total as f64 / 2.0;
-        let mut traversed = 0.0;
-        for window in points.windows(2) {
-            let start = window[0];
-            let end = window[1];
-            let dx = f64::from(end.x - start.x);
-            let dy = f64::from(end.y - start.y);
-            let segment = dx.abs() + dy.abs();
-            if segment <= 0.0 {
-                continue;
-            }
-            if traversed + segment >= target {
-                let ratio = ((target - traversed) / segment).clamp(0.0, 1.0);
-                return (
-                    (
-                        f64::from(start.x) + dx * ratio,
-                        f64::from(start.y) + dy * ratio,
-                    ),
-                    (dx, dy),
-                );
-            }
-            traversed += segment;
-        }
-        let last = points.last().copied().unwrap_or(*first);
-        let previous = points.iter().rev().nth(1).copied().unwrap_or(last);
-        (
-            (f64::from(last.x), f64::from(last.y)),
-            (
-                f64::from(last.x - previous.x),
-                f64::from(last.y - previous.y),
-            ),
+        let subject = match self.kind {
+            DataflowEdgeKind::Data => "records",
+            DataflowEdgeKind::CorrelationTimeout => "correlation timeouts",
+            DataflowEdgeKind::MessageError => "message errors",
+            DataflowEdgeKind::StateLink => "materialized state",
+        };
+        let routes = if self.routes > 1 {
+            format!(" · {} routes", self.routes)
+        } else {
+            String::new()
+        };
+        let feedback = if self.feedback { " · return path" } else { "" };
+        format!(
+            "{} → {}{side}: {subject}{routes}{feedback}",
+            self.source, self.target
         )
+    }
+
+    fn feedback_data(&self) -> String {
+        self.feedback.to_string()
+    }
+
+    fn input_side_data(&self) -> String {
+        self.input_side
+            .map(|side| side.as_ref().to_string())
+            .unwrap_or_default()
     }
 
     fn metric_summary(&self) -> String {
@@ -5638,422 +4956,11 @@ impl GraphViewEdge {
                 self.statistics.batches_total
             ));
         }
+        if self.routes > 1 {
+            parts.push(format!("routes: {}", self.routes));
+        }
         parts.join("; ")
     }
-}
-
-#[derive(Clone, Copy)]
-struct GraphRouteCurve {
-    start: GraphRoutePoint,
-    control_1: GraphRoutePoint,
-    control_2: GraphRoutePoint,
-    end: GraphRoutePoint,
-}
-
-fn direct_curve_path(
-    start: GraphRoutePoint,
-    end: GraphRoutePoint,
-    obstacles: &[GraphRouteRect],
-) -> Option<String> {
-    let curve = direct_curve(start, end, obstacles)?;
-    Some(format!(
-        "M{} {} C{} {}, {} {}, {} {}",
-        curve.start.x,
-        curve.start.y,
-        curve.control_1.x,
-        curve.control_1.y,
-        curve.control_2.x,
-        curve.control_2.y,
-        curve.end.x,
-        curve.end.y
-    ))
-}
-
-fn should_route_with_direct_curve(
-    preferred_lane: Option<i32>,
-    start: GraphRoutePoint,
-    end: GraphRoutePoint,
-) -> bool {
-    preferred_lane.is_none()
-        || (end.x - start.x).abs()
-            < GRAPH_EDGE_TURN_X + GRAPH_EDGE_TERMINAL_STRAIGHT + GRAPH_EDGE_LANE_SPACING
-}
-
-fn direct_curve(
-    start: GraphRoutePoint,
-    end: GraphRoutePoint,
-    obstacles: &[GraphRouteRect],
-) -> Option<GraphRouteCurve> {
-    let flow_direction = (end.x - start.x).signum();
-    if flow_direction == 0 {
-        return None;
-    }
-    let horizontal_distance = (end.x - start.x).abs();
-    if horizontal_distance < 48 {
-        return None;
-    }
-    let control_offset = ((horizontal_distance as f64 * 0.45).round() as i32).max(36);
-    let curve = GraphRouteCurve {
-        start,
-        control_1: GraphRoutePoint::new(start.x + flow_direction * control_offset, start.y),
-        control_2: GraphRoutePoint::new(end.x - flow_direction * control_offset, end.y),
-        end,
-    };
-    let distance = (end.x - start.x).abs() + (end.y - start.y).abs();
-    let samples = (distance / 8).clamp(12, 80);
-    for index in 1..samples {
-        let t = f64::from(index) / f64::from(samples);
-        let (x, y) = curve_point(curve, t);
-        if obstacles
-            .iter()
-            .any(|obstacle| obstacle.contains_core_point(x, y))
-        {
-            return None;
-        }
-    }
-    Some(curve)
-}
-
-fn curve_midpoint(curve: GraphRouteCurve) -> ((f64, f64), (f64, f64)) {
-    (curve_point(curve, 0.5), curve_tangent(curve, 0.5))
-}
-
-fn curve_point(curve: GraphRouteCurve, t: f64) -> (f64, f64) {
-    let inv = 1.0 - t;
-    let start = (f64::from(curve.start.x), f64::from(curve.start.y));
-    let control_1 = (f64::from(curve.control_1.x), f64::from(curve.control_1.y));
-    let control_2 = (f64::from(curve.control_2.x), f64::from(curve.control_2.y));
-    let end = (f64::from(curve.end.x), f64::from(curve.end.y));
-    (
-        inv.powi(3) * start.0
-            + 3.0 * inv.powi(2) * t * control_1.0
-            + 3.0 * inv * t.powi(2) * control_2.0
-            + t.powi(3) * end.0,
-        inv.powi(3) * start.1
-            + 3.0 * inv.powi(2) * t * control_1.1
-            + 3.0 * inv * t.powi(2) * control_2.1
-            + t.powi(3) * end.1,
-    )
-}
-
-fn curve_tangent(curve: GraphRouteCurve, t: f64) -> (f64, f64) {
-    let inv = 1.0 - t;
-    let start = (f64::from(curve.start.x), f64::from(curve.start.y));
-    let control_1 = (f64::from(curve.control_1.x), f64::from(curve.control_1.y));
-    let control_2 = (f64::from(curve.control_2.x), f64::from(curve.control_2.y));
-    let end = (f64::from(curve.end.x), f64::from(curve.end.y));
-    (
-        3.0 * inv.powi(2) * (control_1.0 - start.0)
-            + 6.0 * inv * t * (control_2.0 - control_1.0)
-            + 3.0 * t.powi(2) * (end.0 - control_2.0),
-        3.0 * inv.powi(2) * (control_1.1 - start.1)
-            + 6.0 * inv * t * (control_2.1 - control_1.1)
-            + 3.0 * t.powi(2) * (end.1 - control_2.1),
-    )
-}
-
-fn route_graph_edge(
-    start: GraphRoutePoint,
-    end: GraphRoutePoint,
-    obstacles: &[GraphRouteRect],
-    canvas_width: i32,
-    canvas_height: i32,
-    preferred_lane: Option<i32>,
-) -> Option<Vec<GraphRoutePoint>> {
-    let mut xs = vec![0, canvas_width, start.x, end.x];
-    let mut ys = vec![0, canvas_height, start.y, end.y];
-    let flow_direction = (end.x - start.x).signum();
-    let source_straight_end_x = start.x + flow_direction * GRAPH_EDGE_TURN_X;
-    let requires_source_straight =
-        if flow_direction != 0 && (end.x - start.x).abs() >= GRAPH_EDGE_TURN_X {
-            let plug_end = GraphRoutePoint::new(source_straight_end_x, start.y);
-            plug_end.x > 0
-                && plug_end.x < canvas_width
-                && !obstacles
-                    .iter()
-                    .any(|obstacle| obstacle.intersects_segment(start, plug_end))
-        } else {
-            false
-        };
-    let requires_terminal_straight =
-        if flow_direction != 0 && (end.x - start.x).abs() >= GRAPH_EDGE_TERMINAL_STRAIGHT {
-            let plug_start =
-                GraphRoutePoint::new(end.x - flow_direction * GRAPH_EDGE_TERMINAL_STRAIGHT, end.y);
-            plug_start.x > 0
-                && plug_start.x < canvas_width
-                && !obstacles
-                    .iter()
-                    .any(|obstacle| obstacle.intersects_segment(plug_start, end))
-        } else {
-            false
-        };
-    if flow_direction != 0 {
-        let start_turn_x = start.x + flow_direction * GRAPH_EDGE_TURN_X;
-        let end_turn_x = end.x - flow_direction * GRAPH_EDGE_TERMINAL_STRAIGHT;
-        let mid_x = (start.x + end.x) / 2;
-        for x in [start_turn_x, end_turn_x, mid_x] {
-            if x > 0 && x < canvas_width {
-                xs.push(x);
-            }
-        }
-    }
-    if let Some(lane) = preferred_lane
-        && lane > 0
-        && lane < canvas_height
-    {
-        ys.push(lane);
-    }
-    for obstacle in obstacles {
-        xs.extend([obstacle.left.max(0), obstacle.right.min(canvas_width)]);
-        ys.extend([obstacle.top.max(0), obstacle.bottom.min(canvas_height)]);
-    }
-    xs.sort_unstable();
-    xs.dedup();
-    ys.sort_unstable();
-    ys.dedup();
-    let start_x = xs.iter().position(|x| *x == start.x)?;
-    let start_y = ys.iter().position(|y| *y == start.y)?;
-    let end_x = xs.iter().position(|x| *x == end.x)?;
-    let end_y = ys.iter().position(|y| *y == end.y)?;
-    let width = xs.len();
-    let point_count = width * ys.len();
-    let state_count = point_count * 3;
-    let point_index = |x_index: usize, y_index: usize| y_index * width + x_index;
-    let state_index = |point: usize, direction: usize| point * 3 + direction;
-    let state_point = |state: usize| state / 3;
-    let state_direction = |state: usize| state % 3;
-    let start_point = point_index(start_x, start_y);
-    let end_point = point_index(end_x, end_y);
-    let start_state = state_index(start_point, 0);
-    let mut distances = vec![i32::MAX; state_count];
-    let mut previous = vec![None::<usize>; state_count];
-    let mut pending = BinaryHeap::<(Reverse<i32>, usize)>::new();
-    distances[start_state] = 0;
-    pending.push((Reverse(0), start_state));
-
-    while let Some((Reverse(cost), state)) = pending.pop() {
-        if cost != distances[state] {
-            continue;
-        }
-        let point = state_point(state);
-        let direction = state_direction(state);
-        let x_index = point % width;
-        let y_index = point / width;
-        for (next_x, next_y, next_direction) in [
-            (x_index.checked_sub(1), Some(y_index), 1_usize),
-            (
-                (x_index + 1 < width).then_some(x_index + 1),
-                Some(y_index),
-                1,
-            ),
-            (Some(x_index), y_index.checked_sub(1), 2),
-            (
-                Some(x_index),
-                (y_index + 1 < ys.len()).then_some(y_index + 1),
-                2,
-            ),
-        ] {
-            let (Some(next_x), Some(next_y)) = (next_x, next_y) else {
-                continue;
-            };
-            let current = GraphRoutePoint::new(xs[x_index], ys[y_index]);
-            let next = GraphRoutePoint::new(xs[next_x], ys[next_y]);
-            if flow_direction != 0 {
-                if requires_source_straight {
-                    if current == start {
-                        let step_direction = (next.x - current.x).signum();
-                        if next_direction != 1 || step_direction != flow_direction {
-                            continue;
-                        }
-                    }
-                    if next_direction == 2
-                        && source_plug_zone_contains_x(
-                            current.x,
-                            start.x,
-                            source_straight_end_x,
-                            flow_direction,
-                        )
-                    {
-                        continue;
-                    }
-                }
-                if next == end {
-                    let step_direction = (next.x - current.x).signum();
-                    if next_direction != 1 || step_direction != flow_direction {
-                        continue;
-                    }
-                }
-                if requires_terminal_straight && next_direction == 2 {
-                    let terminal_start_x = end.x - flow_direction * GRAPH_EDGE_TERMINAL_STRAIGHT;
-                    if current.x > terminal_start_x.min(end.x)
-                        && current.x < terminal_start_x.max(end.x)
-                    {
-                        continue;
-                    }
-                }
-            }
-            if obstacles
-                .iter()
-                .any(|obstacle| obstacle.blocks_segment(current, next, start, end))
-            {
-                continue;
-            }
-            let distance = (next.x - current.x).abs() + (next.y - current.y).abs();
-            let turn_penalty = if direction != 0 && direction != next_direction {
-                24
-            } else {
-                0
-            };
-            let flow_penalty = route_flow_penalty(
-                current,
-                next,
-                start,
-                end,
-                next_direction,
-                (canvas_width, canvas_height),
-                preferred_lane,
-            );
-            let next_point = point_index(next_x, next_y);
-            let next_state = state_index(next_point, next_direction);
-            let next_cost = cost
-                .saturating_add(distance)
-                .saturating_add(turn_penalty)
-                .saturating_add(flow_penalty);
-            if next_cost < distances[next_state] {
-                distances[next_state] = next_cost;
-                previous[next_state] = Some(state);
-                pending.push((Reverse(next_cost), next_state));
-            }
-        }
-    }
-
-    let end_state = (0..3)
-        .map(|direction| state_index(end_point, direction))
-        .min_by_key(|state| {
-            distances[*state].saturating_add(route_end_direction_penalty(
-                state_direction(*state),
-                start,
-                end,
-            ))
-        })?;
-    if distances[end_state] == i32::MAX {
-        return None;
-    }
-
-    let mut states = Vec::new();
-    let mut state = end_state;
-    states.push(state);
-    while state != start_state {
-        state = previous[state]?;
-        states.push(state);
-    }
-    states.reverse();
-    let points = states
-        .into_iter()
-        .map(|state| {
-            let point = state_point(state);
-            GraphRoutePoint::new(xs[point % width], ys[point / width])
-        })
-        .collect::<Vec<_>>();
-    Some(simplify_route_points(points))
-}
-
-fn source_plug_zone_contains_x(x: i32, start_x: i32, end_x: i32, flow_direction: i32) -> bool {
-    if flow_direction > 0 {
-        x >= start_x && x < end_x
-    } else {
-        x > end_x && x <= start_x
-    }
-}
-
-fn route_flow_penalty(
-    current: GraphRoutePoint,
-    next: GraphRoutePoint,
-    start: GraphRoutePoint,
-    end: GraphRoutePoint,
-    next_direction: usize,
-    canvas_size: (i32, i32),
-    preferred_lane: Option<i32>,
-) -> i32 {
-    let (canvas_width, canvas_height) = canvas_size;
-    let mut penalty = 0_i32;
-    let flow_direction = (end.x - start.x).signum();
-    if flow_direction != 0 {
-        let segment_direction = (next.x - current.x).signum();
-        if segment_direction == -flow_direction {
-            penalty = penalty.saturating_add(600);
-        }
-        if current == start && next_direction == 2 {
-            penalty = penalty.saturating_add(180);
-        }
-        if next == end && next_direction == 2 {
-            penalty = penalty.saturating_add(900);
-        }
-        if next == end && next_direction == 1 {
-            let segment_direction = (next.x - current.x).signum();
-            if segment_direction != flow_direction {
-                penalty = penalty.saturating_add(5_000);
-            }
-        }
-    }
-    if current.x == 0 || next.x == 0 || current.x == canvas_width || next.x == canvas_width {
-        penalty = penalty.saturating_add(480);
-    }
-    if current.y == 0 || next.y == 0 || current.y == canvas_height || next.y == canvas_height {
-        penalty = penalty.saturating_add(480);
-    }
-    if let Some(lane) = preferred_lane
-        && next_direction == 1
-        && current.y != lane
-    {
-        let segment_length = (next.x - current.x).abs();
-        let short_terminal_segment =
-            segment_length <= GRAPH_EDGE_TERMINAL_STRAIGHT && (current == start || next == end);
-        if !short_terminal_segment {
-            penalty = penalty.saturating_add(1_400 + segment_length.saturating_mul(2));
-        }
-    }
-    if preferred_lane.is_none() && next_direction == 1 && start.y != end.y && current.y != end.y {
-        let segment_length = (next.x - current.x).abs();
-        let source_plug_segment = current == start && segment_length <= GRAPH_EDGE_TURN_X;
-        if !source_plug_segment {
-            penalty = penalty.saturating_add(900 + segment_length.saturating_mul(2));
-        }
-    }
-    penalty
-}
-
-fn route_end_direction_penalty(
-    direction: usize,
-    start: GraphRoutePoint,
-    end: GraphRoutePoint,
-) -> i32 {
-    if (end.x - start.x).signum() != 0 && direction == 2 {
-        return 900;
-    }
-    0
-}
-
-fn simplify_route_points(points: Vec<GraphRoutePoint>) -> Vec<GraphRoutePoint> {
-    let mut simplified = Vec::<GraphRoutePoint>::new();
-    for point in points {
-        if simplified.last().is_some_and(|last| *last == point) {
-            continue;
-        }
-        simplified.push(point);
-        while simplified.len() >= 3 {
-            let len = simplified.len();
-            let a = simplified[len - 3];
-            let b = simplified[len - 2];
-            let c = simplified[len - 1];
-            if (a.x == b.x && b.x == c.x) || (a.y == b.y && b.y == c.y) {
-                simplified.remove(len - 2);
-            } else {
-                break;
-            }
-        }
-    }
-    simplified
 }
 
 trait DataflowEdgeKindView {
@@ -6066,6 +4973,7 @@ impl DataflowEdgeKindView for DataflowEdgeKind {
             Self::Data => "graph-edge--data",
             Self::CorrelationTimeout => "graph-edge--correlation-timeout",
             Self::MessageError => "graph-edge--message-error",
+            Self::StateLink => "graph-edge--state-link",
         }
     }
 }
@@ -6075,6 +4983,20 @@ struct DomainView {
     id: String,
     mode: String,
     status: String,
+}
+
+impl DomainView {
+    /// The lifecycle the console reports for this domain, normalised to the three states a
+    /// domain can be in.
+    fn lifecycle_label(&self) -> &'static str {
+        if self.status.eq_ignore_ascii_case("RUNNING") {
+            "RUNNING"
+        } else if self.status.eq_ignore_ascii_case("PAUSED") {
+            "PAUSED"
+        } else {
+            "STOPPED"
+        }
+    }
 }
 
 impl From<nervix_proto::DomainInfo> for DomainView {
@@ -6160,15 +5082,6 @@ enum NodeKind {
 }
 
 impl NodeKind {
-    const fn category_index(self) -> u64 {
-        match self {
-            Self::Client => 0,
-            Self::Ingestor => 1,
-            Self::Processor => 2,
-            Self::Emitter => 3,
-        }
-    }
-
     const fn from_dataflow_kind(kind: DataflowNodeKind) -> Self {
         match kind {
             DataflowNodeKind::Client => Self::Client,
@@ -6231,12 +5144,6 @@ fn append_filter_reference(filter: RwSignal<String>, reference: &str) {
 }
 
 #[derive(Clone, Copy)]
-enum EndpointSide {
-    Outgoing,
-    Incoming,
-}
-
-#[derive(Clone, Copy)]
 struct GraphDrag {
     client_x: i32,
     client_y: i32,
@@ -6244,16 +5151,42 @@ struct GraphDrag {
     pan_y: f64,
 }
 
-fn graph_position_style(x: i32, y: i32, width: i32, height: i32) -> String {
-    format!("left: {x}px; top: {y}px; width: {width}px; height: {height}px;")
+/// What the console is currently pointing at, so an item can light up the edges it touches and an
+/// edge can light up the items it joins.
+#[derive(Clone, PartialEq, Eq)]
+enum GraphHover {
+    Item(String),
+    Edge(String, String, DataflowEdgeKind),
 }
 
-fn branch_key_fields(schema: &str) -> Vec<String> {
-    let stem = schema.strip_suffix("_branch").unwrap_or(schema);
-    stem.split('_')
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect()
+impl GraphHover {
+    fn emphasises_item(&self, id: &str) -> bool {
+        match self {
+            Self::Item(hovered) => hovered == id,
+            Self::Edge(source, target, _) => source == id || target == id,
+        }
+    }
+
+    fn emphasises_edge(&self, edge: &GraphViewEdge) -> bool {
+        match self {
+            Self::Item(hovered) => *hovered == edge.source || *hovered == edge.target,
+            Self::Edge(source, target, kind) => {
+                *source == edge.source && *target == edge.target && *kind == edge.kind
+            }
+        }
+    }
+}
+
+fn graph_position_style(rect: Rect) -> String {
+    format!(
+        "left: {}px; top: {}px; width: {}px; height: {}px;",
+        rect.x, rect.y, rect.width, rect.height
+    )
+}
+
+/// A rectangle reduced to the hashable tuple keyed views compare.
+const fn rect_key(rect: Rect) -> (i32, i32, i32, i32) {
+    (rect.x, rect.y, rect.width, rect.height)
 }
 
 #[derive(Clone)]
@@ -6321,7 +5254,9 @@ impl TermLineKind {
 
 #[cfg(test)]
 mod tests {
-    use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowEdge, DataflowNode};
+    use nervix_dataflow_graph::{
+        DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
+    };
 
     use super::*;
 
@@ -6373,517 +5308,186 @@ mod tests {
     }
 
     #[test]
-    fn branch_group_uses_callouts_for_initiator_and_finalizers() {
+    fn branch_group_states_the_declared_branch_key_without_parsing_names() {
         let graph = GraphView::from_dataflow_graph(DataflowGraph {
             domain: "iot_demo".to_string(),
             statistics: DataflowStatistics::default(),
             nodes: vec![
-                node(
-                    "processor:device_repartition",
-                    "device_repartition",
-                    DataflowNodeKind::Processor,
-                    "reingestor",
-                    "device_branch",
-                    0,
-                    100,
-                ),
-                node(
-                    "relay:telemetry_ordered",
-                    "telemetry_ordered",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "device_branch",
-                    260,
-                    100,
-                ),
-                unbranched_node(
-                    "processor:anomaly_splitter",
-                    "anomaly_splitter",
-                    DataflowNodeKind::Processor,
-                    "deduplicator",
-                    520,
-                    100,
-                ),
-                node(
-                    "relay:thermal_alerts",
-                    "thermal_alerts",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "device_branch",
-                    780,
-                    40,
-                ),
-                node(
-                    "relay:maintenance_alerts",
-                    "maintenance_alerts",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "device_branch",
-                    780,
-                    160,
-                ),
-                node(
-                    "emitter:redis_thermal_alerts",
-                    "redis_thermal_alerts",
-                    DataflowNodeKind::Emitter,
-                    "redis",
-                    "device_branch",
-                    1040,
-                    40,
-                ),
-                node(
-                    "emitter:redis_maintenance_alerts",
-                    "redis_maintenance_alerts",
-                    DataflowNodeKind::Emitter,
-                    "redis",
-                    "device_branch",
-                    1040,
-                    160,
-                ),
-            ],
-            edges: vec![
-                edge("processor:device_repartition", "relay:telemetry_ordered"),
-                edge("relay:telemetry_ordered", "processor:anomaly_splitter"),
-                edge("processor:anomaly_splitter", "relay:thermal_alerts"),
-                edge("processor:anomaly_splitter", "relay:maintenance_alerts"),
-                edge("relay:thermal_alerts", "emitter:redis_thermal_alerts"),
-                edge(
-                    "relay:maintenance_alerts",
-                    "emitter:redis_maintenance_alerts",
-                ),
-            ],
-        });
-
-        let groups = graph.branching_groups();
-        assert_eq!(groups.len(), 1);
-        let group = &groups[0];
-        assert_eq!(group.schema, "device_branch");
-        assert_eq!(group.initiators.len(), 1);
-        assert_eq!(group.finalizers.len(), 2);
-        assert!(
-            group.x > GRAPH_NODE_WIDTH,
-            "branch body should not cover the reingestor"
-        );
-        assert!(
-            group.x + group.width < 1040,
-            "branch body should not cover finalizing emitters"
-        );
-        assert_eq!(
-            group.x - GRAPH_NODE_WIDTH,
-            GraphBranchGroup::CALLOUT_CLEARANCE,
-            "branch body should start close to the initiating node border"
-        );
-        assert_eq!(
-            1040 - (group.x + group.width),
-            GraphBranchGroup::CALLOUT_CLEARANCE,
-            "branch body should end close to the finalizing node borders"
-        );
-        let callouts = group.callout_paths();
-        assert_eq!(callouts.len(), 3);
-        assert!(
-            callouts
-                .iter()
-                .any(|path| path.contains(&format!("L{} ", GRAPH_NODE_WIDTH))),
-            "branch callout should point left to its initiator"
-        );
-        assert!(
-            callouts
-                .iter()
-                .any(|path| path.contains(&format!("L{} ", 1040))),
-            "branch callout should point right to finalizing consumers"
-        );
-    }
-
-    #[test]
-    fn branch_group_is_not_an_obstacle_for_attached_member_edges() {
-        let graph = GraphView::from_dataflow_graph(DataflowGraph {
-            domain: "iot_demo".to_string(),
-            statistics: DataflowStatistics::default(),
-            nodes: vec![
-                node(
-                    "processor:device_repartition",
-                    "device_repartition",
-                    DataflowNodeKind::Processor,
-                    "reingestor",
-                    "device_branch",
-                    0,
-                    100,
-                ),
-                node(
-                    "relay:telemetry_ordered",
-                    "telemetry_ordered",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "device_branch",
-                    260,
-                    100,
-                ),
-                node(
-                    "emitter:redis_maintenance_alerts",
-                    "redis_maintenance_alerts",
-                    DataflowNodeKind::Emitter,
-                    "redis",
-                    "device_branch",
-                    520,
-                    100,
-                ),
-                unbranched_node(
-                    "client:redis_alerts",
-                    "redis_alerts",
-                    DataflowNodeKind::Client,
-                    "REDIS",
-                    780,
-                    100,
-                ),
-            ],
-            edges: vec![
-                edge("processor:device_repartition", "relay:telemetry_ordered"),
-                edge(
-                    "relay:telemetry_ordered",
-                    "emitter:redis_maintenance_alerts",
-                ),
-                edge("emitter:redis_maintenance_alerts", "client:redis_alerts"),
-            ],
-        });
-
-        let groups = graph.branching_groups();
-        assert_eq!(groups.len(), 1);
-        let group = &groups[0];
-        assert!(
-            group
-                .boundary_nodes
-                .contains("emitter:redis_maintenance_alerts")
-        );
-        let entry_obstacles =
-            graph.edge_obstacles("processor:device_repartition", "relay:telemetry_ordered");
-        let exit_obstacles = graph.edge_obstacles(
-            "relay:telemetry_ordered",
-            "emitter:redis_maintenance_alerts",
-        );
-
-        assert!(
-            entry_obstacles.iter().all(|obstacle| {
-                obstacle.core_left != group.x
-                    || obstacle.core_top != group.y
-                    || obstacle.core_right != group.x + group.width
-                    || obstacle.core_bottom != group.y + group.height
-            }),
-            "edges entering a branch group should not route around that same group"
-        );
-        assert!(
-            exit_obstacles.iter().all(|obstacle| {
-                obstacle.core_left != group.x
-                    || obstacle.core_top != group.y
-                    || obstacle.core_right != group.x + group.width
-                    || obstacle.core_bottom != group.y + group.height
-            }),
-            "edges exiting a branch group member should not route around that same group"
-        );
-    }
-
-    #[test]
-    fn finalizer_edge_routes_around_unrelated_downstream_branch_group() {
-        let graph = GraphView::from_dataflow_graph(DataflowGraph {
-            domain: "iot_demo".to_string(),
-            statistics: DataflowStatistics::default(),
-            nodes: vec![
-                node(
-                    "ingestor:site_ingest",
-                    "site_ingest",
-                    DataflowNodeKind::Ingestor,
-                    "http",
-                    "site_branch",
-                    0,
-                    300,
-                ),
-                node(
-                    "relay:battery_alerts",
-                    "battery_alerts",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "site_branch",
-                    300,
-                    300,
-                ),
-                node(
-                    "emitter:redis_battery_alerts",
-                    "redis_battery_alerts",
-                    DataflowNodeKind::Emitter,
-                    "redis",
-                    "site_branch",
-                    560,
-                    300,
-                ),
-                node(
-                    "processor:device_repartition",
-                    "device_repartition",
-                    DataflowNodeKind::Processor,
-                    "reingestor",
-                    "device_branch",
-                    700,
-                    120,
-                ),
-                node(
-                    "relay:maintenance_alerts",
-                    "maintenance_alerts",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "device_branch",
-                    960,
-                    120,
-                ),
-                node(
-                    "emitter:redis_maintenance_alerts",
-                    "redis_maintenance_alerts",
-                    DataflowNodeKind::Emitter,
-                    "redis",
-                    "device_branch",
-                    1220,
-                    120,
-                ),
-                unbranched_node(
-                    "client:redis_alerts",
-                    "redis_alerts",
-                    DataflowNodeKind::Client,
-                    "REDIS",
-                    1560,
-                    300,
-                ),
-            ],
-            edges: vec![
-                edge("ingestor:site_ingest", "relay:battery_alerts"),
-                edge("relay:battery_alerts", "emitter:redis_battery_alerts"),
-                edge("emitter:redis_battery_alerts", "client:redis_alerts"),
-                edge("processor:device_repartition", "relay:maintenance_alerts"),
-                edge(
-                    "relay:maintenance_alerts",
-                    "emitter:redis_maintenance_alerts",
-                ),
-                edge("emitter:redis_maintenance_alerts", "client:redis_alerts"),
-            ],
-        });
-
-        let groups = graph.branching_groups();
-        let device_group = groups
-            .iter()
-            .find(|group| group.schema == "device_branch")
-            .expect("device branch group should be present");
-        let route = graph
-            .edges
-            .iter()
-            .find(|edge| {
-                edge.source == "emitter:redis_battery_alerts"
-                    && edge.target == "client:redis_alerts"
-            })
-            .map(|edge| edge.route_points(&graph))
-            .expect("shared sink edge should route");
-        let obstacle = GraphRouteRect::from_branch_group(device_group);
-
-        assert!(
-            route
-                .windows(2)
-                .all(|segment| !obstacle.intersects_core_segment(segment[0], segment[1])),
-            "shared sink edge should avoid unrelated branch group body: {route:?}"
-        );
-    }
-
-    #[test]
-    fn route_graph_edge_avoids_branch_body_after_source_plug() {
-        let start = GraphRoutePoint::new(1814, 310);
-        let end = GraphRoutePoint::new(3224, 251);
-        let obstacle = GraphRouteRect::new(1862, 128, 2856, 338);
-        let route = route_graph_edge(start, end, &[obstacle], 3400, 420, Some(310))
-            .expect("edge should route around branch body");
-
-        assert!(
-            route
-                .windows(2)
-                .all(|segment| !obstacle.intersects_core_segment(segment[0], segment[1])),
-            "route should avoid branch body: {route:?}"
-        );
-    }
-
-    #[test]
-    fn branch_groups_are_not_merged_only_because_schema_matches() {
-        let graph = GraphView::from_dataflow_graph(DataflowGraph {
-            domain: "iot_demo".to_string(),
-            statistics: DataflowStatistics::default(),
-            nodes: vec![
-                node(
-                    "processor:left_repartition",
-                    "left_repartition",
-                    DataflowNodeKind::Processor,
-                    "reingestor",
-                    "device_branch",
-                    0,
-                    40,
-                ),
-                node(
-                    "relay:left_stream",
-                    "left_stream",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "device_branch",
-                    260,
-                    40,
-                ),
-                node(
-                    "emitter:left_redis",
-                    "left_redis",
-                    DataflowNodeKind::Emitter,
-                    "redis",
-                    "device_branch",
-                    520,
-                    40,
-                ),
-                node(
-                    "processor:right_repartition",
-                    "right_repartition",
-                    DataflowNodeKind::Processor,
-                    "reingestor",
-                    "device_branch",
-                    0,
-                    180,
-                ),
-                node(
-                    "relay:right_stream",
-                    "right_stream",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "device_branch",
-                    260,
-                    180,
-                ),
-                node(
-                    "emitter:right_redis",
-                    "right_redis",
-                    DataflowNodeKind::Emitter,
-                    "redis",
-                    "device_branch",
-                    520,
-                    180,
-                ),
-            ],
-            edges: vec![
-                edge("processor:left_repartition", "relay:left_stream"),
-                edge("relay:left_stream", "emitter:left_redis"),
-                edge("processor:right_repartition", "relay:right_stream"),
-                edge("relay:right_stream", "emitter:right_redis"),
-            ],
-        });
-
-        let groups = graph.branching_groups();
-        assert_eq!(groups.len(), 2);
-        assert!(groups.iter().all(|group| group.schema == "device_branch"));
-        assert_ne!(groups[0].id, groups[1].id);
-    }
-
-    #[test]
-    fn branch_group_merges_multiple_ingestors_for_same_branch_members() {
-        let graph = GraphView::from_dataflow_graph(DataflowGraph {
-            domain: "iot_demo".to_string(),
-            statistics: DataflowStatistics::default(),
-            nodes: vec![
-                unbranched_node(
-                    "ingestor:mqtt_primary",
-                    "mqtt_primary",
-                    DataflowNodeKind::Ingestor,
-                    "MQTT",
-                    0,
-                    40,
-                ),
-                unbranched_node(
-                    "ingestor:mqtt_backup",
-                    "mqtt_backup",
-                    DataflowNodeKind::Ingestor,
-                    "MQTT",
-                    0,
-                    180,
-                ),
-                node(
+                ingestor("ingestor:mqtt", "mqtt", Some(site_branch())),
+                relay(
                     "relay:telemetry_by_site",
                     "telemetry_by_site",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "site_branch",
-                    320,
-                    110,
+                    Some(site_branch()),
                 ),
+                junction("junction:route_site", "route_site", Some(site_branch())),
+                emitter("emitter:redis_site", "redis_site", Some(site_branch())),
             ],
             edges: vec![
-                edge("ingestor:mqtt_primary", "relay:telemetry_by_site"),
-                edge("ingestor:mqtt_backup", "relay:telemetry_by_site"),
+                edge("ingestor:mqtt", "relay:telemetry_by_site"),
+                edge("relay:telemetry_by_site", "junction:route_site"),
+                edge("junction:route_site", "emitter:redis_site"),
             ],
         });
 
-        let groups = graph.branching_groups();
-        assert_eq!(groups.len(), 1);
-        let group = &groups[0];
-        assert_eq!(group.schema, "site_branch");
-        assert_eq!(group.initiators.len(), 2);
-        assert_eq!(group.finalizers.len(), 0);
-        assert_eq!(group.callout_paths().len(), 2);
-        assert_eq!(group.key_fields(), vec!["site".to_string()]);
+        assert_eq!(graph.groups.len(), 1);
+        let group = &graph.groups[0];
+        assert_eq!(group.branch, "by_site");
+        assert_eq!(group.key_schema, "site_key");
+        assert_eq!(group.key_fields, vec!["site".to_string()]);
+        assert_eq!(group.key_fields_data(), "site");
+        assert!(!group.outline.is_empty());
+        assert!(group.header.is_some());
     }
 
     #[test]
     fn branch_group_counts_unique_active_branches_from_group_items() {
-        let graph = GraphView::from_dataflow_graph(DataflowGraph {
-            domain: "iot_demo".to_string(),
-            statistics: DataflowStatistics::default(),
-            nodes: vec![
-                node_with_branches(
-                    "ingestor:mqtt_primary",
-                    "mqtt_primary",
-                    DataflowNodeKind::Ingestor,
-                    "MQTT",
-                    "site_branch",
-                    (0, 40),
-                    &["site=iad-1", "site=sfo-1"],
-                ),
-                node_with_branches(
-                    "ingestor:mqtt_backup",
-                    "mqtt_backup",
-                    DataflowNodeKind::Ingestor,
-                    "MQTT",
-                    "site_branch",
-                    (0, 180),
-                    &["site=sfo-1"],
-                ),
-                node_with_branches(
-                    "relay:telemetry_by_site",
-                    "telemetry_by_site",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "site_branch",
-                    (320, 110),
-                    &["site=lhr-1"],
-                ),
-            ],
-            edges: vec![
-                edge("ingestor:mqtt_primary", "relay:telemetry_by_site"),
-                edge("ingestor:mqtt_backup", "relay:telemetry_by_site"),
-            ],
-        });
+        let region = GroupRegion {
+            branch: "by_site".to_string(),
+            bands: vec![Rect {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 120,
+            }],
+        };
+        let nodes = vec![
+            view_node(
+                "ingestor:mqtt",
+                DataflowNodeRole::Ingestor {
+                    transport: "MQTT".to_string(),
+                },
+                Some(site_branch()),
+                &["site=iad-1", "site=lhr-1"],
+            ),
+            view_node(
+                "junction:route_site",
+                DataflowNodeRole::Processor {
+                    processor: DataflowProcessorKind::Junction,
+                },
+                Some(site_branch()),
+                &["site=iad-1", "site=sfo-1"],
+            ),
+        ];
+        let relays = vec![view_relay(
+            "relay:telemetry_by_site",
+            Some(site_branch()),
+            &["site=ams-1"],
+        )];
+        let edges = vec![view_edge(
+            "relay:telemetry_by_site",
+            "junction:route_site",
+            &["site=cdg-1"],
+        )];
 
-        let groups = graph.branching_groups();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].active_branches, 3);
-        assert_eq!(groups[0].subtitle(), "3 br · keys site".to_string());
+        let group = GraphBranchGroup::new(&region, &nodes, &relays, &edges);
+
+        // The members and the edge between them contribute iad-1, sfo-1, ams-1 and cdg-1. The
+        // ingestor constructs the branch, so it stands on the group's border and lhr-1, which
+        // only it reports, is not counted.
+        assert_eq!(group.active_branches, 4);
+        assert_eq!(group.subtitle(), "(site) · 4 br");
     }
 
     #[test]
-    fn datalake_node_geometry_aligns_hit_box_route_endpoint_and_obstacle() {
+    fn branch_group_without_key_fields_reports_a_singleton_key() {
+        let region = GroupRegion {
+            branch: "by_tenant".to_string(),
+            bands: vec![Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 40,
+            }],
+        };
+        let branch = DataflowBranch {
+            name: "by_tenant".to_string(),
+            key_schema: "tenant_key".to_string(),
+            key_fields: Vec::new(),
+        };
+        let relays = vec![view_relay("relay:tenants", Some(branch), &[])];
+
+        let group = GraphBranchGroup::new(&region, &[], &relays, &[]);
+
+        assert_eq!(group.key_fields_data(), "");
+        assert_eq!(group.subtitle(), "(singleton key) · 0 br");
+    }
+
+    #[test]
+    fn node_command_kind_comes_from_the_typed_processor() {
+        let reingestor = view_node(
+            "reingestor:replay",
+            DataflowNodeRole::Processor {
+                processor: DataflowProcessorKind::Reingestor,
+            },
+            None,
+            &[],
+        );
+        assert_eq!(reingestor.command_kind(), "REINGESTOR");
+        assert_eq!(reingestor.kind_label(), "PROCESSOR");
+        assert_eq!(reingestor.detail_label(), "REINGESTOR");
+
+        let window = view_node(
+            "window_processor:rolling",
+            DataflowNodeRole::Processor {
+                processor: DataflowProcessorKind::WindowProcessor,
+            },
+            None,
+            &[],
+        );
+        assert_eq!(window.command_kind(), "WINDOW PROCESSOR");
+        assert_eq!(
+            describe_command(window.command_kind(), "rolling").as_deref(),
+            Some("DESCRIBE WINDOW PROCESSOR rolling;")
+        );
+
+        let emitter = view_node(
+            "emitter:redis",
+            DataflowNodeRole::Emitter {
+                transport: "REDIS".to_string(),
+            },
+            None,
+            &[],
+        );
+        assert_eq!(emitter.command_kind(), "EMITTER");
+        assert_eq!(emitter.kind_label(), "EMITTER");
+        assert_eq!(emitter.detail_label(), "REDIS");
+    }
+
+    #[test]
+    fn branch_group_membership_excludes_the_nodes_that_bound_the_branch() {
+        let ingestor = view_node(
+            "ingestor:mqtt",
+            DataflowNodeRole::Ingestor {
+                transport: "MQTT".to_string(),
+            },
+            Some(site_branch()),
+            &[],
+        );
+        assert_eq!(ingestor.group_branch(), None);
+
+        let junction = view_node(
+            "junction:route",
+            DataflowNodeRole::Processor {
+                processor: DataflowProcessorKind::Junction,
+            },
+            Some(site_branch()),
+            &[],
+        );
+        assert_eq!(junction.group_branch(), Some("by_site"));
+
+        let relay = view_relay("relay:telemetry", Some(site_branch()), &[]);
+        assert_eq!(relay.group_branch(), Some("by_site"));
+    }
+
+    #[test]
+    fn node_geometry_comes_from_the_layout_rectangle() {
         let graph = GraphView::from_dataflow_graph(DataflowGraph {
             domain: "datalake_demo".to_string(),
             statistics: DataflowStatistics::default(),
-            nodes: vec![unbranched_node(
+            nodes: vec![emitter(
                 "emitter:iceberg_connected_sessions",
                 "iceberg_connected_sessions",
-                DataflowNodeKind::Emitter,
-                "ICEBERG",
-                0,
-                0,
+                None,
             )],
             edges: Vec::new(),
         });
@@ -6893,19 +5497,10 @@ mod tests {
             .iter()
             .find(|node| node.id == "emitter:iceberg_connected_sessions")
             .expect("datalake node should be present");
-        assert_eq!(
-            node.hit_style(),
-            graph_position_style(0, 0, GRAPH_NODE_WIDTH, GRAPH_NODE_HEIGHT)
-        );
-        assert_eq!(
-            graph.graph_endpoint(&node.id, EndpointSide::Outgoing),
-            Some((GRAPH_NODE_WIDTH, GRAPH_NODE_CENTER_Y))
-        );
-        let obstacle = GraphRouteRect::from_node(node);
-        assert_eq!(obstacle.core_left, 0);
-        assert_eq!(obstacle.core_top, 0);
-        assert_eq!(obstacle.core_right, GRAPH_NODE_WIDTH);
-        assert_eq!(obstacle.core_bottom, GRAPH_NODE_HEIGHT);
+        assert_eq!(node.hit_style(), graph_position_style(node.rect));
+        assert!(node.rect.width > 0 && node.rect.height > 0);
+        assert!(graph.canvas_width() >= node.rect.right());
+        assert!(graph.canvas_height() >= node.rect.bottom());
     }
 
     #[test]
@@ -6937,29 +5532,140 @@ mod tests {
     }
 
     #[test]
+    fn state_links_carry_no_rate_badge() {
+        let graph = GraphView::from_dataflow_graph(DataflowGraph {
+            domain: "state_demo".to_string(),
+            statistics: DataflowStatistics::default(),
+            nodes: vec![
+                relay("relay:reference", "reference", None),
+                DataflowNode::new(
+                    "generator:ticks",
+                    "ticks",
+                    DataflowNodeRole::Processor {
+                        processor: DataflowProcessorKind::Generator,
+                    },
+                ),
+            ],
+            edges: vec![DataflowEdge::data(
+                "relay:reference",
+                "generator:ticks",
+                DataflowEdgeKind::StateLink,
+            )],
+        });
+
+        let link = &graph.edges[0];
+        assert_eq!(link.metric_style(), None);
+        assert_eq!(link.kind.css_class(), "graph-edge--state-link");
+        assert_eq!(link.marker(), "url(#graph-arrow-hollow)");
+        assert_eq!(
+            link.route_summary(),
+            "relay:reference → generator:ticks: materialized state"
+        );
+    }
+
+    #[test]
+    fn an_edge_reports_the_routes_and_correlator_side_it_stands_for() {
+        let edge = GraphViewEdge {
+            input_side: Some(DataflowInputSide::Right),
+            routes: 3,
+            ..view_edge("relay:orders", "correlator:match", &[])
+        };
+
+        assert_eq!(edge.input_side_data(), "RIGHT");
+        assert_eq!(edge.feedback_data(), "false");
+        assert_eq!(edge.marker(), "url(#graph-arrow)");
+        assert_eq!(
+            edge.route_summary(),
+            "relay:orders → correlator:match into RIGHT: records · 3 routes"
+        );
+    }
+
+    #[test]
+    fn a_branch_group_outline_thickens_with_its_live_branches() {
+        let region = GroupRegion {
+            branch: "by_site".to_string(),
+            bands: vec![Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 40,
+            }],
+        };
+        let quiet = GraphBranchGroup::new(
+            &region,
+            &[],
+            &[view_relay("relay:a", Some(site_branch()), &[])],
+            &[],
+        );
+        let busy = GraphBranchGroup::new(
+            &region,
+            &[],
+            &[view_relay(
+                "relay:a",
+                Some(site_branch()),
+                &["site=iad-1", "site=lhr-1", "site=sfo-1"],
+            )],
+            &[],
+        );
+
+        assert!(
+            busy.outline_stroke_width() > quiet.outline_stroke_width(),
+            "a busier group must be drawn heavier"
+        );
+    }
+
+    #[test]
+    fn edge_path_rounds_its_turns_and_reports_them() {
+        let edge = view_edge_with_points(
+            "relay:a",
+            "junction:b",
+            vec![(0, 0), (100, 0), (100, 100), (200, 100)],
+        );
+
+        let path = edge.path();
+        assert!(path.starts_with("M0 0"), "{path}");
+        assert!(path.ends_with("L200 100"), "{path}");
+        assert_eq!(
+            path.matches(" Q").count(),
+            2,
+            "both turns must be drawn as corners: {path}"
+        );
+        assert!(
+            path.contains("L90 0 Q100 0, 100 10"),
+            "a corner between long segments uses the full radius: {path}"
+        );
+    }
+
+    #[test]
+    fn edge_path_halves_the_corner_radius_between_short_segments() {
+        let edge = view_edge_with_points("relay:a", "junction:b", vec![(0, 0), (12, 0), (12, 40)]);
+
+        let path = edge.path();
+        assert!(
+            path.contains("L7 0 Q12 0, 12 5"),
+            "a short segment must not be eaten by its corner: {path}"
+        );
+    }
+
+    #[test]
+    fn edge_path_of_a_straight_run_has_no_corners() {
+        let edge = view_edge_with_points("relay:a", "junction:b", vec![(0, 40), (180, 40)]);
+
+        assert_eq!(edge.path(), "M0 40 L180 40");
+    }
+
+    #[test]
     fn graph_topology_key_ignores_runtime_statistics() {
         let base = GraphView::from_dataflow_graph(DataflowGraph {
             domain: "metrics_demo".to_string(),
             statistics: DataflowStatistics::default(),
             nodes: vec![
-                node(
+                ingestor(
                     "ingestor:http_notifications",
                     "http_notifications",
-                    DataflowNodeKind::Ingestor,
-                    "HTTP",
-                    "user_branch",
-                    0,
-                    100,
+                    Some(user_branch()),
                 ),
-                node(
-                    "relay:notifications",
-                    "notifications",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "user_branch",
-                    320,
-                    100,
-                ),
+                relay("relay:notifications", "notifications", Some(user_branch())),
             ],
             edges: vec![edge("ingestor:http_notifications", "relay:notifications")],
         });
@@ -6978,14 +5684,10 @@ mod tests {
                 relay_buffer_len_p99: None,
             },
             nodes: vec![
-                node(
+                ingestor(
                     "ingestor:http_notifications",
                     "http_notifications",
-                    DataflowNodeKind::Ingestor,
-                    "HTTP",
-                    "user_branch",
-                    0,
-                    100,
+                    Some(user_branch()),
                 )
                 .with_statistics(DataflowStatistics {
                     messages_per_second: 10.0,
@@ -7000,32 +5702,24 @@ mod tests {
                         ..DataflowStatistics::default()
                     },
                 }]),
-                node(
-                    "relay:notifications",
-                    "notifications",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    "user_branch",
-                    320,
-                    100,
-                )
-                .with_statistics(DataflowStatistics {
-                    messages_per_second: 10.0,
-                    messages_total: 20,
-                    relay_buffer_capacity: Some(3),
-                    relay_buffer_len_p50: Some(1.0),
-                    relay_buffer_len_p90: Some(2.0),
-                    relay_buffer_len_p99: Some(3.0),
-                    ..DataflowStatistics::default()
-                })
-                .with_branches(vec![DataflowBranchStatistics {
-                    branch: r#"{"user_id":42}"#.to_string(),
-                    statistics: DataflowStatistics {
+                relay("relay:notifications", "notifications", Some(user_branch()))
+                    .with_statistics(DataflowStatistics {
                         messages_per_second: 10.0,
                         messages_total: 20,
+                        relay_buffer_capacity: Some(3),
+                        relay_buffer_len_p50: Some(1.0),
+                        relay_buffer_len_p90: Some(2.0),
+                        relay_buffer_len_p99: Some(3.0),
                         ..DataflowStatistics::default()
-                    },
-                }]),
+                    })
+                    .with_branches(vec![DataflowBranchStatistics {
+                        branch: r#"{"user_id":42}"#.to_string(),
+                        statistics: DataflowStatistics {
+                            messages_per_second: 10.0,
+                            messages_total: 20,
+                            ..DataflowStatistics::default()
+                        },
+                    }]),
             ],
             edges: vec![
                 edge("ingestor:http_notifications", "relay:notifications")
@@ -7056,656 +5750,125 @@ mod tests {
     }
 
     #[test]
-    fn graph_topology_key_changes_for_layout_updates() {
+    fn graph_topology_key_changes_with_the_shape_of_the_graph() {
         let base = GraphView::from_dataflow_graph(DataflowGraph {
             domain: "layout_demo".to_string(),
             statistics: DataflowStatistics::default(),
             nodes: vec![
-                unbranched_node(
-                    "ingestor:http_notifications",
-                    "http_notifications",
-                    DataflowNodeKind::Ingestor,
-                    "HTTP",
-                    0,
-                    100,
-                ),
-                unbranched_node(
-                    "relay:notifications",
-                    "notifications",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    320,
-                    100,
-                ),
+                ingestor("ingestor:http_notifications", "http_notifications", None),
+                relay("relay:notifications", "notifications", None),
             ],
             edges: vec![edge("ingestor:http_notifications", "relay:notifications")],
         });
-        let moved = GraphView::from_dataflow_graph(DataflowGraph {
+        let extended = GraphView::from_dataflow_graph(DataflowGraph {
             domain: "layout_demo".to_string(),
             statistics: DataflowStatistics::default(),
             nodes: vec![
-                unbranched_node(
-                    "ingestor:http_notifications",
-                    "http_notifications",
-                    DataflowNodeKind::Ingestor,
-                    "HTTP",
-                    0,
-                    100,
-                ),
-                unbranched_node(
-                    "relay:notifications",
-                    "notifications",
-                    DataflowNodeKind::Relay,
-                    "relay",
-                    420,
-                    100,
-                ),
+                ingestor("ingestor:http_notifications", "http_notifications", None),
+                relay("relay:notifications", "notifications", None),
+                emitter("emitter:redis", "redis", None),
             ],
-            edges: vec![edge("ingestor:http_notifications", "relay:notifications")],
+            edges: vec![
+                edge("ingestor:http_notifications", "relay:notifications"),
+                edge("relay:notifications", "emitter:redis"),
+            ],
         });
 
         assert!(
-            base.topology_key() != moved.topology_key(),
-            "layout changes must still rerender topology"
+            base.topology_key() != extended.topology_key(),
+            "a different graph shape must rerender topology"
         );
     }
 
     #[test]
-    fn overlapping_long_edges_use_distinct_horizontal_lanes() {
-        let graph = GraphView {
-            id: "datalake_demo".to_string(),
-            mode: "LIVE".to_string(),
-            status: "RUNNING".to_string(),
-            uptime: String::new(),
-            statistics: GraphStatistics::default(),
-            nodes: Vec::new(),
-            relays: Vec::new(),
-            edges: vec![
-                graph_view_edge(
-                    "relay:first_source",
-                    "processor:first_target",
-                    0,
-                    100,
-                    620,
-                    100,
-                ),
-                graph_view_edge(
-                    "relay:second_source",
-                    "processor:second_target",
-                    40,
-                    100,
-                    660,
-                    100,
-                ),
+    fn graph_topology_key_distinguishes_correlator_input_sides_and_route_counts() {
+        let left = GraphView::from_dataflow_graph(correlator_graph(DataflowInputSide::Left, 1));
+        let right = GraphView::from_dataflow_graph(correlator_graph(DataflowInputSide::Right, 1));
+        let collapsed =
+            GraphView::from_dataflow_graph(correlator_graph(DataflowInputSide::Left, 3));
+
+        assert!(left.topology_key() != right.topology_key());
+        assert!(left.topology_key() != collapsed.topology_key());
+    }
+
+    #[test]
+    fn hovering_an_item_emphasises_its_incident_edges() {
+        let graph = GraphView::from_dataflow_graph(DataflowGraph {
+            domain: "hover_demo".to_string(),
+            statistics: DataflowStatistics::default(),
+            nodes: vec![
+                ingestor("ingestor:mqtt", "mqtt", None),
+                relay("relay:telemetry", "telemetry", None),
+                emitter("emitter:redis", "redis", None),
             ],
-        };
-
-        let first_lane = graph
-            .edge_preferred_lane(&graph.edges[0])
-            .expect("first long edge should have a preferred lane");
-        let second_lane = graph
-            .edge_preferred_lane(&graph.edges[1])
-            .expect("second long edge should have a preferred lane");
-        assert_ne!(first_lane, second_lane);
-
-        let first_route = graph.edges[0].route_points(&graph);
-        let second_route = graph.edges[1].route_points(&graph);
-        assert_eq!(longest_horizontal_lane(&first_route), Some(first_lane));
-        assert_eq!(longest_horizontal_lane(&second_route), Some(second_lane));
-    }
-
-    #[test]
-    fn shared_source_fanout_edges_use_distinct_horizontal_lanes() {
-        let graph = GraphView {
-            id: "datalake_demo".to_string(),
-            mode: "LIVE".to_string(),
-            status: "RUNNING".to_string(),
-            uptime: String::new(),
-            statistics: GraphStatistics::default(),
-            nodes: Vec::new(),
-            relays: Vec::new(),
             edges: vec![
-                graph_view_edge(
-                    "relay:source_events",
-                    "processor:top_target",
-                    0,
-                    100,
-                    620,
-                    80,
-                ),
-                graph_view_edge(
-                    "relay:source_events",
-                    "processor:bottom_target",
-                    0,
-                    100,
-                    620,
-                    160,
-                ),
+                edge("ingestor:mqtt", "relay:telemetry"),
+                edge("relay:telemetry", "emitter:redis"),
             ],
-        };
-
-        assert!(
-            graph.edge_preferred_lane(&graph.edges[0]).is_none(),
-            "fan-out edges whose target rows are already distinct should not get synthetic lanes"
-        );
-        assert!(
-            graph.edge_preferred_lane(&graph.edges[1]).is_none(),
-            "fan-out edges whose target rows are already distinct should not get synthetic lanes"
-        );
-        let first_route = graph.edges[0].route_points(&graph);
-        let second_route = graph.edges[1].route_points(&graph);
-        assert_ne!(
-            longest_horizontal_lane(&first_route),
-            longest_horizontal_lane(&second_route)
-        );
-        assert!(
-            route_turn_count(&first_route) <= 2,
-            "fan-out route should not dogleg through a synthetic lane: {first_route:?}"
-        );
-        assert!(
-            route_turn_count(&second_route) <= 2,
-            "fan-out route should not dogleg through a synthetic lane: {second_route:?}"
-        );
-    }
-
-    #[test]
-    fn route_graph_edge_prefers_assigned_horizontal_lane() {
-        let start = GraphRoutePoint::new(40, 100);
-        let end = GraphRoutePoint::new(620, 100);
-        let route = route_graph_edge(start, end, &[], 700, 240, Some(118))
-            .expect("edge should route through the assigned lane");
-
-        assert_eq!(longest_horizontal_lane(&route), Some(118));
-    }
-
-    #[test]
-    fn graph_edge_route_escapes_soft_margin_without_crossing_obstacle_core() {
-        let obstacle = GraphRouteRect::new(100, 0, 200, 100);
-        let start = GraphRoutePoint::new(95, 50);
-        let end = GraphRoutePoint::new(250, 50);
-
-        let route = route_graph_edge(start, end, &[obstacle], 300, 160, None)
-            .expect("edge should route around an obstacle when the source is in its soft margin");
-
-        assert_eq!(route.first(), Some(&start));
-        assert_eq!(route.last(), Some(&end));
-        assert!(
-            route.len() > 2,
-            "route should not use the direct segment through the obstacle"
-        );
-        for segment in route.windows(2) {
-            assert!(
-                !obstacle.intersects_core_segment(segment[0], segment[1]),
-                "route segment should not cross the obstacle core: {segment:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn graph_edge_route_prefers_horizontal_first_forward_flow() {
-        let start = GraphRoutePoint::new(100, 40);
-        let end = GraphRoutePoint::new(280, 160);
-
-        let route = route_graph_edge(start, end, &[], 360, 220, None)
-            .expect("edge should route through an empty canvas");
-
-        assert_eq!(route.first(), Some(&start));
-        assert_eq!(route.last(), Some(&end));
-        let first_segment = route
-            .windows(2)
-            .next()
-            .expect("route must contain a first segment");
-        assert_eq!(
-            first_segment[0].y, first_segment[1].y,
-            "forward fan-out should avoid a vertical trunk at the source"
-        );
-        let last_segment = route
-            .windows(2)
-            .last()
-            .expect("route must contain a last segment");
-        assert_eq!(
-            last_segment[0].y, last_segment[1].y,
-            "forward fan-out should enter the target from the side"
-        );
-        assert!(
-            last_segment[1].x > last_segment[0].x,
-            "forward fan-out should enter the target from the left"
-        );
-        assert!(
-            last_segment[1].x - last_segment[0].x >= GRAPH_EDGE_TERMINAL_STRAIGHT,
-            "forward fan-out should keep terminal bends away from the target"
-        );
-    }
-
-    #[test]
-    fn graph_edge_uses_direct_curve_when_clear() {
-        let start = GraphRoutePoint::new(100, 80);
-        let end = GraphRoutePoint::new(300, 180);
-
-        let path = direct_curve_path(start, end, &[])
-            .expect("clear left-to-right edges should use a direct curve");
-
-        assert!(path.starts_with("M100 80 C"));
-        assert!(path.ends_with("300 180"));
-    }
-
-    #[test]
-    fn graph_edge_direct_curve_rejects_obstacle_crossing() {
-        let start = GraphRoutePoint::new(100, 80);
-        let end = GraphRoutePoint::new(300, 180);
-        let obstacle = GraphRouteRect::new(180, 90, 240, 160);
-
-        assert!(direct_curve_path(start, end, &[obstacle]).is_none());
-    }
-
-    #[test]
-    fn graph_edge_path_rounds_middle_orthogonal_corners() {
-        let path = GraphViewEdge::rounded_path(&[
-            GraphRoutePoint::new(0, 20),
-            GraphRoutePoint::new(100, 20),
-            GraphRoutePoint::new(100, 80),
-            GraphRoutePoint::new(160, 80),
-            GraphRoutePoint::new(160, 130),
-        ]);
-
-        assert_eq!(
-            path,
-            "M0 20 L92 20 Q100 20, 100 28 L100 62 Q100 80, 118 80 L152 80 Q160 80, 160 88 L160 130"
-        );
-    }
-
-    #[test]
-    fn graph_edge_path_rounds_endpoint_plugs_without_eating_them() {
-        let path = GraphViewEdge::rounded_path(&[
-            GraphRoutePoint::new(0, 20),
-            GraphRoutePoint::new(100, 20),
-            GraphRoutePoint::new(100, 80),
-            GraphRoutePoint::new(160, 80),
-        ]);
-
-        assert_eq!(
-            path,
-            "M0 20 L92 20 Q100 20, 100 28 L100 72 Q100 80, 108 80 L160 80"
-        );
-    }
-
-    #[test]
-    fn route_graph_edge_rejects_vertical_target_entry() {
-        let start = GraphRoutePoint::new(853, 251);
-        let end = GraphRoutePoint::new(984, 251);
-        let route = route_graph_edge(start, end, &[], 1120, 360, Some(242))
-            .expect("edge should route without a vertical target entry");
-        let first_segment = route
-            .windows(2)
-            .next()
-            .expect("route must contain a first segment");
-        let last_segment = route
-            .windows(2)
-            .last()
-            .expect("route must contain a last segment");
-
-        assert_eq!(
-            first_segment[0].y, first_segment[1].y,
-            "route should leave the source horizontally: {route:?}"
-        );
-        assert!(
-            first_segment[1].x - first_segment[0].x >= GRAPH_EDGE_TURN_X,
-            "route should reserve a clear source plug: {route:?}"
-        );
-        assert_eq!(
-            last_segment[0].y, last_segment[1].y,
-            "route should enter the target horizontally: {route:?}"
-        );
-        assert!(
-            last_segment[1].x > last_segment[0].x,
-            "route should enter the target in the flow direction: {route:?}"
-        );
-        assert!(
-            last_segment[1].x - last_segment[0].x >= GRAPH_EDGE_TERMINAL_STRAIGHT,
-            "route should reserve a clear target plug: {route:?}"
-        );
-    }
-
-    #[test]
-    fn datalake_splitter_input_edge_stays_near_its_endpoints() {
-        let graph = GraphView::from_dataflow_graph(
-            DataflowGraph {
-                domain: "datalake_demo".to_string(),
-                statistics: DataflowStatistics::default(),
-                nodes: vec![
-                    node(
-                        "client:mqtt_devices",
-                        "mqtt_devices",
-                        DataflowNodeKind::Client,
-                        "MQTT",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "client:nats_edge",
-                        "nats_edge",
-                        DataflowNodeKind::Client,
-                        "NATS",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "client:kafka_auth",
-                        "kafka_auth",
-                        DataflowNodeKind::Client,
-                        "KAFKA",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "ingestor:iot_device_activity",
-                        "iot_device_activity",
-                        DataflowNodeKind::Ingestor,
-                        "MQTT",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "ingestor:edge_server_activity",
-                        "edge_server_activity",
-                        DataflowNodeKind::Ingestor,
-                        "NATS",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "ingestor:auth_server_activity",
-                        "auth_server_activity",
-                        DataflowNodeKind::Ingestor,
-                        "KAFKA",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:device_activity_landing",
-                        "device_activity_landing",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:edge_activity_landing",
-                        "edge_activity_landing",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:auth_activity_landing",
-                        "auth_activity_landing",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "processor:device_activity_splitter",
-                        "device_activity_splitter",
-                        DataflowNodeKind::Processor,
-                        "deduplicator",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "processor:edge_location_lookup",
-                        "edge_location_lookup",
-                        DataflowNodeKind::Processor,
-                        "deduplicator",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "processor:auth_activity_splitter",
-                        "auth_activity_splitter",
-                        DataflowNodeKind::Processor,
-                        "deduplicator",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:device_connect_events",
-                        "device_connect_events",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:device_location_events",
-                        "device_location_events",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:device_disconnect_events",
-                        "device_disconnect_events",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:edge_activity_enriched_landing",
-                        "edge_activity_enriched_landing",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:auth_authorized_events",
-                        "auth_authorized_events",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:auth_denied_events",
-                        "auth_denied_events",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "processor:edge_activity_splitter",
-                        "edge_activity_splitter",
-                        DataflowNodeKind::Processor,
-                        "deduplicator",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:edge_connect_events",
-                        "edge_connect_events",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                    node(
-                        "relay:edge_disconnect_events",
-                        "edge_disconnect_events",
-                        DataflowNodeKind::Relay,
-                        "relay",
-                        "device_branch",
-                        0,
-                        0,
-                    ),
-                ],
-                edges: vec![
-                    edge("client:mqtt_devices", "ingestor:iot_device_activity"),
-                    edge("client:nats_edge", "ingestor:edge_server_activity"),
-                    edge("client:kafka_auth", "ingestor:auth_server_activity"),
-                    edge(
-                        "ingestor:iot_device_activity",
-                        "relay:device_activity_landing",
-                    ),
-                    edge(
-                        "ingestor:edge_server_activity",
-                        "relay:edge_activity_landing",
-                    ),
-                    edge(
-                        "ingestor:auth_server_activity",
-                        "relay:auth_activity_landing",
-                    ),
-                    edge(
-                        "relay:device_activity_landing",
-                        "processor:device_activity_splitter",
-                    ),
-                    edge(
-                        "relay:edge_activity_landing",
-                        "processor:edge_location_lookup",
-                    ),
-                    edge(
-                        "relay:auth_activity_landing",
-                        "processor:auth_activity_splitter",
-                    ),
-                    edge(
-                        "processor:device_activity_splitter",
-                        "relay:device_connect_events",
-                    ),
-                    edge(
-                        "processor:device_activity_splitter",
-                        "relay:device_location_events",
-                    ),
-                    edge(
-                        "processor:device_activity_splitter",
-                        "relay:device_disconnect_events",
-                    ),
-                    edge(
-                        "processor:edge_location_lookup",
-                        "relay:edge_activity_enriched_landing",
-                    ),
-                    edge(
-                        "relay:edge_activity_enriched_landing",
-                        "processor:edge_activity_splitter",
-                    ),
-                    edge(
-                        "processor:auth_activity_splitter",
-                        "relay:auth_authorized_events",
-                    ),
-                    edge(
-                        "processor:auth_activity_splitter",
-                        "relay:auth_denied_events",
-                    ),
-                    edge(
-                        "processor:edge_activity_splitter",
-                        "relay:edge_connect_events",
-                    ),
-                    edge(
-                        "processor:edge_activity_splitter",
-                        "relay:edge_disconnect_events",
-                    ),
-                ],
-            }
-            .laid_out(),
-        );
-        let edge = graph
+        });
+        let first = graph
             .edges
             .iter()
-            .find(|edge| {
-                edge.source == "relay:edge_activity_enriched_landing"
-                    && edge.target == "processor:edge_activity_splitter"
-            })
-            .expect("edge_activity_splitter input edge must exist");
+            .find(|edge| edge.source == "ingestor:mqtt")
+            .expect("the ingest edge must exist");
+        let second = graph
+            .edges
+            .iter()
+            .find(|edge| edge.target == "emitter:redis")
+            .expect("the emit edge must exist");
 
-        let route = edge.route_points(&graph);
-        let path = edge.path(&graph);
-        let min_y = route.iter().map(|point| point.y).min().unwrap_or_default();
-        let max_y = route.iter().map(|point| point.y).max().unwrap_or_default();
-        let endpoint_min_y = route
-            .first()
-            .zip(route.last())
-            .map(|(start, end)| start.y.min(end.y))
-            .unwrap_or_default();
-        let endpoint_max_y = route
-            .first()
-            .zip(route.last())
-            .map(|(start, end)| start.y.max(end.y))
-            .unwrap_or_default();
+        let hover = GraphHover::Item("ingestor:mqtt".to_string());
+        assert!(hover.emphasises_item("ingestor:mqtt"));
+        assert!(!hover.emphasises_item("emitter:redis"));
+        assert!(hover.emphasises_edge(first));
+        assert!(!hover.emphasises_edge(second));
 
-        assert!(
-            min_y >= endpoint_min_y - GRAPH_EDGE_LANE_SPACING
-                && max_y <= endpoint_max_y + GRAPH_EDGE_LANE_SPACING,
-            "deduplicator input edge should not make a tall vertical detour: {route:?}"
+        let hover = GraphHover::Edge(
+            "relay:telemetry".to_string(),
+            "emitter:redis".to_string(),
+            DataflowEdgeKind::Data,
         );
-        assert!(
-            path.contains(" C"),
-            "short clear deduplicator input edge should use a direct curve instead of an \
-             orthogonal dogleg: {path}"
-        );
+        assert!(hover.emphasises_item("relay:telemetry"));
+        assert!(hover.emphasises_item("emitter:redis"));
+        assert!(!hover.emphasises_item("ingestor:mqtt"));
+        assert!(hover.emphasises_edge(second));
+        assert!(!hover.emphasises_edge(first));
     }
 
     #[test]
-    fn short_clear_edges_use_direct_curve_even_with_synthetic_lane() {
-        let graph = GraphView {
-            id: "datalake_demo".to_string(),
-            mode: "LIVE".to_string(),
-            status: "RUNNING".to_string(),
-            uptime: String::new(),
-            statistics: GraphStatistics::default(),
-            nodes: Vec::new(),
-            relays: Vec::new(),
-            edges: vec![
-                graph_view_edge(
-                    "relay:edge_activity_enriched_landing",
-                    "processor:edge_activity_splitter",
-                    1518,
-                    428,
-                    1624,
-                    369,
-                ),
-                graph_view_edge(
-                    "relay:auth_activity_landing",
-                    "processor:edge_activity_splitter",
-                    1518,
-                    428,
-                    1624,
-                    369,
-                ),
+    fn search_matches_items_by_name_and_frames_them() {
+        let graph = GraphView::from_dataflow_graph(DataflowGraph {
+            domain: "search_demo".to_string(),
+            statistics: DataflowStatistics::default(),
+            nodes: vec![
+                ingestor("ingestor:mqtt_telemetry", "mqtt_telemetry", None),
+                relay("relay:telemetry", "telemetry", None),
+                emitter("emitter:redis_alerts", "redis_alerts", None),
             ],
-        };
-        let edge = &graph.edges[0];
+            edges: vec![
+                edge("ingestor:mqtt_telemetry", "relay:telemetry"),
+                edge("relay:telemetry", "emitter:redis_alerts"),
+            ],
+        });
 
-        assert!(
-            graph.edge_preferred_lane(edge).is_some(),
-            "test setup must assign a synthetic lane"
-        );
-        assert!(
-            edge.path(&graph).contains(" C"),
-            "short clear edge should not dogleg through its synthetic lane"
-        );
+        assert_eq!(graph.search_result_count("telemetry"), 2);
+        assert_eq!(graph.search_result_count("t"), 0, "one letter is too broad");
+        assert!(graph.search_result_bounds("telemetry").is_some());
+        assert!(graph.search_result_bounds("nothing").is_none());
+    }
+
+    #[test]
+    fn domain_lifecycle_reports_the_three_states() {
+        let domain = |status: &str| DomainView {
+            id: "demo".to_string(),
+            mode: "LIVE".to_string(),
+            status: status.to_string(),
+        };
+        assert_eq!(domain("RUNNING").lifecycle_label(), "RUNNING");
+        assert_eq!(domain("running").lifecycle_label(), "RUNNING");
+        assert_eq!(domain("PAUSED").lifecycle_label(), "PAUSED");
+        assert_eq!(domain("STOPPED").lifecycle_label(), "STOPPED");
+        assert_eq!(domain("").lifecycle_label(), "STOPPED");
     }
 
     #[test]
@@ -7756,105 +5919,147 @@ mod tests {
         );
     }
 
-    fn node(
-        id: &str,
-        label: &str,
-        kind: DataflowNodeKind,
-        subtype: &str,
-        schema: &str,
-        x: i32,
-        y: i32,
-    ) -> DataflowNode {
-        let mut node =
-            DataflowNode::new(id, label, kind, subtype).with_branching_schema(schema.to_string());
-        node.x = x;
-        node.y = y;
-        node
-    }
-
-    fn unbranched_node(
-        id: &str,
-        label: &str,
-        kind: DataflowNodeKind,
-        subtype: &str,
-        x: i32,
-        y: i32,
-    ) -> DataflowNode {
-        let mut node = DataflowNode::new(id, label, kind, subtype);
-        node.x = x;
-        node.y = y;
-        node
-    }
-
-    fn node_with_branches(
-        id: &str,
-        label: &str,
-        kind: DataflowNodeKind,
-        subtype: &str,
-        schema: &str,
-        position: (i32, i32),
-        branches: &[&str],
-    ) -> DataflowNode {
-        node(id, label, kind, subtype, schema, position.0, position.1).with_branches(
-            branches
-                .iter()
-                .map(|branch| DataflowBranchStatistics {
-                    branch: (*branch).to_string(),
-                    statistics: DataflowStatistics::default(),
-                })
-                .collect(),
-        )
-    }
-
-    fn edge(source: &str, target: &str) -> DataflowEdge {
-        DataflowEdge {
-            source: source.to_string(),
-            target: target.to_string(),
-            kind: DataflowEdgeKind::Data,
-            metric: None,
-            statistics: DataflowStatistics::default(),
-            branches: Vec::new(),
+    fn site_branch() -> DataflowBranch {
+        DataflowBranch {
+            name: "by_site".to_string(),
+            key_schema: "site_key".to_string(),
+            key_fields: vec!["site".to_string()],
         }
     }
 
-    fn graph_view_edge(
-        source: &str,
-        target: &str,
-        x1: i32,
-        y1: i32,
-        x2: i32,
-        y2: i32,
-    ) -> GraphViewEdge {
+    fn user_branch() -> DataflowBranch {
+        DataflowBranch {
+            name: "by_user".to_string(),
+            key_schema: "user_key".to_string(),
+            key_fields: vec!["user_id".to_string()],
+        }
+    }
+
+    fn ingestor(id: &str, label: &str, branch: Option<DataflowBranch>) -> DataflowNode {
+        DataflowNode::new(
+            id,
+            label,
+            DataflowNodeRole::Ingestor {
+                transport: "MQTT".to_string(),
+            },
+        )
+        .with_branch(branch)
+    }
+
+    fn emitter(id: &str, label: &str, branch: Option<DataflowBranch>) -> DataflowNode {
+        DataflowNode::new(
+            id,
+            label,
+            DataflowNodeRole::Emitter {
+                transport: "REDIS".to_string(),
+            },
+        )
+        .with_branch(branch)
+    }
+
+    fn junction(id: &str, label: &str, branch: Option<DataflowBranch>) -> DataflowNode {
+        DataflowNode::new(
+            id,
+            label,
+            DataflowNodeRole::Processor {
+                processor: DataflowProcessorKind::Junction,
+            },
+        )
+        .with_branch(branch)
+    }
+
+    fn relay(id: &str, label: &str, branch: Option<DataflowBranch>) -> DataflowNode {
+        DataflowNode::new(id, label, DataflowNodeRole::Relay).with_branch(branch)
+    }
+
+    fn edge(source: &str, target: &str) -> DataflowEdge {
+        DataflowEdge::data(source, target, DataflowEdgeKind::Data)
+    }
+
+    fn correlator_graph(side: DataflowInputSide, routes: u32) -> DataflowGraph {
+        DataflowGraph {
+            domain: "correlation_demo".to_string(),
+            statistics: DataflowStatistics::default(),
+            nodes: vec![
+                relay("relay:orders", "orders", None),
+                DataflowNode::new(
+                    "correlator:match",
+                    "match",
+                    DataflowNodeRole::Processor {
+                        processor: DataflowProcessorKind::Correlator,
+                    },
+                ),
+            ],
+            edges: vec![
+                edge("relay:orders", "correlator:match")
+                    .with_input_side(Some(side))
+                    .with_routes(routes),
+            ],
+        }
+    }
+
+    fn view_node(
+        id: &str,
+        role: DataflowNodeRole,
+        branch: Option<DataflowBranch>,
+        branches: &[&str],
+    ) -> GraphViewNode {
+        GraphViewNode {
+            id: id.to_string(),
+            label: id.rsplit(':').next().unwrap_or(id).to_string(),
+            kind: NodeKind::from_dataflow_kind(role.kind()),
+            role,
+            status: DataflowNodeStatus::Ok,
+            status_detail: None,
+            reconnect_wait_millis: None,
+            rect: Rect::default(),
+            branch,
+            branches: branch_statistics(branches),
+        }
+    }
+
+    fn view_relay(id: &str, branch: Option<DataflowBranch>, branches: &[&str]) -> GraphViewRelay {
+        GraphViewRelay {
+            id: id.to_string(),
+            label: id.rsplit(':').next().unwrap_or(id).to_string(),
+            rect: Rect::default(),
+            schema: None,
+            schema_fields: Vec::new(),
+            branch,
+            statistics: GraphStatistics::default(),
+            branches: branch_statistics(branches),
+        }
+    }
+
+    fn view_edge(source: &str, target: &str, branches: &[&str]) -> GraphViewEdge {
         GraphViewEdge {
             source: source.to_string(),
             target: target.to_string(),
             kind: DataflowEdgeKind::Data,
+            input_side: None,
+            routes: 1,
             statistics: GraphStatistics::default(),
-            branches: Vec::new(),
-            x1,
-            y1,
-            x2,
-            y2,
+            branches: branch_statistics(branches),
+            points: Vec::new(),
+            badge: None,
+            feedback: false,
         }
     }
 
-    fn longest_horizontal_lane(points: &[GraphRoutePoint]) -> Option<i32> {
-        points
-            .windows(2)
-            .filter(|segment| segment[0].y == segment[1].y)
-            .max_by_key(|segment| (segment[1].x - segment[0].x).abs())
-            .map(|segment| segment[0].y)
+    fn view_edge_with_points(source: &str, target: &str, points: Vec<(i32, i32)>) -> GraphViewEdge {
+        GraphViewEdge {
+            points,
+            ..view_edge(source, target, &[])
+        }
     }
 
-    fn route_turn_count(points: &[GraphRoutePoint]) -> usize {
-        points
-            .windows(3)
-            .filter(|window| {
-                let incoming = (window[1].x - window[0].x, window[1].y - window[0].y);
-                let outgoing = (window[2].x - window[1].x, window[2].y - window[1].y);
-                incoming.0.signum() != outgoing.0.signum()
-                    || incoming.1.signum() != outgoing.1.signum()
+    fn branch_statistics(branches: &[&str]) -> Vec<GraphBranchStatistics> {
+        branches
+            .iter()
+            .map(|branch| GraphBranchStatistics {
+                branch: (*branch).to_string(),
+                statistics: GraphStatistics::default(),
             })
-            .count()
+            .collect()
     }
 }

@@ -829,6 +829,45 @@ impl Model {
         }
     }
 
+    /// The relays this model reads as materialized state. State is resolved by key rather than
+    /// delivered as records, so these are dependencies and not record inputs.
+    pub fn materialized_state_relays(&self) -> Vec<&Identifier> {
+        let dependencies = match self {
+            Self::Generator(generator) => return vec![&generator.materialized_relay],
+            Self::Emitter(model) => &model.materialized_state,
+            Self::Reingestor(model) => &model.materialized_state,
+            Self::Inferencer(model) => &model.materialized_state,
+            Self::WasmProcessor(model) => &model.materialized_state,
+            Self::Junction(model) => &model.materialized_state,
+            Self::Deduplicator(model) => &model.materialized_state,
+            Self::Correlator(model) => &model.materialized_state,
+            Self::Reorderer(model) => &model.materialized_state,
+            Self::WindowProcessor(model) => &model.materialized_state,
+            _ => return Vec::new(),
+        };
+        dependencies
+            .iter()
+            .map(|dependency| &dependency.relay)
+            .collect()
+    }
+
+    /// The declared output routes of a producing model, in written order.
+    pub const fn output_routes(&self) -> Option<&ProcessorOutputs> {
+        match self {
+            Self::Generator(model) => Some(&model.output_routes),
+            Self::Ingestor(model) => Some(&model.output_routes),
+            Self::Reingestor(model) => Some(&model.output_routes),
+            Self::Inferencer(model) => Some(&model.output_routes),
+            Self::WasmProcessor(model) => Some(&model.output_routes),
+            Self::Junction(model) => Some(&model.output_routes),
+            Self::Deduplicator(model) => Some(&model.output_routes),
+            Self::Correlator(model) => Some(&model.output_routes),
+            Self::Reorderer(model) => Some(&model.output_routes),
+            Self::WindowProcessor(model) => Some(&model.output_routes),
+            _ => None,
+        }
+    }
+
     pub fn identifier(&self) -> &Identifier {
         match self {
             Self::Schema(v) => &v.name,

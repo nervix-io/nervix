@@ -277,7 +277,6 @@ blake3 = "1"
 bolero = "0.13"
 byte-unit = "5.2"
 bytes = "1.11"
-charming = { version = "0.6.0", default-features = false }
 chitchat = "0.10.1"
 chrono = "0.4.44"
 chumsky = "0.12.0"
