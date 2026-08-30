@@ -39,14 +39,14 @@ use nervix_models::{
     CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
     CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPrometheus,
     CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor,
-    CreateRelay, CreateSignalingProtocol, CreateUdf, Domain, DomainConfig, DomainPace,
-    DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterPublishingMode,
-    EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy, IcebergCatalog,
-    IcebergStorageBackend, IcebergValueMapping, Identifier, InferencerExecutionMode,
-    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets,
+    CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
+    CreateUdf, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink,
+    EmitterAckWindow, EmitterPublishingMode, EndpointType, ErrorPolicies, FieldPath,
+    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
     MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping,
     MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
@@ -149,6 +149,7 @@ mod runtime_impl;
 mod schedule_delta;
 mod service_url;
 mod state_store;
+mod syslog;
 mod test_hooks;
 mod tls;
 mod wasm_state;
@@ -1931,6 +1932,15 @@ impl IngestFilterMapMetadata {
         metadata
     }
 
+    fn syslog(peer_addr: std::net::SocketAddr) -> Self {
+        let mut metadata = Self::default();
+        metadata.values.insert(
+            "peer_addr".to_string(),
+            RuntimeValue::String(peer_addr.to_string()),
+        );
+        metadata
+    }
+
     fn insert_header(&mut self, name: String, value: String) {
         self.headers.entry(name).or_default().push(value);
     }
@@ -3124,6 +3134,8 @@ pub struct Runtime {
     transaction_commit_pauses: Arc<test_hooks::TransactionCommitPauseInjector>,
     #[cfg(feature = "testing")]
     entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
+    #[cfg(feature = "testing")]
+    syslog_ingestor_bind_address_overrides: Arc<test_hooks::SyslogIngestorBindAddressOverrides>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,
@@ -12099,6 +12111,9 @@ fn ingestor_filter_map_metadata_arrow_schema(
             arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
             arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
             arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
+        ]))),
+        IngestSource::Syslog { .. } => Some(StdArc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("peer_addr", ArrowDataType::Utf8, true),
         ]))),
         _ => None,
     }

@@ -7,26 +7,27 @@ use nervix_models::{
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
     CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
-    CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
-    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode,
-    EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog,
-    IcebergStorageBackend, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode,
-    KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    OutputFlushPolicy, ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
-    RedisPubSubIngestMode, RelayBranching, RetryPolicy, SchemaField, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, VhostTlsResource,
-    WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
+    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
+    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterAckWindow, EmitterPublishingMode,
+    EndpointIngestMode, EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy,
+    IcebergCatalog, IcebergStorageBackend, Identifier, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+    InferencerTensorRepresentation, InferencerTensorSchema, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, InputCollectPolicy, JsonType,
+    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy,
+    Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+    NameError, NatsIngestMode, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope,
+    OtelSignal, OutputFlushPolicy, ParseAsType, PlacementPolicy, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
+    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, SchemaField,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
+    VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness,
+    ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -59,6 +60,7 @@ pub enum StoredModelVersioned {
     TransportGcs(StoredCreateClientGcs),
     TransportAzureBlob(StoredCreateClientAzureBlob),
     TransportIcebergRest(StoredCreateClientIcebergRest),
+    TransportSyslog(StoredCreateClientSyslog),
     Vhost(StoredCreateVhost),
     Branch(StoredCreateBranch),
     Endpoint(StoredCreateEndpoint),
@@ -573,6 +575,13 @@ pub struct StoredCreateClientIcebergRest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredCreateClientSyslog {
+    pub name: String,
+    pub mount: Option<String>,
+    pub config: Vec<StoredClientConfigEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateCodec {
     pub name: String,
     pub wire_format: StoredCodecWireFormat,
@@ -591,6 +600,7 @@ pub enum StoredCodecWireFormat {
         transformations: StoredCodecJaqTransformations,
     },
     Protobuf(StoredCodecProtobufConfig),
+    Syslog,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -948,6 +958,10 @@ pub enum StoredIngestSource {
     Websockets {
         client: String,
         mode: StoredWebsocketsIngestMode,
+        quiesce: StoredIngestQuiesceMode,
+    },
+    Syslog {
+        client: String,
         quiesce: StoredIngestQuiesceMode,
     },
 }
@@ -1436,6 +1450,9 @@ pub enum StoredEmitSink {
         resource: Vec<StoredClickHouseValueMapping>,
         scope: Option<StoredOtelScope>,
     },
+    Syslog {
+        client: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1647,6 +1664,7 @@ impl From<Model> for StoredModelVersioned {
             Model::ClientGcs(v) => Self::TransportGcs(v.into()),
             Model::ClientAzureBlob(v) => Self::TransportAzureBlob(v.into()),
             Model::ClientIcebergRest(v) => Self::TransportIcebergRest(v.into()),
+            Model::ClientSyslog(v) => Self::TransportSyslog(v.into()),
             Model::Vhost(v) => Self::Vhost(v.into()),
             Model::Branch(v) => Self::Branch(v.into()),
             Model::Endpoint(v) => Self::Endpoint(v.into()),
@@ -1736,6 +1754,7 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::TransportIcebergRest(v) => {
                 Ok(Model::ClientIcebergRest(convert_stored(v)?))
             }
+            StoredModelVersioned::TransportSyslog(v) => Ok(Model::ClientSyslog(convert_stored(v)?)),
             StoredModelVersioned::Vhost(v) => Ok(Model::Vhost(convert_stored(v)?)),
             StoredModelVersioned::Branch(v) => Ok(Model::Branch(convert_stored(v)?)),
             StoredModelVersioned::Endpoint(v) => Ok(Model::Endpoint(convert_stored(v)?)),
@@ -2700,6 +2719,31 @@ impl TryFrom<StoredCreateClientIcebergRest> for CreateClientIcebergRest {
     }
 }
 
+impl From<CreateClientSyslog> for StoredCreateClientSyslog {
+    fn from(value: CreateClientSyslog) -> Self {
+        Self {
+            name: value.name.to_string(),
+            mount: value.mount.map(|mount| mount.to_string()),
+            config: value.config.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<StoredCreateClientSyslog> for CreateClientSyslog {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredCreateClientSyslog) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: Identifier::parse(&value.name)?,
+            mount: value
+                .mount
+                .map(|mount| Identifier::parse(&mount))
+                .transpose()?,
+            config: value.config.into_iter().map(Into::into).collect(),
+        })
+    }
+}
+
 impl From<CreateVhost> for StoredCreateVhost {
     fn from(value: CreateVhost) -> Self {
         Self {
@@ -3123,6 +3167,7 @@ impl From<CodecWireFormat> for StoredCodecWireFormat {
                 transformations: transformations.into(),
             },
             CodecWireFormat::Protobuf(config) => Self::Protobuf(config.into()),
+            CodecWireFormat::Syslog => Self::Syslog,
         }
     }
 }
@@ -3143,6 +3188,7 @@ impl TryFrom<StoredCodecWireFormat> for CodecWireFormat {
                 transformations: transformations.into(),
             },
             StoredCodecWireFormat::Protobuf(config) => Self::Protobuf(config.try_into()?),
+            StoredCodecWireFormat::Syslog => Self::Syslog,
         })
     }
 }
@@ -3862,6 +3908,10 @@ impl From<IngestSource> for StoredIngestSource {
                 mode: mode.into(),
                 quiesce: quiesce.into(),
             },
+            IngestSource::Syslog { client, quiesce } => Self::Syslog {
+                client: client.to_string(),
+                quiesce: quiesce.into(),
+            },
         }
     }
 }
@@ -4011,6 +4061,10 @@ impl TryFrom<StoredIngestSource> for IngestSource {
             } => Ok(Self::Websockets {
                 client: Identifier::parse(&client)?,
                 mode: mode.into(),
+                quiesce: quiesce.into(),
+            }),
+            StoredIngestSource::Syslog { client, quiesce } => Ok(Self::Syslog {
+                client: Identifier::parse(&client)?,
                 quiesce: quiesce.into(),
             }),
         }
@@ -5048,6 +5102,9 @@ impl From<EmitSink> for StoredEmitSink {
             EmitSink::ZeroMq { client } => Self::ZeroMq {
                 client: client.to_string(),
             },
+            EmitSink::Syslog { client } => Self::Syslog {
+                client: client.to_string(),
+            },
             EmitSink::Sqs {
                 client,
                 queue,
@@ -5192,6 +5249,9 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 subject: Identifier::parse(&subject)?,
             }),
             StoredEmitSink::ZeroMq { client } => Ok(Self::ZeroMq {
+                client: Identifier::parse(&client)?,
+            }),
+            StoredEmitSink::Syslog { client } => Ok(Self::Syslog {
                 client: Identifier::parse(&client)?,
             }),
             StoredEmitSink::Sqs { .. } => Err(Report::new(NameError::Empty)
@@ -5516,6 +5576,13 @@ mod tests {
                     optional: false,
                 }],
             }),
+            Model::Codec(CreateCodec {
+                name: identifier("syslog_codec"),
+                wire_format: CodecWireFormat::Syslog,
+                wire_schema: None,
+                schema: identifier("events"),
+                encoding_rules: Vec::new(),
+            }),
             Model::ClientHttp(CreateClientHttp {
                 name: identifier("http_client"),
                 mount: None,
@@ -5550,6 +5617,22 @@ mod tests {
                     StoredClientConfigEntry {
                         key: "protocol".to_string(),
                         value: "grpc".to_string(),
+                    }
+                    .into(),
+                ],
+            }),
+            Model::ClientSyslog(CreateClientSyslog {
+                name: identifier("syslog_client"),
+                mount: Some(identifier("syslog_tls")),
+                config: vec![
+                    StoredClientConfigEntry {
+                        key: "protocol".to_string(),
+                        value: "tls".to_string(),
+                    }
+                    .into(),
+                    StoredClientConfigEntry {
+                        key: "addr".to_string(),
+                        value: "logs.example.com:6514".to_string(),
                     }
                     .into(),
                 ],
@@ -5618,6 +5701,22 @@ mod tests {
                 },
                 general_error_policy: GeneralErrorPolicy::Log,
 
+                filter_where: None,
+            }),
+            Model::Ingestor(CreateIngestor {
+                name: identifier("syslog_ingestor"),
+                output_routes: (ProcessorOutputs::single(identifier("events_stream")))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                decode_using_codec: identifier("syslog_codec"),
+                timestamp_source: None,
+                source: IngestSource::Syslog {
+                    client: identifier("syslog_client"),
+                    quiesce: IngestQuiesceMode::Buffer {
+                        max_size: "1MiB".to_string(),
+                        overflow: IngestQuiesceOverflow::DropNewest,
+                    },
+                },
+                general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             }),
             Model::Junction(CreateJunction {
@@ -5740,6 +5839,26 @@ mod tests {
                 mode: AckMode::Detached,
                 error_policies: ErrorPolicies::handled_by_log(),
 
+                construction: nervix_models::RouteConstruction::default(),
+                materialized_state: Vec::new(),
+            }),
+            Model::Emitter(CreateEmitter {
+                name: identifier("syslog_emitter"),
+                from: ProcessorInputs::single(identifier("events_stream")),
+                encode_using_codec: Some(identifier("syslog_codec")),
+                sink: Box::new(EmitSink::Syslog {
+                    client: identifier("syslog_client"),
+                }),
+                publishing_mode: EmitterPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                flush_each: "100ms".to_string(),
+                max_batch_size: Some("1MiB".to_string()),
+                mode: AckMode::Detached,
+                error_policies: ErrorPolicies::handled_by_log(),
                 construction: nervix_models::RouteConstruction::default(),
                 materialized_state: Vec::new(),
             }),

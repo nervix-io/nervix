@@ -219,6 +219,13 @@ fn zeromq_emit_sink_parser<'src>()
         .map(|client| EmitSink::ZeroMq { client })
 }
 
+fn syslog_emit_sink_parser<'src>()
+-> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Syslog)
+        .ignore_then(client_ref())
+        .map(|client| EmitSink::Syslog { client })
+}
+
 fn sqs_fifo_group_expression<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
@@ -987,6 +994,10 @@ fn emit_sink_parser<'src>()
             no_ack_publishing_mode(),
         )),
         encoded_sink(sink_with_publishing_mode(
+            syslog_emit_sink_parser(),
+            no_ack_publishing_mode(),
+        )),
+        encoded_sink(sink_with_publishing_mode(
             sqs_emit_sink_parser(),
             sqs_publishing_mode(),
         )),
@@ -1016,6 +1027,7 @@ fn alter_emit_sink_parser<'src>()
         sink_with_publishing_mode(mqtt_emit_sink_parser(), mqtt_publishing_mode()),
         sink_with_publishing_mode(nats_emit_sink_parser(), nats_publishing_mode()),
         sink_with_publishing_mode(zeromq_emit_sink_parser(), no_ack_publishing_mode()),
+        sink_with_publishing_mode(syslog_emit_sink_parser(), no_ack_publishing_mode()),
         sink_with_publishing_mode(sqs_emit_sink_parser(), sqs_publishing_mode()),
         sink_with_publishing_mode(sentry_emit_sink_parser(), request_ack_publishing_mode()),
     )
@@ -3243,6 +3255,7 @@ mod tests {
         assert!(suggestions.contains(&"MQTT".to_string()));
         assert!(suggestions.contains(&"NATS".to_string()));
         assert!(suggestions.contains(&"ZEROMQ".to_string()));
+        assert!(suggestions.contains(&"SYSLOG".to_string()));
         assert!(suggestions.contains(&"SQS".to_string()));
         assert!(suggestions.contains(&"CLICKHOUSE".to_string()));
         assert!(suggestions.contains(&"POSTGRES".to_string()));
@@ -3416,6 +3429,61 @@ mod tests {
                     .expect("valid client identifier"),
             }
         );
+    }
+
+    #[test]
+    fn parses_create_emitter_syslog_with_only_no_ack() {
+        let input = r#"
+            CREATE EMITTER forward_syslog
+                FROM events
+                TO SYSLOG syslog_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                ENCODE USING syslog_codec INHERIT ALL
+                FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        "#;
+
+        let parsed = parse_create_emitter(input).expect("parse should succeed");
+        assert_eq!(
+            parsed.sink.as_ref(),
+            &EmitSink::Syslog {
+                client: nervix_models::Identifier::try_from("syslog_out")
+                    .expect("valid client identifier"),
+            }
+        );
+        assert!(matches!(
+            parsed.publishing_mode,
+            EmitterPublishingMode::NoAck { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_syslog_ack_mode_and_header_invocations() {
+        assert!(
+            parse_create_emitter(
+                "CREATE EMITTER e FROM events TO SYSLOG c MODE ACK SEQUENTIAL ACK TIMEOUT 1s \
+                 RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING codec INHERIT ALL FLUSH IMMEDIATE \
+                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            )
+            .is_err()
+        );
+
+        // Header capability is rejected semantically because route construction is shared by all
+        // encoded sinks; the parser still preserves the structured invocation for validation.
+        let parsed = parse_create_emitter(
+            "CREATE EMITTER e FROM events TO SYSLOG c MODE NO_ACK RETRY POLICY BACKOFF 1s MAX 30s \
+             ENCODE USING codec INHERIT ALL INVOKE write_header('x', 'y') FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        )
+        .expect("shared route syntax should parse for semantic capability validation");
+        assert_eq!(parsed.construction.invocations.len(), 1);
+    }
+
+    #[test]
+    fn syslog_completion_stays_on_no_ack_mode() {
+        let input = "CREATE EMITTER e FROM events TO SYSLOG c MODE ";
+        let suggestions = suggest_create_emitter(input, input.len());
+        assert!(suggestions.contains(&"NO_ACK".to_string()));
+        assert!(!suggestions.contains(&"ACK".to_string()));
+        assert!(!suggestions.contains(&"QOS".to_string()));
     }
 
     #[test]

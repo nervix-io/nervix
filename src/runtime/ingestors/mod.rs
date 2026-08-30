@@ -10,6 +10,7 @@ pub(in crate::runtime) mod pulsar;
 pub(in crate::runtime) mod rabbitmq;
 pub(in crate::runtime) mod redis_pubsub;
 pub(in crate::runtime) mod sqs;
+pub(in crate::runtime) mod syslog;
 pub(in crate::runtime) mod websockets;
 pub(in crate::runtime) mod zeromq;
 
@@ -23,6 +24,7 @@ use pulsar::PulsarIngestor;
 use rabbitmq::RabbitMqIngestor;
 use redis_pubsub::RedisPubSubIngestor;
 use sqs::SqsIngestor;
+use syslog::SyslogIngestor;
 use websockets::WebsocketsIngestor;
 use zeromq::ZeroMqIngestor;
 
@@ -77,6 +79,9 @@ impl IngestorStarter {
             }
             (Model::ClientWebsockets(client), IngestSource::Websockets { .. }) => {
                 WebsocketsIngestor::start(runtime, domain, client.clone(), ingestor).await
+            }
+            (Model::ClientSyslog(client), IngestSource::Syslog { .. }) => {
+                SyslogIngestor::start(runtime, domain, client.clone(), ingestor).await
             }
             (Model::Endpoint(endpoint), IngestSource::Endpoint { .. }) => {
                 EndpointIngestor::start(runtime, domain, endpoint.clone(), ingestor).await
