@@ -5223,6 +5223,7 @@ impl RelayProcessorNode {
                     let mut correlations =
                         Vec::<(CorrelatorPendingMessage, CorrelatorPendingMessage)>::new();
                     for message in messages {
+                        tokio::task::consume_budget().await;
                         let incoming = CorrelatorPendingMessage {
                             received_at: execution_now,
                             message,
@@ -5434,6 +5435,7 @@ impl RelayProcessorNode {
                         .map(|_| Vec::<RelayMessage>::new())
                         .collect::<Vec<_>>();
                     for (left, right) in correlations {
+                        tokio::task::consume_budget().await;
                         let key = left.message.key.clone();
                         let combined =
                             match correlator_input_row(&left.message.record, &right.message.record)
@@ -5462,6 +5464,7 @@ impl RelayProcessorNode {
                             right.message.acks.attached(),
                         ]));
                         for output_index in 0..output_count {
+                            tokio::task::consume_budget().await;
                             let route_acks = if output_index + 1 == output_count {
                                 pair_acks
                                     .take()
@@ -5522,6 +5525,7 @@ impl RelayProcessorNode {
                         }
                     }
                     for (output_index, messages) in messages_by_output.into_iter().enumerate() {
+                        tokio::task::consume_budget().await;
                         enqueue_correlator_output(
                             CorrelatorOutputContext {
                                 graph,
@@ -11242,6 +11246,9 @@ enum CorrelatorSide {
     Right,
 }
 
+#[cfg(test)]
+static CORRELATOR_WHERE_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+
 fn take_correlator_opposite_pending(
     state: &mut CorrelatorBranchState,
     incoming_side: CorrelatorSide,
@@ -11299,35 +11306,23 @@ async fn correlate_incoming_message(
     execution_now: Timestamp,
 ) -> Result<Option<(CorrelatorPendingMessage, CorrelatorPendingMessage)>, (String, Vec<AckSet>)> {
     let opposite_pending = take_correlator_opposite_pending(state, incoming_side);
-    let mut evaluated = Vec::<(CorrelatorPendingMessage, bool)>::new();
-    let mut pending_iter = opposite_pending.into_iter();
-
-    while let Some(candidate) = pending_iter.next() {
-        let (left, right) = match incoming_side {
-            CorrelatorSide::Left => (&incoming, &candidate),
-            CorrelatorSide::Right => (&candidate, &incoming),
-        };
-        let matched =
-            match evaluate_correlator_where_match(processor, program, left, right, execution_now)
-                .await
-            {
-                Ok(matched) => matched,
-                Err(error) => {
-                    let mut restore = evaluated
-                        .into_iter()
-                        .map(|(pending, _matched)| pending)
-                        .collect::<Vec<_>>();
-                    restore.extend(pending_iter);
-                    restore_correlator_opposite_pending(state, incoming_side, restore);
-                    return Err(error);
-                }
-            };
-        evaluated.push((candidate, matched));
+    if opposite_pending.is_empty() {
+        store_correlator_unmatched_incoming(state, incoming_side, incoming, opposite_pending);
+        return Ok(None);
     }
+    let evaluated = evaluate_correlator_where_matches(
+        processor,
+        program,
+        incoming_side,
+        &incoming,
+        &opposite_pending,
+        execution_now,
+    )
+    .await?;
 
     let mut matching = Vec::new();
     let mut remaining = Vec::new();
-    for (pending, matched) in evaluated {
+    for (pending, matched) in opposite_pending.into_iter().zip(evaluated) {
         if matched {
             matching.push(pending);
         } else {
@@ -11356,33 +11351,67 @@ async fn correlate_incoming_message(
     }))
 }
 
-async fn evaluate_correlator_where_match(
+async fn evaluate_correlator_where_matches(
     processor: &Identifier,
     program: &CompiledCorrelatorWhereProgram,
-    left: &CorrelatorPendingMessage,
-    right: &CorrelatorPendingMessage,
+    incoming_side: CorrelatorSide,
+    incoming: &CorrelatorPendingMessage,
+    candidates: &[CorrelatorPendingMessage],
     execution_now: Timestamp,
-) -> Result<bool, (String, Vec<AckSet>)> {
-    let acks = AckSet::merged([left.message.acks.attached(), right.message.acks.attached()]);
-    let combined =
-        correlator_input_row(&left.message.record, &right.message.record).map_err(|error| {
-            (
-                format!(
-                    "correlator '{}' failed to build CORRELATE WHERE input batch: {}",
-                    processor.as_str(),
-                    error
-                ),
-                vec![acks.clone()],
-            )
-        })?;
-    let keys = vec![left.message.key.clone()];
+) -> Result<Vec<bool>, (String, Vec<AckSet>)> {
+    let error_acks = || {
+        vec![AckSet::merged(
+            std::iter::once(incoming.message.acks.attached()).chain(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.message.acks.attached()),
+            ),
+        )]
+    };
+    let incoming_rows =
+        std::iter::repeat_n(&incoming.message.record, candidates.len()).collect::<Vec<_>>();
+    let candidate_rows = candidates
+        .iter()
+        .map(|candidate| &candidate.message.record)
+        .collect::<Vec<_>>();
+    let (left_rows, right_rows) = match incoming_side {
+        CorrelatorSide::Left => (&incoming_rows, &candidate_rows),
+        CorrelatorSide::Right => (&candidate_rows, &incoming_rows),
+    };
+    let left = RuntimeRecordBatch::from_rows(left_rows).map_err(|error| {
+        (
+            format!(
+                "correlator '{}' failed to build batched LEFT CORRELATE WHERE input: {}",
+                processor.as_str(),
+                error
+            ),
+            error_acks(),
+        )
+    })?;
+    let right = RuntimeRecordBatch::from_rows(right_rows).map_err(|error| {
+        (
+            format!(
+                "correlator '{}' failed to build batched RIGHT CORRELATE WHERE input: {}",
+                processor.as_str(),
+                error
+            ),
+            error_acks(),
+        )
+    })?;
+    let keys = match incoming_side {
+        CorrelatorSide::Left => vec![incoming.message.key.clone(); candidates.len()],
+        CorrelatorSide::Right => candidates
+            .iter()
+            .map(|candidate| candidate.message.key.clone())
+            .collect(),
+    };
     let side_inputs = HashMap::default();
     let lookup_columns = HashMap::default();
     let input = project_vm_input_batch(
         &program.program.input_schema,
         &VmInputProjectionSources {
-            carrier: combined.batch(),
-            namespace_batches: &[],
+            carrier: &left,
+            namespace_batches: &[("left", &left), ("right", &right)],
             strict_namespaces: &["left", "right"],
             keys: &keys,
             side_inputs: &side_inputs,
@@ -11399,9 +11428,11 @@ async fn evaluate_correlator_where_match(
                 processor.as_str(),
                 error
             ),
-            vec![acks.clone()],
+            error_acks(),
         )
     })?;
+    #[cfg(test)]
+    CORRELATOR_WHERE_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
     let result = execute_program_with_selection_in_context(
         &program.program,
         &input,
@@ -11418,10 +11449,26 @@ async fn evaluate_correlator_where_match(
                 processor.as_str(),
                 error
             ),
-            vec![acks.clone()],
+            error_acks(),
         )
     })?;
-    Ok(!result.selected_rows.is_empty())
+    let mut matching = vec![false; candidates.len()];
+    for row in result.selected_rows {
+        let Some(matched) = matching.get_mut(row) else {
+            return Err((
+                format!(
+                    "correlator '{}' CORRELATE WHERE selected row {} outside its {} candidate \
+                     pairs",
+                    processor.as_str(),
+                    row,
+                    candidates.len()
+                ),
+                error_acks(),
+            ));
+        };
+        *matched = true;
+    }
+    Ok(matching)
 }
 
 fn correlator_input_row(left: &RuntimeRow, right: &RuntimeRow) -> Result<RuntimeRow, String> {

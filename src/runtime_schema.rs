@@ -1005,6 +1005,44 @@ impl RuntimeRecordBatch {
 
         Ok(Self { schema, batch })
     }
+
+    pub(crate) fn from_rows(rows: &[&RuntimeRow]) -> Result<Self, String> {
+        let Some(first) = rows.first() else {
+            return Err("cannot build an arrow batch from zero rows".to_string());
+        };
+        let schema = first.batch.schema();
+        if rows
+            .iter()
+            .any(|row| row.batch.schema().as_ref() != schema.as_ref())
+        {
+            return Err("cannot build an arrow batch from rows with different schemas".to_string());
+        }
+
+        if rows.iter().all(|row| Arc::ptr_eq(&first.batch, &row.batch)) {
+            if rows.len() == first.batch.batch().num_rows()
+                && rows.iter().enumerate().all(|(index, row)| row.row == index)
+            {
+                return Ok(first.batch.as_ref().clone());
+            }
+            let start = first.row;
+            if rows
+                .iter()
+                .enumerate()
+                .all(|(offset, row)| row.row == start.saturating_add(offset))
+            {
+                return first.batch.slice(start, rows.len());
+            }
+            return first
+                .batch
+                .take(&rows.iter().map(|row| row.row).collect::<Vec<_>>());
+        }
+
+        let batches = rows
+            .iter()
+            .map(|row| row.one_row_batch())
+            .collect::<Vec<_>>();
+        Self::concat(&batches.iter().collect::<Vec<_>>())
+    }
 }
 
 impl RuntimeRow {
