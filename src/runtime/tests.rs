@@ -6213,6 +6213,109 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
 }
 
 #[tokio::test]
+async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
+    let left_schema = test_schema(&[("id", ParseAsType::U32), ("marker", ParseAsType::I64)]);
+    let right_schema = test_schema(&[("id", ParseAsType::U32)]);
+    let processor = identifier("join_profiles");
+    let program = super::compile_correlator_where_program(
+        &processor,
+        &expression("left.id = right.id"),
+        &[identifier("left_profiles")],
+        left_schema.arrow_schema(),
+        &[identifier("right_profiles")],
+        right_schema.arrow_schema(),
+        None,
+    )
+    .expect("correlator WHERE should compile");
+    let now = super::current_timestamp();
+    let pending = |id, marker| super::CorrelatorPendingMessage {
+        received_at: now,
+        message: RelayMessage {
+            key: None,
+            record: test_runtime_row([
+                ("id".to_string(), RuntimeValue::U32(id)),
+                ("marker".to_string(), RuntimeValue::I64(marker)),
+            ]),
+            acks: AckSet::empty(),
+        },
+        materialized_state: HashMap::default(),
+    };
+    let mut state = super::CorrelatorBranchState {
+        pending_left: vec![pending(7, 1), pending(8, 2), pending(7, 3)],
+        pending_right: Vec::new(),
+    };
+    let incoming = super::CorrelatorPendingMessage {
+        received_at: now,
+        message: RelayMessage {
+            key: None,
+            record: test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]),
+            acks: AckSet::empty(),
+        },
+        materialized_state: HashMap::default(),
+    };
+    super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let (matched_left, _matched_right) = super::correlate_incoming_message(
+        &processor,
+        &program,
+        super::CorrelatorSide::Right,
+        nervix_models::CorrelatorMatchPolicy::Latest,
+        &mut state,
+        incoming,
+        now,
+    )
+    .await
+    .expect("batched WHERE evaluation should succeed")
+    .expect("matching candidates should produce a correlation");
+
+    assert_eq!(
+        super::CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "all candidate pairs must share one WHERE VM execution"
+    );
+    assert_eq!(
+        row_value(&matched_left.message.record, "marker"),
+        Some(RuntimeValue::I64(3))
+    );
+    assert_eq!(state.pending_left.len(), 1);
+    assert_eq!(
+        row_value(&state.pending_left[0].message.record, "marker"),
+        Some(RuntimeValue::I64(2))
+    );
+
+    let incoming_left = pending(7, 4);
+    let right_candidate = |id| super::CorrelatorPendingMessage {
+        received_at: now,
+        message: RelayMessage {
+            key: None,
+            record: test_runtime_row([("id".to_string(), RuntimeValue::U32(id))]),
+            acks: AckSet::empty(),
+        },
+        materialized_state: HashMap::default(),
+    };
+    let right_candidates = vec![right_candidate(7), right_candidate(8), right_candidate(7)];
+    super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let matching = super::evaluate_correlator_where_matches(
+        &processor,
+        &program,
+        super::CorrelatorSide::Left,
+        &incoming_left,
+        &right_candidates,
+        now,
+    )
+    .await
+    .expect("left-side arrival should evaluate its right-side candidates");
+
+    assert_eq!(matching, vec![true, false, true]);
+    assert_eq!(
+        super::CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "a left-side arrival must also batch all candidate pairs"
+    );
+}
+
+#[tokio::test]
 async fn correlator_output_reads_branch_and_declared_materialized_state() {
     let left_schema = test_schema(&[("id", ParseAsType::U32)]);
     let right_schema = test_schema(&[("score", ParseAsType::I64)]);
