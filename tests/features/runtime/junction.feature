@@ -343,3 +343,154 @@ Feature: Relay junction
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: Junction routes read defaulted materialized state
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        user_id I64,
+        source STRING,
+        note STRING OPTIONAL
+      );
+        CREATE SCHEMA preference (
+        user_id I64,
+        theme STRING,
+        hint STRING OPTIONAL
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer,
+        source string,
+        note string OPTIONAL
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_default_state SCHEMA user_id_branch TTL 5m;
+        CREATE RELAY default_preferences
+        SCHEMA preference BRANCHED BY by_default_state
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_default_state;
+        CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_default_state;
+        CREATE VHOST edge http-junction-default-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
+        ON edge
+        PATH '/junction-default'
+        TYPE HTTP;
+        CREATE INGESTOR source_one
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO ss1
+        INHERIT ALL
+        BRANCHED BY by_default_state
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE JUNCTION apply_defaults
+        FROM ss1
+        BRANCHED BY by_default_state
+        USING MATERIALIZED STATE default_preferences DEFAULT { user_id = 0, theme = "system", hint = "unset" }
+        TO ss10
+        INHERIT ALL
+        SET source = relay_state.default_preferences.theme,
+            note = relay_state.default_preferences.hint
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION ss10_subscription TO ss10;
+        START;
+      """
+    When http payload is posted to node "node-1" with host "http-junction-default-{{test_id}}.example.com" path "/junction-default"
+      """
+      {"user_id":11,"source":"incoming","note":"incoming"}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      {"note":"unset","source":"system","user_id":11}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
+  Scenario Outline: Junction routes read defaulted materialized state into optional fields
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        user_id I64,
+        source STRING,
+        note STRING OPTIONAL
+      );
+        CREATE SCHEMA preference (
+        user_id I64,
+        theme STRING,
+        hint STRING OPTIONAL
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer,
+        source string,
+        note string OPTIONAL
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_optional_default SCHEMA user_id_branch TTL 5m;
+        CREATE RELAY optional_preferences
+        SCHEMA preference BRANCHED BY by_optional_default
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_optional_default;
+        CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_optional_default;
+        CREATE VHOST edge http-junction-optional-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
+        ON edge
+        PATH '/junction-optional'
+        TYPE HTTP;
+        CREATE INGESTOR source_one
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO ss1
+        INHERIT ALL
+        BRANCHED BY by_optional_default
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE JUNCTION apply_optional_defaults
+        FROM ss1
+        BRANCHED BY by_optional_default
+        USING MATERIALIZED STATE optional_preferences DEFAULT { user_id = 0, theme = "system", hint = "unset" }
+        TO ss10
+        INHERIT ALL
+        SET note = relay_state.optional_preferences.hint
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION ss10_subscription TO ss10;
+        START;
+      """
+    When http payload is posted to node "node-1" with host "http-junction-optional-{{test_id}}.example.com" path "/junction-optional"
+      """
+      {"user_id":11,"source":"incoming","note":"incoming"}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      {"note":"unset","source":"incoming","user_id":11}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |

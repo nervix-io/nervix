@@ -184,8 +184,6 @@ const OBSERVABILITY_READYZ_PATH: &str = "/readyz";
 const OBSERVABILITY_METRICS_PATH: &str = "/metrics";
 const WEB_CONSOLE_INDEX: &[u8] = include_bytes!("../crates/web-console/dist/index.html");
 const WEB_CONSOLE_CSS: &[u8] = include_bytes!("../crates/web-console/dist/console.css");
-const WEB_CONSOLE_ECHARTS_JS: &[u8] =
-    include_bytes!("../crates/web-console/dist/echarts-5.5.1.min.js");
 const WEB_CONSOLE_JS: &[u8] = include_bytes!("../crates/web-console/dist/nervix-web-console.js");
 const WEB_CONSOLE_WASM: &[u8] =
     include_bytes!("../crates/web-console/dist/nervix-web-console_bg.wasm");
@@ -2258,11 +2256,6 @@ async fn handle_web_console_request(
             StatusCode::OK,
             Bytes::from_static(WEB_CONSOLE_CSS),
             "text/css; charset=utf-8",
-        ),
-        (&Method::GET, "/console/echarts-5.5.1.min.js") => response_with_bytes(
-            StatusCode::OK,
-            Bytes::from_static(WEB_CONSOLE_ECHARTS_JS),
-            "text/javascript; charset=utf-8",
         ),
         (&Method::GET, "/console/nervix-web-console.js") => response_with_bytes(
             StatusCode::OK,
@@ -12109,7 +12102,10 @@ impl SessionServiceImpl {
 
     fn scheduled_node_should_follow_desired_assignment(node: &ScheduledNode) -> bool {
         if let Model::Ingestor(CreateIngestor {
-            source: IngestSource::Endpoint { .. } | IngestSource::Websockets { .. },
+            source:
+                IngestSource::Endpoint { .. }
+                | IngestSource::Websockets { .. }
+                | IngestSource::Syslog { .. },
             ..
         }) = node.config.as_ref()
         {
@@ -13284,6 +13280,7 @@ fn format_ingestor_source(source: &IngestSource) -> &'static str {
         IngestSource::Sqs { .. } => "SQS",
         IngestSource::Endpoint { .. } => "ENDPOINT",
         IngestSource::Websockets { .. } => "WEBSOCKETS",
+        IngestSource::Syslog { .. } => "SYSLOG",
     }
 }
 
@@ -13906,6 +13903,7 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             )
         }
         EmitSink::ZeroMq { client } => format!("ZEROMQ client={}", client.as_str()),
+        EmitSink::Syslog { client } => format!("SYSLOG client={}", client.as_str()),
         EmitSink::Sqs {
             client,
             queue,
@@ -17493,22 +17491,22 @@ impl Application {
                                     }
                                     Err(error) => Err(error),
                                 };
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::StateSyncResponse(
-                                            RemoteStateSyncResponse {
-                                                correlation_id: request.correlation_id,
-                                                result: result.map(|snapshot| {
-                                                    snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
-                                                        lsm: snapshot.lsm,
-                                                        schema_fingerprint: snapshot.schema_fingerprint,
-                                                        payload: snapshot.payload,
-                                                    })
-                                                }),
-                                            },
-                                        ),
-                                    )
+                                // The request proves this authenticated connection is live. Reply
+                                // on it so state sync cannot wait for a separate reverse route.
+                                if let Err(error) = message
+                                    .reply
+                                    .send(Envelope::Control(ControlEnvelope::StateSyncResponse(
+                                        RemoteStateSyncResponse {
+                                            correlation_id: request.correlation_id,
+                                            result: result.map(|snapshot| {
+                                                snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
+                                                    lsm: snapshot.lsm,
+                                                    schema_fingerprint: snapshot.schema_fingerprint,
+                                                    payload: snapshot.payload,
+                                                })
+                                            }),
+                                        },
+                                    )))
                                     .await
                                 {
                                     warn!(error = %error, "failed to send state sync response");

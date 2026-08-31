@@ -1000,6 +1000,7 @@ impl IcebergEmitter {
                 lookup_columns: &lookup_columns,
                 uninitialized: None,
             },
+            None,
         )
         .map_err(|error| Report::new(IcebergEmitterError::MapBatch).attach_printable(error))?;
         let result = execute_program_with_selection_in_context(
@@ -1020,7 +1021,7 @@ impl IcebergEmitter {
                 .selected_rows
                 .iter()
                 .enumerate()
-                .any(|(output_row, input_row)| output_row != *input_row)
+                .any(|(output_row, input_row)| output_row != input_row)
         {
             return Err(
                 Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(

@@ -436,3 +436,82 @@ Feature: Relay deduplication
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: Deduplicator routes read defaulted materialized state
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA transaction (
+        transaction_id STRING,
+        amount I32,
+        source STRING,
+        note STRING OPTIONAL
+      );
+        CREATE SCHEMA preference (
+        transaction_id STRING,
+        theme STRING,
+        hint STRING OPTIONAL
+      );
+        CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        transaction_id string,
+        amount integer,
+        source string,
+        note string OPTIONAL
+      );
+        CREATE CODEC transaction_codec
+        FROM WIRE JSON SCHEMA transaction_wire
+        TO SCHEMA transaction;
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS BRANCH by_dedup_default SCHEMA transaction_id_branch TTL 5m;
+        CREATE RELAY default_preferences
+        SCHEMA preference BRANCHED BY by_dedup_default
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+        CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_dedup_default;
+        CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_dedup_default;
+        CREATE VHOST edge http-dedup-default-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
+        ON edge
+        PATH '/dedup-default'
+        TYPE HTTP;
+        CREATE INGESTOR source_txns
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        TO ss1
+        INHERIT ALL
+        BRANCHED BY by_dedup_default
+        SET transaction_id = message.transaction_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DEDUPLICATOR dedup_defaults FROM ss1
+        DEDUPLICATE ON input.transaction_id
+        MAX TIME 10m
+        BRANCHED BY by_dedup_default
+        USING MATERIALIZED STATE default_preferences DEFAULT { transaction_id = "unknown", theme = "system", hint = "unset" }
+        TO ss2
+        INHERIT ALL
+        SET source = relay_state.default_preferences.theme,
+            note = relay_state.default_preferences.hint
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION ss2_subscription TO ss2;
+        START;
+      """
+    When http payload is posted to node "node-1" with host "http-dedup-default-{{test_id}}.example.com" path "/dedup-default"
+      """
+      {"transaction_id":"txn-1","amount":10,"source":"input","note":"incoming"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"amount":10,"note":"unset","source":"system","transaction_id":"txn-1"}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |

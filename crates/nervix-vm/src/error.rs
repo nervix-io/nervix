@@ -41,6 +41,13 @@ pub struct RowErrors {
     rows: Vec<Vec<SideError>>,
 }
 
+/// Borrowed row-error membership without materializing a dense boolean vector.
+#[derive(Debug, Clone, Copy)]
+pub struct RowErrorMask<'a> {
+    row_count: usize,
+    rows: &'a [Vec<SideError>],
+}
+
 /// Per-row error counts captured before a conditional instruction runs.
 #[derive(Debug, Clone)]
 pub struct RowErrorLengths(Vec<usize>);
@@ -59,7 +66,18 @@ impl RowErrors {
 
     /// True when no row carries an error.
     pub fn is_error_free(&self) -> bool {
-        self.rows.iter().all(Vec::is_empty)
+        self.rows.is_empty()
+    }
+
+    pub fn first(&self) -> Option<&SideError> {
+        self.rows.iter().flatten().next()
+    }
+
+    pub fn mask(&self) -> RowErrorMask<'_> {
+        RowErrorMask {
+            row_count: self.row_count,
+            rows: &self.rows,
+        }
     }
 
     pub fn row(&self, row: usize) -> &[SideError] {
@@ -86,10 +104,15 @@ impl RowErrors {
         if self.rows.is_empty() {
             return Self::new(rows.len());
         }
-        Self {
-            row_count: rows.len(),
-            rows: rows.iter().map(|&row| self.row(row).to_vec()).collect(),
+        let selected = rows.iter().map(|&row| self.row(row).to_vec()).collect();
+        Self::from_materialized_rows(rows.len(), selected)
+    }
+
+    fn from_materialized_rows(row_count: usize, mut rows: Vec<Vec<SideError>>) -> Self {
+        if rows.iter().all(Vec::is_empty) {
+            rows.clear();
         }
+        Self { row_count, rows }
     }
 
     pub fn row_lengths(&self) -> RowErrorLengths {
@@ -108,6 +131,40 @@ impl RowErrors {
                 errors.truncate(lengths.0.get(row).copied().unwrap_or_default());
             }
         }
+        if self.rows.iter().all(Vec::is_empty) {
+            self.rows.clear();
+        }
+    }
+}
+
+impl<'a> RowErrorMask<'a> {
+    pub fn none(row_count: usize) -> Self {
+        Self {
+            row_count,
+            rows: &[],
+        }
+    }
+
+    pub fn len(self) -> usize {
+        self.row_count
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.row_count == 0
+    }
+
+    pub fn is_error_free(self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn contains(self, row: usize) -> bool {
+        self.rows.get(row).is_some_and(|errors| !errors.is_empty())
+    }
+
+    pub fn iter(self) -> impl ExactSizeIterator<Item = bool> + 'a {
+        let row_count = self.row_count;
+        let rows = self.rows;
+        (0..row_count).map(move |row| rows.get(row).is_some_and(|errors| !errors.is_empty()))
     }
 }
 
@@ -168,7 +225,7 @@ pub enum RuntimeError {
 
 #[cfg(test)]
 mod tests {
-    use super::ErrorCode;
+    use super::{ErrorCode, RowErrors, SideError};
 
     #[test]
     fn error_code_strings_are_stable() {
@@ -176,5 +233,35 @@ mod tests {
         assert_eq!(ErrorCode::Overflow.as_str(), "overflow");
         assert_eq!(ErrorCode::CastFailed.as_str(), "cast_failed");
         assert_eq!(ErrorCode::InvalidArgument.as_str(), "invalid_argument");
+    }
+
+    #[test]
+    fn sparse_error_masks_do_not_materialize_clean_rows() {
+        let mut errors = RowErrors::new(3);
+
+        assert!(errors.is_error_free());
+        assert_eq!(
+            errors.mask().iter().collect::<Vec<_>>(),
+            [false, false, false]
+        );
+
+        errors.push(
+            1,
+            SideError {
+                code: ErrorCode::InvalidArgument,
+                message: "invalid input".to_string(),
+                span: (0..1).into(),
+            },
+        );
+
+        let mask = errors.mask();
+        assert!(!mask.is_error_free());
+        assert_eq!(mask.iter().collect::<Vec<_>>(), [false, true, false]);
+        assert!(!mask.contains(0));
+        assert!(mask.contains(1));
+
+        let clean = errors.select_rows(&[0, 2]);
+        assert_eq!(clean.row_count(), 2);
+        assert!(clean.is_error_free());
     }
 }

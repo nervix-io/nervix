@@ -1,5 +1,5 @@
 Feature: Reorderer
-  Scenario Outline: Reorderer emits records ordered by BY expressions with arrival tie-breaks
+  Scenario Outline: Reorderer preserves ordered output while fanning batches across routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -25,6 +25,7 @@ Feature: Reorderer
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE RELAY filtered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress
         ON edge
@@ -48,8 +49,14 @@ Feature: Reorderer
         TO ordered_notifications
         INHERIT ALL
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        TO filtered_notifications
+        INHERIT ALL
+        WHERE sequence < 0
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE tenant = 'acme';
+        CREATE SUBSCRIPTION filtered_notifications_subscription TO filtered_notifications WHERE tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
@@ -79,6 +86,7 @@ Feature: Reorderer
       "payload":"third"
       """
     And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
+    And the relay subscription does not receive a payload within "1s"
 
     Examples:
       | cluster_size | replica_count |
@@ -211,3 +219,83 @@ Feature: Reorderer
 
         ON GENERAL ERROR LOG;
       """
+
+  Scenario Outline: Reorderer routes read defaulted materialized state
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        tenant STRING,
+        sequence I64,
+        payload STRING,
+        note STRING OPTIONAL
+      );
+        CREATE SCHEMA preference (
+        tenant STRING,
+        theme STRING,
+        hint STRING OPTIONAL
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        tenant string,
+        sequence integer,
+        payload string,
+        note string OPTIONAL
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_reorder_default SCHEMA tenant_branch TTL 5m;
+        CREATE RELAY default_preferences
+        SCHEMA preference BRANCHED BY by_reorder_default
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+        CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_reorder_default;
+        CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_reorder_default;
+        CREATE VHOST edge http-reorder-default-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
+        ON edge
+        PATH '/reorder-default'
+        TYPE HTTP;
+        CREATE INGESTOR http_notifications
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO incoming_notifications
+        INHERIT ALL
+        BRANCHED BY by_reorder_default
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE REORDERER order_notifications
+        FROM incoming_notifications
+        BY input.sequence
+        MAX TIME 10s
+        BRANCHED BY by_reorder_default
+        USING MATERIALIZED STATE default_preferences DEFAULT { tenant = "unknown", theme = "system", hint = "unset" }
+        TO ordered_notifications
+        INHERIT ALL
+        SET payload = relay_state.default_preferences.theme,
+            note = relay_state.default_preferences.hint
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications;
+        START;
+      """
+    When http payload is posted to node "node-1" with host "http-reorder-default-{{test_id}}.example.com" path "/reorder-default"
+      """
+      {"tenant":"acme","sequence":1,"payload":"first","note":"incoming"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"note":"unset","payload":"system","sequence":1,"tenant":"acme"}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |

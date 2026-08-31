@@ -111,6 +111,7 @@ fn vm_input_from_test_rows(
             lookup_columns: &lookup_columns,
             uninitialized: None,
         },
+        None,
     )
 }
 
@@ -887,6 +888,48 @@ async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array(
             RuntimeValue::F64(OrderedFloat(35.0)),
         ]))
     );
+}
+
+#[tokio::test]
+async fn window_aggregate_inputs_evaluate_one_batch_in_one_vm_execution() {
+    let output_schema = test_schema(&[("adjusted_total", ParseAsType::I64)]);
+    let aggregate = window_aggregate("SET adjusted_total = SUM(120 / input.latency)");
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
+    let rows = [10, 0, 30]
+        .into_iter()
+        .map(|latency| test_runtime_row([("latency".to_string(), RuntimeValue::I64(latency))]))
+        .collect::<Vec<_>>();
+    let carrier = RuntimeRecordBatch::from_rows(rows[0].batch().schema(), rows.iter())
+        .expect("window input rows should form one Arrow batch");
+    super::WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let evaluated =
+        super::evaluate_window_aggregate_inputs(&compiled, &carrier, Timestamp::from_unix_nanos(1))
+            .await
+            .expect("batched window aggregate inputs should evaluate");
+
+    assert_eq!(
+        super::WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "all input rows must share one aggregate-input VM execution"
+    );
+    assert_eq!(evaluated.len(), 3);
+    let first = evaluated[0]
+        .as_ref()
+        .expect("the first window input row should evaluate");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].value, Some(RuntimeValue::I64(12)));
+    assert!(
+        evaluated[1]
+            .as_ref()
+            .expect_err("division by zero should fail only its input row")
+            .contains("division_by_zero")
+    );
+    let third = evaluated[2]
+        .as_ref()
+        .expect("the third window input row should evaluate");
+    assert_eq!(third.len(), 1);
+    assert_eq!(third[0].value, Some(RuntimeValue::I64(4)));
 }
 
 #[tokio::test]
@@ -4237,7 +4280,7 @@ async fn deduplicator_snapshot_task_persists_dirty_state_on_interval() {
         .expect("persisted runtime should spawn a snapshot task");
 
     assert!(state.reserve_new_key(
-        "txn-1".to_string(),
+        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
@@ -4821,7 +4864,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .replicated_deduplicator_state(placement.clone())
         .expect("deduplicator state should initialize");
     assert!(state.reserve_new_key(
-        "txn-1".to_string(),
+        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
@@ -4856,8 +4899,9 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
     let seen_at = Timestamp::from_unix_nanos(1);
     let max_time = Duration::from_secs(600);
 
-    assert!(state.reserve_new_key("txn-1".to_string(), seen_at, max_time));
-    assert!(!state.reserve_new_key("txn-1".to_string(), seen_at, max_time));
+    let key = super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]);
+    assert!(state.reserve_new_key(key.clone(), seen_at, max_time));
+    assert!(!state.reserve_new_key(key, seen_at, max_time));
     assert_eq!(state.current_lsm.load(Ordering::SeqCst), 1);
 }
 
@@ -5342,6 +5386,109 @@ fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
         messages[1].record.metadata().ingested_at_low_watermark(),
         Timestamp::from_unix_nanos(200)
     );
+}
+
+#[tokio::test]
+async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sidecars() {
+    let schema = test_schema(&[("sequence", ParseAsType::U32)]);
+    let batch = |rows: Vec<(u32, i64, AckSet)>| {
+        super::RelayRecordBatch::from_messages(
+            schema.clone(),
+            rows.into_iter()
+                .map(|(sequence, ingested_at, acks)| RelayMessage {
+                    key: None,
+                    record: test_runtime_row([(
+                        "sequence".to_string(),
+                        RuntimeValue::U32(sequence),
+                    )])
+                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(ingested_at)),
+                    acks,
+                })
+                .collect(),
+        )
+        .expect("test relay batch should build")
+    };
+    let (first_ordered_acks, first_ordered_completion) = AckSet::root();
+    let mut buffer = super::ReordererOutputBuffer::default();
+    buffer.push(
+        batch(vec![
+            (3, 300, AckSet::empty()),
+            (1, 100, first_ordered_acks),
+        ]),
+        Arc::new(vec![
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(3)],
+                arrival_sequence: 0,
+            },
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(1)],
+                arrival_sequence: 1,
+            },
+        ]),
+        Timestamp::from_unix_nanos(10),
+    );
+    buffer.push(
+        batch(vec![(2, 200, AckSet::empty()), (1, 101, AckSet::empty())]),
+        Arc::new(vec![
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(2)],
+                arrival_sequence: 2,
+            },
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(1)],
+                arrival_sequence: 3,
+            },
+        ]),
+        Timestamp::from_unix_nanos(20),
+    );
+
+    let ordered = buffer
+        .take_ordered_batch()
+        .expect("buffered Arrow batches should reorder");
+
+    let sequences = (0..ordered.batch.batch().num_rows())
+        .map(|row| {
+            ordered
+                .batch
+                .value(row, "sequence")
+                .expect("sequence should decode")
+                .expect("sequence should be initialized")
+        })
+        .collect::<Vec<_>>();
+    let watermarks = ordered
+        .metadata
+        .iter()
+        .map(RuntimeRecordMetadata::ingested_at_low_watermark)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        sequences,
+        [
+            RuntimeValue::U32(1),
+            RuntimeValue::U32(1),
+            RuntimeValue::U32(2),
+            RuntimeValue::U32(3),
+        ]
+    );
+    assert_eq!(
+        watermarks,
+        [
+            Timestamp::from_unix_nanos(100),
+            Timestamp::from_unix_nanos(101),
+            Timestamp::from_unix_nanos(200),
+            Timestamp::from_unix_nanos(300),
+        ]
+    );
+    assert_eq!(ordered.acks.len(), 4);
+    ordered.acks[0].ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), first_ordered_completion.wait())
+            .await
+            .expect("the first reordered row should retain its source ACK"),
+        AckOutcome::Ack
+    );
+    assert!(buffer.is_empty());
+    assert_eq!(buffer.estimated_bytes(), 0);
 }
 
 #[test]
@@ -6192,6 +6339,109 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
     );
     assert_eq!(row_value(&combined, "relay_state.profiles.status"), None);
     assert_eq!(row_value(&combined, "id"), None);
+}
+
+#[tokio::test]
+async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
+    let left_schema = test_schema(&[("id", ParseAsType::U32), ("marker", ParseAsType::I64)]);
+    let right_schema = test_schema(&[("id", ParseAsType::U32)]);
+    let processor = identifier("join_profiles");
+    let program = super::compile_correlator_where_program(
+        &processor,
+        &expression("left.id = right.id"),
+        &[identifier("left_profiles")],
+        left_schema.arrow_schema(),
+        &[identifier("right_profiles")],
+        right_schema.arrow_schema(),
+        None,
+    )
+    .expect("correlator WHERE should compile");
+    let now = super::current_timestamp();
+    let pending = |id, marker| super::CorrelatorPendingMessage {
+        received_at: now,
+        message: RelayMessage {
+            key: None,
+            record: test_runtime_row([
+                ("id".to_string(), RuntimeValue::U32(id)),
+                ("marker".to_string(), RuntimeValue::I64(marker)),
+            ]),
+            acks: AckSet::empty(),
+        },
+        materialized_state: HashMap::default(),
+    };
+    let mut state = super::CorrelatorBranchState {
+        pending_left: vec![pending(7, 1), pending(8, 2), pending(7, 3)],
+        pending_right: Vec::new(),
+    };
+    let incoming = super::CorrelatorPendingMessage {
+        received_at: now,
+        message: RelayMessage {
+            key: None,
+            record: test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]),
+            acks: AckSet::empty(),
+        },
+        materialized_state: HashMap::default(),
+    };
+    super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let (matched_left, _matched_right) = super::correlate_incoming_message(
+        &processor,
+        &program,
+        super::CorrelatorSide::Right,
+        nervix_models::CorrelatorMatchPolicy::Latest,
+        &mut state,
+        incoming,
+        now,
+    )
+    .await
+    .expect("batched WHERE evaluation should succeed")
+    .expect("matching candidates should produce a correlation");
+
+    assert_eq!(
+        super::CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "all candidate pairs must share one WHERE VM execution"
+    );
+    assert_eq!(
+        row_value(&matched_left.message.record, "marker"),
+        Some(RuntimeValue::I64(3))
+    );
+    assert_eq!(state.pending_left.len(), 1);
+    assert_eq!(
+        row_value(&state.pending_left[0].message.record, "marker"),
+        Some(RuntimeValue::I64(2))
+    );
+
+    let incoming_left = pending(7, 4);
+    let right_candidate = |id| super::CorrelatorPendingMessage {
+        received_at: now,
+        message: RelayMessage {
+            key: None,
+            record: test_runtime_row([("id".to_string(), RuntimeValue::U32(id))]),
+            acks: AckSet::empty(),
+        },
+        materialized_state: HashMap::default(),
+    };
+    let right_candidates = vec![right_candidate(7), right_candidate(8), right_candidate(7)];
+    super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let matching = super::evaluate_correlator_where_matches(
+        &processor,
+        &program,
+        super::CorrelatorSide::Left,
+        &incoming_left,
+        &right_candidates,
+        now,
+    )
+    .await
+    .expect("left-side arrival should evaluate its right-side candidates");
+
+    assert_eq!(matching, vec![true, false, true]);
+    assert_eq!(
+        super::CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "a left-side arrival must also batch all candidate pairs"
+    );
 }
 
 #[tokio::test]
@@ -10550,6 +10800,39 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     assert!(row_value(&output, "active").is_none());
     assert!(row_value(&output, "amount").is_none());
     assert!(row_value(&output, "raw").is_none());
+
+    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
+        metadata,
+        super::IngestFilterMapMetadata::kafka(
+            "logic_notifications_t123".to_string(),
+            3,
+            43,
+            None,
+            Vec::new(),
+        ),
+    ])
+    .expect("Kafka metadata must concatenate column-wise");
+    let offsets = grouped_metadata
+        .field_column("offset")
+        .expect("metadata projection must succeed")
+        .expect("Kafka offset column must exist");
+    let offsets = offsets
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .expect("Kafka offsets must remain INT64");
+    assert_eq!(offsets.values(), &[42, 43]);
+    let selected = grouped_metadata
+        .select(&[false, true])
+        .expect("metadata row selection must succeed");
+    let selected_offset = selected
+        .field_column("offset")
+        .expect("selected metadata projection must succeed")
+        .expect("selected Kafka offset column must exist");
+    let selected_offset = selected_offset
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .expect("selected Kafka offset must remain INT64");
+    assert_eq!(selected_offset.values(), &[43]);
 }
 
 #[tokio::test]
@@ -10655,6 +10938,78 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         Some(RuntimeValue::String("primary".to_string()))
     );
     assert_eq!(row_value(&output, "total"), Some(RuntimeValue::I64(2)));
+
+    let second_record = test_runtime_row([
+        (
+            "tenant".to_string(),
+            RuntimeValue::String("acme".to_string()),
+        ),
+        (
+            "header_name".to_string(),
+            RuntimeValue::String("route".to_string()),
+        ),
+        (
+            "raw".to_string(),
+            RuntimeValue::String("second".to_string()),
+        ),
+    ]);
+    let grouped_carrier =
+        RuntimeRecordBatch::concat(&[&record.one_row_batch(), &second_record.one_row_batch()])
+            .expect("grouped carrier must concatenate");
+    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
+        metadata.clone(),
+        super::IngestFilterMapMetadata::from_headers(vec![
+            ("tenant".to_string(), "acme".to_string()),
+            ("route".to_string(), "backup".to_string()),
+        ]),
+    ])
+    .expect("grouped metadata must concatenate");
+    let grouped_runtime_metadata =
+        vec![record.metadata().clone(), second_record.metadata().clone()];
+    let grouped_keys = vec![None, None];
+    let grouped_outcomes = super::evaluate_filter_map_on_batch(
+        ModelKind::Ingestor.as_str(),
+        &identifier("header_ingestor"),
+        &program,
+        super::FilterMapOutcomeInputs {
+            carrier: &grouped_carrier,
+            record_metadata: &grouped_runtime_metadata,
+            keys: &grouped_keys,
+            filter_map_metadata: Some(&grouped_metadata),
+            side_inputs: &HashMap::default(),
+        },
+        Timestamp::from_unix_nanos(1),
+    )
+    .await
+    .expect("grouped header filter-map must execute");
+    let grouped_outputs = grouped_outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            super::SingleRecordFilterMapOutcome::Output(record) => record,
+            super::SingleRecordFilterMapOutcome::Filtered => {
+                panic!("grouped header row must be selected")
+            }
+            super::SingleRecordFilterMapOutcome::MessageError { error, .. } => {
+                panic!("grouped header row failed: {}", error.message)
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        row_value(&grouped_outputs[0], "first"),
+        Some(RuntimeValue::String("primary".to_string()))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[0], "total"),
+        Some(RuntimeValue::I64(2))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[1], "first"),
+        Some(RuntimeValue::String("backup".to_string()))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[1], "total"),
+        Some(RuntimeValue::I64(1))
+    );
 
     let top_filter = super::compile_expression_filter_program(
         super::RuntimeCompileTarget {

@@ -2004,33 +2004,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "charming"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df19cf7d4540f4db08203dce5171421fdfc5e83ea3f14d7b5329f0dbff3bf3c2"
-dependencies = [
- "charming_macros",
- "js-sys",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "serde_with",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
-name = "charming_macros"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ec2398273c047c67d69794a924b1a2a5c14a5fab6bcbe8b24e86a0df9328e5e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "chitchat"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6522,7 +6495,6 @@ name = "nervix-dataflow-graph"
 version = "0.1.0-dev"
 dependencies = [
  "ascii-dag",
- "petgraph 0.8.3",
  "serde",
  "serde_json",
  "strum 0.26.3",
@@ -6644,6 +6616,7 @@ dependencies = [
  "argon2",
  "arrow-arith",
  "arrow-array",
+ "arrow-data",
  "arrow-ipc",
  "arrow-ord",
  "arrow-schema",
@@ -6785,6 +6758,7 @@ dependencies = [
  "ahash 0.8.12",
  "arrow-arith",
  "arrow-array",
+ "arrow-buffer",
  "arrow-cast",
  "arrow-ord",
  "arrow-schema",
@@ -6845,7 +6819,6 @@ name = "nervix-web-console"
 version = "0.1.0-dev"
 dependencies = [
  "base64 0.22.1",
- "charming",
  "console_error_panic_hook",
  "futures-channel",
  "futures-util",
@@ -10133,17 +10106,6 @@ checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
 dependencies = [
  "ordered-float 2.10.1",
  "serde",
-]
-
-[[package]]
-name = "serde-wasm-bindgen"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
-dependencies = [
- "js-sys",
- "serde",
- "wasm-bindgen",
 ]
 
 [[package]]

@@ -13,11 +13,11 @@ use crate::{
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
     CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
-    CreateLookup, CreateMaterializer, CreatePlacement, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
+    CreateJunction, CreateLookup, CreateMaterializer, CreatePlacement, CreateReingestor,
+    CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
     CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DomainPace, DomainStartPoint,
     EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType,
     Expression, FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog,
@@ -807,6 +807,7 @@ impl Model {
             Self::ClientZeroMq(client) => client.to_canonical_nspl(),
             Self::ClientSqs(client) => client.to_canonical_nspl(),
             Self::ClientWebsockets(client) => client.to_canonical_nspl(),
+            Self::ClientSyslog(client) => client.to_canonical_nspl(),
             Self::ClientClickHouse(client) => client.to_canonical_nspl(),
             Self::ClientPostgres(client) => client.to_canonical_nspl(),
             Self::ClientMySql(client) => client.to_canonical_nspl(),
@@ -1463,6 +1464,28 @@ impl CreateClientWebsockets {
     }
 }
 
+impl CreateClientSyslog {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let config = self
+            .config
+            .iter()
+            .map(kafka_entry_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+
+        Ok(clause_statement(
+            format!("CREATE CLIENT {}", self.name.as_str()),
+            vec![
+                Clause::line(format!(
+                    "TYPE SYSLOG{}",
+                    client_mount_clause(self.mount.as_ref()),
+                )),
+                Clause::braced("CONFIG", split_config_entries(&config)),
+            ],
+        ))
+    }
+}
+
 impl CreateClientClickHouse {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let config = self
@@ -1721,6 +1744,19 @@ impl CreateCodec {
                         format!("WIRE AVRO SCHEMA {}", wire_schema.as_str()),
                         String::new(),
                     )
+                }
+                CodecWireFormat::Syslog => {
+                    if self.wire_schema.is_some() {
+                        return Err(CanonicalNsplError::InvalidCodec {
+                            reason: "SYSLOG codec must not reference a wire schema".to_string(),
+                        });
+                    }
+                    if !self.encoding_rules.is_empty() {
+                        return Err(CanonicalNsplError::InvalidCodec {
+                            reason: "SYSLOG codec must not declare encoding rules".to_string(),
+                        });
+                    }
+                    ("SYSLOG".to_string(), String::new())
                 }
                 CodecWireFormat::JaqNative {
                     format,
@@ -3211,6 +3247,11 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             websockets_mode_to_nspl(mode),
             ingest_quiesce_to_nspl(quiesce)
         ),
+        IngestSource::Syslog { client, quiesce } => format!(
+            "SYSLOG {} MODE NO_ACK SEQUENTIAL ON QUIESCE {}",
+            client.as_str(),
+            ingest_quiesce_to_nspl(quiesce)
+        ),
     }
 }
 
@@ -3664,6 +3705,7 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             ))
         }
         EmitSink::Sentry { client } => Ok(format!("SENTRY {}", client.as_str())),
+        EmitSink::Syslog { client } => Ok(format!("SYSLOG {}", client.as_str())),
         EmitSink::Otel {
             client,
             signal,
@@ -4057,19 +4099,19 @@ mod tests {
         CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
         CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
         CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis, CreateClientSentry,
-        CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
-        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
-        CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol,
-        CreateUdf, CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies, Expression,
-        FieldScope, GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource, JsonType,
-        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy, Model,
-        MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
-        PlacementPolicy, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
-        RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
-        SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
+        CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq,
+        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint,
+        CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
+        CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWindowProcessor,
+        CreateWireSchema, EmitSink, EmitterPublishingMode, EndpointIngestMode, EndpointType,
+        ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, Identifier,
+        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal,
+        MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+        MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch,
+        ParseAsType, PlacementPolicy, PostgresConflictAction, PostgresValueMapping,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
+        RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction,
+        SchemaField, SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
         SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
         WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
         expression_to_nspl,
@@ -4456,6 +4498,20 @@ mod tests {
                 "CREATE CLIENT zmq_main\n  TYPE ZEROMQ\n  CONFIG {\n    'bind' = 'tcp://*:5555'\n  };",
             ),
             (
+                CreateClientSyslog {
+                    name: identifier("syslog_main"),
+                    mount: Some(identifier("syslog_tls")),
+                    config: vec![
+                        config_entry("protocol", "tls"),
+                        config_entry("addr", "logs.example.com:6514"),
+                        config_entry("tls_ca_file", "{{ syslog_tls }}/ca.pem"),
+                    ],
+                }
+                .to_canonical_nspl()
+                .expect("must render"),
+                "CREATE CLIENT syslog_main\n  TYPE SYSLOG MOUNT syslog_tls\n  CONFIG {\n    'protocol' = 'tls',\n    'addr' = 'logs.example.com:6514',\n    'tls_ca_file' = '{{ syslog_tls }}/ca.pem'\n  };",
+            ),
+            (
                 CreateClientSqs {
                     name: identifier("sqs_main"),
                     mount: None,
@@ -4613,6 +4669,18 @@ mod tests {
         assert_eq!(
             codec.to_canonical_nspl().expect("must render"),
             "CREATE CODEC orders_codec\n  FROM WIRE JSON SCHEMA orders_wire\n  TO SCHEMA orders;"
+        );
+
+        let syslog_codec = CreateCodec {
+            name: identifier("syslog_codec"),
+            wire_format: CodecWireFormat::Syslog,
+            wire_schema: None,
+            schema: identifier("syslog_event"),
+            encoding_rules: Vec::new(),
+        };
+        assert_eq!(
+            syslog_codec.to_canonical_nspl().expect("must render"),
+            "CREATE CODEC syslog_codec\n  FROM SYSLOG\n  TO SCHEMA syslog_event;"
         );
 
         let codec_with_encoding = CreateCodec {
@@ -4981,6 +5049,12 @@ mod tests {
                     client: identifier("sentry_main"),
                 },
                 "SENTRY sentry_main",
+            ),
+            (
+                EmitSink::Syslog {
+                    client: identifier("syslog_main"),
+                },
+                "SYSLOG syslog_main",
             ),
         ];
 
@@ -5435,6 +5509,29 @@ mod tests {
                  QUIESCE DROP\n  DECODE USING orders_codec\n  TO orders\n    UNBRANCHED\n    \
                  FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL \
                  ERROR LOG;",
+            ),
+            (
+                CreateIngestor {
+                    name: identifier("syslog_ingestor"),
+                    output_routes: flushed_ingestor_outputs("orders"),
+                    decode_using_codec: identifier("syslog_codec"),
+                    timestamp_source: None,
+                    source: IngestSource::Syslog {
+                        client: identifier("syslog_main"),
+                        quiesce: crate::IngestQuiesceMode::Buffer {
+                            max_size: "1MiB".to_string(),
+                            overflow: crate::IngestQuiesceOverflow::DropOldest,
+                        },
+                    },
+                    general_error_policy: GeneralErrorPolicy::Log,
+                    filter_where: None,
+                }
+                .to_canonical_nspl()
+                .expect("must render"),
+                "CREATE INGESTOR syslog_ingestor\n  FROM SYSLOG syslog_main MODE NO_ACK \
+                 SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST\n  DECODE \
+                 USING syslog_codec\n  TO orders\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH \
+                 SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;",
             ),
         ];
 

@@ -154,7 +154,10 @@ Feature: HTTP ingestor specific filter-map logic
           uppered = upper(message.tenant),
           regex_ok = regexp_like(trim(input.raw), 'h[a-z]+'),
           regex_replaced = regexp_replace(trim(input.raw), 'h[a-z]+', 'XX'),
-          regex_piece = regexp_substr(input.raw, 'h[a-z]+')
+          regex_piece = regexp_substr(input.raw, 'h[a-z]+'),
+          unicode_chars = length('é界'),
+          unicode_trimmed = trim(' hello '),
+          empty_replaced = replace('é', '', '-')
       WHERE message.tenant = 'acme' AND input.active AND starts_with(lower(trim(input.raw)), 'he')
       """
     And the ingestor logic transport "http_endpoint" delivers payload fixture "extended_builtin_message"
@@ -200,6 +203,9 @@ Feature: HTTP ingestor specific filter-map logic
       "regex_ok":true
       "regex_replaced":"XX.world"
       "regex_piece":"hello"
+      "unicode_chars":2
+      "unicode_trimmed":"hello"
+      "empty_replaced":"-é-"
       """
 
     Examples:
