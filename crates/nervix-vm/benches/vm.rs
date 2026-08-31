@@ -1,6 +1,6 @@
 use std::sync::Arc as StdArc;
 
-use arrow_array::{BooleanArray, Int64Array, StringArray};
+use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use nervix_nspl::vm_program::parse_program;
@@ -113,6 +113,82 @@ fn string_batch(row_count: usize) -> TypedBatch {
     .expect("benchmark batch must build")
 }
 
+fn long_tail_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("text", DataType::Utf8, true),
+        Field::new("from_chars", DataType::Utf8, true),
+        Field::new("to_chars", DataType::Utf8, true),
+        Field::new("fill", DataType::Utf8, true),
+        Field::new("delimiter", DataType::Utf8, true),
+        Field::new("needle", DataType::Utf8, true),
+        Field::new("count", DataType::Int64, true),
+        Field::new("width", DataType::Int64, true),
+        Field::new("start", DataType::Int64, true),
+        Field::new("length", DataType::Int64, true),
+        Field::new("integer", DataType::Int64, true),
+        Field::new("numeric", DataType::Float64, true),
+    ]))
+}
+
+fn long_tail_output_schema() -> StdArc<Schema> {
+    let mut fields = long_tail_schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.extend([
+        Field::new("translated", DataType::Utf8, true),
+        Field::new("hexed", DataType::Utf8, true),
+        Field::new("lefted", DataType::Utf8, true),
+        Field::new("righted", DataType::Utf8, true),
+        Field::new("padded", DataType::Utf8, true),
+        Field::new("joined", DataType::Utf8, true),
+        Field::new("piece", DataType::Utf8, true),
+        Field::new("digest", DataType::Utf8, true),
+        Field::new("titled", DataType::Utf8, true),
+        Field::new("reversed", DataType::Utf8, true),
+        Field::new("part", DataType::Utf8, true),
+        Field::new("position", DataType::Int64, true),
+        Field::new("cosine", DataType::Float64, true),
+    ]);
+    StdArc::new(Schema::new(fields))
+}
+
+fn long_tail_batch(row_count: usize) -> TypedBatch {
+    let text =
+        StringArray::from_iter((0..row_count).map(|row| Some(format!("alpha-{row}-beta-gamma"))));
+    let from_chars = StringArray::from_iter((0..row_count).map(|_| Some("abg-")));
+    let to_chars = StringArray::from_iter((0..row_count).map(|_| Some("ABG_")));
+    let fill = StringArray::from_iter((0..row_count).map(|_| Some("xy")));
+    let delimiter = StringArray::from_iter((0..row_count).map(|_| Some("-")));
+    let needle = StringArray::from_iter((0..row_count).map(|_| Some("beta")));
+    let count = Int64Array::from_iter((0..row_count).map(|_| Some(8)));
+    let width = Int64Array::from_iter((0..row_count).map(|_| Some(32)));
+    let start = Int64Array::from_iter((0..row_count).map(|_| Some(3)));
+    let length = Int64Array::from_iter((0..row_count).map(|_| Some(12)));
+    let integer = Int64Array::from_iter((0..row_count).map(|row| Some(row as i64 + 1)));
+    let numeric = Float64Array::from_iter((0..row_count).map(|row| Some((row % 100) as f64)));
+
+    TypedBatch::try_new(
+        long_tail_schema(),
+        vec![
+            TypedArray::Utf8(text),
+            TypedArray::Utf8(from_chars),
+            TypedArray::Utf8(to_chars),
+            TypedArray::Utf8(fill),
+            TypedArray::Utf8(delimiter),
+            TypedArray::Utf8(needle),
+            TypedArray::Int64(count),
+            TypedArray::Int64(width),
+            TypedArray::Int64(start),
+            TypedArray::Int64(length),
+            TypedArray::Int64(integer),
+            TypedArray::Float64(numeric),
+        ],
+    )
+    .expect("long-tail benchmark batch must build")
+}
+
 fn compile_arithmetic(options: CompileOptions) -> Arc<CompiledProgram> {
     let program = parse_program(
         "SET input.total = input.left + input.right, input.quotient = (input.left + input.right) \
@@ -145,6 +221,28 @@ fn compile_string(options: CompileOptions) -> Arc<CompiledProgram> {
     )
     .map(Arc::new)
     .expect("benchmark program must compile")
+}
+
+fn compile_long_tail() -> Arc<CompiledProgram> {
+    let program = parse_program(
+        "SET input.translated = translate(input.text, input.from_chars, input.to_chars), \
+         input.hexed = to_hex(input.integer), input.lefted = left(input.text, input.count), \
+         input.righted = right(input.text, input.count), input.padded = lpad(input.text, \
+         input.width, input.fill), input.joined = concat(input.text, input.fill, input.text), \
+         input.piece = substr(input.text, input.start, input.length), input.digest = \
+         md5(input.text), input.titled = initcap(input.text), input.reversed = \
+         reverse(input.text), input.part = split_part(input.text, input.delimiter, input.count), \
+         input.position = strpos(input.text, input.needle), input.cosine = cos(input.numeric);",
+    )
+    .expect("long-tail benchmark program must parse");
+    compile_program_with_options_for_bindings(
+        &program,
+        long_tail_output_schema(),
+        [CompileBinding::writable("input", long_tail_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("long-tail benchmark program must compile")
 }
 
 /// Filters on a numeric comparison and writes text-case builtins, so the sweep also covers
@@ -204,6 +302,8 @@ fn execute_benches(c: &mut Criterion) {
     let string_compiled = compile_string(CompileOptions::default());
     let string_unoptimized = compile_string(unoptimized_options());
     let string_batch = string_batch(8_192);
+    let long_tail_compiled = compile_long_tail();
+    let long_tail_batch = long_tail_batch(8_192);
     let runtime = benchmark_runtime();
 
     let mut group = c.benchmark_group("execute_program");
@@ -236,6 +336,14 @@ fn execute_benches(c: &mut Criterion) {
             runtime.block_on(execute_program(
                 black_box(&string_unoptimized),
                 black_box(&string_batch),
+            ))
+        })
+    });
+    group.bench_function("long_tail_builtins_8192", |b| {
+        b.iter(|| {
+            runtime.block_on(execute_program(
+                black_box(&long_tail_compiled),
+                black_box(&long_tail_batch),
             ))
         })
     });

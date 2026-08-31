@@ -28,6 +28,7 @@ arc-swap = { workspace = true }
 argon2 = { workspace = true }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
+arrow-data = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-ord = { workspace = true }
 arrow-schema = { workspace = true }
@@ -247,6 +248,7 @@ ariadne = "0.5"
 arrow-arith = "58"
 arrow-array = "58"
 arrow-cast = "58"
+arrow-data = "58"
 arrow-ipc = "58"
 arrow-ord = "58"
 arrow-schema = "58"

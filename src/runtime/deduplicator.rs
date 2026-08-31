@@ -11,14 +11,24 @@ use dashmap::DashMap;
 use indexmap::IndexMap;
 use nervix_models::{Expression, Identifier, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
+use ordered_float::OrderedFloat;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tokio::sync::Notify;
 use triomphe::Arc;
 
 use super::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement, UdfExecutor,
-    checked_add_duration_to_timestamp, compile_key_projection_program,
+    PersistedRuntimeStateEntry, ReorderKeyPart, RuntimePersistenceError, RuntimeStatePlacement,
+    UdfExecutor, checked_add_duration_to_timestamp, compile_key_projection_program,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct DeduplicatorKey(Vec<ReorderKeyPart>);
+
+impl DeduplicatorKey {
+    pub(super) fn new(parts: Vec<ReorderKeyPart>) -> Self {
+        Self(parts)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledDeduplicatorKeyProgram {
@@ -32,7 +42,7 @@ pub(super) struct ReplicatedDeduplicatorState {
     pub(super) placement: RuntimeStatePlacement,
     pub(super) required_replica_acks: usize,
     pub(super) replica_nodes: Vec<String>,
-    recent_keys: parking_lot::Mutex<IndexMap<String, Timestamp, RandomState>>,
+    recent_keys: parking_lot::Mutex<IndexMap<DeduplicatorKey, Timestamp, RandomState>>,
     pub(super) current_lsm: AtomicU64,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
@@ -47,8 +57,66 @@ struct DeduplicatorSnapshot {
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct DeduplicatorEntrySnapshot {
-    key: String,
+    key: DeduplicatorKeySnapshot,
     seen_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+struct DeduplicatorKeySnapshot(Vec<DeduplicatorKeyPartSnapshot>);
+
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+enum DeduplicatorKeyPartSnapshot {
+    Null,
+    Boolean(bool),
+    Int64(i64),
+    UInt64(u64),
+    Float64(u64),
+    Utf8(String),
+    Datetime(i64),
+}
+
+impl From<&DeduplicatorKey> for DeduplicatorKeySnapshot {
+    fn from(key: &DeduplicatorKey) -> Self {
+        Self(
+            key.0
+                .iter()
+                .map(|part| match part {
+                    ReorderKeyPart::Null => DeduplicatorKeyPartSnapshot::Null,
+                    ReorderKeyPart::Boolean(value) => DeduplicatorKeyPartSnapshot::Boolean(*value),
+                    ReorderKeyPart::Int64(value) => DeduplicatorKeyPartSnapshot::Int64(*value),
+                    ReorderKeyPart::UInt64(value) => DeduplicatorKeyPartSnapshot::UInt64(*value),
+                    ReorderKeyPart::Float64(value) => {
+                        DeduplicatorKeyPartSnapshot::Float64(value.into_inner().to_bits())
+                    }
+                    ReorderKeyPart::Utf8(value) => DeduplicatorKeyPartSnapshot::Utf8(value.clone()),
+                    ReorderKeyPart::Datetime(value) => {
+                        DeduplicatorKeyPartSnapshot::Datetime(*value)
+                    }
+                })
+                .collect(),
+        )
+    }
+}
+
+impl From<DeduplicatorKeySnapshot> for DeduplicatorKey {
+    fn from(key: DeduplicatorKeySnapshot) -> Self {
+        Self(
+            key.0
+                .into_iter()
+                .map(|part| match part {
+                    DeduplicatorKeyPartSnapshot::Null => ReorderKeyPart::Null,
+                    DeduplicatorKeyPartSnapshot::Boolean(value) => ReorderKeyPart::Boolean(value),
+                    DeduplicatorKeyPartSnapshot::Int64(value) => ReorderKeyPart::Int64(value),
+                    DeduplicatorKeyPartSnapshot::UInt64(value) => ReorderKeyPart::UInt64(value),
+                    DeduplicatorKeyPartSnapshot::Float64(value) => {
+                        ReorderKeyPart::Float64(OrderedFloat(f64::from_bits(value)))
+                    }
+                    DeduplicatorKeyPartSnapshot::Utf8(value) => ReorderKeyPart::Utf8(value),
+                    DeduplicatorKeyPartSnapshot::Datetime(value) => ReorderKeyPart::Datetime(value),
+                })
+                .collect(),
+        )
+    }
 }
 
 pub(super) fn compile_deduplicator_key_program(
@@ -82,7 +150,7 @@ pub(super) fn compile_deduplicator_key_program(
 
 impl ReplicatedDeduplicatorState {
     fn prune_expired_recent_keys(
-        recent_keys: &mut IndexMap<String, Timestamp, RandomState>,
+        recent_keys: &mut IndexMap<DeduplicatorKey, Timestamp, RandomState>,
         now: Timestamp,
         max_time: Duration,
     ) {
@@ -124,7 +192,7 @@ impl ReplicatedDeduplicatorState {
 
     pub(super) fn apply_new_key(
         &self,
-        key: String,
+        key: DeduplicatorKey,
         seen_at: Timestamp,
         max_time: Duration,
     ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
@@ -142,7 +210,7 @@ impl ReplicatedDeduplicatorState {
         Ok(Some((lsm, encode_deduplicator_snapshot(&recent_keys)?)))
     }
 
-    pub(super) fn remove_reserved_keys(&self, keys: &[String]) {
+    pub(super) fn remove_reserved_keys(&self, keys: &[DeduplicatorKey]) {
         if keys.is_empty() {
             return;
         }
@@ -184,13 +252,13 @@ impl ReplicatedDeduplicatorState {
 }
 
 fn encode_deduplicator_snapshot(
-    recent_keys: &IndexMap<String, Timestamp, RandomState>,
+    recent_keys: &IndexMap<DeduplicatorKey, Timestamp, RandomState>,
 ) -> Result<Vec<u8>, RuntimePersistenceError> {
     rkyv::to_bytes::<rkyv::rancor::Error>(&DeduplicatorSnapshot {
         entries: recent_keys
             .iter()
             .map(|(key, seen_at)| DeduplicatorEntrySnapshot {
-                key: key.clone(),
+                key: DeduplicatorKeySnapshot::from(key),
                 seen_at: *seen_at,
             })
             .collect(),
@@ -201,12 +269,49 @@ fn encode_deduplicator_snapshot(
 
 fn decode_deduplicator_snapshot(
     payload: &[u8],
-) -> Result<IndexMap<String, Timestamp, RandomState>, RuntimePersistenceError> {
+) -> Result<IndexMap<DeduplicatorKey, Timestamp, RandomState>, RuntimePersistenceError> {
     let snapshot = rkyv::from_bytes::<DeduplicatorSnapshot, rkyv::rancor::Error>(payload)
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
     let mut recent_keys = IndexMap::with_hasher(RandomState::default());
     for entry in snapshot.entries {
-        recent_keys.insert(entry.key, entry.seen_at);
+        recent_keys.insert(entry.key.into(), entry.seen_at);
     }
     Ok(recent_keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use ahash::RandomState;
+    use indexmap::IndexMap;
+    use nervix_models::Timestamp;
+    use ordered_float::OrderedFloat;
+
+    use super::{
+        DeduplicatorKey, ReorderKeyPart, decode_deduplicator_snapshot, encode_deduplicator_snapshot,
+    };
+
+    #[test]
+    fn typed_deduplicator_keys_round_trip_without_string_collisions() {
+        let numeric = DeduplicatorKey::new(vec![
+            ReorderKeyPart::UInt64(1),
+            ReorderKeyPart::Float64(OrderedFloat(1.5)),
+            ReorderKeyPart::Null,
+        ]);
+        let text = DeduplicatorKey::new(vec![
+            ReorderKeyPart::Utf8("1".to_string()),
+            ReorderKeyPart::Float64(OrderedFloat(1.5)),
+            ReorderKeyPart::Null,
+        ]);
+        assert_ne!(numeric, text);
+
+        let mut keys = IndexMap::with_hasher(RandomState::default());
+        keys.insert(numeric.clone(), Timestamp::from_unix_nanos(10));
+        keys.insert(text.clone(), Timestamp::from_unix_nanos(20));
+
+        let encoded = encode_deduplicator_snapshot(&keys).expect("snapshot must encode");
+        let decoded = decode_deduplicator_snapshot(&encoded).expect("snapshot must decode");
+
+        assert_eq!(decoded.get(&numeric), Some(&Timestamp::from_unix_nanos(10)));
+        assert_eq!(decoded.get(&text), Some(&Timestamp::from_unix_nanos(20)));
+    }
 }

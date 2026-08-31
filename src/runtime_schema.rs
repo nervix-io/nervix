@@ -14,7 +14,9 @@ use arrow_array::{
         TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
         make_builder,
     },
+    make_array, new_empty_array,
 };
+use arrow_data::transform::MutableArrayData;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
@@ -701,22 +703,6 @@ impl CompiledCodecBatchEncoder<'_> {
     }
 }
 
-impl RuntimeValue {
-    pub(crate) fn estimated_bytes(&self) -> u64 {
-        match self {
-            Self::U8(_) | Self::I8(_) | Self::Bool(_) => 1,
-            Self::U16(_) | Self::I16(_) => 2,
-            Self::U32(_) | Self::I32(_) | Self::F32(_) => 4,
-            Self::U64(_) | Self::I64(_) | Self::F64(_) | Self::Datetime(_) => 8,
-            Self::String(value) => u64::try_from(value.len()).unwrap_or(u64::MAX),
-            Self::Array(values) | Self::Vec(values) => values
-                .iter()
-                .map(Self::estimated_bytes)
-                .fold(0_u64, u64::saturating_add),
-        }
-    }
-}
-
 impl RuntimeRecordBatch {
     pub(crate) fn from_record_batch(
         expected_schema: StdArc<ArrowSchema>,
@@ -737,6 +723,109 @@ impl RuntimeRecordBatch {
 
     pub fn batch(&self) -> &RecordBatch {
         &self.batch
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        self.batch
+            .columns()
+            .iter()
+            .map(|column| {
+                column
+                    .to_data()
+                    .get_slice_memory_size()
+                    .ok()
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .unwrap_or(u64::MAX)
+            })
+            .fold(0_u64, u64::saturating_add)
+    }
+
+    pub(crate) fn from_rows(
+        expected_schema: StdArc<ArrowSchema>,
+        rows: &[RuntimeRow],
+    ) -> Result<Self, String> {
+        if rows.is_empty() {
+            let columns = expected_schema
+                .fields()
+                .iter()
+                .map(|field| new_empty_array(field.data_type()))
+                .collect::<Vec<_>>();
+            let batch = RecordBatch::try_new(expected_schema.clone(), columns)
+                .map_err(|error| error.to_string())?;
+            return Ok(Self {
+                schema: expected_schema,
+                batch,
+            });
+        }
+
+        let mut source_indices = HashMap::default();
+        let mut sources = Vec::new();
+        let mut selections = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.batch.schema.as_ref() != expected_schema.as_ref() {
+                return Err("Arrow row schema does not match expected schema".to_string());
+            }
+            if row.row >= row.batch.batch.num_rows() {
+                return Err(format!(
+                    "Arrow batch row {} is outside batch with {} rows",
+                    row.row,
+                    row.batch.batch.num_rows()
+                ));
+            }
+            let pointer = Arc::as_ptr(&row.batch);
+            let source = if let Some(source) = source_indices.get(&pointer) {
+                *source
+            } else {
+                let source = sources.len();
+                sources.push(row.batch.as_ref());
+                source_indices.insert(pointer, source);
+                source
+            };
+            selections.push((source, row.row));
+        }
+
+        if sources.len() == 1 {
+            let start = selections[0].1;
+            if selections
+                .iter()
+                .enumerate()
+                .all(|(offset, (_, row))| *row == start.saturating_add(offset))
+            {
+                if start == 0 && rows.len() == sources[0].batch.num_rows() {
+                    return Ok(sources[0].clone());
+                }
+                return sources[0].slice(start, rows.len());
+            }
+        }
+
+        let columns = (0..expected_schema.fields().len())
+            .map(|column| {
+                let source_data = sources
+                    .iter()
+                    .map(|source| source.batch.column(column).to_data())
+                    .collect::<Vec<_>>();
+                let mut output =
+                    MutableArrayData::new(source_data.iter().collect(), false, rows.len());
+                for (source, row) in &selections {
+                    output.extend(*source, *row, (*row).saturating_add(1));
+                }
+                make_array(output.freeze())
+            })
+            .collect::<Vec<_>>();
+        let batch = if columns.is_empty() {
+            RecordBatch::try_new_with_options(
+                expected_schema.clone(),
+                columns,
+                &RecordBatchOptions::new().with_row_count(Some(rows.len())),
+            )
+        } else {
+            RecordBatch::try_new(expected_schema.clone(), columns)
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(Self {
+            schema: expected_schema,
+            batch,
+        })
     }
 
     pub(crate) fn value(&self, row: usize, name: &str) -> Result<Option<RuntimeValue>, String> {
@@ -1077,18 +1166,6 @@ impl RuntimeRow {
             fields,
             metadata: self.metadata.to_remote(),
         })
-    }
-
-    pub(crate) fn estimated_bytes(&self) -> Result<u64, String> {
-        let mut bytes = 32_u64;
-        for field in self.batch.schema.fields() {
-            if let Some(value) = self.value(field.name())? {
-                bytes = bytes
-                    .saturating_add(u64::try_from(field.name().len()).unwrap_or(u64::MAX))
-                    .saturating_add(value.estimated_bytes());
-            }
-        }
-        Ok(bytes)
     }
 }
 

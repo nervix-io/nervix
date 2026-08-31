@@ -4695,7 +4695,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .expect("deduplicator state should initialize");
     let (lsm, _payload) = state
         .apply_new_key(
-            "txn-1".to_string(),
+            super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
             Timestamp::from_unix_nanos(1),
             Duration::from_secs(600),
         )
@@ -4856,7 +4856,7 @@ async fn replica_quorum_waits_for_replication_ack() {
     );
     let (lsm, _payload) = state
         .apply_new_key(
-            "txn-1".to_string(),
+            super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
             Timestamp::from_unix_nanos(1),
             Duration::from_secs(600),
         )
