@@ -24,6 +24,7 @@ use testcontainers::{
 };
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const REUSABLE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const TEST_CONCURRENCY_FACTOR_ENV: &str = "NERVIX_TEST_CONCURRENCY_FACTOR";
 const TESTCONTAINERS_MODE_ENV: &str = "NERVIX_TESTCONTAINERS_MODE";
 const TESTCONTAINERS_COMMAND_ENV: &str = "TESTCONTAINERS_COMMAND";
 const TESTCONTAINERS_CONFIG_LABEL: &str = "com.nervix.testcontainers.config-hash";
@@ -53,6 +54,25 @@ pub struct TestParallelism {
     available_cpus: NonZeroUsize,
 }
 
+#[derive(Clone, Copy, Debug, clap::Args)]
+pub struct TestParallelismArgs {
+    /// Multiplier applied to the detected CPU count for default scenario concurrency.
+    /// The absolute `--concurrency` option takes precedence when both are set.
+    #[arg(
+        long,
+        env = TEST_CONCURRENCY_FACTOR_ENV,
+        default_value = "1",
+        value_name = "FACTOR"
+    )]
+    concurrency_factor: NonZeroUsize,
+}
+
+impl TestParallelismArgs {
+    pub const fn concurrency_factor(self) -> NonZeroUsize {
+        self.concurrency_factor
+    }
+}
+
 impl TestParallelism {
     pub fn detect() -> Self {
         Self::from_available_cpus(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
@@ -62,8 +82,10 @@ impl TestParallelism {
         Self { available_cpus }
     }
 
-    pub const fn max_concurrent_scenarios(self) -> usize {
-        self.available_cpus.get()
+    pub const fn max_concurrent_scenarios(self, concurrency_factor: NonZeroUsize) -> usize {
+        self.available_cpus
+            .get()
+            .saturating_mul(concurrency_factor.get())
     }
 
     pub const fn tokio_worker_threads(self) -> usize {
@@ -2175,9 +2197,42 @@ impl Image for KafkaImage {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
+    use std::{ffi::OsStr, num::NonZeroUsize};
 
-    use super::{KafkaImage, TestParallelism};
+    use clap::{CommandFactory as _, Parser as _};
+
+    use super::{KafkaImage, TEST_CONCURRENCY_FACTOR_ENV, TestParallelism, TestParallelismArgs};
+
+    #[derive(clap::Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        parallelism: TestParallelismArgs,
+    }
+
+    #[test]
+    fn test_parallelism_args_default_to_one_and_accept_a_positive_factor() {
+        let defaults = TestCli::try_parse_from(["test"]).expect("default arguments should parse");
+        let configured = TestCli::try_parse_from(["test", "--concurrency-factor", "3"])
+            .expect("positive concurrency factor should parse");
+
+        assert_eq!(defaults.parallelism.concurrency_factor().get(), 1);
+        assert_eq!(configured.parallelism.concurrency_factor().get(), 3);
+        assert!(TestCli::try_parse_from(["test", "--concurrency-factor", "0"]).is_err());
+    }
+
+    #[test]
+    fn test_parallelism_args_declare_the_environment_override() {
+        let command = TestCli::command();
+        let factor = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "concurrency_factor")
+            .expect("concurrency factor argument should exist");
+
+        assert_eq!(
+            factor.get_env(),
+            Some(OsStr::new(TEST_CONCURRENCY_FACTOR_ENV))
+        );
+    }
 
     #[test]
     fn test_parallelism_scales_from_available_cpus() {
@@ -2185,7 +2240,11 @@ mod tests {
             NonZeroUsize::new(12).expect("test CPU count is non-zero"),
         );
 
-        assert_eq!(parallelism.max_concurrent_scenarios(), 12);
+        assert_eq!(
+            parallelism
+                .max_concurrent_scenarios(NonZeroUsize::new(3).expect("test factor is non-zero")),
+            36
+        );
         assert_eq!(parallelism.tokio_worker_threads(), 12);
     }
 

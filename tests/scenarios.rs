@@ -54,7 +54,7 @@ use nervix_server::{
     application::InternalTransportMode, memory_pressure::MemoryPressureConfig,
     runtime::RuntimeTestHooks,
 };
-use nervix_test_environment::TestParallelism;
+use nervix_test_environment::{TestParallelism, TestParallelismArgs};
 use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
@@ -13506,7 +13506,7 @@ fn main() {
                 scope.to_string_lossy().into_owned(),
             ))
         } else {
-            runtime.block_on(run_scenarios(parallelism.max_concurrent_scenarios()))
+            runtime.block_on(run_scenarios(parallelism))
         }
     }));
     let dependency_teardown_errors = runtime.block_on(TestDependencies::shutdown_suite());
@@ -13543,8 +13543,21 @@ async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
     panic!("intentional dependency lifecycle helper unwind");
 }
 
-async fn run_scenarios(max_concurrent_scenarios: usize) -> Option<String> {
+async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
+    let cli =
+        cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, TestParallelismArgs>::parsed();
+    let concurrency_factor = cli.custom.concurrency_factor();
+    let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
+    let effective_max_concurrent_scenarios = cli
+        .runner
+        .concurrency
+        .unwrap_or(default_max_concurrent_scenarios);
     truncate_cucumber_log();
+    append_cucumber_log_line(&format!(
+        "scenario parallelism: max_concurrent_scenarios={effective_max_concurrent_scenarios} \
+         concurrency_factor={concurrency_factor} tokio_worker_threads={}",
+        parallelism.tokio_worker_threads()
+    ));
     let writer = writer::Basic::raw(
         std::io::stdout(), // Output to stdout
         writer::Coloring::Auto,
@@ -13554,7 +13567,7 @@ async fn run_scenarios(max_concurrent_scenarios: usize) -> Option<String> {
     .normalized()
     .repeat_failed();
     let writer = ScenarioWorld::cucumber()
-        .max_concurrent_scenarios(max_concurrent_scenarios)
+        .max_concurrent_scenarios(default_max_concurrent_scenarios)
         .retries(1)
         .before(|feature, _rule, scenario, world| {
             let feature_name = feature.name.clone();
@@ -13624,6 +13637,7 @@ async fn run_scenarios(max_concurrent_scenarios: usize) -> Option<String> {
         // given, so calling this first silently discards the guard and lets an unmatched step skip
         // its scenario while the suite still reports green.
         .fail_on_skipped()
+        .with_cli(cli)
         .run(SCENARIOS_PATH)
         .await;
 
