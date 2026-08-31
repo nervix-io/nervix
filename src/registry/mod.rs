@@ -5957,13 +5957,6 @@ fn effective_wasm_output_filter_map_schema(
             reason: format!("WASM output route is invalid: {reason}"),
         })
     })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
-        }));
-    }
     if !parsed.inner.invoke.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -8238,13 +8231,6 @@ fn effective_processor_output_filter_map_schema(
             reason: format!("output route is invalid: {reason}"),
         })
     })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
-        }));
-    }
     let original_parsed = parsed.clone();
     let (parsed, lookup_fields) =
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
@@ -8511,12 +8497,6 @@ fn rewrite_lookup_hash_map_program(
     let program = nervix_nspl::vm_program::SpannedNode {
         inner: Program {
             filter: parsed.inner.filter.as_ref().map(&mut rewrite).transpose()?,
-            branch_filters: parsed
-                .inner
-                .branch_filters
-                .iter()
-                .map(&mut rewrite)
-                .collect::<Result<Vec<_>, _>>()?,
             set: parsed
                 .inner
                 .set
@@ -8805,7 +8785,6 @@ fn expr_uses_header_read(expr: &SpannedExpr) -> bool {
 
 fn program_uses_header_reads(program: &Program) -> bool {
     program.filter.as_ref().is_some_and(expr_uses_header_read)
-        || program.branch_filters.iter().any(expr_uses_header_read)
         || program
             .set
             .iter()
@@ -8821,9 +8800,6 @@ fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec
     let mut refs = Vec::new();
     if let Some(filter) = &program.filter {
         collect_expr_field_refs(filter, &mut refs);
-    }
-    for branch_filter in &program.branch_filters {
-        collect_expr_field_refs(branch_filter, &mut refs);
     }
     for (_field_ref, expr) in &program.set {
         collect_expr_field_refs(expr, &mut refs);
@@ -9047,13 +9023,6 @@ fn effective_ingestor_output_filter_map_schema(
             reason: format!("ingestor output route is invalid: {reason}"),
         })
     })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
-        }));
-    }
     if program_uses_header_reads(&parsed.inner) && !ingest_source_supports_headers(&ingestor.source)
     {
         return Err(Report::new(RegistryError::InvalidModel {
@@ -9632,10 +9601,7 @@ fn validate_correlator_output(
             ),
         })
     })?;
-    if !parsed.inner.branch_filters.is_empty()
-        || !parsed.inner.invoke.is_empty()
-        || parsed.inner.set.is_empty()
-    {
+    if !parsed.inner.invoke.is_empty() || parsed.inner.set.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -9891,13 +9857,6 @@ fn validate_inferencer_output_filter_map(
             reason: format!("inferencer output route is invalid: {reason}"),
         })
     })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
-        }));
-    }
     let original_parsed = parsed.clone();
     let (parsed, lookup_fields) =
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;

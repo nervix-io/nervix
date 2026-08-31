@@ -2725,28 +2725,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         });
     }
 
-    let mut branch_filters = Vec::with_capacity(program.inner.branch_filters.len());
-    for filter_expr in &program.inner.branch_filters {
-        let filter_type = compiler.infer_expr_type(filter_expr)?;
-        if filter_type != DataType::Boolean {
-            return Err(CompileError {
-                code: "invalid_filter",
-                message: "WHERE expression must evaluate to Boolean".to_string(),
-                span: filter_expr.span,
-            });
-        }
-        let filter_reg = compiler.alloc_condition(RegisterType::Boolean);
-        let compiled = compiler.compile_expr(filter_expr)?;
-        compiler.emit_move(filter_reg, compiled, filter_expr.span);
-        branch_filters.push(filter_reg);
-    }
-
-    optimize_instructions(
-        &mut compiler.instructions,
-        &outputs,
-        filter,
-        &branch_filters,
-    );
+    optimize_instructions(&mut compiler.instructions, &outputs, filter);
     if options.optimize_temp_registers {
         remap_temp_registers(&mut compiler.instructions, &mut compiler.layouts.temps);
     }
@@ -2757,7 +2736,6 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         inputs: compiler.inputs,
         instructions: compiler.instructions,
         filter,
-        branch_filters,
         outputs,
         invocations,
         layouts: compiler.layouts,
@@ -2769,10 +2747,9 @@ fn optimize_instructions(
     instructions: &mut Vec<Instruction>,
     outputs: &[OutputBinding],
     filter: Option<RegisterRef>,
-    branch_filters: &[RegisterRef],
 ) {
     eliminate_redundant_moves(instructions);
-    eliminate_dead_removable_temps(instructions, outputs, filter, branch_filters);
+    eliminate_dead_removable_temps(instructions, outputs, filter);
 }
 
 fn eliminate_redundant_moves(instructions: &mut Vec<Instruction>) {
@@ -2877,7 +2854,6 @@ fn eliminate_dead_removable_temps(
     instructions: &mut Vec<Instruction>,
     outputs: &[OutputBinding],
     filter: Option<RegisterRef>,
-    branch_filters: &[RegisterRef],
 ) {
     let mut live = outputs
         .iter()
@@ -2886,7 +2862,6 @@ fn eliminate_dead_removable_temps(
     if let Some(filter) = filter {
         live.insert(filter);
     }
-    live.extend(branch_filters.iter().copied());
 
     let mut retained = Vec::with_capacity(instructions.len());
     for instruction in instructions.iter().rev() {
@@ -3428,7 +3403,6 @@ mod tests {
         let program = SpannedNode {
             inner: Program {
                 filter: None,
-                branch_filters: Vec::new(),
                 set: vec![(
                     FieldRef {
                         relay: "input".to_string(),
@@ -3623,7 +3597,6 @@ mod tests {
         let program = SpannedNode {
             inner: Program {
                 filter: None,
-                branch_filters: Vec::new(),
                 set: Vec::new(),
                 invoke: Vec::new(),
             },
@@ -4090,7 +4063,7 @@ mod tests {
             },
         ];
 
-        optimize_instructions(&mut instructions, &outputs, None, &[]);
+        optimize_instructions(&mut instructions, &outputs, None);
 
         assert_eq!(instructions.len(), 2);
         assert!(
@@ -4131,7 +4104,7 @@ mod tests {
             error_mask: None,
         }];
 
-        optimize_instructions(&mut instructions, &[], None, &[]);
+        optimize_instructions(&mut instructions, &[], None);
 
         assert_eq!(instructions.len(), 1);
         assert!(matches!(

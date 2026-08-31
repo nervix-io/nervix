@@ -4770,48 +4770,91 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
-                    for message in messages {
+                    let Some(first_message) = messages.first() else {
+                        return;
+                    };
+                    let execution_now = message_timestamp(first_message);
+                    let row_count = messages.len();
+                    let mut aggregate_inputs_by_row = (0..row_count)
+                        .map(|_| Ok(Vec::new()))
+                        .collect::<Vec<Result<Vec<WindowAggregateInput>, String>>>();
+                    for compiled in compiled_aggregates.iter() {
                         tokio::task::consume_budget().await;
-                        let timestamp = message_timestamp(&message);
-                        let mut aggregate_inputs = Vec::new();
-                        let mut aggregate_input_error = None;
-                        for compiled in compiled_aggregates.iter() {
-                            tokio::task::consume_budget().await;
-                            match evaluate_window_aggregate_inputs(
-                                compiled,
-                                &message.record,
-                                timestamp,
-                            )
-                            .await
-                            {
-                                Ok(inputs) => aggregate_inputs.extend(inputs),
+                        let evaluated = match evaluate_window_aggregate_inputs(
+                            compiled,
+                            first_message.record.batch(),
+                            execution_now,
+                        )
+                        .await
+                        {
+                            Ok(evaluated) => evaluated,
+                            Err(error) => {
+                                for inputs in &mut aggregate_inputs_by_row {
+                                    if inputs.is_ok() {
+                                        *inputs = Err(error.clone());
+                                    }
+                                }
+                                break;
+                            }
+                        };
+                        if evaluated.len() != row_count {
+                            let error = format!(
+                                "window aggregate input VM produced {} rows for {row_count} input \
+                                 rows",
+                                evaluated.len()
+                            );
+                            for inputs in &mut aggregate_inputs_by_row {
+                                if inputs.is_ok() {
+                                    *inputs = Err(error.clone());
+                                }
+                            }
+                            break;
+                        }
+                        for (inputs, evaluated) in aggregate_inputs_by_row.iter_mut().zip(evaluated)
+                        {
+                            match evaluated {
+                                Ok(evaluated) => {
+                                    if let Ok(inputs) = inputs {
+                                        inputs.extend(evaluated);
+                                    }
+                                }
                                 Err(error) => {
-                                    aggregate_input_error = Some(error);
-                                    break;
+                                    if inputs.is_ok() {
+                                        *inputs = Err(error);
+                                    }
                                 }
                             }
                         }
-                        if let Some(error) = aggregate_input_error {
-                            branch
-                                .runtime
-                                .handle_message_error(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    message,
-                                    MessageErrorFailure::publish(
-                                        None,
-                                        format!(
-                                            "window processor '{}' aggregate input failed: {}",
-                                            self.processor.as_str(),
-                                            error
+                    }
+                    for (message, aggregate_inputs) in
+                        messages.into_iter().zip(aggregate_inputs_by_row)
+                    {
+                        tokio::task::consume_budget().await;
+                        let timestamp = message_timestamp(&message);
+                        let aggregate_inputs = match aggregate_inputs {
+                            Ok(aggregate_inputs) => aggregate_inputs,
+                            Err(error) => {
+                                branch
+                                    .runtime
+                                    .handle_message_error(
+                                        &branch.domain,
+                                        self.kind.as_str(),
+                                        &self.processor,
+                                        &self.error_policies,
+                                        message,
+                                        MessageErrorFailure::publish(
+                                            None,
+                                            format!(
+                                                "window processor '{}' aggregate input failed: {}",
+                                                self.processor.as_str(),
+                                                error
+                                            ),
                                         ),
-                                    ),
-                                )
-                                .await;
-                            continue;
-                        }
+                                    )
+                                    .await;
+                                continue;
+                            }
+                        };
                         if let Err(error_and_message) =
                             state.push_message(aggregate, timestamp, message, aggregate_inputs)
                         {
@@ -9042,9 +9085,6 @@ fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec
     if let Some(filter) = &program.filter {
         collect_expr_field_refs(filter, &mut refs);
     }
-    for branch_filter in &program.branch_filters {
-        collect_expr_field_refs(branch_filter, &mut refs);
-    }
     for (_field_ref, expr) in &program.set {
         collect_expr_field_refs(expr, &mut refs);
     }
@@ -9297,12 +9337,6 @@ fn rewrite_lookup_hash_map_program(
             .as_ref()
             .map(|expr| rewrite_lookup_hash_map_expr(expr, available_lookups, &mut pending_calls))
             .transpose()?,
-        branch_filters: parsed
-            .inner
-            .branch_filters
-            .iter()
-            .map(|expr| rewrite_lookup_hash_map_expr(expr, available_lookups, &mut pending_calls))
-            .collect::<Result<Vec<_>, _>>()?,
         set: parsed
             .inner
             .set
@@ -9372,7 +9406,6 @@ fn compile_lookup_hash_map_calls(
         let key_program = nervix_nspl::vm_program::SpannedNode {
             inner: nervix_nspl::vm_program::Program {
                 filter: None,
-                branch_filters: Vec::new(),
                 set: vec![(
                     nervix_nspl::vm_program::FieldRef {
                         relay: writable_namespace.to_string(),
@@ -10019,15 +10052,6 @@ fn compile_processor_output_filter_map_program(
             identifier
         ),
     })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
     let inherited_count = if inferencer_tensors.is_some() {
         0
     } else {
@@ -10302,15 +10326,6 @@ fn compile_wasm_output_filter_map_program(
                     identifier
                 ),
             })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
     if !parsed.inner.invoke.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
@@ -11005,10 +11020,7 @@ impl CorrelatorOutputCompileContext<'_> {
             self.construction,
             SemanticNamespaces::new("__invalid_correlator_bare_read", "output"),
         )?;
-        if !parsed.inner.branch_filters.is_empty()
-            || !parsed.inner.invoke.is_empty()
-            || parsed.inner.set.is_empty()
-        {
+        if !parsed.inner.invoke.is_empty() || parsed.inner.set.is_empty() {
             return Err(format!(
                 "correlator '{}' TO output '{}' must contain SET assignments and may contain WHERE",
                 self.processor.as_str(),
@@ -12249,15 +12261,6 @@ fn compile_ingestor_filter_map_program(
             ),
         },
     )?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
     let inherited_count = parsed
         .inner
         .set
@@ -15262,13 +15265,16 @@ struct WindowAggregateInput {
     value: Option<RuntimeValue>,
 }
 
+#[cfg(test)]
+static WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+
 async fn evaluate_window_aggregate_inputs(
     program: &CompiledWindowAggregateProgram,
-    row: &RuntimeRow,
+    carrier: &RuntimeRecordBatch,
     execution_now: Timestamp,
-) -> Result<Vec<WindowAggregateInput>, String> {
-    let carrier = row.one_row_batch();
-    let keys = [None];
+) -> Result<Vec<Result<Vec<WindowAggregateInput>, String>>, String> {
+    let row_count = carrier.batch().num_rows();
+    let keys = vec![None; row_count];
     let side_inputs = HashMap::new();
     let lookup_columns = HashMap::new();
     let uninitialized = VmUninitializedInput {
@@ -15284,7 +15290,7 @@ async fn evaluate_window_aggregate_inputs(
     let input = project_vm_input_batch(
         &program.input_program.input_schema,
         &VmInputProjectionSources {
-            carrier: &carrier,
+            carrier,
             namespace_batches: &[],
             strict_namespaces: &[],
             keys: &keys,
@@ -15295,6 +15301,8 @@ async fn evaluate_window_aggregate_inputs(
         },
         None,
     )?;
+    #[cfg(test)]
+    WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
     let result = execute_program_with_selection_in_context(
         &program.input_program,
         &input,
@@ -15305,38 +15313,59 @@ async fn evaluate_window_aggregate_inputs(
     )
     .await
     .map_err(|error| error.to_string())?;
-    if result.selected_rows.as_slice() != [0] {
-        return Err("window aggregate input VM did not preserve its input row".to_string());
-    }
-    if let Some(error) = result.batch.errors().row(0).first() {
+    if result.batch.row_count() != row_count {
         return Err(format!(
-            "window aggregate input VM failed with {}: {}",
-            error.code.as_str(),
-            error.message
+            "window aggregate input VM produced {} rows for {row_count} input rows",
+            result.batch.row_count()
         ));
     }
-    program
+    if result.selected_rows.len() != row_count
+        || !result.selected_rows.iter().copied().eq(0..row_count)
+    {
+        return Err(format!(
+            "window aggregate input VM did not preserve all {row_count} input rows"
+        ));
+    }
+    let input_columns = program
         .input_fields
         .iter()
         .map(|field_name| {
             let Some(field_name) = field_name else {
-                return Ok(WindowAggregateInput { value: None });
+                return Ok(None);
             };
             let column_index = result.batch.schema().index_of(field_name).map_err(|_| {
                 format!("window aggregate input VM produced no '{field_name}' field")
             })?;
             let field = result.batch.schema().field(column_index);
             let array = result.batch.column(column_index).to_array_ref();
-            runtime_value_from_arrow_array(
-                array.as_ref(),
-                &parse_as_type_from_arrow(field.data_type())?,
-                true,
-                0,
-                field_name,
-            )
-            .map(|value| WindowAggregateInput { value })
+            Ok(Some((
+                field_name.as_str(),
+                array,
+                parse_as_type_from_arrow(field.data_type())?,
+            )))
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((0..row_count)
+        .map(|row| {
+            if let Some(error) = result.batch.errors().row(row).first() {
+                return Err(format!(
+                    "window aggregate input VM failed with {}: {}",
+                    error.code.as_str(),
+                    error.message
+                ));
+            }
+            input_columns
+                .iter()
+                .map(|column| {
+                    let Some((field_name, array, ty)) = column else {
+                        return Ok(WindowAggregateInput { value: None });
+                    };
+                    runtime_value_from_arrow_array(array.as_ref(), ty, true, row, field_name)
+                        .map(|value| WindowAggregateInput { value })
+                })
+                .collect()
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy)]
