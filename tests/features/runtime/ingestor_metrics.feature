@@ -124,6 +124,7 @@ Feature: Ingestor metrics
     And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target_kind="INGESTOR"'
     And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target="ingestor_metrics_source"'
     And node "node-1" observability path "/metrics" eventually responds with 200 and contains "nervix_messages_per_batch_bucket"
+    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'le="65536"'
     And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 2
       """
       target_kind="INGESTOR"

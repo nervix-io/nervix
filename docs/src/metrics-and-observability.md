@@ -68,7 +68,10 @@ Nervix records these raw metric families:
 - `nervix_messages_total`: total messages received or sent
 - `nervix_batches_total`: total batches received or sent
 - `nervix_bytes_total`: total bytes received or sent
-- `nervix_messages_per_batch`: histogram of message count per batch
+- `nervix_messages_per_batch`: histogram of message count per batch. Its finite Prometheus bucket
+  boundaries are `1`, `2`, `5`, `10`, `50`, `100`, `500`, `1000`, `1024`, `2048`, `4096`,
+  `8192`, `16384`, `32768`, and `65536`, followed by `+Inf`. The rolling HDR histograms used by
+  `DESCRIBE` track batch sizes through 65,536 messages.
 - `nervix_delivery_latency_seconds`: histogram of delivery latency between graph nodes
 - `nervix_relay_buffer_len`: histogram of runtime relay buffer occupancy in queued batches
 - `nervix_branch_instances`: current concrete branch keys with at least one runtime instance on the
