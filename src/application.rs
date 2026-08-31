@@ -12674,13 +12674,14 @@ impl SessionServiceImpl {
             let Model::Schema(schema) = schema_node.config.as_ref() else {
                 return Err("scheduled schema node has invalid model kind".to_string());
             };
+            let schema = runtime_schema::compile_schema(schema);
             specs.insert(
                 ack_model.name.clone(),
-                RuntimeMaterializedRelaySpec {
-                    schema: runtime_schema::compile_schema(schema).arrow_schema(),
-                    sensitivity: runtime_schema::compile_schema(schema).vm_sensitivity(),
-                    branching: relay_node.effective_branching.clone().unwrap_or_default(),
-                },
+                RuntimeMaterializedRelaySpec::new(
+                    schema.arrow_schema(),
+                    schema.vm_sensitivity(),
+                    relay_node.effective_branching.clone().unwrap_or_default(),
+                ),
             );
             owners.insert(ack_model.name.clone(), None);
         }

@@ -1,18 +1,19 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{
+    Arc as StdArc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use ahash::RandomState;
 use dashmap::DashMap;
 use nervix_models::{ModelKind, RemoteRuntimeField, RemoteRuntimeRecord};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::sync::Notify;
 
 use super::{
     BranchKey, PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
-    materialized_record_is_newer,
 };
 use crate::{
     metrics::{RuntimeMetrics, RuntimeMetricsSnapshot},
-    runtime_schema::RuntimeRow,
+    runtime_schema::{RuntimeRow, RuntimeValue},
 };
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -35,25 +36,21 @@ type DecodedMaterializedRelaySnapshot = (
 #[derive(Debug)]
 pub(super) struct ReplicatedMaterializedRelayState {
     pub(super) placement: RuntimeStatePlacement,
-    pub(super) required_replica_acks: usize,
+    schema: StdArc<arrow_schema::Schema>,
     pub(super) primary_node: Option<String>,
     pub(super) physical_node_id: String,
-    pub(super) replica_nodes: Vec<String>,
-    pub(super) entries: DashMap<Option<BranchKey>, RemoteRuntimeRecord, RandomState>,
+    pub(super) entries: DashMap<Option<BranchKey>, RuntimeRow, RandomState>,
     pub(super) current_lsm: AtomicU64,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
-    pub(super) replica_progress: DashMap<String, u64, RandomState>,
-    pub(super) replication_notify: Notify,
 }
 
 impl ReplicatedMaterializedRelayState {
     pub(super) fn new(
         placement: RuntimeStatePlacement,
+        schema: StdArc<arrow_schema::Schema>,
         primary_node: Option<String>,
         physical_node_id: String,
-        replica_nodes: Vec<String>,
-        required_replica_acks: usize,
         metrics: &RuntimeMetrics,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
@@ -66,40 +63,24 @@ impl ReplicatedMaterializedRelayState {
             let (snapshot_entries, snapshot_metrics) =
                 decode_materialized_stream_snapshot_with_metrics(&initial.payload)?;
             for (key, record) in snapshot_entries {
-                entries.insert(key, record);
+                entries.insert(
+                    key,
+                    RuntimeRow::from_remote(schema.clone(), record)
+                        .map_err(RuntimePersistenceError::DecodeState)?,
+                );
             }
             Self::apply_metrics_snapshot(metrics, &placement, &physical_node_id, snapshot_metrics);
         }
         Ok(Self {
             placement,
-            required_replica_acks,
+            schema,
             primary_node,
             physical_node_id,
-            replica_nodes,
             entries,
             current_lsm: AtomicU64::new(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
-            replica_progress: DashMap::default(),
-            replication_notify: Notify::new(),
         })
-    }
-
-    pub(super) fn mark_replica_progress(&self, node_id: &str, lsm: u64) {
-        self.replica_progress.insert(node_id.to_string(), lsm);
-        self.replication_notify.notify_waiters();
-    }
-
-    pub(super) fn replica_quorum_satisfied(&self, lsm: u64) -> bool {
-        self.replica_nodes
-            .iter()
-            .filter(|node_id| {
-                self.replica_progress
-                    .get(node_id.as_str())
-                    .is_some_and(|observed| *observed >= lsm)
-            })
-            .count()
-            >= self.required_replica_acks
     }
 
     pub(super) fn apply_snapshot(
@@ -112,7 +93,11 @@ impl ReplicatedMaterializedRelayState {
             decode_materialized_stream_snapshot_with_metrics(payload)?;
         self.entries.clear();
         for (key, record) in entries {
-            self.entries.insert(key, record);
+            self.entries.insert(
+                key,
+                RuntimeRow::from_remote(self.schema.clone(), record)
+                    .map_err(RuntimePersistenceError::DecodeState)?,
+            );
         }
         Self::apply_metrics_snapshot(
             metrics,
@@ -122,7 +107,6 @@ impl ReplicatedMaterializedRelayState {
         );
         self.current_lsm.store(lsm, Ordering::SeqCst);
         self.dirty.store(true, Ordering::SeqCst);
-        self.replication_notify.notify_waiters();
         Ok(())
     }
 
@@ -187,50 +171,49 @@ impl ReplicatedMaterializedRelayState {
 
     pub(super) fn update_last_by_timestamp(
         &self,
-        metrics: &RuntimeMetrics,
         key: &Option<BranchKey>,
         record: &RuntimeRow,
-    ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
-        let candidate = record
-            .to_remote()
-            .map_err(RuntimePersistenceError::EncodeState)?;
+    ) -> Option<u64> {
         let should_update = if let Some(existing) = self.entries.get(key) {
-            materialized_record_is_newer(&existing.metadata, &candidate.metadata)
+            record.metadata().is_newer_than(existing.metadata())
         } else {
             true
         };
         if !should_update {
-            return Ok(None);
+            return None;
         }
-        self.entries.insert(key.clone(), candidate);
+        self.entries.insert(key.clone(), record.clone());
         let lsm = self
             .current_lsm
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
         self.dirty.store(true, Ordering::SeqCst);
-        Ok(Some((
-            lsm,
-            encode_materialized_stream_snapshot(&self.entries, self.metrics_snapshot(metrics))?,
-        )))
+        Some(lsm)
     }
 
-    pub(super) fn remove_key(
-        &self,
-        metrics: &RuntimeMetrics,
-        key: &Option<BranchKey>,
-    ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
-        if self.entries.remove(key).is_none() {
-            return Ok(None);
-        }
+    pub(super) fn remove_key(&self, key: &Option<BranchKey>) -> Option<u64> {
+        self.entries.remove(key)?;
         let lsm = self
             .current_lsm
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
         self.dirty.store(true, Ordering::SeqCst);
-        Ok(Some((
-            lsm,
-            encode_materialized_stream_snapshot(&self.entries, self.metrics_snapshot(metrics))?,
-        )))
+        Some(lsm)
+    }
+
+    pub(super) fn values_at(
+        &self,
+        key: &Option<BranchKey>,
+        column_indices: impl IntoIterator<Item = usize>,
+    ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
+        let Some(record) = self.entries.get(key) else {
+            return Ok(None);
+        };
+        column_indices
+            .into_iter()
+            .map(|column_index| record.value_at(column_index))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
     }
 }
 
@@ -261,16 +244,21 @@ pub(super) fn decode_materialized_stream_snapshot(
 }
 
 fn encode_materialized_stream_snapshot(
-    entries: &DashMap<Option<BranchKey>, RemoteRuntimeRecord, RandomState>,
+    entries: &DashMap<Option<BranchKey>, RuntimeRow, RandomState>,
     metrics: RuntimeMetricsSnapshot,
 ) -> Result<Vec<u8>, RuntimePersistenceError> {
     let mut snapshot_entries = entries
         .iter()
-        .map(|entry| MaterializedRelayEntrySnapshot {
-            key: BranchKey::to_remote_key(entry.key()),
-            record: entry.value().clone(),
+        .map(|entry| {
+            Ok(MaterializedRelayEntrySnapshot {
+                key: BranchKey::to_remote_key(entry.key()),
+                record: entry
+                    .value()
+                    .to_remote()
+                    .map_err(RuntimePersistenceError::EncodeState)?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, RuntimePersistenceError>>()?;
     snapshot_entries.sort_by_key(|entry| snapshot_key_sort(&entry.key));
     rkyv::to_bytes::<rkyv::rancor::Error>(&MaterializedRelaySnapshot {
         entries: snapshot_entries,
@@ -336,32 +324,34 @@ mod tests {
             64,
             None,
         );
-        let state = ReplicatedMaterializedRelayState::new(
-            placement.clone(),
-            None,
-            "node-1".to_string(),
-            Vec::new(),
-            0,
-            &metrics,
-            None,
-        )
-        .expect("unbranched materialized state should build");
         let record = test_runtime_row([(
             "value".to_string(),
             RuntimeValue::String("ready".to_string()),
         )]);
+        let schema = record.arrow_schema();
+        let state = ReplicatedMaterializedRelayState::new(
+            placement.clone(),
+            schema.clone(),
+            None,
+            "node-1".to_string(),
+            &metrics,
+            None,
+        )
+        .expect("unbranched materialized state should build");
 
-        let (lsm, payload) = state
-            .update_last_by_timestamp(&metrics, &None, &record)
-            .expect("unbranched materialized state should snapshot")
+        let lsm = state
+            .update_last_by_timestamp(&None, &record)
             .expect("the first record should update state");
+        let payload = state
+            .latest_snapshot(&metrics)
+            .expect("unbranched materialized state should snapshot")
+            .payload;
         let restored_metrics = RuntimeMetrics::default();
         let restored = ReplicatedMaterializedRelayState::new(
             placement,
+            schema,
             None,
             "node-1".to_string(),
-            Vec::new(),
-            0,
             &restored_metrics,
             Some(PersistedRuntimeStateEntry {
                 lsm,
@@ -376,14 +366,54 @@ mod tests {
                 .entries
                 .get(&None)
                 .expect("restored record should exist")
-                .fields
-                .len(),
-            1
+                .value()
+                .value("value")
+                .expect("restored field should load"),
+            Some(RuntimeValue::String("ready".to_string()))
         );
         assert!(restored_metrics.has_global_target_measurements(
             &restored.placement.domain,
             ModelKind::Relay,
             &restored.placement.identifier,
         ));
+    }
+
+    #[test]
+    fn materialized_state_reads_selected_arrow_columns_by_index() {
+        let record = test_runtime_row([
+            (
+                "status".to_string(),
+                RuntimeValue::String("ready".to_string()),
+            ),
+            ("score".to_string(), RuntimeValue::I64(42)),
+        ]);
+        let state = ReplicatedMaterializedRelayState::new(
+            RuntimeStatePlacement {
+                domain: Domain::parse("default").expect("valid domain"),
+                state: super::super::RuntimeStateKind::MaterializedRelay,
+                kind: ModelKind::Materializer,
+                identifier: Identifier::parse("profiles").expect("valid relay"),
+                schema_fingerprint: [0; 32],
+                branch_key: None,
+            },
+            record.arrow_schema(),
+            None,
+            "node-1".to_string(),
+            &RuntimeMetrics::default(),
+            None,
+        )
+        .expect("materialized state should build");
+        assert!(state.update_last_by_timestamp(&None, &record).is_some());
+
+        assert_eq!(
+            state
+                .values_at(&None, [1, 0])
+                .expect("selected fields should load")
+                .expect("the materialized record should exist"),
+            vec![
+                Some(RuntimeValue::I64(42)),
+                Some(RuntimeValue::String("ready".to_string())),
+            ]
+        );
     }
 }
