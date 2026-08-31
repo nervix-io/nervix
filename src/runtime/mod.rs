@@ -1418,7 +1418,7 @@ struct RawIngestDispatch<'a> {
 /// is what keeps a message error attributable to the record that produced it and keeps
 /// each record's ack identity its own once the group has been filtered.
 struct IngestGroupRows {
-    batch: RuntimeRecordBatch,
+    batch: Arc<RuntimeRecordBatch>,
     record_metadata: Vec<RuntimeRecordMetadata>,
     /// Empty when the source carries no ingest metadata, otherwise row-aligned.
     ingest_metadata: Vec<IngestFilterMapMetadata>,
@@ -1486,7 +1486,7 @@ impl PendingIngestGroup {
         debug_assert!(self.metadata.is_empty() || self.metadata.len() == self.records.len());
         let batch_refs = self.records.iter().collect::<Vec<_>>();
         Ok(IngestGroupRows {
-            batch: RuntimeRecordBatch::concat(&batch_refs)?,
+            batch: Arc::new(RuntimeRecordBatch::concat(&batch_refs)?),
             record_metadata: self
                 .ingested_at
                 .into_iter()
@@ -1524,7 +1524,7 @@ impl IngestGroupRows {
                 self.record_metadata.len()
             )
         })?;
-        RuntimeRow::new(Arc::new(self.batch.clone()), row, metadata)
+        RuntimeRow::new(self.batch.clone(), row, metadata)
     }
 
     /// Keeps only the rows selected by `keep`, moving records, metadata and acks
@@ -1533,7 +1533,7 @@ impl IngestGroupRows {
         let selected = |row: usize| keep.get(row).copied().unwrap_or(false);
         let predicate = BooleanArray::from_iter((0..self.len()).map(|row| Some(selected(row))));
         Ok(Self {
-            batch: self.batch.filter(&predicate)?,
+            batch: Arc::new(self.batch.filter(&predicate)?),
             record_metadata: self
                 .record_metadata
                 .into_iter()
@@ -1703,7 +1703,7 @@ impl BranchedEntrypointBatch {
                 Vec::new(),
             ));
         }
-        let mut batches = Vec::<RuntimeRecordBatch>::new();
+        let mut batches = Vec::<Arc<RuntimeRecordBatch>>::new();
         let mut metadata = Vec::<RuntimeRecordMetadata>::new();
         let mut keys = Vec::<Option<BranchKey>>::new();
         let mut acks = Vec::<AckSet>::new();
@@ -1716,7 +1716,7 @@ impl BranchedEntrypointBatch {
             keys.extend(batch_keys);
             acks.extend(batch_acks);
         }
-        let batch_refs = batches.iter().collect::<Vec<_>>();
+        let batch_refs = batches.iter().map(Arc::as_ref).collect::<Vec<_>>();
         let batch = RuntimeRecordBatch::concat(&batch_refs).map_err(|error| {
             (
                 format!("failed to concatenate branch input batches: {error}"),
@@ -5222,12 +5222,13 @@ impl RelayProcessorNode {
 
                     let mut correlations =
                         Vec::<(CorrelatorPendingMessage, CorrelatorPendingMessage)>::new();
+                    let materialized_state = Arc::new(materialized_values);
                     for message in messages {
                         tokio::task::consume_budget().await;
                         let incoming = CorrelatorPendingMessage {
                             received_at: execution_now,
                             message,
-                            materialized_state: materialized_values.clone(),
+                            materialized_state: materialized_state.clone(),
                         };
                         match correlate_incoming_message(
                             &self.processor,
@@ -5431,87 +5432,109 @@ impl RelayProcessorNode {
                     }
 
                     let output_count = output_routes.routes.len();
-                    let mut messages_by_output = (0..output_count)
-                        .map(|_| Vec::<RelayMessage>::new())
-                        .collect::<Vec<_>>();
-                    for (left, right) in correlations {
-                        tokio::task::consume_budget().await;
-                        let key = left.message.key.clone();
-                        let combined =
-                            match correlator_input_row(&left.message.record, &right.message.record)
-                            {
-                                Ok(combined) => combined,
-                                Err(error) => {
-                                    branch.runtime.handle_internal_processor_error_for_acks(
-                                        &branch.domain,
-                                        self.kind.as_str(),
-                                        &self.processor,
-                                        &self.error_policies,
-                                        [&left.message.acks, &right.message.acks],
-                                        format!(
-                                            "correlator '{}' failed to build paired Arrow input: \
-                                             {error}",
-                                            self.processor.as_str()
-                                        ),
-                                    );
-                                    continue;
-                                }
-                            };
-                        let mut materialized_state = left.materialized_state.clone();
-                        materialized_state.extend(right.materialized_state.clone());
-                        let mut pair_acks = Some(AckSet::merged([
-                            left.message.acks.attached(),
-                            right.message.acks.attached(),
-                        ]));
-                        for output_index in 0..output_count {
-                            tokio::task::consume_budget().await;
-                            let route_acks = if output_index + 1 == output_count {
-                                pair_acks
-                                    .take()
-                                    .expect("last correlator output must own the pair ACKs")
-                            } else {
-                                pair_acks
-                                    .as_ref()
-                                    .expect("correlator pair ACKs must remain available")
-                                    .attached()
-                            };
-                            let Some(output_program) =
-                                compiled_output_programs[output_index].as_deref()
-                            else {
-                                route_acks.no_ack(format!(
-                                    "correlator '{}' output program is unavailable",
-                                    self.processor.as_str()
-                                ));
-                                continue;
-                            };
-                            match evaluate_correlator_output_message(
+                    let Some(output_programs) = compiled_output_programs
+                        .iter()
+                        .map(|program| program.as_deref())
+                        .collect::<Option<Vec<_>>>()
+                    else {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind.as_str(),
+                            &self.processor,
+                            &self.error_policies,
+                            correlations.iter().flat_map(|(left, right)| {
+                                [&left.message.acks, &right.message.acks]
+                            }),
+                            format!(
+                                "correlator '{}' output program is unavailable",
+                                self.processor.as_str()
+                            ),
+                        );
+                        return;
+                    };
+                    let matched = match CorrelatorMatchedBatch::from_correlations(
+                        &correlations,
+                        &output_programs,
+                    ) {
+                        Ok(matched) => matched,
+                        Err(error) => {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
                                 &self.processor,
-                                output_program,
-                                key.clone(),
-                                combined.clone(),
-                                &materialized_state,
-                                route_acks,
-                                execution_now,
-                            )
-                            .await
-                            {
-                                Ok(Some(message)) => {
-                                    messages_by_output[output_index].push(message);
-                                }
+                                &self.error_policies,
+                                correlations.iter().flat_map(|(left, right)| {
+                                    [&left.message.acks, &right.message.acks]
+                                }),
+                                format!(
+                                    "correlator '{}' failed to build matched Arrow batches: \
+                                     {error}",
+                                    self.processor.as_str()
+                                ),
+                            );
+                            return;
+                        }
+                    };
+                    let mut pair_acks = correlations
+                        .iter()
+                        .map(|(left, right)| {
+                            AckSet::merged([
+                                left.message.acks.attached(),
+                                right.message.acks.attached(),
+                            ])
+                        })
+                        .collect::<Vec<_>>();
+                    for (output_index, output_program) in output_programs.into_iter().enumerate() {
+                        tokio::task::consume_budget().await;
+                        let route_acks = if output_index + 1 == output_count {
+                            std::mem::take(&mut pair_acks)
+                        } else {
+                            pair_acks.iter().map(AckSet::attached).collect()
+                        };
+                        let outcomes = match evaluate_correlator_output_batch(
+                            &self.processor,
+                            output_program,
+                            &matched,
+                            route_acks,
+                            execution_now,
+                        )
+                        .await
+                        {
+                            Ok(outcomes) => outcomes,
+                            Err((error, acks)) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    acks.iter(),
+                                    format!(
+                                        "correlator '{}' failed to evaluate batched output: \
+                                         {error}",
+                                        self.processor.as_str()
+                                    ),
+                                );
+                                continue;
+                            }
+                        };
+                        let policy = output_routes.routes[output_index]
+                            .message_error_policy
+                            .clone();
+                        let output_relay = output_routes.routes[output_index].relay.clone();
+                        let mut messages = Vec::new();
+                        for outcome in outcomes {
+                            tokio::task::consume_budget().await;
+                            match outcome {
+                                Ok(Some(message)) => messages.push(message),
                                 Ok(None) => {}
                                 Err(error) => {
-                                    let policy = output_routes.routes[output_index]
-                                        .message_error_policy
-                                        .clone();
                                     branch
                                         .runtime
                                         .handle_structured_message_error(MessageErrorHandling {
                                             domain: &branch.domain,
                                             node_kind: self.kind.as_str(),
                                             node: &self.processor,
-                                            source_route: Some(
-                                                &output_routes.routes[output_index].relay,
-                                            ),
+                                            source_route: Some(&output_relay),
                                             policy: &policy,
                                             message: error.message,
                                             error: error.error,
@@ -5523,9 +5546,6 @@ impl RelayProcessorNode {
                                 }
                             }
                         }
-                    }
-                    for (output_index, messages) in messages_by_output.into_iter().enumerate() {
-                        tokio::task::consume_budget().await;
                         enqueue_correlator_output(
                             CorrelatorOutputContext {
                                 graph,
@@ -11248,6 +11268,155 @@ enum CorrelatorSide {
 
 #[cfg(test)]
 static CORRELATOR_WHERE_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static CORRELATOR_OUTPUT_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone)]
+struct CorrelatorMaterializedState {
+    left: Arc<HashMap<String, RuntimeValue>>,
+    right: Arc<HashMap<String, RuntimeValue>>,
+}
+
+impl CorrelatorMaterializedState {
+    fn value(&self, name: &str) -> Option<&RuntimeValue> {
+        self.right.get(name).or_else(|| self.left.get(name))
+    }
+
+    fn snapshot(&self) -> HashMap<String, RuntimeValue> {
+        if Arc::ptr_eq(&self.left, &self.right) {
+            return self.right.as_ref().clone();
+        }
+        let mut snapshot = self.left.as_ref().clone();
+        snapshot.extend(
+            self.right
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        snapshot
+    }
+}
+
+struct CorrelatorMatchedBatch {
+    carrier: Arc<RuntimeRecordBatch>,
+    keys: Vec<Option<BranchKey>>,
+    metadata: Vec<RuntimeRecordMetadata>,
+    materialized_state: Vec<CorrelatorMaterializedState>,
+}
+
+impl CorrelatorMatchedBatch {
+    fn from_correlations(
+        correlations: &[(CorrelatorPendingMessage, CorrelatorPendingMessage)],
+        programs: &[&CompiledCorrelatorOutputProgram],
+    ) -> Result<Self, String> {
+        if correlations.is_empty() {
+            return Err("cannot batch zero correlator matches".to_string());
+        }
+        if correlations
+            .iter()
+            .any(|(left, right)| left.message.key != right.message.key)
+        {
+            return Err("correlator match cannot combine different branch keys".to_string());
+        }
+        let left_rows = correlations
+            .iter()
+            .map(|(left, _)| &left.message.record)
+            .collect::<Vec<_>>();
+        let right_rows = correlations
+            .iter()
+            .map(|(_, right)| &right.message.record)
+            .collect::<Vec<_>>();
+        let left = RuntimeRecordBatch::from_rows(&left_rows)?;
+        let right = RuntimeRecordBatch::from_rows(&right_rows)?;
+        let materialized_state = correlations
+            .iter()
+            .map(|(left, right)| CorrelatorMaterializedState {
+                left: left.materialized_state.clone(),
+                right: right.materialized_state.clone(),
+            })
+            .collect::<Vec<_>>();
+        let materialized_fields = Self::materialized_fields(programs)?;
+        let carrier = Arc::new(correlator_input_batch(
+            &left,
+            &right,
+            &materialized_fields,
+            &materialized_state,
+        )?);
+        Ok(Self {
+            carrier,
+            keys: correlations
+                .iter()
+                .map(|(left, _)| left.message.key.clone())
+                .collect(),
+            metadata: correlations
+                .iter()
+                .map(|(left, right)| {
+                    correlator_output_metadata(
+                        left.message.record.metadata(),
+                        right.message.record.metadata(),
+                    )
+                })
+                .collect(),
+            materialized_state,
+        })
+    }
+
+    fn materialized_fields(
+        programs: &[&CompiledCorrelatorOutputProgram],
+    ) -> Result<Vec<StdArc<arrow_schema::Field>>, String> {
+        let mut fields = BTreeMap::<String, StdArc<arrow_schema::Field>>::new();
+        for program in programs {
+            let schemas = std::iter::once(&program.program.compiled.input_schema).chain(
+                program
+                    .program
+                    .lookup_hash_maps
+                    .iter()
+                    .map(|call| &call.key_program.input_schema),
+            );
+            for schema in schemas {
+                for field in schema
+                    .fields()
+                    .iter()
+                    .filter(|field| field.name().starts_with("relay_state."))
+                {
+                    if let Some(existing) = fields.get(field.name())
+                        && existing.as_ref() != field.as_ref()
+                    {
+                        return Err(format!(
+                            "correlator materialized input '{}' has conflicting Arrow fields",
+                            field.name()
+                        ));
+                    }
+                    fields.insert(field.name().clone(), field.clone());
+                }
+            }
+        }
+        Ok(fields.into_values().collect())
+    }
+
+    fn row_count(&self) -> usize {
+        self.carrier.batch().num_rows()
+    }
+
+    fn source_message(&self, row: usize, acks: AckSet) -> Result<RelayMessage, String> {
+        let metadata = self.metadata.get(row).cloned().ok_or_else(|| {
+            format!(
+                "correlator output row {row} is outside {} metadata rows",
+                self.metadata.len()
+            )
+        })?;
+        let key = self.keys.get(row).cloned().ok_or_else(|| {
+            format!(
+                "correlator output row {row} is outside {} branch keys",
+                self.keys.len()
+            )
+        })?;
+        Ok(RelayMessage {
+            key,
+            record: RuntimeRow::new(self.carrier.clone(), row, metadata)?,
+            acks,
+        })
+    }
+}
 
 fn take_correlator_opposite_pending(
     state: &mut CorrelatorBranchState,
@@ -11471,37 +11640,58 @@ async fn evaluate_correlator_where_matches(
     Ok(matching)
 }
 
-fn correlator_input_row(left: &RuntimeRow, right: &RuntimeRow) -> Result<RuntimeRow, String> {
+fn correlator_input_batch(
+    left: &RuntimeRecordBatch,
+    right: &RuntimeRecordBatch,
+    materialized_fields: &[StdArc<arrow_schema::Field>],
+    materialized_state: &[CorrelatorMaterializedState],
+) -> Result<RuntimeRecordBatch, String> {
+    let row_count = left.batch().num_rows();
+    if right.batch().num_rows() != row_count || materialized_state.len() != row_count {
+        return Err(format!(
+            "correlator input has {row_count} left rows, {} right rows, and {} materialized-state \
+             rows",
+            right.batch().num_rows(),
+            materialized_state.len()
+        ));
+    }
     let mut fields = Vec::with_capacity(
-        left.batch().schema().fields().len() + right.batch().schema().fields().len(),
+        left.schema().fields().len() + right.schema().fields().len() + materialized_fields.len(),
     );
     let mut columns = Vec::with_capacity(fields.capacity());
-    for (namespace, row) in [("left", left), ("right", right)] {
-        for (index, field) in row.batch().schema().fields().iter().enumerate() {
+    for (namespace, batch) in [("left", left), ("right", right)] {
+        for (index, field) in batch.schema().fields().iter().enumerate() {
             fields.push(StdArc::new(arrow_schema::Field::new(
                 format!("{namespace}.{}", field.name()),
                 field.data_type().clone(),
                 field.is_nullable(),
             )));
-            columns.push(row.batch().batch().column(index).slice(row.index(), 1));
+            columns.push(batch.batch().column(index).clone());
         }
+    }
+    for field in materialized_fields {
+        let column = runtime_values_input_column(
+            materialized_state
+                .iter()
+                .map(|state| state.value(field.name())),
+            row_count,
+            field,
+        )?;
+        fields.push(field.clone());
+        columns.push(column.to_array_ref());
     }
     let schema = StdArc::new(arrow_schema::Schema::new(fields));
     let batch = if columns.is_empty() {
         RecordBatch::try_new_with_options(
             schema.clone(),
             columns,
-            &arrow_array::RecordBatchOptions::new().with_row_count(Some(1)),
+            &arrow_array::RecordBatchOptions::new().with_row_count(Some(row_count)),
         )
     } else {
         RecordBatch::try_new(schema.clone(), columns)
     }
     .map_err(|error| error.to_string())?;
-    RuntimeRow::new(
-        Arc::new(RuntimeRecordBatch::from_record_batch(schema, batch)?),
-        0,
-        correlator_output_metadata(left.metadata(), right.metadata()),
-    )
+    RuntimeRecordBatch::from_record_batch(schema, batch)
 }
 
 fn correlator_output_metadata(
@@ -11516,52 +11706,90 @@ fn correlator_output_metadata(
     )
 }
 
-async fn evaluate_correlator_output_message(
+type CorrelatorOutputOutcome = Result<Option<RelayMessage>, Box<PlannedMessageError>>;
+
+fn correlator_output_batch_errors(
+    processor: &Identifier,
+    matched: &CorrelatorMatchedBatch,
+    acks: Vec<AckSet>,
+    code: MessageErrorCode,
+    reason: &str,
+    operation: MessageErrorOperation,
+) -> Vec<CorrelatorOutputOutcome> {
+    acks.into_iter()
+        .enumerate()
+        .map(|(row, acks)| {
+            let source = matched
+                .source_message(row, acks)
+                .expect("validated correlator batch rows must remain aligned");
+            Err(Box::new(planned_structured_message_error(
+                source,
+                structured_message_error(
+                    code,
+                    format!("correlator '{}' {reason}", processor.as_str()),
+                    operation,
+                    None,
+                    std::iter::empty(),
+                ),
+                None,
+                matched.materialized_state[row].snapshot(),
+            )))
+        })
+        .collect()
+}
+
+async fn evaluate_correlator_output_batch(
     processor: &Identifier,
     program: &CompiledCorrelatorOutputProgram,
-    key: Option<BranchKey>,
-    combined: RuntimeRow,
-    materialized_state: &HashMap<String, RuntimeValue>,
-    acks: AckSet,
+    matched: &CorrelatorMatchedBatch,
+    acks: Vec<AckSet>,
     execution_now: Timestamp,
-) -> Result<Option<RelayMessage>, Box<PlannedMessageError>> {
-    let source_message = RelayMessage {
-        key: key.clone(),
-        record: combined.clone(),
-        acks,
-    };
-    let keys = vec![key];
-    let lookup_columns = compute_lookup_hash_map_columns(
+) -> Result<Vec<CorrelatorOutputOutcome>, (String, Vec<AckSet>)> {
+    let row_count = matched.row_count();
+    if matched.keys.len() != row_count
+        || matched.metadata.len() != row_count
+        || matched.materialized_state.len() != row_count
+        || acks.len() != row_count
+    {
+        return Err((
+            format!(
+                "correlator output has {row_count} Arrow rows, {} branch keys, {} metadata rows, \
+                 {} materialized-state rows, and {} ACK sets",
+                matched.keys.len(),
+                matched.metadata.len(),
+                matched.materialized_state.len(),
+                acks.len()
+            ),
+            acks,
+        ));
+    }
+    let side_inputs = HashMap::default();
+    let lookup_columns = match compute_lookup_hash_map_columns(
         &program.program,
         &FilterMapBatchInputs {
-            carrier: combined.batch(),
+            carrier: &matched.carrier,
             namespace_batches: &[],
-            keys: &keys,
-            side_inputs: materialized_state,
+            keys: &matched.keys,
+            side_inputs: &side_inputs,
             ingest_metadata: None,
         },
         execution_now,
         None,
     )
     .await
-    .map_err(|error| {
-        Box::new(planned_structured_message_error(
-            source_message.clone(),
-            structured_message_error(
+    {
+        Ok(columns) => columns,
+        Err(error) => {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
                 MessageErrorCode::Evaluation,
-                format!(
-                    "correlator '{}' failed to prepare TO output lookup inputs: {}",
-                    processor.as_str(),
-                    error
-                ),
+                &format!("failed to prepare TO output lookup inputs: {error}"),
                 MessageErrorOperation::Set,
-                None,
-                std::iter::empty(),
-            ),
-            None,
-            materialized_state.clone(),
-        ))
-    })?;
+            ));
+        }
+    };
     let uninitialized = VmUninitializedInput {
         fields: program
             .program
@@ -11573,39 +11801,35 @@ async fn evaluate_correlator_output_message(
             .map(|field| field.name().clone())
             .collect(),
     };
-    let input = project_vm_input_batch(
+    let input = match project_vm_input_batch(
         &program.program.compiled.input_schema,
         &VmInputProjectionSources {
-            carrier: combined.batch(),
+            carrier: &matched.carrier,
             namespace_batches: &[],
             strict_namespaces: &["left", "right"],
-            keys: &keys,
-            side_inputs: materialized_state,
+            keys: &matched.keys,
+            side_inputs: &side_inputs,
             ingest_metadata: None,
             lookup_columns: &lookup_columns,
             uninitialized: Some(&uninitialized),
         },
         None,
-    )
-    .map_err(|error| {
-        Box::new(planned_structured_message_error(
-            source_message.clone(),
-            structured_message_error(
+    ) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
                 MessageErrorCode::Internal,
-                format!(
-                    "correlator '{}' failed to build TO output input batch: {}",
-                    processor.as_str(),
-                    error
-                ),
+                &format!("failed to build TO output input batch: {error}"),
                 MessageErrorOperation::Set,
-                None,
-                std::iter::empty(),
-            ),
-            None,
-            materialized_state.clone(),
-        ))
-    })?;
-    let result = execute_program_with_selection_in_context(
+            ));
+        }
+    };
+    #[cfg(test)]
+    CORRELATOR_OUTPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    let result = match execute_program_with_selection_in_context(
         &program.program.compiled,
         &input,
         &VmExecutionContext {
@@ -11614,110 +11838,178 @@ async fn evaluate_correlator_output_message(
         },
     )
     .await
-    .map_err(|error| {
-        Box::new(planned_structured_message_error(
-            source_message.clone(),
-            structured_message_error(
+    {
+        Ok(result) => result,
+        Err(error) => {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
                 MessageErrorCode::Internal,
-                format!(
-                    "correlator '{}' failed to evaluate TO output: {}",
-                    processor.as_str(),
-                    error
-                ),
+                &format!("failed to evaluate TO output: {error}"),
                 MessageErrorOperation::Set,
-                None,
-                std::iter::empty(),
+            ));
+        }
+    };
+    if result.selected_rows.len() != result.batch.row_count() {
+        return Ok(correlator_output_batch_errors(
+            processor,
+            matched,
+            acks,
+            MessageErrorCode::Internal,
+            &format!(
+                "TO output produced {} rows for {} selected correlations",
+                result.batch.row_count(),
+                result.selected_rows.len()
             ),
-            None,
-            materialized_state.clone(),
-        ))
-    })?;
-    if result.selected_rows.is_empty() {
-        source_message.acks.ack_success();
-        return Ok(None);
+            MessageErrorOperation::Finalize,
+        ));
     }
-    if result.selected_rows.len() != 1 || result.batch.row_count() != 1 {
-        return Err(Box::new(planned_structured_message_error(
-            source_message,
-            structured_message_error(
+    let mut seen = vec![false; row_count];
+    for input_row in &result.selected_rows {
+        let Some(selected) = seen.get_mut(*input_row) else {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
                 MessageErrorCode::Internal,
-                format!(
-                    "correlator '{}' TO output produced {} rows for one correlation",
-                    processor.as_str(),
-                    result.batch.row_count()
-                ),
+                &format!("TO output selected row {input_row} outside its {row_count} correlations"),
                 MessageErrorOperation::Finalize,
-                None,
-                std::iter::empty(),
-            ),
-            None,
-            HashMap::default(),
-        )));
+            ));
+        };
+        if *selected {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
+                MessageErrorCode::Internal,
+                &format!("TO output selected correlation row {input_row} more than once"),
+                MessageErrorOperation::Finalize,
+            ));
+        }
+        *selected = true;
     }
-    if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-        let partial_output = vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok();
-        let materialized_state = materialized_state.clone();
-        return Err(Box::new(planned_structured_message_error(
-            source_message,
-            program.program.structured_side_error(
-                format!(
-                    "correlator '{}' TO output side error {}: {} at {}",
-                    processor.as_str(),
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
+
+    let mut pending_acks = acks.into_iter().map(Some).collect::<Vec<_>>();
+    let mut outcomes = (0..row_count).map(|_| None).collect::<Vec<_>>();
+    let mut successful = Vec::<(usize, usize, RelayMessage)>::new();
+    for (output_row, input_row) in result.selected_rows.iter().copied().enumerate() {
+        let acks = pending_acks[input_row]
+            .take()
+            .expect("validated correlator selection must consume each ACK once");
+        let source = matched
+            .source_message(input_row, acks)
+            .expect("validated correlator rows must remain aligned");
+        if let Some(side_error) = result.batch.errors().row(output_row).first() {
+            outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
+                source,
+                program.program.structured_side_error(
+                    format!(
+                        "correlator '{}' TO output side error {}: {} at {}",
+                        processor.as_str(),
+                        side_error.code.as_str(),
+                        side_error.message,
+                        side_error.span
+                    ),
+                    side_error.span,
+                    MessageErrorOperation::Set,
                 ),
-                side_error.span,
-                MessageErrorOperation::Set,
-            ),
-            partial_output,
-            materialized_state,
-        )));
-    }
-    let RelayMessage { key, acks, .. } = source_message;
-    let output =
-        vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0]).map_err(|error| {
-            Box::new(planned_structured_message_error(
-                RelayMessage {
-                    key: key.clone(),
-                    record: combined.clone(),
-                    acks: acks.clone(),
-                },
+                vm_partial_output_row_to_runtime_batch(&result.batch, output_row).ok(),
+                matched.materialized_state[input_row].snapshot(),
+            ))));
+            continue;
+        }
+        let invalid_fields = invalid_output_fields(&result.batch, output_row);
+        if !invalid_fields.is_empty() {
+            outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
+                source,
                 structured_message_error(
                     MessageErrorCode::Validation,
                     format!(
-                        "correlator '{}' failed to finalize TO output row: {}",
-                        processor.as_str(),
-                        error
+                        "correlator '{}' failed to finalize TO output row",
+                        processor.as_str()
                     ),
                     MessageErrorOperation::Finalize,
                     None,
-                    invalid_output_fields(&result.batch, 0),
+                    invalid_fields,
                 ),
-                vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok(),
-                materialized_state.clone(),
-            ))
-        })?;
-    let record =
-        RuntimeRow::new(Arc::new(output), 0, combined.metadata().clone()).map_err(|error| {
-            Box::new(planned_structured_message_error(
-                RelayMessage {
-                    key: key.clone(),
-                    record: combined,
-                    acks: acks.clone(),
-                },
-                structured_message_error(
-                    MessageErrorCode::Internal,
-                    error,
-                    MessageErrorOperation::Finalize,
-                    None,
-                    std::iter::empty(),
-                ),
-                None,
-                materialized_state.clone(),
-            ))
-        })?;
-    Ok(Some(RelayMessage { key, record, acks }))
+                vm_partial_output_row_to_runtime_batch(&result.batch, output_row).ok(),
+                matched.materialized_state[input_row].snapshot(),
+            ))));
+            continue;
+        }
+        successful.push((output_row, input_row, source));
+    }
+    for (input_row, acks) in pending_acks.into_iter().enumerate() {
+        if let Some(acks) = acks {
+            acks.ack_success();
+            outcomes[input_row] = Some(Ok(None));
+        }
+    }
+
+    if !successful.is_empty() {
+        let output_rows = successful
+            .iter()
+            .map(|(output_row, _, _)| *output_row)
+            .collect::<Vec<_>>();
+        match vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &output_rows) {
+            Ok(output) => {
+                let output = Arc::new(output);
+                for (output_row, (_, input_row, source)) in successful.into_iter().enumerate() {
+                    match RuntimeRow::new(
+                        output.clone(),
+                        output_row,
+                        matched.metadata[input_row].clone(),
+                    ) {
+                        Ok(record) => {
+                            let RelayMessage { key, acks, .. } = source;
+                            outcomes[input_row] =
+                                Some(Ok(Some(RelayMessage { key, record, acks })));
+                        }
+                        Err(error) => {
+                            outcomes[input_row] =
+                                Some(Err(Box::new(planned_structured_message_error(
+                                    source,
+                                    structured_message_error(
+                                        MessageErrorCode::Internal,
+                                        error,
+                                        MessageErrorOperation::Finalize,
+                                        None,
+                                        std::iter::empty(),
+                                    ),
+                                    None,
+                                    matched.materialized_state[input_row].snapshot(),
+                                ))));
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                for (output_row, input_row, source) in successful {
+                    outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
+                        source,
+                        structured_message_error(
+                            MessageErrorCode::Validation,
+                            format!(
+                                "correlator '{}' failed to finalize TO output row: {error}",
+                                processor.as_str()
+                            ),
+                            MessageErrorOperation::Finalize,
+                            None,
+                            invalid_output_fields(&result.batch, output_row),
+                        ),
+                        vm_partial_output_row_to_runtime_batch(&result.batch, output_row).ok(),
+                        matched.materialized_state[input_row].snapshot(),
+                    ))));
+                }
+            }
+        }
+    }
+
+    Ok(outcomes
+        .into_iter()
+        .map(|outcome| outcome.expect("every correlator input row must produce an outcome"))
+        .collect())
 }
 
 struct CorrelatorOutputContext<'a> {

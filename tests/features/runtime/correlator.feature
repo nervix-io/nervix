@@ -1,5 +1,5 @@
 Feature: Relay correlation
-  Scenario Outline: Correlator matches records inside one branch using the selected pending record
+  Scenario Outline: Correlator matches records inside one branch across independent output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -131,6 +131,7 @@ Feature: Relay correlation
         TO correlation_audits
         SET tenant = right.tenant,
           audit_name = concat(upper(left.first_name), ' ', upper(right.surname))
+        WHERE right.surname != 'private'
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION correlated_profiles_subscription TO correlated_profiles WHERE tenant = 'acme';
@@ -174,6 +175,19 @@ Feature: Relay correlation
       "left_marker":3 | "normalized_name":"jane" | "surname":"DOE"
       "audit_name":"JANE DOE"
       """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
+      """
+      {"tenant":"acme","first_name":"Eve","marker":4}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right"
+      """
+      {"tenant":"acme","first_name":"eve","surname":"private"}
+      """
+    Then within "5s" the relay subscription receives payloads containing all fragments
+      """
+      "left_marker":4 | "normalized_name":"eve" | "surname":"PRIVATE"
+      """
+    And the relay subscription does not receive a payload within "500ms"
 
     Examples:
       | cluster_size | replica_count | match_policy | expected_left_marker |

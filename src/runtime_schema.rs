@@ -1043,6 +1043,19 @@ impl RuntimeRecordBatch {
             .collect::<Vec<_>>();
         Self::concat(&batches.iter().collect::<Vec<_>>())
     }
+
+    pub(crate) fn shared_from_rows(rows: &[&RuntimeRow]) -> Result<Arc<Self>, String> {
+        if let Some(first) = rows.first()
+            && rows.len() == first.batch.batch().num_rows()
+            && rows
+                .iter()
+                .enumerate()
+                .all(|(index, row)| Arc::ptr_eq(&first.batch, &row.batch) && row.row == index)
+        {
+            return Ok(first.batch.clone());
+        }
+        Self::from_rows(rows).map(Arc::new)
+    }
 }
 
 impl RuntimeRow {
@@ -1064,12 +1077,9 @@ impl RuntimeRow {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn batch(&self) -> &Arc<RuntimeRecordBatch> {
         &self.batch
-    }
-
-    pub(crate) fn index(&self) -> usize {
-        self.row
     }
 
     pub(crate) fn metadata(&self) -> &RuntimeRecordMetadata {
