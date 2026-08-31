@@ -21,6 +21,7 @@ module.exports = {
         "drop",
         "obs",
         "agent",
+        "bench",
       ],
     ],
   },

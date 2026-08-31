@@ -6449,6 +6449,7 @@ dependencies = [
  "rdkafka",
  "reqwest 0.13.4",
  "serde",
+ "serde_json",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.20",
