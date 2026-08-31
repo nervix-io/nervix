@@ -689,3 +689,67 @@ Feature: Inferencer resources
       | cluster_size | replica_count | tensor_type       | input_field_type | output_field_type |
       | 1            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
       | 3            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
+
+  Scenario Outline: Inferencer routes read defaulted materialized state
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      CREATE SCHEMA features ( vector <input_field_type> );
+      CREATE SCHEMA scored ( score <output_field_type>, theme STRING, hint STRING OPTIONAL );
+      CREATE SCHEMA preference ( theme STRING, hint STRING OPTIONAL );
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( vector array );
+      CREATE CODEC features_codec FROM WIRE JSON SCHEMA features_wire TO SCHEMA features;
+      CREATE RELAY default_preferences SCHEMA preference UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY features SCHEMA features UNBRANCHED;
+      CREATE RELAY scored SCHEMA scored UNBRANCHED;
+      CREATE VHOST edge infer-default-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
+      CREATE INGESTOR feature_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        TO features
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INFERENCER score_defaults FROM features
+        USING RESOURCE inference VERSION 1
+        FILE 'models/simple_score.onnx'
+        INPUTS { "features" <tensor_type>[2] = input.vector }
+        OUTPUT SCHEMA { "score" <tensor_type>[1] }
+        UNBRANCHED
+        USING MATERIALIZED STATE default_preferences DEFAULT { theme = "system", hint = "unset" }
+        TO scored
+        SET score = score,
+            theme = relay_state.default_preferences.theme,
+            hint = relay_state.default_preferences.hint
+        FLUSH EACH 500ms MAX BATCH SIZE 16mb
+        ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION scored_subscription TO scored;
+      START;
+      """
+    And http payload is posted to host "infer-default-{{test_id}}.example.com" path "/features"
+      """
+      {"vector":[1.0,0.0]}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"hint":"unset","score":[0.875],"theme":"system"}
+      """
+
+    Examples:
+      | cluster_size | replica_count | tensor_type       | input_field_type | output_field_type |
+      | 1            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 1>     |
+      | 3            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 1>     |

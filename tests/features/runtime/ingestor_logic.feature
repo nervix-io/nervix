@@ -36,7 +36,8 @@ Feature: Ingestor filter-map logic
     When the ingestor logic fixture "<transport_fixture>" starts with output schema "header_routed" and program
       """
       INHERIT ALL EXCEPT raw
-      SET amount = message.amount + 1, normalized = first(read_headers(lower("ROUTE")))
+      SET amount = message.amount + count(read_headers(lower("ROUTE"))),
+          normalized = first(read_headers(lower("ROUTE")))
       WHERE read_header(lower("TENANT")) = message.tenant AND count(read_headers("missing")) = 0
       """
     And the ingestor logic transport "<transport_fixture>" delivers payload fixture "header_message" with headers

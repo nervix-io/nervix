@@ -214,8 +214,8 @@ async function settle(page) {
   let previous = null;
   for (;;) {
     const signature = await page.evaluate(() => {
-      const chart = document.querySelector("#execution-graph-chart");
-      const renders = chart ? chart.getAttribute("data-render-count") : "none";
+      const layer = document.querySelector(".graph-zoom-layer");
+      const renders = layer ? layer.getAttribute("data-render-count") : "none";
       const items = Array.from(document.querySelectorAll(".graph-hit-layer > *")).map((item) => {
         const box = item.getBoundingClientRect();
         return `${item.getAttribute("data-label") ?? ""}@${Math.round(box.x)},${Math.round(box.y)}`;

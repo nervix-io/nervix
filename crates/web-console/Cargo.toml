@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 base64 = { workspace = true }
-charming = { workspace = true, features = ["wasm"] }
 console_error_panic_hook = { workspace = true }
 futures-channel = { workspace = true }
 futures-util = { workspace = true }

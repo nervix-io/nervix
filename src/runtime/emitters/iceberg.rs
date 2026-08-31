@@ -213,7 +213,7 @@ struct IcebergCommitPolicy {
 }
 
 struct IcebergPendingBatch {
-    batch: RuntimeRecordBatch,
+    batch: Arc<RuntimeRecordBatch>,
     metadata: Vec<RuntimeRecordMetadata>,
     keys: Vec<Option<BranchKey>>,
     acks: Vec<AckSet>,
@@ -747,7 +747,7 @@ impl IcebergEmitter {
         let pending_batches = self
             .pending_batches
             .iter()
-            .map(|batch| &batch.batch)
+            .map(|batch| batch.batch.as_ref())
             .collect::<Vec<_>>();
         let input_batch = RuntimeRecordBatch::concat(&pending_batches).map_err(|error| {
             Report::new(IcebergEmitterError::FlushToDisk).attach_printable(error)
@@ -1000,6 +1000,7 @@ impl IcebergEmitter {
                 lookup_columns: &lookup_columns,
                 uninitialized: None,
             },
+            None,
         )
         .map_err(|error| Report::new(IcebergEmitterError::MapBatch).attach_printable(error))?;
         let result = execute_program_with_selection_in_context(
@@ -1020,7 +1021,7 @@ impl IcebergEmitter {
                 .selected_rows
                 .iter()
                 .enumerate()
-                .any(|(output_row, input_row)| output_row != *input_row)
+                .any(|(output_row, input_row)| output_row != input_row)
         {
             return Err(
                 Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
@@ -1809,7 +1810,7 @@ mod tests {
         let (pending_acks, pending_completion) = AckSet::root();
         let (staged_acks, staged_completion) = AckSet::root();
         let pending = IcebergPendingBatch {
-            batch,
+            batch: Arc::new(batch),
             metadata: vec![RuntimeRecordMetadata::test()],
             keys: vec![None],
             acks: vec![pending_acks],

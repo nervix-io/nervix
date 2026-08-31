@@ -11,7 +11,8 @@ use std::{
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array,
+    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, ListArray, RecordBatch,
+    RecordBatchOptions, StringArray, UInt64Array,
     builder::{
         ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
         Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
@@ -39,13 +40,13 @@ use nervix_models::{
     CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
     CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPrometheus,
     CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor,
-    CreateRelay, CreateSignalingProtocol, CreateUdf, Domain, DomainConfig, DomainPace,
-    DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterPublishingMode,
-    EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy, IcebergCatalog,
-    IcebergStorageBackend, IcebergValueMapping, Identifier, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorMapping, IngestQuiesceMode, IngestQuiesceOverflow,
+    CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets,
+    CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
+    CreateUdf, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink,
+    EmitterAckWindow, EmitterPublishingMode, EndpointType, ErrorPolicies, FieldPath,
+    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
     IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
     MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping,
@@ -149,6 +150,7 @@ mod runtime_impl;
 mod schedule_delta;
 mod service_url;
 mod state_store;
+mod syslog;
 mod test_hooks;
 mod tls;
 mod wasm_state;
@@ -164,7 +166,8 @@ use branch_instance_registry::BranchInstanceRegistry;
 use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
 use client_config::{client_tls_paths, read_tls_file, render_client_config_template};
 use deduplicator::{
-    CompiledDeduplicatorKeyProgram, ReplicatedDeduplicatorState, compile_deduplicator_key_program,
+    CompiledDeduplicatorKeyProgram, DeduplicatorKey, ReplicatedDeduplicatorState,
+    compile_deduplicator_key_program,
 };
 use force_flush::{DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant};
 use http_client::HttpClientConfig;
@@ -188,15 +191,16 @@ use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
     BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputSpec,
     BranchedProcessorOutputsSpec, BranchedProcessorSpec, CompiledCorrelatorOutputProgram,
-    CompiledCorrelatorWhereProgram, CompiledReordererProgram, CompiledWindowAggregateExpr,
-    CompiledWindowAggregateProgram, CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan,
-    InferencerFlushContext, InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext,
-    PlannedGeneralError, PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
-    RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
-    RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
-    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage,
-    RuntimeInputCollector, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor,
-    WasmFlushContext, WindowBounds, WindowFlushContext,
+    CompiledCorrelatorWhereProgram, CompiledInferencerInputProgram, CompiledReordererProgram,
+    CompiledWindowAggregateExpr, CompiledWindowAggregateProgram, CorrelatorBranchState,
+    CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext, InferencerOutputBuffer,
+    IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
+    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
+    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
+    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
+    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, RuntimeInputCollector,
+    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
+    WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -408,19 +412,31 @@ struct IngestorQuiesceModes {
 #[derive(Debug, Clone)]
 pub(crate) struct BufferedIngestPayload {
     payloads: Vec<Vec<u8>>,
-    metadata: Vec<IngestFilterMapMetadata>,
+    metadata: IngestFilterMapMetadata,
 }
 
 impl BufferedIngestPayload {
     pub(crate) fn new(payload: &[u8], metadata: IngestFilterMapMetadata) -> Self {
+        assert_eq!(
+            metadata.len(),
+            1,
+            "a buffered single payload must carry one metadata row"
+        );
         Self {
             payloads: vec![payload.to_vec()],
-            metadata: vec![metadata],
+            metadata,
         }
     }
 
     pub(crate) fn batch(entries: Vec<(Vec<u8>, IngestFilterMapMetadata)>) -> Self {
-        let (payloads, metadata) = entries.into_iter().unzip();
+        let (payloads, metadata): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        let metadata = IngestFilterMapMetadata::concat(&metadata)
+            .expect("one buffered source batch must use one ingest metadata schema");
+        assert_eq!(
+            payloads.len(),
+            metadata.len(),
+            "buffered payloads and ingest metadata must have the same row count"
+        );
         Self { payloads, metadata }
     }
 
@@ -431,16 +447,11 @@ impl BufferedIngestPayload {
     }
 
     pub(crate) fn metadata(&self) -> &IngestFilterMapMetadata {
-        self.metadata
-            .first()
-            .expect("buffered ingest payload must contain matching ingest metadata")
+        &self.metadata
     }
 
-    fn entries(&self) -> impl Iterator<Item = (&[u8], &IngestFilterMapMetadata)> {
-        self.payloads
-            .iter()
-            .zip(&self.metadata)
-            .map(|(payload, metadata)| (payload.as_slice(), metadata))
+    fn payloads(&self) -> impl Iterator<Item = &[u8]> {
+        self.payloads.iter().map(Vec::as_slice)
     }
 
     fn byte_len(&self) -> usize {
@@ -1375,8 +1386,8 @@ struct IngestGroupDispatch<'a> {
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     records: Vec<RuntimeRecordBatch>,
-    /// Row-aligned with `records`, or empty when the source carries no ingest metadata.
-    metadata: Vec<IngestFilterMapMetadata>,
+    /// One columnar metadata batch for `records`, or absent when the source exposes none.
+    metadata: Option<IngestFilterMapMetadata>,
     /// Row-aligned with `records`. An empty set is replaced by a tracked ack root.
     acks: Vec<AckSet>,
     ingested_at: Timestamp,
@@ -1392,7 +1403,7 @@ struct IngestGroupContribution<'a> {
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     records: Vec<RuntimeRecordBatch>,
-    metadata: Vec<IngestFilterMapMetadata>,
+    metadata: Option<IngestFilterMapMetadata>,
     acks: Vec<AckSet>,
     ingested_at: Timestamp,
 }
@@ -1410,24 +1421,47 @@ struct RawIngestDispatch<'a> {
     flush: bool,
 }
 
-/// Row-aligned ingest group state.
+/// Columnar ingest group state.
 ///
-/// Records, ingest metadata and acks are only ever selected or dropped together, which
-/// is what keeps a message error attributable to the record that produced it and keeps
-/// each record's ack identity its own once the group has been filtered.
+/// Record columns and the shared ingest-metadata view are selected together. ACKs remain
+/// row-indexed hot-path state so a message error and its ACK identity stay attributable
+/// to the record that produced them after filtering.
 struct IngestGroupRows {
-    batch: RuntimeRecordBatch,
+    batch: Arc<RuntimeRecordBatch>,
     record_metadata: Vec<RuntimeRecordMetadata>,
-    /// Empty when the source carries no ingest metadata, otherwise row-aligned.
-    ingest_metadata: Vec<IngestFilterMapMetadata>,
+    ingest_metadata: Option<IngestFilterMapMetadata>,
     acks: Vec<AckSet>,
+}
+
+#[derive(Default)]
+struct PendingIngestFilterMapMetadata {
+    batches: Vec<IngestFilterMapMetadata>,
+    row_count: usize,
+}
+
+impl PendingIngestFilterMapMetadata {
+    fn push(&mut self, metadata: IngestFilterMapMetadata) {
+        self.row_count += metadata.len();
+        self.batches.push(metadata);
+    }
+
+    fn finish(self) -> Result<IngestFilterMapMetadata, String> {
+        let metadata = IngestFilterMapMetadata::concat(&self.batches)?;
+        if metadata.len() != self.row_count {
+            return Err(format!(
+                "combined ingest metadata has {} rows, expected {}",
+                metadata.len(),
+                self.row_count
+            ));
+        }
+        Ok(metadata)
+    }
 }
 
 #[derive(Default)]
 struct PendingIngestGroup {
     records: Vec<RuntimeRecordBatch>,
-    /// Empty when the source carries no ingest metadata, otherwise row-aligned.
-    metadata: Vec<IngestFilterMapMetadata>,
+    metadata: Option<PendingIngestFilterMapMetadata>,
     acks: Vec<AckSet>,
     ingested_at: Vec<Timestamp>,
 }
@@ -1436,12 +1470,14 @@ impl PendingIngestGroup {
     fn append(
         &mut self,
         records: Vec<RuntimeRecordBatch>,
-        metadata: Vec<IngestFilterMapMetadata>,
+        metadata: Option<IngestFilterMapMetadata>,
         acks: Vec<AckSet>,
         ingested_at: Timestamp,
     ) -> Result<(), String> {
         let row_count = records.len();
-        if !metadata.is_empty() && metadata.len() != row_count {
+        if let Some(metadata) = metadata.as_ref()
+            && metadata.len() != row_count
+        {
             return Err(format!(
                 "received {} ingest metadata rows for {row_count} records",
                 metadata.len()
@@ -1453,7 +1489,7 @@ impl PendingIngestGroup {
                 acks.len()
             ));
         }
-        if !self.records.is_empty() && self.metadata.is_empty() != metadata.is_empty() {
+        if !self.records.is_empty() && self.metadata.is_some() != metadata.is_some() {
             return Err("cannot mix ingest rows with and without source metadata".to_string());
         }
         if records.iter().any(|record| record.batch().num_rows() != 1) {
@@ -1463,7 +1499,9 @@ impl PendingIngestGroup {
         }
 
         self.records.extend(records);
-        self.metadata.extend(metadata);
+        if let Some(metadata) = metadata {
+            self.metadata.get_or_insert_default().push(metadata);
+        }
         self.acks.extend(acks);
         self.ingested_at
             .extend(std::iter::repeat_n(ingested_at, row_count));
@@ -1481,10 +1519,9 @@ impl PendingIngestGroup {
     fn into_rows(self) -> Result<IngestGroupRows, String> {
         debug_assert_eq!(self.records.len(), self.ingested_at.len());
         debug_assert_eq!(self.records.len(), self.acks.len());
-        debug_assert!(self.metadata.is_empty() || self.metadata.len() == self.records.len());
         let batch_refs = self.records.iter().collect::<Vec<_>>();
         Ok(IngestGroupRows {
-            batch: RuntimeRecordBatch::concat(&batch_refs)?,
+            batch: Arc::new(RuntimeRecordBatch::concat(&batch_refs)?),
             record_metadata: self
                 .ingested_at
                 .into_iter()
@@ -1492,7 +1529,10 @@ impl PendingIngestGroup {
                     RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at)
                 })
                 .collect(),
-            ingest_metadata: self.metadata,
+            ingest_metadata: self
+                .metadata
+                .map(PendingIngestFilterMapMetadata::finish)
+                .transpose()?,
             acks: self.acks,
         })
     }
@@ -1507,12 +1547,14 @@ impl IngestGroupRows {
         self.batch.batch().num_rows() == 0
     }
 
-    fn metadata_row(&self, row: usize) -> Option<&IngestFilterMapMetadata> {
-        self.ingest_metadata.get(row)
+    fn metadata_row(&self, row: usize) -> Option<IngestFilterMapMetadata> {
+        self.ingest_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.row(row))
     }
 
-    fn metadata_rows(&self) -> Option<&[IngestFilterMapMetadata]> {
-        (!self.ingest_metadata.is_empty()).then_some(self.ingest_metadata.as_slice())
+    fn metadata_rows(&self) -> Option<&IngestFilterMapMetadata> {
+        self.ingest_metadata.as_ref()
     }
 
     fn row(&self, row: usize) -> Result<RuntimeRow, String> {
@@ -1522,7 +1564,7 @@ impl IngestGroupRows {
                 self.record_metadata.len()
             )
         })?;
-        RuntimeRow::new(Arc::new(self.batch.clone()), row, metadata)
+        RuntimeRow::new(self.batch.clone(), row, metadata)
     }
 
     /// Keeps only the rows selected by `keep`, moving records, metadata and acks
@@ -1531,7 +1573,7 @@ impl IngestGroupRows {
         let selected = |row: usize| keep.get(row).copied().unwrap_or(false);
         let predicate = BooleanArray::from_iter((0..self.len()).map(|row| Some(selected(row))));
         Ok(Self {
-            batch: self.batch.filter(&predicate)?,
+            batch: Arc::new(self.batch.filter(&predicate)?),
             record_metadata: self
                 .record_metadata
                 .into_iter()
@@ -1540,10 +1582,8 @@ impl IngestGroupRows {
                 .collect(),
             ingest_metadata: self
                 .ingest_metadata
-                .into_iter()
-                .enumerate()
-                .filter_map(|(row, metadata)| selected(row).then_some(metadata))
-                .collect(),
+                .map(|metadata| metadata.select(keep))
+                .transpose()?,
             acks: self
                 .acks
                 .into_iter()
@@ -1560,7 +1600,7 @@ struct IngestorFilterWhereError<'a> {
     ingestor: &'a Identifier,
     output_routes: &'a RelayProcessorOutputsNode,
     record: &'a RuntimeRow,
-    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
+    ingest_metadata: Option<IngestFilterMapMetadata>,
     acks: AckSet,
     error: StructuredMessageError,
     materialized_state: HashMap<String, RuntimeValue>,
@@ -1701,7 +1741,7 @@ impl BranchedEntrypointBatch {
                 Vec::new(),
             ));
         }
-        let mut batches = Vec::<RuntimeRecordBatch>::new();
+        let mut batches = Vec::<Arc<RuntimeRecordBatch>>::new();
         let mut metadata = Vec::<RuntimeRecordMetadata>::new();
         let mut keys = Vec::<Option<BranchKey>>::new();
         let mut acks = Vec::<AckSet>::new();
@@ -1714,7 +1754,7 @@ impl BranchedEntrypointBatch {
             keys.extend(batch_keys);
             acks.extend(batch_acks);
         }
-        let batch_refs = batches.iter().collect::<Vec<_>>();
+        let batch_refs = batches.iter().map(Arc::as_ref).collect::<Vec<_>>();
         let batch = RuntimeRecordBatch::concat(&batch_refs).map_err(|error| {
             (
                 format!("failed to concatenate branch input batches: {error}"),
@@ -1847,7 +1887,7 @@ struct MessageErrorHandling<'a> {
     error: StructuredMessageError,
     partial_output: Option<RuntimeRecordBatch>,
     materialized_state: HashMap<String, RuntimeValue>,
-    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
+    ingest_metadata: Option<IngestFilterMapMetadata>,
 }
 
 struct MessageErrorFailure {
@@ -1895,19 +1935,63 @@ enum SingleRecordFilterMapOutcome {
     },
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
+struct IngestFilterMapMetadataColumns {
+    integration_fields: RecordBatch,
+    header_names: ArrayRef,
+    header_values: ArrayRef,
+}
+
+struct IngestHeaderRow<'a> {
+    names: &'a StringArray,
+    values: &'a StringArray,
+    start: usize,
+    end: usize,
+}
+
+impl<'a> IngestHeaderRow<'a> {
+    fn first(&self, name: &str) -> Option<&'a str> {
+        (self.start..self.end)
+            .find(|index| self.names.value(*index) == name)
+            .map(|index| self.values.value(index))
+    }
+
+    fn visit(&self, name: &str, mut visit: impl FnMut(&'a str)) {
+        for index in self.start..self.end {
+            if self.names.value(index) == name {
+                visit(self.values.value(index));
+            }
+        }
+    }
+}
+
+/// Columnar metadata for one ingest group.
+///
+/// The Arrow columns are shared by every filtered or single-row view. `rows` is the
+/// logical-to-physical row projection, so filtering and message-error attribution do
+/// not copy transport headers or rebuild integration fields from scalar values.
+#[derive(Debug, Clone)]
 pub(crate) struct IngestFilterMapMetadata {
-    values: HashMap<String, RuntimeValue>,
-    headers: HashMap<String, Vec<String>>,
+    columns: Arc<IngestFilterMapMetadataColumns>,
+    rows: Arc<Vec<usize>>,
+}
+
+impl Default for IngestFilterMapMetadata {
+    fn default() -> Self {
+        Self::from_headers(Vec::new())
+    }
 }
 
 impl IngestFilterMapMetadata {
     pub(crate) fn from_headers(headers: IngestHeaders) -> Self {
-        let mut metadata = Self::default();
-        for (name, value) in headers {
-            metadata.insert_header(name, value);
-        }
-        metadata
+        let integration_fields = RecordBatch::try_new_with_options(
+            StdArc::new(arrow_schema::Schema::empty()),
+            Vec::new(),
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .expect("one-row header metadata must form a valid Arrow batch");
+        Self::from_columns(integration_fields, std::iter::once(headers))
+            .expect("one-row header metadata must have aligned Arrow columns")
     }
 
     fn kafka(
@@ -1917,47 +2001,255 @@ impl IngestFilterMapMetadata {
         _key: Option<String>,
         headers: IngestHeaders,
     ) -> Self {
-        let mut metadata = Self::from_headers(headers);
-        metadata
-            .values
-            .insert("topic".to_string(), RuntimeValue::String(topic));
-        metadata
-            .values
-            .insert("partition".to_string(), RuntimeValue::I32(partition));
-        metadata
-            .values
-            .insert("offset".to_string(), RuntimeValue::I64(offset));
-        metadata
+        let integration_fields = RecordBatch::try_new(
+            Self::kafka_arrow_schema(),
+            vec![
+                StdArc::new(StringArray::from(vec![topic])),
+                StdArc::new(Int32Array::from(vec![partition])),
+                StdArc::new(Int64Array::from(vec![offset])),
+            ],
+        )
+        .expect("one-row Kafka metadata must form a valid Arrow batch");
+        Self::from_columns(integration_fields, std::iter::once(headers))
+            .expect("one-row Kafka metadata must have aligned Arrow columns")
     }
 
-    fn insert_header(&mut self, name: String, value: String) {
-        self.headers.entry(name).or_default().push(value);
+    fn kafka_arrow_schema() -> StdArc<arrow_schema::Schema> {
+        StdArc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
+            arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
+            arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
+        ]))
     }
 
-    fn metadata_value(&self, name: &str) -> Option<&RuntimeValue> {
-        self.values.get(name)
+    fn syslog(peer_addr: std::net::SocketAddr) -> Self {
+        let integration_fields = RecordBatch::try_new(
+            Self::syslog_arrow_schema(),
+            vec![StdArc::new(StringArray::from(vec![peer_addr.to_string()]))],
+        )
+        .expect("one-row Syslog metadata must form a valid Arrow batch");
+        Self::from_columns(integration_fields, std::iter::once(Vec::new()))
+            .expect("one-row Syslog metadata must have aligned Arrow columns")
+    }
+
+    fn syslog_arrow_schema() -> StdArc<arrow_schema::Schema> {
+        StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "peer_addr",
+            ArrowDataType::Utf8,
+            true,
+        )]))
+    }
+
+    fn from_columns(
+        integration_fields: RecordBatch,
+        headers: impl IntoIterator<Item = IngestHeaders>,
+    ) -> Result<Self, String> {
+        let item_field =
+            || StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
+        let mut header_names = ListBuilder::new(StringBuilder::new()).with_field(item_field());
+        let mut header_values = ListBuilder::new(StringBuilder::new()).with_field(item_field());
+        let mut header_row_count = 0;
+        for headers in headers {
+            for (name, value) in headers {
+                header_names.values().append_value(name);
+                header_values.values().append_value(value);
+            }
+            header_names.append(true);
+            header_values.append(true);
+            header_row_count += 1;
+        }
+        if integration_fields.num_rows() != header_row_count {
+            return Err(format!(
+                "ingest integration metadata has {} rows but headers have {header_row_count}",
+                integration_fields.num_rows()
+            ));
+        }
+        let header_names: ArrayRef = StdArc::new(header_names.finish());
+        let header_values: ArrayRef = StdArc::new(header_values.finish());
+        let rows = Arc::new((0..header_row_count).collect());
+        Ok(Self {
+            columns: Arc::new(IngestFilterMapMetadataColumns {
+                integration_fields,
+                header_names,
+                header_values,
+            }),
+            rows,
+        })
+    }
+
+    fn concat(metadata: &[Self]) -> Result<Self, String> {
+        let Some(first) = metadata.first() else {
+            return Err("cannot concatenate zero ingest metadata batches".to_string());
+        };
+        if metadata.len() == 1 {
+            return Ok(first.clone());
+        }
+        let schema = first.columns.integration_fields.schema();
+        for batch in &metadata[1..] {
+            if batch.columns.integration_fields.schema() != schema {
+                return Err(
+                    "cannot combine ingest metadata with different field schemas".to_string(),
+                );
+            }
+        }
+        let row_count = metadata.iter().map(Self::len).sum();
+        let integration_columns = (0..schema.fields().len())
+            .map(|column| {
+                let arrays = metadata
+                    .iter()
+                    .map(|metadata| {
+                        metadata.selected_array(metadata.columns.integration_fields.column(column))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let arrays = arrays
+                    .iter()
+                    .map(|array| array.as_ref())
+                    .collect::<Vec<_>>();
+                concat_arrow_arrays(&arrays).map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let integration_fields = RecordBatch::try_new_with_options(
+            schema,
+            integration_columns,
+            &RecordBatchOptions::new().with_row_count(Some(row_count)),
+        )
+        .map_err(|error| error.to_string())?;
+        let header_names =
+            Self::concat_selected_arrays(metadata, |metadata| &metadata.columns.header_names)?;
+        let header_values =
+            Self::concat_selected_arrays(metadata, |metadata| &metadata.columns.header_values)?;
+        Ok(Self {
+            columns: Arc::new(IngestFilterMapMetadataColumns {
+                integration_fields,
+                header_names,
+                header_values,
+            }),
+            rows: Arc::new((0..row_count).collect()),
+        })
+    }
+
+    fn concat_selected_arrays(
+        metadata: &[Self],
+        array: impl Fn(&Self) -> &ArrayRef,
+    ) -> Result<ArrayRef, String> {
+        let arrays = metadata
+            .iter()
+            .map(|metadata| metadata.selected_array(array(metadata)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let arrays = arrays
+            .iter()
+            .map(|array| array.as_ref())
+            .collect::<Vec<_>>();
+        concat_arrow_arrays(&arrays).map_err(|error| error.to_string())
+    }
+
+    fn selected_array(&self, array: &ArrayRef) -> Result<ArrayRef, String> {
+        if self.rows.iter().copied().eq(0..self.rows.len()) && self.rows.len() == array.len() {
+            return Ok(array.clone());
+        }
+        let indices = self
+            .rows
+            .iter()
+            .map(|row| {
+                if *row >= array.len() {
+                    return Err(format!(
+                        "ingest metadata row {row} is outside column with {} rows",
+                        array.len()
+                    ));
+                }
+                u64::try_from(*row).map_err(|_| {
+                    format!("ingest metadata row {row} cannot be represented as an Arrow index")
+                })
+            })
+            .collect::<Result<UInt64Array, _>>()?;
+        take_arrow_array(array.as_ref(), &indices, None).map_err(|error| error.to_string())
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn row(&self, row: usize) -> Option<Self> {
+        self.rows.get(row).copied().map(|physical_row| Self {
+            columns: self.columns.clone(),
+            rows: Arc::new(vec![physical_row]),
+        })
+    }
+
+    fn select(&self, keep: &[bool]) -> Result<Self, String> {
+        if keep.len() != self.len() {
+            return Err(format!(
+                "ingest metadata selection has {} rows for {} metadata rows",
+                keep.len(),
+                self.len()
+            ));
+        }
+        Ok(Self {
+            columns: self.columns.clone(),
+            rows: Arc::new(
+                self.rows
+                    .iter()
+                    .zip(keep)
+                    .filter_map(|(row, keep)| keep.then_some(*row))
+                    .collect(),
+            ),
+        })
+    }
+
+    fn field_column(&self, name: &str) -> Result<Option<ArrayRef>, String> {
+        let Ok(index) = self.columns.integration_fields.schema().index_of(name) else {
+            return Ok(None);
+        };
+        self.selected_array(self.columns.integration_fields.column(index))
+            .map(Some)
+    }
+
+    fn first_header(&self, row: usize, name: &str) -> Option<&str> {
+        self.header_row(row)?.first(name)
+    }
+
+    fn visit_header_values(&self, row: usize, name: &str, visit: impl FnMut(&str)) {
+        if let Some(headers) = self.header_row(row) {
+            headers.visit(name, visit);
+        }
+    }
+
+    fn header_row(&self, row: usize) -> Option<IngestHeaderRow<'_>> {
+        let physical_row = *self.rows.get(row)?;
+        let names = self
+            .columns
+            .header_names
+            .as_any()
+            .downcast_ref::<ListArray>()?;
+        let values = self
+            .columns
+            .header_values
+            .as_any()
+            .downcast_ref::<ListArray>()?;
+        Some(IngestHeaderRow {
+            names: names.values().as_any().downcast_ref::<StringArray>()?,
+            values: values.values().as_any().downcast_ref::<StringArray>()?,
+            start: usize::try_from(*names.value_offsets().get(physical_row)?).ok()?,
+            end: usize::try_from(*names.value_offsets().get(physical_row + 1)?).ok()?,
+        })
     }
 }
 
 #[derive(Debug)]
 struct IngestHeaderFunctionInjector {
-    rows: Vec<HashMap<String, Vec<String>>>,
+    metadata: Option<IngestFilterMapMetadata>,
+    row_count: usize,
 }
 
 impl IngestHeaderFunctionInjector {
     fn from_metadata(
-        metadata: Option<&[IngestFilterMapMetadata]>,
+        metadata: Option<&IngestFilterMapMetadata>,
         row_count: usize,
     ) -> Arc<Box<dyn VmFunctionInjector>> {
-        let rows = metadata
-            .map(|metadata| {
-                metadata
-                    .iter()
-                    .map(|row| row.headers.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| vec![HashMap::new(); row_count]);
-        Arc::new(Box::new(Self { rows }))
+        Arc::new(Box::new(Self {
+            metadata: metadata.cloned(),
+            row_count,
+        }))
     }
 }
 
@@ -1977,23 +2269,29 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                 ),
             });
         };
-        if self.rows.len() != row_count || names.len() != row_count {
+        let metadata_row_count = self
+            .metadata
+            .as_ref()
+            .map_or(self.row_count, IngestFilterMapMetadata::len);
+        if metadata_row_count != row_count || names.len() != row_count {
             return Err(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "function '{}' header context has {} rows for a {row_count}-row batch",
                     function.as_str(),
-                    self.rows.len()
+                    metadata_row_count
                 ),
             });
         }
         if let FunctionName::ReadHeader = function {
             let values = names
                 .iter()
-                .zip(&self.rows)
-                .map(|(name, headers)| {
-                    name.and_then(|name| headers.get(name))
-                        .and_then(|values| values.first())
-                        .map(String::as_str)
+                .enumerate()
+                .map(|(row, name)| {
+                    name.and_then(|name| {
+                        self.metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.first_header(row, name))
+                    })
                 })
                 .collect::<Vec<_>>();
             return Ok(VmTypedArray::Utf8(arrow_array::StringArray::from(values)));
@@ -2001,11 +2299,13 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
         if let FunctionName::ReadHeaders = function {
             let field = StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
             let mut builder = ListBuilder::new(StringBuilder::new()).with_field(field);
-            for (name, headers) in names.iter().zip(&self.rows) {
-                if let Some(values) = name.and_then(|name| headers.get(name)) {
-                    for value in values {
+            for (row, name) in names.iter().enumerate() {
+                if let Some(name) = name
+                    && let Some(metadata) = self.metadata.as_ref()
+                {
+                    metadata.visit_header_values(row, name, |value| {
                         builder.values().append_value(value);
-                    }
+                    });
                 }
                 builder.append(true);
             }
@@ -2769,7 +3069,6 @@ struct ExecutionBuildDeps<'a> {
     relay_schemas: &'a HashMap<Identifier, Arc<CompiledSchema>>,
     relay_branchings: &'a HashMap<Identifier, Vec<Identifier>>,
     materialized_relay_specs: &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
-    materialized_relay_owner_nodes: &'a HashMap<Identifier, Option<String>>,
     lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
 }
 
@@ -2778,7 +3077,6 @@ struct EmitterTaskDeps {
     input_schema: Arc<CompiledSchema>,
     input_branching: Vec<Identifier>,
     materialized_relay_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
-    materialized_relay_owner_nodes: HashMap<Identifier, Option<String>>,
     lookups: HashMap<Identifier, Arc<LookupRuntime>>,
 }
 
@@ -2977,7 +3275,6 @@ pub(crate) type EmitterHeaders = Vec<(String, String)>;
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledEmitterFilterMapProgram {
     pub(crate) body: CompiledProgramWithMaterializedInterest,
-    pub(crate) materialized_interest: MaterializedProgramInterest,
     pub(crate) codec_route: bool,
 }
 
@@ -3126,6 +3423,8 @@ pub struct Runtime {
     transaction_commit_pauses: Arc<test_hooks::TransactionCommitPauseInjector>,
     #[cfg(feature = "testing")]
     entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
+    #[cfg(feature = "testing")]
+    syslog_ingestor_bind_address_overrides: Arc<test_hooks::SyslogIngestorBindAddressOverrides>,
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,
@@ -3885,6 +4184,7 @@ impl RelayProcessorOperationNode {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                     ..
                 },
                 RelayProcessorOperationTemplate::Inferencer {
@@ -3894,6 +4194,7 @@ impl RelayProcessorOperationNode {
                     file: desired_file,
                     inputs: desired_inputs,
                     output_schema: desired_output_schema,
+                    compiled_input_program: desired_compiled_input_program,
                 },
             ) => {
                 if resource != desired_resource
@@ -3906,6 +4207,7 @@ impl RelayProcessorOperationNode {
                         "dynamic inferencer update changed its inference session".to_string()
                     );
                 }
+                *compiled_input_program = desired_compiled_input_program.clone();
                 output_routes.apply_template(desired_outputs)?;
                 Ok(())
             }
@@ -4478,25 +4780,6 @@ impl RelayProcessorNode {
                         .ok()
                         .flatten()
                         .unwrap_or_else(current_timestamp);
-                    let messages = match batch.try_into_messages() {
-                        Ok(messages) => messages,
-                        Err(error_and_batch) => {
-                            let (error, batch) = *error_and_batch;
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                batch.acks.iter(),
-                                format!(
-                                    "deduplicator '{}' failed to decode arrow batch: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
-                            );
-                            return;
-                        }
-                    };
 
                     if compiled_key_program.is_none() {
                         let udfs = branch.runtime.udf_executor(&branch.domain);
@@ -4514,7 +4797,7 @@ impl RelayProcessorNode {
                                     self.kind.as_str(),
                                     &self.processor,
                                     &self.error_policies,
-                                    messages.iter().map(|message| &message.acks),
+                                    batch.acks.iter(),
                                     error,
                                 );
                                 return;
@@ -4537,6 +4820,7 @@ impl RelayProcessorNode {
                             lookup_columns: &lookup_columns,
                             uninitialized: None,
                         },
+                        None,
                     ) {
                         Ok(batch) => batch,
                         Err(error) => {
@@ -4545,7 +4829,7 @@ impl RelayProcessorNode {
                                 self.kind.as_str(),
                                 &self.processor,
                                 &self.error_policies,
-                                messages.iter().map(|message| &message.acks),
+                                batch.acks.iter(),
                                 format!(
                                     "deduplicator '{}' failed to build DEDUPLICATE ON input \
                                      batch: {}",
@@ -4573,7 +4857,7 @@ impl RelayProcessorNode {
                                 self.kind.as_str(),
                                 &self.processor,
                                 &self.error_policies,
-                                messages.iter().map(|message| &message.acks),
+                                batch.acks.iter(),
                                 format!(
                                     "deduplicator '{}' failed to evaluate DEDUPLICATE ON \
                                      expressions: {}",
@@ -4585,83 +4869,44 @@ impl RelayProcessorNode {
                         }
                     };
 
-                    let mut forwarded_entries = Vec::new();
-                    for (row, message) in messages.into_iter().enumerate() {
+                    let mut dedup_keys = Vec::new();
+                    let mut forwarded_rows = Vec::new();
+                    for (row, acks) in batch.acks.iter().enumerate() {
                         trace!(
                             processor = self.processor.as_str(),
                             operator = "deduplicator",
                             "branched relay operator received message"
                         );
 
-                        let dedup_key = (0..key_program.key_count)
-                            .map(|index| {
-                                reorder_key_part(
-                                    key_result
-                                        .batch
-                                        .column(key_program.key_column_offset + index),
-                                    row,
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let dedup_key = format!("{dedup_key:?}");
-                        let RelayMessage { key, record, acks } = message;
-                        match state.apply_new_key(dedup_key.clone(), execution_now, *max_time) {
-                            Ok(Some(_)) => {
-                                forwarded_entries
-                                    .push((dedup_key, RelayMessage { key, record, acks }));
-                            }
-                            Ok(None) => {
-                                debug!(
-                                    deduplicator = self.processor.as_str(),
-                                    "branched deduplicator dropped duplicate message"
-                                );
-                                acks.ack_success();
-                            }
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    std::iter::once(&acks),
-                                    format!(
-                                        "deduplicator '{}' failed to update state: {}",
-                                        self.processor.as_str(),
-                                        error
-                                    ),
-                                );
-                            }
+                        let dedup_key = DeduplicatorKey::new(
+                            (0..key_program.key_count)
+                                .map(|index| {
+                                    reorder_key_part(
+                                        key_result
+                                            .batch
+                                            .column(key_program.key_column_offset + index),
+                                        row,
+                                    )
+                                })
+                                .collect(),
+                        );
+                        if state.reserve_new_key(dedup_key.clone(), execution_now, *max_time) {
+                            dedup_keys.push(dedup_key);
+                            forwarded_rows.push(row);
+                        } else {
+                            debug!(
+                                deduplicator = self.processor.as_str(),
+                                "branched deduplicator dropped duplicate message"
+                            );
+                            acks.ack_success();
                         }
                     }
 
-                    if forwarded_entries.is_empty() {
+                    if forwarded_rows.is_empty() {
                         return;
                     }
 
-                    let (dedup_keys, forwarded_messages): (Vec<_>, Vec<_>) =
-                        forwarded_entries.into_iter().unzip();
-                    let source_schema = match relay_schema_for_runtime(
-                        &branch.runtime,
-                        &branch.domain,
-                        incoming_relay,
-                    ) {
-                        Ok(schema) => schema,
-                        Err(error) => {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                forwarded_messages.iter().map(|message| &message.acks),
-                                error,
-                            );
-                            return;
-                        }
-                    };
-                    let forwarded = match build_stream_record_batch_preserving_acks(
-                        source_schema,
-                        forwarded_messages,
-                    ) {
+                    let forwarded = match batch.take(&forwarded_rows) {
                         Ok(batch) => batch,
                         Err((error, acks)) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
@@ -4690,7 +4935,9 @@ impl RelayProcessorNode {
                             error_policies: &self.error_policies,
                             input_relays: &self.input_relays,
                             filter_source: ProcessorOutputFilterSource::InputRelays,
-                            resolved_materialized_state: Some(&materialized_values),
+                            materialized_state: ProcessorMaterializedState::Admitted(
+                                &materialized_values,
+                            ),
                         },
                         output_routes,
                         forwarded,
@@ -4701,45 +4948,8 @@ impl RelayProcessorNode {
                         return;
                     };
 
-                    match state.latest_snapshot() {
-                        Ok(snapshot) => {
-                            if let Err(error) = branch
-                                .runtime
-                                .persist_deduplicator_snapshot(
-                                    state,
-                                    snapshot.lsm,
-                                    &snapshot.payload,
-                                )
-                                .await
-                            {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    dispatched_acks.iter(),
-                                    error,
-                                );
-                                return;
-                            }
-                            for ack in dispatched_acks {
-                                ack.ack_success();
-                            }
-                        }
-                        Err(error) => {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                dispatched_acks.iter(),
-                                format!(
-                                    "deduplicator '{}' failed to update state: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
-                            );
-                        }
+                    for ack in dispatched_acks {
+                        ack.ack_success();
                     }
                 }
                 RelayProcessorOperationNode::WindowProcessor {
@@ -4772,48 +4982,91 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
-                    for message in messages {
+                    let Some(first_message) = messages.first() else {
+                        return;
+                    };
+                    let execution_now = message_timestamp(first_message);
+                    let row_count = messages.len();
+                    let mut aggregate_inputs_by_row = (0..row_count)
+                        .map(|_| Ok(Vec::new()))
+                        .collect::<Vec<Result<Vec<WindowAggregateInput>, String>>>();
+                    for compiled in compiled_aggregates.iter() {
                         tokio::task::consume_budget().await;
-                        let timestamp = message_timestamp(&message);
-                        let mut aggregate_inputs = Vec::new();
-                        let mut aggregate_input_error = None;
-                        for compiled in compiled_aggregates.iter() {
-                            tokio::task::consume_budget().await;
-                            match evaluate_window_aggregate_inputs(
-                                compiled,
-                                &message.record,
-                                timestamp,
-                            )
-                            .await
-                            {
-                                Ok(inputs) => aggregate_inputs.extend(inputs),
+                        let evaluated = match evaluate_window_aggregate_inputs(
+                            compiled,
+                            first_message.record.batch(),
+                            execution_now,
+                        )
+                        .await
+                        {
+                            Ok(evaluated) => evaluated,
+                            Err(error) => {
+                                for inputs in &mut aggregate_inputs_by_row {
+                                    if inputs.is_ok() {
+                                        *inputs = Err(error.clone());
+                                    }
+                                }
+                                break;
+                            }
+                        };
+                        if evaluated.len() != row_count {
+                            let error = format!(
+                                "window aggregate input VM produced {} rows for {row_count} input \
+                                 rows",
+                                evaluated.len()
+                            );
+                            for inputs in &mut aggregate_inputs_by_row {
+                                if inputs.is_ok() {
+                                    *inputs = Err(error.clone());
+                                }
+                            }
+                            break;
+                        }
+                        for (inputs, evaluated) in aggregate_inputs_by_row.iter_mut().zip(evaluated)
+                        {
+                            match evaluated {
+                                Ok(evaluated) => {
+                                    if let Ok(inputs) = inputs {
+                                        inputs.extend(evaluated);
+                                    }
+                                }
                                 Err(error) => {
-                                    aggregate_input_error = Some(error);
-                                    break;
+                                    if inputs.is_ok() {
+                                        *inputs = Err(error);
+                                    }
                                 }
                             }
                         }
-                        if let Some(error) = aggregate_input_error {
-                            branch
-                                .runtime
-                                .handle_message_error(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    message,
-                                    MessageErrorFailure::publish(
-                                        None,
-                                        format!(
-                                            "window processor '{}' aggregate input failed: {}",
-                                            self.processor.as_str(),
-                                            error
+                    }
+                    for (message, aggregate_inputs) in
+                        messages.into_iter().zip(aggregate_inputs_by_row)
+                    {
+                        tokio::task::consume_budget().await;
+                        let timestamp = message_timestamp(&message);
+                        let aggregate_inputs = match aggregate_inputs {
+                            Ok(aggregate_inputs) => aggregate_inputs,
+                            Err(error) => {
+                                branch
+                                    .runtime
+                                    .handle_message_error(
+                                        &branch.domain,
+                                        self.kind.as_str(),
+                                        &self.processor,
+                                        &self.error_policies,
+                                        message,
+                                        MessageErrorFailure::publish(
+                                            None,
+                                            format!(
+                                                "window processor '{}' aggregate input failed: {}",
+                                                self.processor.as_str(),
+                                                error
+                                            ),
                                         ),
-                                    ),
-                                )
-                                .await;
-                            continue;
-                        }
+                                    )
+                                    .await;
+                                continue;
+                            }
+                        };
                         if let Err(error_and_message) =
                             state.push_message(aggregate, timestamp, message, aggregate_inputs)
                         {
@@ -4849,9 +5102,13 @@ impl RelayProcessorNode {
                                 ),
                             );
                             state.clear(aggregate);
+                            replicated_state.mark_live_dirty();
                             continue;
                         }
-                        flush_ready_window_processor(
+                        replicated_state.mark_live_dirty();
+                        let due =
+                            window_width_met(state, *width_messages, *width_duration, timestamp);
+                        let changed = flush_ready_window_processor(
                             WindowFlushContext {
                                 graph,
                                 node_kind: self.kind.as_str(),
@@ -4859,6 +5116,7 @@ impl RelayProcessorNode {
                                 error_policies: &self.error_policies,
                                 branch,
                                 output_routes,
+                                materialized_state: &self.materialized_state,
                             },
                             state,
                             aggregate,
@@ -4872,23 +5130,24 @@ impl RelayProcessorNode {
                             timestamp,
                         )
                         .await;
-                        if let Err(error) = persist_window_processor_live_state(
-                            &branch.runtime,
-                            &self.processor,
-                            replicated_state,
-                            state,
-                        )
-                        .await
-                        {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
+                        if due || changed {
+                            replicated_state.mark_live_dirty();
+                            if let Err(error) = snapshot_window_processor_live_state(
                                 &self.processor,
-                                &self.error_policies,
-                                state.entries.iter().map(|entry| &entry.message.acks),
-                                error,
-                            );
-                            state.clear(aggregate);
+                                replicated_state,
+                                state,
+                            ) {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    state.entries.iter().map(|entry| &entry.message.acks),
+                                    error,
+                                );
+                                state.clear(aggregate);
+                                replicated_state.mark_live_dirty();
+                            }
                         }
                     }
                 }
@@ -4945,6 +5204,7 @@ impl RelayProcessorNode {
                             lookup_columns: &lookup_columns,
                             uninitialized: None,
                         },
+                        None,
                     ) {
                         Ok(batch) => batch,
                         Err(error) => {
@@ -5017,49 +5277,20 @@ impl RelayProcessorNode {
                             .collect::<Vec<_>>();
                         let sequence = *arrival_sequence;
                         *arrival_sequence = arrival_sequence.saturating_add(1);
-                        row_ordering.push((key, sequence));
+                        row_ordering.push(ReordererRowOrder {
+                            key,
+                            arrival_sequence: sequence,
+                        });
                     }
-                    let estimated_bytes = batch.estimated_bytes();
+                    let row_ordering = Arc::new(row_ordering);
                     let route_batches = batch.into_attached_fanout(output_routes.routes.len());
                     let mut due_outputs = Vec::new();
                     for (output_index, route_batch) in route_batches.into_iter().enumerate() {
-                        let messages = match route_batch.try_into_messages() {
-                            Ok(messages) => messages,
-                            Err(error_and_batch) => {
-                                let (error, batch) = *error_and_batch;
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    batch.acks.iter(),
-                                    format!(
-                                        "reorderer '{}' failed to decode arrow batch: {}",
-                                        self.processor.as_str(),
-                                        error
-                                    ),
-                                );
-                                continue;
-                            }
-                        };
                         let output_buffer = &mut output_buffers[output_index];
-                        output_buffer.estimated_bytes = output_buffer
-                            .estimated_bytes
-                            .saturating_add(estimated_bytes);
-                        output_buffer
-                            .pending
-                            .extend(messages.into_iter().enumerate().map(|(row, message)| {
-                                let (key, arrival_sequence) = &row_ordering[row];
-                                ReordererPendingMessage {
-                                    key: key.clone(),
-                                    arrival_sequence: *arrival_sequence,
-                                    received_at: execution_now,
-                                    message,
-                                }
-                            }));
+                        output_buffer.push(route_batch, Arc::clone(&row_ordering), execution_now);
                         let output = &mut output_routes.routes[output_index];
                         match output
-                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes)
+                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes())
                         {
                             Some(true) => {
                                 output.force_flush_at(execution_now);
@@ -5072,10 +5303,7 @@ impl RelayProcessorNode {
                                     self.kind.as_str(),
                                     &self.processor,
                                     &self.error_policies,
-                                    output_buffer
-                                        .pending
-                                        .iter()
-                                        .map(|entry| &entry.message.acks),
+                                    output_buffer.acks(),
                                     format!(
                                         "reorderer '{}' output '{}' has no flush policy",
                                         self.processor.as_str(),
@@ -5096,6 +5324,7 @@ impl RelayProcessorNode {
                                 error_policies: &self.error_policies,
                                 output_routes,
                                 input_relays: &self.input_relays,
+                                materialized_state: &self.materialized_state,
                             },
                             &mut output_buffers[output_index],
                             output_index,
@@ -5253,11 +5482,13 @@ impl RelayProcessorNode {
 
                     let mut correlations =
                         Vec::<(CorrelatorPendingMessage, CorrelatorPendingMessage)>::new();
+                    let materialized_state = Arc::new(materialized_values);
                     for message in messages {
+                        tokio::task::consume_budget().await;
                         let incoming = CorrelatorPendingMessage {
                             received_at: execution_now,
                             message,
-                            materialized_state: materialized_values.clone(),
+                            materialized_state: materialized_state.clone(),
                         };
                         match correlate_incoming_message(
                             &self.processor,
@@ -5461,85 +5692,109 @@ impl RelayProcessorNode {
                     }
 
                     let output_count = output_routes.routes.len();
-                    let mut messages_by_output = (0..output_count)
-                        .map(|_| Vec::<RelayMessage>::new())
-                        .collect::<Vec<_>>();
-                    for (left, right) in correlations {
-                        let key = left.message.key.clone();
-                        let combined =
-                            match correlator_input_row(&left.message.record, &right.message.record)
-                            {
-                                Ok(combined) => combined,
-                                Err(error) => {
-                                    branch.runtime.handle_internal_processor_error_for_acks(
-                                        &branch.domain,
-                                        self.kind.as_str(),
-                                        &self.processor,
-                                        &self.error_policies,
-                                        [&left.message.acks, &right.message.acks],
-                                        format!(
-                                            "correlator '{}' failed to build paired Arrow input: \
-                                             {error}",
-                                            self.processor.as_str()
-                                        ),
-                                    );
-                                    continue;
-                                }
-                            };
-                        let mut materialized_state = left.materialized_state.clone();
-                        materialized_state.extend(right.materialized_state.clone());
-                        let mut pair_acks = Some(AckSet::merged([
-                            left.message.acks.attached(),
-                            right.message.acks.attached(),
-                        ]));
-                        for output_index in 0..output_count {
-                            let route_acks = if output_index + 1 == output_count {
-                                pair_acks
-                                    .take()
-                                    .expect("last correlator output must own the pair ACKs")
-                            } else {
-                                pair_acks
-                                    .as_ref()
-                                    .expect("correlator pair ACKs must remain available")
-                                    .attached()
-                            };
-                            let Some(output_program) =
-                                compiled_output_programs[output_index].as_deref()
-                            else {
-                                route_acks.no_ack(format!(
-                                    "correlator '{}' output program is unavailable",
-                                    self.processor.as_str()
-                                ));
-                                continue;
-                            };
-                            match evaluate_correlator_output_message(
+                    let Some(output_programs) = compiled_output_programs
+                        .iter()
+                        .map(|program| program.as_deref())
+                        .collect::<Option<Vec<_>>>()
+                    else {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind.as_str(),
+                            &self.processor,
+                            &self.error_policies,
+                            correlations.iter().flat_map(|(left, right)| {
+                                [&left.message.acks, &right.message.acks]
+                            }),
+                            format!(
+                                "correlator '{}' output program is unavailable",
+                                self.processor.as_str()
+                            ),
+                        );
+                        return;
+                    };
+                    let matched = match CorrelatorMatchedBatch::from_correlations(
+                        &correlations,
+                        &output_programs,
+                    ) {
+                        Ok(matched) => matched,
+                        Err(error) => {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
                                 &self.processor,
-                                output_program,
-                                key.clone(),
-                                combined.clone(),
-                                &materialized_state,
-                                route_acks,
-                                execution_now,
-                            )
-                            .await
-                            {
-                                Ok(Some(message)) => {
-                                    messages_by_output[output_index].push(message);
-                                }
+                                &self.error_policies,
+                                correlations.iter().flat_map(|(left, right)| {
+                                    [&left.message.acks, &right.message.acks]
+                                }),
+                                format!(
+                                    "correlator '{}' failed to build matched Arrow batches: \
+                                     {error}",
+                                    self.processor.as_str()
+                                ),
+                            );
+                            return;
+                        }
+                    };
+                    let mut pair_acks = correlations
+                        .iter()
+                        .map(|(left, right)| {
+                            AckSet::merged([
+                                left.message.acks.attached(),
+                                right.message.acks.attached(),
+                            ])
+                        })
+                        .collect::<Vec<_>>();
+                    for (output_index, output_program) in output_programs.into_iter().enumerate() {
+                        tokio::task::consume_budget().await;
+                        let route_acks = if output_index + 1 == output_count {
+                            std::mem::take(&mut pair_acks)
+                        } else {
+                            pair_acks.iter().map(AckSet::attached).collect()
+                        };
+                        let outcomes = match evaluate_correlator_output_batch(
+                            &self.processor,
+                            output_program,
+                            &matched,
+                            route_acks,
+                            execution_now,
+                        )
+                        .await
+                        {
+                            Ok(outcomes) => outcomes,
+                            Err((error, acks)) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    acks.iter(),
+                                    format!(
+                                        "correlator '{}' failed to evaluate batched output: \
+                                         {error}",
+                                        self.processor.as_str()
+                                    ),
+                                );
+                                continue;
+                            }
+                        };
+                        let policy = output_routes.routes[output_index]
+                            .message_error_policy
+                            .clone();
+                        let output_relay = output_routes.routes[output_index].relay.clone();
+                        let mut messages = Vec::new();
+                        for outcome in outcomes {
+                            tokio::task::consume_budget().await;
+                            match outcome {
+                                Ok(Some(message)) => messages.push(message),
                                 Ok(None) => {}
                                 Err(error) => {
-                                    let policy = output_routes.routes[output_index]
-                                        .message_error_policy
-                                        .clone();
                                     branch
                                         .runtime
                                         .handle_structured_message_error(MessageErrorHandling {
                                             domain: &branch.domain,
                                             node_kind: self.kind.as_str(),
                                             node: &self.processor,
-                                            source_route: Some(
-                                                &output_routes.routes[output_index].relay,
-                                            ),
+                                            source_route: Some(&output_relay),
                                             policy: &policy,
                                             message: error.message,
                                             error: error.error,
@@ -5551,8 +5806,6 @@ impl RelayProcessorNode {
                                 }
                             }
                         }
-                    }
-                    for (output_index, messages) in messages_by_output.into_iter().enumerate() {
                         enqueue_correlator_output(
                             CorrelatorOutputContext {
                                 graph,
@@ -5579,6 +5832,7 @@ impl RelayProcessorNode {
                             error_policies: &self.error_policies,
                             input_relays: &self.input_relays,
                             output_routes,
+                            materialized_values: &materialized_values,
                         },
                         batch,
                     )
@@ -5591,6 +5845,7 @@ impl RelayProcessorNode {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                     output_buffers,
                     session,
                 } => {
@@ -5660,8 +5915,10 @@ impl RelayProcessorNode {
                                 file,
                                 inputs,
                                 output_schema,
+                                compiled_input_program,
                                 input_relays: &self.input_relays,
                                 session,
+                                materialized_state: &self.materialized_state,
                             },
                             &mut output_buffers[output_index],
                             output_index,
@@ -5728,7 +5985,9 @@ impl RelayProcessorNode {
                     error_policies: &self.error_policies,
                     input_relays: &self.input_relays,
                     filter_source: ProcessorOutputFilterSource::InputRelays,
-                    resolved_materialized_state: None,
+                    materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
+                        &self.materialized_state,
+                    ),
                 },
                 self.operation.output_routes_mut(),
                 now,
@@ -5756,6 +6015,7 @@ impl RelayProcessorNode {
                             error_policies: &self.error_policies,
                             branch,
                             output_routes,
+                            materialized_state: &self.materialized_state,
                         },
                         state,
                         aggregate,
@@ -5769,24 +6029,24 @@ impl RelayProcessorNode {
                         now,
                     )
                     .await;
-                    if (due || changed)
-                        && let Err(error) = persist_window_processor_live_state(
-                            &branch.runtime,
+                    if due || changed {
+                        replicated_state.mark_live_dirty();
+                        if let Err(error) = snapshot_window_processor_live_state(
                             &self.processor,
                             replicated_state,
                             state,
-                        )
-                        .await
-                    {
-                        branch.runtime.handle_internal_processor_error_for_acks(
-                            &branch.domain,
-                            self.kind.as_str(),
-                            &self.processor,
-                            &self.error_policies,
-                            state.entries.iter().map(|entry| &entry.message.acks),
-                            error,
-                        );
-                        state.clear(aggregate);
+                        ) {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
+                                &self.processor,
+                                &self.error_policies,
+                                state.entries.iter().map(|entry| &entry.message.acks),
+                                error,
+                            );
+                            state.clear(aggregate);
+                            replicated_state.mark_live_dirty();
+                        }
                     }
                 }
                 RelayProcessorOperationNode::Junction { .. } => {}
@@ -5798,12 +6058,15 @@ impl RelayProcessorNode {
                 } => {
                     let mut due_outputs = Vec::new();
                     for (output_index, output_buffer) in output_buffers.iter().enumerate() {
-                        if output_buffer.pending.is_empty() {
+                        if output_buffer.is_empty() {
                             continue;
                         }
-                        let max_time_due = output_buffer.pending.first().is_some_and(|entry| {
-                            checked_add_duration_to_timestamp(entry.received_at, *max_time) <= now
-                        });
+                        let max_time_due =
+                            output_buffer
+                                .first_received_at()
+                                .is_some_and(|received_at| {
+                                    checked_add_duration_to_timestamp(received_at, *max_time) <= now
+                                });
                         let flush_due = output_routes.routes[output_index].flush_deadline_due(now);
                         if max_time_due || flush_due {
                             output_routes.routes[output_index].force_flush_at(now);
@@ -5820,6 +6083,7 @@ impl RelayProcessorNode {
                                 error_policies: &self.error_policies,
                                 output_routes,
                                 input_relays: &self.input_relays,
+                                materialized_state: &self.materialized_state,
                             },
                             &mut output_buffers[output_index],
                             output_index,
@@ -5882,6 +6146,7 @@ impl RelayProcessorNode {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                     output_buffers,
                     session,
                 } => {
@@ -5909,8 +6174,10 @@ impl RelayProcessorNode {
                                 file,
                                 inputs,
                                 output_schema,
+                                compiled_input_program,
                                 input_relays: &self.input_relays,
                                 session,
+                                materialized_state: &self.materialized_state,
                             },
                             &mut output_buffers[output_index],
                             output_index,
@@ -6116,6 +6383,70 @@ impl RelayProcessorNode {
         })
     }
 
+    fn snapshot_live_state(&mut self, branch: &mut BranchRuntime) -> Result<(), String> {
+        let RelayProcessorOperationNode::WindowProcessor {
+            aggregate,
+            state,
+            replicated_state,
+            ..
+        } = &mut self.operation
+        else {
+            return Ok(());
+        };
+        if !replicated_state.live_dirty.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if let Err(error) =
+            snapshot_window_processor_live_state(&self.processor, replicated_state, state)
+        {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                self.kind.as_str(),
+                &self.processor,
+                &self.error_policies,
+                state.entries.iter().map(|entry| &entry.message.acks),
+                error.clone(),
+            );
+            state.clear(aggregate);
+            replicated_state.mark_live_dirty();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn spawn_snapshot_task(
+        &self,
+        runtime: &Runtime,
+        shutdown_tx: &watch::Sender<bool>,
+    ) -> (
+        Option<JoinHandle<()>>,
+        Option<mpsc::Receiver<WindowProcessorSnapshotRequest>>,
+    ) {
+        match &self.operation {
+            RelayProcessorOperationNode::Deduplicator { state, .. } => (
+                runtime.spawn_deduplicator_snapshot_task(shutdown_tx, state.clone()),
+                None,
+            ),
+            RelayProcessorOperationNode::WindowProcessor {
+                replicated_state, ..
+            } => {
+                let (request_tx, request_rx) = mpsc::channel(1);
+                let task = runtime.spawn_window_processor_snapshot_task(
+                    shutdown_tx,
+                    replicated_state.clone(),
+                    request_tx,
+                );
+                let requests = task.is_some().then_some(request_rx);
+                (task, requests)
+            }
+            RelayProcessorOperationNode::Junction { .. }
+            | RelayProcessorOperationNode::Reorderer { .. }
+            | RelayProcessorOperationNode::Correlator { .. }
+            | RelayProcessorOperationNode::Inferencer { .. }
+            | RelayProcessorOperationNode::WasmProcessor { .. } => (None, None),
+        }
+    }
+
     fn next_deadline(&self) -> Option<Timestamp> {
         let operation_deadline = match &self.operation {
             RelayProcessorOperationNode::Deduplicator { .. } => None,
@@ -6131,8 +6462,8 @@ impl RelayProcessorNode {
                 ..
             } => output_buffers
                 .iter()
-                .filter_map(|buffer| buffer.pending.first())
-                .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
+                .filter_map(ReordererOutputBuffer::first_received_at)
+                .map(|received_at| checked_add_duration_to_timestamp(received_at, *max_time))
                 .min(),
             RelayProcessorOperationNode::Correlator {
                 max_time, state, ..
@@ -6287,17 +6618,13 @@ impl RelayProcessorTemplate {
                     max_time: *max_time,
                     compiled_key_program: None,
                     state: runtime
-                        .replicated_deduplicator_state(
-                            runtime.state_placement(
-                                domain,
-                                RuntimeStateKind::Deduplicator,
-                                self.kind,
-                                &self.processor,
-                                key.clone(),
-                            ),
-                            Vec::new(),
-                            0,
-                        )
+                        .replicated_deduplicator_state(runtime.state_placement(
+                            domain,
+                            RuntimeStateKind::Deduplicator,
+                            self.kind,
+                            &self.processor,
+                            key.clone(),
+                        ))
                         .map_err(|error| error.to_string())?,
                 },
                 RelayProcessorOperationTemplate::WindowProcessor {
@@ -6310,18 +6637,13 @@ impl RelayProcessorTemplate {
                     compiled_aggregates,
                 } => {
                     let replicated_state = runtime
-                        .replicated_window_processor_state(
-                            runtime.state_placement(
-                                domain,
-                                RuntimeStateKind::WindowProcessor,
-                                self.kind,
-                                &self.processor,
-                                key.clone(),
-                            ),
-                            None,
-                            Vec::new(),
-                            0,
-                        )
+                        .replicated_window_processor_state(runtime.state_placement(
+                            domain,
+                            RuntimeStateKind::WindowProcessor,
+                            self.kind,
+                            &self.processor,
+                            key.clone(),
+                        ))
                         .map_err(|error| error.to_string())?;
                     let input_relay = self.input_relays.first().ok_or_else(|| {
                         format!(
@@ -6398,6 +6720,7 @@ impl RelayProcessorTemplate {
                     file,
                     inputs,
                     output_schema,
+                    compiled_input_program,
                 } => {
                     let output_routes = Self::instantiate_outputs(output_routes);
                     let output_buffers = (0..output_routes.routes.len())
@@ -6410,6 +6733,7 @@ impl RelayProcessorTemplate {
                         file: file.clone(),
                         inputs: inputs.clone(),
                         output_schema: output_schema.clone(),
+                        compiled_input_program: compiled_input_program.clone(),
                         output_buffers,
                         session: None,
                     }
@@ -6708,6 +7032,15 @@ impl BranchRuntime {
         self.processors
             .get(processor_id)
             .is_some_and(|processor| !processor.pending_materialized.is_empty())
+    }
+
+    fn snapshot_processor_live_state(&mut self, processor_id: &Identifier) -> Result<(), String> {
+        let Some(mut processor) = self.processors.remove(processor_id) else {
+            return Ok(());
+        };
+        let result = processor.snapshot_live_state(self);
+        self.processors.insert(processor_id.clone(), processor);
+        result
     }
 
     async fn retry_processor_pending_materialized(
@@ -7974,6 +8307,14 @@ struct ProcessorBranchInput {
     work: NodeQuiesceWorkGuard,
 }
 
+type WindowProcessorSnapshotRequest = oneshot::Sender<Result<(), String>>;
+
+struct ProcessorSnapshotTask {
+    shutdown_tx: watch::Sender<bool>,
+    task: Option<JoinHandle<()>>,
+    requests: Option<mpsc::Receiver<WindowProcessorSnapshotRequest>>,
+}
+
 #[derive(Debug)]
 struct ProcessorBranchHandoff {
     key: Option<BranchKey>,
@@ -8627,6 +8968,19 @@ fn spawn_processor_branch_task(
     let (input_tx, input_rx) = mpsc::channel(1);
     let (stop_tx, stop_rx) = mpsc::channel(1);
     let processor = template.source.clone();
+    let (snapshot_shutdown_tx, _) = watch::channel(false);
+    let (snapshot_task, snapshot_requests) = branch
+        .processors
+        .get(&processor)
+        .map(|processor| {
+            processor.spawn_snapshot_task(&context.runtime_handle, &snapshot_shutdown_tx)
+        })
+        .unwrap_or((None, None));
+    let snapshot_task = ProcessorSnapshotTask {
+        shutdown_tx: snapshot_shutdown_tx,
+        task: snapshot_task,
+        requests: snapshot_requests,
+    };
     let quiesce_counters = context
         .runtime_handle
         .node_quiesce_counters(&context.domain, &processor);
@@ -8637,12 +8991,41 @@ fn spawn_processor_branch_task(
         input_rx,
         stop_rx,
         quiesce_counters,
+        snapshot_task,
     ));
     Ok(ProcessorBranchTask {
         input: input_tx,
         stop: stop_tx,
         task: parking_lot::Mutex::new(Some(task)),
     })
+}
+
+async fn stop_processor_snapshot_task(
+    branch: &mut BranchRuntime,
+    processor: &Identifier,
+    snapshot: &mut ProcessorSnapshotTask,
+) {
+    if let Some(requests) = snapshot.requests.as_mut() {
+        requests.close();
+        while let Some(response) = requests.recv().await {
+            tokio::task::consume_budget().await;
+            let result = branch.snapshot_processor_live_state(processor);
+            let _ = response.send(result);
+        }
+    }
+    if snapshot.task.is_some() && branch.snapshot_processor_live_state(processor).is_err() {
+        let _ = branch.snapshot_processor_live_state(processor);
+    }
+    snapshot.shutdown_tx.send_replace(true);
+    if let Some(task) = snapshot.task.take()
+        && let Err(error) = task.await
+    {
+        warn!(
+            processor = processor.as_str(),
+            error = %error,
+            "processor state snapshot task join failed"
+        );
+    }
 }
 
 async fn run_processor_branch_task(
@@ -8652,6 +9035,7 @@ async fn run_processor_branch_task(
     mut input: mpsc::Receiver<ProcessorBranchInput>,
     mut stop_rx: mpsc::Receiver<ProcessorBranchStopMode>,
     quiesce_counters: Arc<NodeQuiesceCounters>,
+    mut snapshot: ProcessorSnapshotTask,
 ) {
     let ProcessorRuntimeContext {
         runtime_handle,
@@ -8689,6 +9073,21 @@ async fn run_processor_branch_task(
             mode = stop_rx.recv() => {
                 stop_mode = Some(mode.unwrap_or(ProcessorBranchStopMode::Detach));
                 break;
+            }
+            snapshot_request = async {
+                snapshot.requests
+                    .as_mut()
+                    .expect("enabled window snapshot receiver must exist")
+                    .recv()
+                    .await
+            }, if snapshot.requests.is_some() => {
+                match snapshot_request {
+                    Some(response) => {
+                        let result = branch.snapshot_processor_live_state(&processor);
+                        let _ = response.send(result);
+                    }
+                    None => snapshot.requests = None,
+                }
             }
             received = input.recv() => {
                 match received {
@@ -8730,9 +9129,8 @@ async fn run_processor_branch_task(
         quiesce_gauges.observe(&branch, &processor);
         drop(work);
     }
-    match stop_mode {
-        Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
-        Some(ProcessorBranchStopMode::Handoff(response)) => {
+    let handoff_timestamp = match &stop_mode {
+        Some(ProcessorBranchStopMode::Handoff(_)) => {
             branch
                 .flush_processor_collected_inputs(&graph, &processor)
                 .await;
@@ -8742,6 +9140,21 @@ async fn run_processor_branch_task(
                 .flatten()
                 .unwrap_or_else(current_timestamp);
             branch.force_flush(&graph, now).await;
+            Some(now)
+        }
+        Some(ProcessorBranchStopMode::Detach) | None => {
+            branch
+                .flush_processor_collected_inputs(&graph, &processor)
+                .await;
+            None
+        }
+        Some(ProcessorBranchStopMode::Evict) => None,
+    };
+    stop_processor_snapshot_task(&mut branch, &processor, &mut snapshot).await;
+    match stop_mode {
+        Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
+        Some(ProcessorBranchStopMode::Handoff(response)) => {
+            let restored_at = handoff_timestamp.expect("handoff timestamp must be captured");
             let pending_materialized = branch
                 .processors
                 .get_mut(&processor)
@@ -8749,16 +9162,13 @@ async fn run_processor_branch_task(
                 .unwrap_or_default();
             let handoff = ProcessorBranchHandoff {
                 key: branch.key.clone(),
-                restored_at: now,
+                restored_at,
                 pending_materialized,
             };
             branch.detach();
             let _ = response.send(handoff);
         }
         Some(ProcessorBranchStopMode::Detach) | None => {
-            branch
-                .flush_processor_collected_inputs(&graph, &processor)
-                .await;
             branch.detach();
         }
     }
@@ -8967,6 +9377,18 @@ struct LookupHashMapCall {
     lookup_field: String,
     generated_field: String,
     key_program: Arc<VmCompiledProgram>,
+    /// Identifies the call across output routes. Two routes of one node compile separate programs,
+    /// so the compiled key program cannot be compared; the source expression can.
+    key_expr: Expr,
+}
+
+/// Identity of one `LOOKUP_HASH_MAP` call, shared by every output route that spells it the same
+/// way over the same batch.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct LookupHashMapCallKey {
+    lookup: Identifier,
+    lookup_field: String,
+    key_expr: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -9020,9 +9442,6 @@ fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec
     let mut refs = Vec::new();
     if let Some(filter) = &program.filter {
         collect_expr_field_refs(filter, &mut refs);
-    }
-    for branch_filter in &program.branch_filters {
-        collect_expr_field_refs(branch_filter, &mut refs);
     }
     for (_field_ref, expr) in &program.set {
         collect_expr_field_refs(expr, &mut refs);
@@ -9086,100 +9505,6 @@ fn expr_contains_lookup_hash_map(expr: &SpannedExpr) -> bool {
                     .as_deref()
                     .is_some_and(expr_contains_lookup_hash_map)
         }
-    }
-}
-
-fn expr_same_without_spans(left: &SpannedExpr, right: &SpannedExpr) -> bool {
-    match (&left.inner, &right.inner) {
-        (Expr::Literal(left), Expr::Literal(right)) => left == right,
-        (Expr::FieldRef(left), Expr::FieldRef(right)) => left == right,
-        (
-            Expr::Unary {
-                op: left_op,
-                expr: left_expr,
-            },
-            Expr::Unary {
-                op: right_op,
-                expr: right_expr,
-            },
-        ) => left_op == right_op && expr_same_without_spans(left_expr, right_expr),
-        (
-            Expr::Binary {
-                op: left_op,
-                left: left_left,
-                right: left_right,
-            },
-            Expr::Binary {
-                op: right_op,
-                left: right_left,
-                right: right_right,
-            },
-        ) => {
-            left_op == right_op
-                && expr_same_without_spans(left_left, right_left)
-                && expr_same_without_spans(left_right, right_right)
-        }
-        (
-            Expr::Cast {
-                expr: left_expr,
-                data_type: left_type,
-            },
-            Expr::Cast {
-                expr: right_expr,
-                data_type: right_type,
-            },
-        ) => left_type == right_type && expr_same_without_spans(left_expr, right_expr),
-        (
-            Expr::Call {
-                function: left_function,
-                args: left_args,
-            },
-            Expr::Call {
-                function: right_function,
-                args: right_args,
-            },
-        ) => {
-            left_function == right_function
-                && left_args.len() == right_args.len()
-                && left_args
-                    .iter()
-                    .zip(right_args)
-                    .all(|(left, right)| expr_same_without_spans(left, right))
-        }
-        (
-            Expr::Case {
-                operand: left_operand,
-                branches: left_branches,
-                else_result: left_else,
-            },
-            Expr::Case {
-                operand: right_operand,
-                branches: right_branches,
-                else_result: right_else,
-            },
-        ) => {
-            let operands_match = match (left_operand, right_operand) {
-                (Some(left), Some(right)) => expr_same_without_spans(left, right),
-                (None, None) => true,
-                _ => false,
-            };
-            let else_results_match = match (left_else, right_else) {
-                (Some(left), Some(right)) => expr_same_without_spans(left, right),
-                (None, None) => true,
-                _ => false,
-            };
-            operands_match
-                && else_results_match
-                && left_branches.len() == right_branches.len()
-                && left_branches
-                    .iter()
-                    .zip(right_branches)
-                    .all(|(left, right)| {
-                        expr_same_without_spans(&left.when, &right.when)
-                            && expr_same_without_spans(&left.result, &right.result)
-                    })
-        }
-        _ => false,
     }
 }
 
@@ -9310,7 +9635,7 @@ fn rewrite_lookup_hash_map_expr(
                 let existing = pending_calls.iter().find(|call| {
                     call.lookup == lookup
                         && call.lookup_field == lookup_field
-                        && expr_same_without_spans(&call.key_expr, &args[1])
+                        && call.key_expr.inner == args[1].inner
                 });
                 let generated_field = if let Some(existing) = existing {
                     existing.generated_field.clone()
@@ -9370,12 +9695,6 @@ fn rewrite_lookup_hash_map_program(
             .as_ref()
             .map(|expr| rewrite_lookup_hash_map_expr(expr, available_lookups, &mut pending_calls))
             .transpose()?,
-        branch_filters: parsed
-            .inner
-            .branch_filters
-            .iter()
-            .map(|expr| rewrite_lookup_hash_map_expr(expr, available_lookups, &mut pending_calls))
-            .collect::<Result<Vec<_>, _>>()?,
         set: parsed
             .inner
             .set
@@ -9445,13 +9764,12 @@ fn compile_lookup_hash_map_calls(
         let key_program = nervix_nspl::vm_program::SpannedNode {
             inner: nervix_nspl::vm_program::Program {
                 filter: None,
-                branch_filters: Vec::new(),
                 set: vec![(
                     nervix_nspl::vm_program::FieldRef {
                         relay: writable_namespace.to_string(),
                         field: call.generated_field.clone(),
                     },
-                    call.key_expr,
+                    call.key_expr.clone(),
                 )],
                 invoke: Vec::new(),
             },
@@ -9508,6 +9826,7 @@ fn compile_lookup_hash_map_calls(
             lookup_field: call.lookup_field,
             generated_field: call.generated_field,
             key_program: Arc::new(compiled_key),
+            key_expr: call.key_expr.inner,
         });
     }
     Ok((compiled_calls, Some(lookup_binding)))
@@ -10091,15 +10410,6 @@ fn compile_processor_output_filter_map_program(
             identifier
         ),
     })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
     let inherited_count = if inferencer_tensors.is_some() {
         0
     } else {
@@ -10374,15 +10684,6 @@ fn compile_wasm_output_filter_map_program(
                     identifier
                 ),
             })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
     if !parsed.inner.invoke.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
@@ -10586,12 +10887,7 @@ pub(crate) fn compile_emitter_filter_map_program(
         error_sites,
         context,
     )?;
-    let materialized_interest = body.materialized_interest.clone();
-    Ok(Some(CompiledEmitterFilterMapProgram {
-        body,
-        materialized_interest,
-        codec_route,
-    }))
+    Ok(Some(CompiledEmitterFilterMapProgram { body, codec_route }))
 }
 
 pub(crate) fn compile_sqs_fifo_group_program(
@@ -10972,7 +11268,7 @@ async fn evaluate_constant_expression_vm(
     )
     .await
     .map_err(|error| format!("constant expression execution failed: {error}"))?;
-    if result.selected_rows.as_slice() != [0] {
+    if !result.selected_rows.is_single(0) {
         return Err("constant expression did not produce exactly one row".to_string());
     }
     vm_output_value(&result.batch, 0, OUTPUT_FIELD)?
@@ -11082,10 +11378,7 @@ impl CorrelatorOutputCompileContext<'_> {
             self.construction,
             SemanticNamespaces::new("__invalid_correlator_bare_read", "output"),
         )?;
-        if !parsed.inner.branch_filters.is_empty()
-            || !parsed.inner.invoke.is_empty()
-            || parsed.inner.set.is_empty()
-        {
+        if !parsed.inner.invoke.is_empty() || parsed.inner.set.is_empty() {
             return Err(format!(
                 "correlator '{}' TO output '{}' must contain SET assignments and may contain WHERE",
                 self.processor.as_str(),
@@ -11271,6 +11564,7 @@ struct ReordererFlushContext<'a> {
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
     input_relays: &'a [Identifier],
+    materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
 
 async fn flush_branch_reorderer_output(
@@ -11284,67 +11578,27 @@ async fn flush_branch_reorderer_output(
     let error_policies = context.error_policies;
     let output_routes = context.output_routes;
     let input_relays = context.input_relays;
+    let materialized_state = context.materialized_state;
     let branch = context.branch;
     output_routes.routes[output_index].clear_flush_deadline();
 
-    if output_buffer.pending.is_empty() {
+    if output_buffer.is_empty() {
         return;
     }
-    let Some(input_relay) = input_relays.first() else {
-        output_routes.routes[output_index].clear_flush_deadline();
-        return;
-    };
-    let mut pending = output_buffer.take_pending();
-    pending.sort_by(|left, right| {
-        left.key
-            .cmp(&right.key)
-            .then(left.arrival_sequence.cmp(&right.arrival_sequence))
-    });
-    let messages = pending
-        .drain(..)
-        .map(|entry| entry.message)
-        .collect::<Vec<_>>();
-    let input_schema = match relay_schema_for_runtime(&branch.runtime, &branch.domain, input_relay)
-    {
-        Ok(schema) => schema,
-        Err(error) => {
-            let message_error_policy = output_routes.routes[output_index]
-                .message_error_policy
-                .clone();
-            for message in messages {
-                branch
-                    .runtime
-                    .handle_message_error_with_policy(
-                        &branch.domain,
-                        node_kind,
-                        processor,
-                        &message_error_policy,
-                        message,
-                        MessageErrorFailure::new(
-                            Some(&output_routes.routes[output_index].relay),
-                            error.to_string(),
-                            MessageErrorOperation::Finalize,
-                        ),
-                    )
-                    .await;
-            }
-            output_routes.routes[output_index].clear_flush_deadline();
-            return;
-        }
-    };
-    let batch = match RelayRecordBatch::from_messages(input_schema, messages) {
+    let batch = match output_buffer.take_ordered_batch() {
         Ok(batch) => batch,
-        Err(error) => {
+        Err(failure) => {
+            let failure = *failure;
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
                 node_kind,
                 processor,
                 error_policies,
-                std::iter::empty::<&AckSet>(),
+                failure.batches.iter().flat_map(|batch| batch.acks.iter()),
                 format!(
-                    "reorderer '{}' failed to build output batch: {}",
+                    "reorderer '{}' failed to order buffered Arrow batches: {}",
                     processor.as_str(),
-                    error
+                    failure.error
                 ),
             );
             output_routes.routes[output_index].clear_flush_deadline();
@@ -11361,7 +11615,7 @@ async fn flush_branch_reorderer_output(
             error_policies,
             input_relays,
             filter_source: ProcessorOutputFilterSource::InputRelays,
-            resolved_materialized_state: None,
+            materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(materialized_state),
         },
         output_routes,
         batch,
@@ -11380,6 +11634,164 @@ async fn flush_branch_reorderer_output(
 enum CorrelatorSide {
     Left,
     Right,
+}
+
+#[cfg(test)]
+static CORRELATOR_WHERE_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static CORRELATOR_OUTPUT_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone)]
+struct CorrelatorMaterializedState {
+    left: Arc<HashMap<String, RuntimeValue>>,
+    right: Arc<HashMap<String, RuntimeValue>>,
+}
+
+impl CorrelatorMaterializedState {
+    fn value(&self, name: &str) -> Option<&RuntimeValue> {
+        self.right.get(name).or_else(|| self.left.get(name))
+    }
+
+    fn snapshot(&self) -> HashMap<String, RuntimeValue> {
+        if Arc::ptr_eq(&self.left, &self.right) {
+            return self.right.as_ref().clone();
+        }
+        let mut snapshot = self.left.as_ref().clone();
+        snapshot.extend(
+            self.right
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        snapshot
+    }
+}
+
+struct CorrelatorMatchedBatch {
+    carrier: Arc<RuntimeRecordBatch>,
+    keys: Vec<Option<BranchKey>>,
+    metadata: Vec<RuntimeRecordMetadata>,
+    materialized_state: Vec<CorrelatorMaterializedState>,
+}
+
+impl CorrelatorMatchedBatch {
+    fn from_correlations(
+        correlations: &[(CorrelatorPendingMessage, CorrelatorPendingMessage)],
+        programs: &[&CompiledCorrelatorOutputProgram],
+    ) -> Result<Self, String> {
+        if correlations.is_empty() {
+            return Err("cannot batch zero correlator matches".to_string());
+        }
+        if correlations
+            .iter()
+            .any(|(left, right)| left.message.key != right.message.key)
+        {
+            return Err("correlator match cannot combine different branch keys".to_string());
+        }
+        let left_rows = correlations
+            .iter()
+            .map(|(left, _)| &left.message.record)
+            .collect::<Vec<_>>();
+        let right_rows = correlations
+            .iter()
+            .map(|(_, right)| &right.message.record)
+            .collect::<Vec<_>>();
+        let left = RuntimeRecordBatch::from_rows(
+            left_rows[0].batch().schema(),
+            left_rows.iter().copied(),
+        )?;
+        let right = RuntimeRecordBatch::from_rows(
+            right_rows[0].batch().schema(),
+            right_rows.iter().copied(),
+        )?;
+        let materialized_state = correlations
+            .iter()
+            .map(|(left, right)| CorrelatorMaterializedState {
+                left: left.materialized_state.clone(),
+                right: right.materialized_state.clone(),
+            })
+            .collect::<Vec<_>>();
+        let materialized_fields = Self::materialized_fields(programs)?;
+        let carrier = Arc::new(correlator_input_batch(
+            &left,
+            &right,
+            &materialized_fields,
+            &materialized_state,
+        )?);
+        Ok(Self {
+            carrier,
+            keys: correlations
+                .iter()
+                .map(|(left, _)| left.message.key.clone())
+                .collect(),
+            metadata: correlations
+                .iter()
+                .map(|(left, right)| {
+                    correlator_output_metadata(
+                        left.message.record.metadata(),
+                        right.message.record.metadata(),
+                    )
+                })
+                .collect(),
+            materialized_state,
+        })
+    }
+
+    fn materialized_fields(
+        programs: &[&CompiledCorrelatorOutputProgram],
+    ) -> Result<Vec<StdArc<arrow_schema::Field>>, String> {
+        let mut fields = BTreeMap::<String, StdArc<arrow_schema::Field>>::new();
+        for program in programs {
+            let schemas = std::iter::once(&program.program.compiled.input_schema).chain(
+                program
+                    .program
+                    .lookup_hash_maps
+                    .iter()
+                    .map(|call| &call.key_program.input_schema),
+            );
+            for schema in schemas {
+                for field in schema
+                    .fields()
+                    .iter()
+                    .filter(|field| field.name().starts_with("relay_state."))
+                {
+                    if let Some(existing) = fields.get(field.name())
+                        && existing.as_ref() != field.as_ref()
+                    {
+                        return Err(format!(
+                            "correlator materialized input '{}' has conflicting Arrow fields",
+                            field.name()
+                        ));
+                    }
+                    fields.insert(field.name().clone(), field.clone());
+                }
+            }
+        }
+        Ok(fields.into_values().collect())
+    }
+
+    fn row_count(&self) -> usize {
+        self.carrier.batch().num_rows()
+    }
+
+    fn source_message(&self, row: usize, acks: AckSet) -> Result<RelayMessage, String> {
+        let metadata = self.metadata.get(row).cloned().ok_or_else(|| {
+            format!(
+                "correlator output row {row} is outside {} metadata rows",
+                self.metadata.len()
+            )
+        })?;
+        let key = self.keys.get(row).cloned().ok_or_else(|| {
+            format!(
+                "correlator output row {row} is outside {} branch keys",
+                self.keys.len()
+            )
+        })?;
+        Ok(RelayMessage {
+            key,
+            record: RuntimeRow::new(self.carrier.clone(), row, metadata)?,
+            acks,
+        })
+    }
 }
 
 fn take_correlator_opposite_pending(
@@ -11439,35 +11851,23 @@ async fn correlate_incoming_message(
     execution_now: Timestamp,
 ) -> Result<Option<(CorrelatorPendingMessage, CorrelatorPendingMessage)>, (String, Vec<AckSet>)> {
     let opposite_pending = take_correlator_opposite_pending(state, incoming_side);
-    let mut evaluated = Vec::<(CorrelatorPendingMessage, bool)>::new();
-    let mut pending_iter = opposite_pending.into_iter();
-
-    while let Some(candidate) = pending_iter.next() {
-        let (left, right) = match incoming_side {
-            CorrelatorSide::Left => (&incoming, &candidate),
-            CorrelatorSide::Right => (&candidate, &incoming),
-        };
-        let matched =
-            match evaluate_correlator_where_match(processor, program, left, right, execution_now)
-                .await
-            {
-                Ok(matched) => matched,
-                Err(error) => {
-                    let mut restore = evaluated
-                        .into_iter()
-                        .map(|(pending, _matched)| pending)
-                        .collect::<Vec<_>>();
-                    restore.extend(pending_iter);
-                    restore_correlator_opposite_pending(state, incoming_side, restore);
-                    return Err(error);
-                }
-            };
-        evaluated.push((candidate, matched));
+    if opposite_pending.is_empty() {
+        store_correlator_unmatched_incoming(state, incoming_side, incoming, opposite_pending);
+        return Ok(None);
     }
+    let evaluated = evaluate_correlator_where_matches(
+        processor,
+        program,
+        incoming_side,
+        &incoming,
+        &opposite_pending,
+        execution_now,
+    )
+    .await?;
 
     let mut matching = Vec::new();
     let mut remaining = Vec::new();
-    for (pending, matched) in evaluated {
+    for (pending, matched) in opposite_pending.into_iter().zip(evaluated) {
         if matched {
             matching.push(pending);
         } else {
@@ -11496,33 +11896,77 @@ async fn correlate_incoming_message(
     }))
 }
 
-async fn evaluate_correlator_where_match(
+async fn evaluate_correlator_where_matches(
     processor: &Identifier,
     program: &CompiledCorrelatorWhereProgram,
-    left: &CorrelatorPendingMessage,
-    right: &CorrelatorPendingMessage,
+    incoming_side: CorrelatorSide,
+    incoming: &CorrelatorPendingMessage,
+    candidates: &[CorrelatorPendingMessage],
     execution_now: Timestamp,
-) -> Result<bool, (String, Vec<AckSet>)> {
-    let acks = AckSet::merged([left.message.acks.attached(), right.message.acks.attached()]);
-    let combined =
-        correlator_input_row(&left.message.record, &right.message.record).map_err(|error| {
-            (
-                format!(
-                    "correlator '{}' failed to build CORRELATE WHERE input batch: {}",
-                    processor.as_str(),
-                    error
-                ),
-                vec![acks.clone()],
-            )
-        })?;
-    let keys = vec![left.message.key.clone()];
+) -> Result<Vec<bool>, (String, Vec<AckSet>)> {
+    let error_acks = || {
+        vec![AckSet::merged(
+            std::iter::once(incoming.message.acks.attached()).chain(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.message.acks.attached()),
+            ),
+        )]
+    };
+    let incoming_rows =
+        std::iter::repeat_n(&incoming.message.record, candidates.len()).collect::<Vec<_>>();
+    let candidate_rows = candidates
+        .iter()
+        .map(|candidate| &candidate.message.record)
+        .collect::<Vec<_>>();
+    let (left_rows, right_rows) = match incoming_side {
+        CorrelatorSide::Left => (&incoming_rows, &candidate_rows),
+        CorrelatorSide::Right => (&candidate_rows, &incoming_rows),
+    };
+    let Some(first_left) = left_rows.first() else {
+        return Ok(Vec::new());
+    };
+    let left =
+        RuntimeRecordBatch::from_rows(first_left.batch().schema(), left_rows.iter().copied())
+            .map_err(|error| {
+                (
+                    format!(
+                        "correlator '{}' failed to build batched LEFT CORRELATE WHERE input: {}",
+                        processor.as_str(),
+                        error
+                    ),
+                    error_acks(),
+                )
+            })?;
+    let Some(first_right) = right_rows.first() else {
+        return Ok(Vec::new());
+    };
+    let right =
+        RuntimeRecordBatch::from_rows(first_right.batch().schema(), right_rows.iter().copied())
+            .map_err(|error| {
+                (
+                    format!(
+                        "correlator '{}' failed to build batched RIGHT CORRELATE WHERE input: {}",
+                        processor.as_str(),
+                        error
+                    ),
+                    error_acks(),
+                )
+            })?;
+    let keys = match incoming_side {
+        CorrelatorSide::Left => vec![incoming.message.key.clone(); candidates.len()],
+        CorrelatorSide::Right => candidates
+            .iter()
+            .map(|candidate| candidate.message.key.clone())
+            .collect(),
+    };
     let side_inputs = HashMap::default();
     let lookup_columns = HashMap::default();
     let input = project_vm_input_batch(
         &program.program.input_schema,
         &VmInputProjectionSources {
-            carrier: combined.batch(),
-            namespace_batches: &[],
+            carrier: &left,
+            namespace_batches: &[("left", &left), ("right", &right)],
             strict_namespaces: &["left", "right"],
             keys: &keys,
             side_inputs: &side_inputs,
@@ -11530,6 +11974,7 @@ async fn evaluate_correlator_where_match(
             lookup_columns: &lookup_columns,
             uninitialized: None,
         },
+        None,
     )
     .map_err(|error| {
         (
@@ -11538,9 +11983,11 @@ async fn evaluate_correlator_where_match(
                 processor.as_str(),
                 error
             ),
-            vec![acks.clone()],
+            error_acks(),
         )
     })?;
+    #[cfg(test)]
+    CORRELATOR_WHERE_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
     let result = execute_program_with_selection_in_context(
         &program.program,
         &input,
@@ -11557,43 +12004,80 @@ async fn evaluate_correlator_where_match(
                 processor.as_str(),
                 error
             ),
-            vec![acks.clone()],
+            error_acks(),
         )
     })?;
-    Ok(!result.selected_rows.is_empty())
+    let mut matching = vec![false; candidates.len()];
+    for row in result.selected_rows.iter() {
+        let Some(matched) = matching.get_mut(row) else {
+            return Err((
+                format!(
+                    "correlator '{}' CORRELATE WHERE selected row {} outside its {} candidate \
+                     pairs",
+                    processor.as_str(),
+                    row,
+                    candidates.len()
+                ),
+                error_acks(),
+            ));
+        };
+        *matched = true;
+    }
+    Ok(matching)
 }
 
-fn correlator_input_row(left: &RuntimeRow, right: &RuntimeRow) -> Result<RuntimeRow, String> {
+fn correlator_input_batch(
+    left: &RuntimeRecordBatch,
+    right: &RuntimeRecordBatch,
+    materialized_fields: &[StdArc<arrow_schema::Field>],
+    materialized_state: &[CorrelatorMaterializedState],
+) -> Result<RuntimeRecordBatch, String> {
+    let row_count = left.batch().num_rows();
+    if right.batch().num_rows() != row_count || materialized_state.len() != row_count {
+        return Err(format!(
+            "correlator input has {row_count} left rows, {} right rows, and {} materialized-state \
+             rows",
+            right.batch().num_rows(),
+            materialized_state.len()
+        ));
+    }
     let mut fields = Vec::with_capacity(
-        left.batch().schema().fields().len() + right.batch().schema().fields().len(),
+        left.schema().fields().len() + right.schema().fields().len() + materialized_fields.len(),
     );
     let mut columns = Vec::with_capacity(fields.capacity());
-    for (namespace, row) in [("left", left), ("right", right)] {
-        for (index, field) in row.batch().schema().fields().iter().enumerate() {
+    for (namespace, batch) in [("left", left), ("right", right)] {
+        for (index, field) in batch.schema().fields().iter().enumerate() {
             fields.push(StdArc::new(arrow_schema::Field::new(
                 format!("{namespace}.{}", field.name()),
                 field.data_type().clone(),
                 field.is_nullable(),
             )));
-            columns.push(row.batch().batch().column(index).slice(row.index(), 1));
+            columns.push(batch.batch().column(index).clone());
         }
+    }
+    for field in materialized_fields {
+        let column = runtime_values_input_column(
+            materialized_state
+                .iter()
+                .map(|state| state.value(field.name())),
+            row_count,
+            field,
+        )?;
+        fields.push(field.clone());
+        columns.push(column.to_array_ref());
     }
     let schema = StdArc::new(arrow_schema::Schema::new(fields));
     let batch = if columns.is_empty() {
         RecordBatch::try_new_with_options(
             schema.clone(),
             columns,
-            &arrow_array::RecordBatchOptions::new().with_row_count(Some(1)),
+            &arrow_array::RecordBatchOptions::new().with_row_count(Some(row_count)),
         )
     } else {
         RecordBatch::try_new(schema.clone(), columns)
     }
     .map_err(|error| error.to_string())?;
-    RuntimeRow::new(
-        Arc::new(RuntimeRecordBatch::from_record_batch(schema, batch)?),
-        0,
-        correlator_output_metadata(left.metadata(), right.metadata()),
-    )
+    RuntimeRecordBatch::from_record_batch(schema, batch)
 }
 
 fn correlator_output_metadata(
@@ -11608,49 +12092,90 @@ fn correlator_output_metadata(
     )
 }
 
-async fn evaluate_correlator_output_message(
+type CorrelatorOutputOutcome = Result<Option<RelayMessage>, Box<PlannedMessageError>>;
+
+fn correlator_output_batch_errors(
+    processor: &Identifier,
+    matched: &CorrelatorMatchedBatch,
+    acks: Vec<AckSet>,
+    code: MessageErrorCode,
+    reason: &str,
+    operation: MessageErrorOperation,
+) -> Vec<CorrelatorOutputOutcome> {
+    acks.into_iter()
+        .enumerate()
+        .map(|(row, acks)| {
+            let source = matched
+                .source_message(row, acks)
+                .expect("validated correlator batch rows must remain aligned");
+            Err(Box::new(planned_structured_message_error(
+                source,
+                structured_message_error(
+                    code,
+                    format!("correlator '{}' {reason}", processor.as_str()),
+                    operation,
+                    None,
+                    std::iter::empty(),
+                ),
+                None,
+                matched.materialized_state[row].snapshot(),
+            )))
+        })
+        .collect()
+}
+
+async fn evaluate_correlator_output_batch(
     processor: &Identifier,
     program: &CompiledCorrelatorOutputProgram,
-    key: Option<BranchKey>,
-    combined: RuntimeRow,
-    materialized_state: &HashMap<String, RuntimeValue>,
-    acks: AckSet,
+    matched: &CorrelatorMatchedBatch,
+    acks: Vec<AckSet>,
     execution_now: Timestamp,
-) -> Result<Option<RelayMessage>, Box<PlannedMessageError>> {
-    let source_message = RelayMessage {
-        key: key.clone(),
-        record: combined.clone(),
-        acks,
-    };
-    let keys = vec![key];
-    let lookup_columns = compute_lookup_hash_map_columns(
+) -> Result<Vec<CorrelatorOutputOutcome>, (String, Vec<AckSet>)> {
+    let row_count = matched.row_count();
+    if matched.keys.len() != row_count
+        || matched.metadata.len() != row_count
+        || matched.materialized_state.len() != row_count
+        || acks.len() != row_count
+    {
+        return Err((
+            format!(
+                "correlator output has {row_count} Arrow rows, {} branch keys, {} metadata rows, \
+                 {} materialized-state rows, and {} ACK sets",
+                matched.keys.len(),
+                matched.metadata.len(),
+                matched.materialized_state.len(),
+                acks.len()
+            ),
+            acks,
+        ));
+    }
+    let side_inputs = HashMap::default();
+    let lookup_columns = match compute_lookup_hash_map_columns(
         &program.program,
-        combined.batch(),
-        &[],
-        &keys,
-        materialized_state,
-        None,
+        &FilterMapBatchInputs {
+            carrier: &matched.carrier,
+            namespace_batches: &[],
+            keys: &matched.keys,
+            side_inputs: &side_inputs,
+            ingest_metadata: None,
+        },
         execution_now,
+        None,
     )
     .await
-    .map_err(|error| {
-        Box::new(planned_structured_message_error(
-            source_message.clone(),
-            structured_message_error(
+    {
+        Ok(columns) => columns,
+        Err(error) => {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
                 MessageErrorCode::Evaluation,
-                format!(
-                    "correlator '{}' failed to prepare TO output lookup inputs: {}",
-                    processor.as_str(),
-                    error
-                ),
+                &format!("failed to prepare TO output lookup inputs: {error}"),
                 MessageErrorOperation::Set,
-                None,
-                std::iter::empty(),
-            ),
-            None,
-            materialized_state.clone(),
-        ))
-    })?;
+            ));
+        }
+    };
     let uninitialized = VmUninitializedInput {
         fields: program
             .program
@@ -11662,38 +12187,35 @@ async fn evaluate_correlator_output_message(
             .map(|field| field.name().clone())
             .collect(),
     };
-    let input = project_vm_input_batch(
+    let input = match project_vm_input_batch(
         &program.program.compiled.input_schema,
         &VmInputProjectionSources {
-            carrier: combined.batch(),
+            carrier: &matched.carrier,
             namespace_batches: &[],
             strict_namespaces: &["left", "right"],
-            keys: &keys,
-            side_inputs: materialized_state,
+            keys: &matched.keys,
+            side_inputs: &side_inputs,
             ingest_metadata: None,
             lookup_columns: &lookup_columns,
             uninitialized: Some(&uninitialized),
         },
-    )
-    .map_err(|error| {
-        Box::new(planned_structured_message_error(
-            source_message.clone(),
-            structured_message_error(
+        None,
+    ) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
                 MessageErrorCode::Internal,
-                format!(
-                    "correlator '{}' failed to build TO output input batch: {}",
-                    processor.as_str(),
-                    error
-                ),
+                &format!("failed to build TO output input batch: {error}"),
                 MessageErrorOperation::Set,
-                None,
-                std::iter::empty(),
-            ),
-            None,
-            materialized_state.clone(),
-        ))
-    })?;
-    let result = execute_program_with_selection_in_context(
+            ));
+        }
+    };
+    #[cfg(test)]
+    CORRELATOR_OUTPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    let result = match execute_program_with_selection_in_context(
         &program.program.compiled,
         &input,
         &VmExecutionContext {
@@ -11702,110 +12224,177 @@ async fn evaluate_correlator_output_message(
         },
     )
     .await
-    .map_err(|error| {
-        Box::new(planned_structured_message_error(
-            source_message.clone(),
-            structured_message_error(
+    {
+        Ok(result) => result,
+        Err(error) => {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
                 MessageErrorCode::Internal,
-                format!(
-                    "correlator '{}' failed to evaluate TO output: {}",
-                    processor.as_str(),
-                    error
-                ),
+                &format!("failed to evaluate TO output: {error}"),
                 MessageErrorOperation::Set,
-                None,
-                std::iter::empty(),
+            ));
+        }
+    };
+    if result.selected_rows.len() != result.batch.row_count() {
+        return Ok(correlator_output_batch_errors(
+            processor,
+            matched,
+            acks,
+            MessageErrorCode::Internal,
+            &format!(
+                "TO output produced {} rows for {} selected correlations",
+                result.batch.row_count(),
+                result.selected_rows.len()
             ),
-            None,
-            materialized_state.clone(),
-        ))
-    })?;
-    if result.selected_rows.is_empty() {
-        source_message.acks.ack_success();
-        return Ok(None);
+            MessageErrorOperation::Finalize,
+        ));
     }
-    if result.selected_rows.len() != 1 || result.batch.row_count() != 1 {
-        return Err(Box::new(planned_structured_message_error(
-            source_message,
-            structured_message_error(
+    let mut seen = vec![false; row_count];
+    for input_row in result.selected_rows.iter() {
+        let Some(selected) = seen.get_mut(input_row) else {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
                 MessageErrorCode::Internal,
-                format!(
-                    "correlator '{}' TO output produced {} rows for one correlation",
-                    processor.as_str(),
-                    result.batch.row_count()
-                ),
+                &format!("TO output selected row {input_row} outside its {row_count} correlations"),
                 MessageErrorOperation::Finalize,
-                None,
-                std::iter::empty(),
-            ),
-            None,
-            HashMap::default(),
-        )));
+            ));
+        };
+        if *selected {
+            return Ok(correlator_output_batch_errors(
+                processor,
+                matched,
+                acks,
+                MessageErrorCode::Internal,
+                &format!("TO output selected correlation row {input_row} more than once"),
+                MessageErrorOperation::Finalize,
+            ));
+        }
+        *selected = true;
     }
-    if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-        let partial_output = vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok();
-        let materialized_state = materialized_state.clone();
-        return Err(Box::new(planned_structured_message_error(
-            source_message,
-            program.program.structured_side_error(
-                format!(
-                    "correlator '{}' TO output side error {}: {} at {}",
-                    processor.as_str(),
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
+    let mut pending_acks = acks.into_iter().map(Some).collect::<Vec<_>>();
+    let mut outcomes = (0..row_count).map(|_| None).collect::<Vec<_>>();
+    let mut successful = Vec::<(usize, usize, RelayMessage)>::new();
+    for (output_row, input_row) in result.selected_rows.iter().enumerate() {
+        let acks = pending_acks[input_row]
+            .take()
+            .expect("validated correlator selection must consume each ACK once");
+        let source = matched
+            .source_message(input_row, acks)
+            .expect("validated correlator rows must remain aligned");
+        if let Some(side_error) = result.batch.errors().row(output_row).first() {
+            outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
+                source,
+                program.program.structured_side_error(
+                    format!(
+                        "correlator '{}' TO output side error {}: {} at {}",
+                        processor.as_str(),
+                        side_error.code.as_str(),
+                        side_error.message,
+                        side_error.span
+                    ),
+                    side_error.span,
+                    MessageErrorOperation::Set,
                 ),
-                side_error.span,
-                MessageErrorOperation::Set,
-            ),
-            partial_output,
-            materialized_state,
-        )));
-    }
-    let RelayMessage { key, acks, .. } = source_message;
-    let output =
-        vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0]).map_err(|error| {
-            Box::new(planned_structured_message_error(
-                RelayMessage {
-                    key: key.clone(),
-                    record: combined.clone(),
-                    acks: acks.clone(),
-                },
+                vm_partial_output_row_to_runtime_batch(&result.batch, output_row).ok(),
+                matched.materialized_state[input_row].snapshot(),
+            ))));
+            continue;
+        }
+        let invalid_fields = invalid_output_fields(&result.batch, output_row);
+        if !invalid_fields.is_empty() {
+            outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
+                source,
                 structured_message_error(
                     MessageErrorCode::Validation,
                     format!(
-                        "correlator '{}' failed to finalize TO output row: {}",
-                        processor.as_str(),
-                        error
+                        "correlator '{}' failed to finalize TO output row",
+                        processor.as_str()
                     ),
                     MessageErrorOperation::Finalize,
                     None,
-                    invalid_output_fields(&result.batch, 0),
+                    invalid_fields,
                 ),
-                vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok(),
-                materialized_state.clone(),
-            ))
-        })?;
-    let record =
-        RuntimeRow::new(Arc::new(output), 0, combined.metadata().clone()).map_err(|error| {
-            Box::new(planned_structured_message_error(
-                RelayMessage {
-                    key: key.clone(),
-                    record: combined,
-                    acks: acks.clone(),
-                },
-                structured_message_error(
-                    MessageErrorCode::Internal,
-                    error,
-                    MessageErrorOperation::Finalize,
-                    None,
-                    std::iter::empty(),
-                ),
-                None,
-                materialized_state.clone(),
-            ))
-        })?;
-    Ok(Some(RelayMessage { key, record, acks }))
+                vm_partial_output_row_to_runtime_batch(&result.batch, output_row).ok(),
+                matched.materialized_state[input_row].snapshot(),
+            ))));
+            continue;
+        }
+        successful.push((output_row, input_row, source));
+    }
+    for (input_row, acks) in pending_acks.into_iter().enumerate() {
+        if let Some(acks) = acks {
+            acks.ack_success();
+            outcomes[input_row] = Some(Ok(None));
+        }
+    }
+
+    if !successful.is_empty() {
+        let output_rows = successful
+            .iter()
+            .map(|(output_row, _, _)| *output_row)
+            .collect::<Vec<_>>();
+        match vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &output_rows) {
+            Ok(output) => {
+                let output = Arc::new(output);
+                for (output_row, (_, input_row, source)) in successful.into_iter().enumerate() {
+                    match RuntimeRow::new(
+                        output.clone(),
+                        output_row,
+                        matched.metadata[input_row].clone(),
+                    ) {
+                        Ok(record) => {
+                            let RelayMessage { key, acks, .. } = source;
+                            outcomes[input_row] =
+                                Some(Ok(Some(RelayMessage { key, record, acks })));
+                        }
+                        Err(error) => {
+                            outcomes[input_row] =
+                                Some(Err(Box::new(planned_structured_message_error(
+                                    source,
+                                    structured_message_error(
+                                        MessageErrorCode::Internal,
+                                        error,
+                                        MessageErrorOperation::Finalize,
+                                        None,
+                                        std::iter::empty(),
+                                    ),
+                                    None,
+                                    matched.materialized_state[input_row].snapshot(),
+                                ))));
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                for (output_row, input_row, source) in successful {
+                    outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
+                        source,
+                        structured_message_error(
+                            MessageErrorCode::Validation,
+                            format!(
+                                "correlator '{}' failed to finalize TO output row: {error}",
+                                processor.as_str()
+                            ),
+                            MessageErrorOperation::Finalize,
+                            None,
+                            invalid_output_fields(&result.batch, output_row),
+                        ),
+                        vm_partial_output_row_to_runtime_batch(&result.batch, output_row).ok(),
+                        matched.materialized_state[input_row].snapshot(),
+                    ))));
+                }
+            }
+        }
+    }
+
+    Ok(outcomes
+        .into_iter()
+        .map(|outcome| outcome.expect("every correlator input row must produce an outcome"))
+        .collect())
 }
 
 struct CorrelatorOutputContext<'a> {
@@ -12045,15 +12634,6 @@ fn compile_ingestor_filter_map_program(
             ),
         },
     )?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
     let inherited_count = parsed
         .inner
         .set
@@ -12242,11 +12822,8 @@ fn ingestor_filter_map_metadata_arrow_schema(
     source: &IngestSource,
 ) -> Option<StdArc<arrow_schema::Schema>> {
     match source {
-        IngestSource::Kafka { .. } => Some(StdArc::new(arrow_schema::Schema::new(vec![
-            arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
-            arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
-            arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
-        ]))),
+        IngestSource::Kafka { .. } => Some(IngestFilterMapMetadata::kafka_arrow_schema()),
+        IngestSource::Syslog { .. } => Some(IngestFilterMapMetadata::syslog_arrow_schema()),
         _ => None,
     }
 }
@@ -12271,7 +12848,7 @@ pub(crate) async fn execute_filter_map_on_record(
             carrier: &carrier,
             record_metadata: &metadata,
             keys: &keys,
-            filter_map_metadata: filter_map_metadata.map(std::slice::from_ref),
+            filter_map_metadata,
             side_inputs,
         },
         execution_now,
@@ -12300,7 +12877,7 @@ struct FilterMapOutcomeInputs<'a> {
     carrier: &'a RuntimeRecordBatch,
     record_metadata: &'a [RuntimeRecordMetadata],
     keys: &'a [Option<BranchKey>],
-    filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
+    filter_map_metadata: Option<&'a IngestFilterMapMetadata>,
     side_inputs: &'a HashMap<String, RuntimeValue>,
 }
 
@@ -12355,6 +12932,7 @@ async fn evaluate_filter_map_on_batch(
         },
         execution_now,
         (0..row_count).map(|_| AckSet::empty()).collect(),
+        None,
     )
     .await
     .map_err(|error| error.reason)?;
@@ -12374,7 +12952,7 @@ async fn evaluate_filter_map_on_batch(
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
     let mut successful_output_rows = Vec::new();
     let mut successful_input_rows = Vec::new();
-    for (output_row, input_row) in executed.selected_rows.iter().copied().enumerate() {
+    for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         let (Some(slot), Some(metadata)) = (
             outcomes.get_mut(input_row),
             record_metadata.get(input_row).cloned(),
@@ -12538,14 +13116,59 @@ struct ProcessorOutputDispatchContext<'a> {
     error_policies: &'a ErrorPolicies,
     input_relays: &'a [Identifier],
     filter_source: ProcessorOutputFilterSource<'a>,
-    resolved_materialized_state: Option<&'a HashMap<String, RuntimeValue>>,
+    materialized_state: ProcessorMaterializedState<'a>,
 }
 
-struct PendingProcessorOutputMessage {
-    row: usize,
-    output_index: usize,
-    key: Option<BranchKey>,
-    record: RuntimeRow,
+/// How a dispatched batch obtains the node-wide materialized state its output routes read.
+///
+/// Materialized dependencies are declared once per node, so every route of a batch reads one
+/// snapshot. Resolving them per route would repeat state-store reads and, because a raw read
+/// applies no policy, would silently drop `DEFAULT` values.
+enum ProcessorMaterializedState<'a> {
+    /// The node resolved its declared dependencies while admitting this batch, so route
+    /// construction reuses that exact snapshot.
+    Admitted(&'a HashMap<String, RuntimeValue>),
+    /// The batch was buffered past admission, so the node-wide dependencies are resolved again
+    /// against the dispatched batch's own branch.
+    ResolvedAtDispatch(&'a [nervix_models::MaterializedStateDependency]),
+}
+
+impl ProcessorMaterializedState<'_> {
+    /// Resolves the node-wide dependencies once for a dispatched batch.
+    ///
+    /// `REQUIRED SKIP` and `REQUIRED WAIT` gate a node's *input*; reaching either here means the
+    /// state backing already-admitted work disappeared, which branch eviction is expected to
+    /// prevent by dropping that buffered work with the branch.
+    async fn resolve(
+        &self,
+        runtime: &Runtime,
+        domain: &Domain,
+        node_kind: &str,
+        node: &Identifier,
+        branch_key: &Option<BranchKey>,
+    ) -> Result<HashMap<String, RuntimeValue>, String> {
+        match self {
+            Self::Admitted(values) => Ok((*values).clone()),
+            Self::ResolvedAtDispatch(dependencies) => {
+                match runtime
+                    .resolve_materialized_dependencies(domain, branch_key, dependencies)
+                    .await?
+                {
+                    MaterializedDependencyResolution::Ready(values) => Ok(values),
+                    MaterializedDependencyResolution::Skip => Err(format!(
+                        "{node_kind} '{}' requires materialized state that was evicted after the \
+                         batch was admitted",
+                        node.as_str()
+                    )),
+                    MaterializedDependencyResolution::Wait => Err(format!(
+                        "{node_kind} '{}' awaits materialized state that was evicted after the \
+                         batch was admitted",
+                        node.as_str()
+                    )),
+                }
+            }
+        }
+    }
 }
 
 struct PendingProcessorOutputBatch {
@@ -12625,126 +13248,143 @@ fn processor_output_input_sensitivity(
         .unwrap_or_default()
 }
 
+/// Work that every output route of one dispatched batch shares.
+///
+/// Output routes differ only in their construction: the node-wide materialized snapshot, the
+/// execution clock, the relay schemas and the columns projected from the carrier batch are the
+/// same for all of them. Resolving those once per batch keeps a fan-out node from repeating
+/// state-store reads, relay-schema lookups and lookup-key programs per route.
+struct ProcessorOutputBatchScope {
+    side_inputs: HashMap<String, RuntimeValue>,
+    state_snapshot: HashMap<String, RuntimeValue>,
+    execution_now: Timestamp,
+    /// Indexed by output route. Only routes this dispatch selected are resolved; a single-route
+    /// flush must not be aborted by an unrelated route whose relay schema is missing.
+    output_schemas: Vec<Option<Arc<CompiledSchema>>>,
+    shared: SharedBatchColumns,
+}
+
+/// Compiles an output route's FILTER-MAP program once and caches it on the route.
+///
+/// Kept separate from evaluation so every selected route is compiled before the batch scope is
+/// built: the scope's materialized snapshot has to cover all of their programs.
+fn compile_processor_output_program(
+    context: &mut ProcessorOutputDispatchContext<'_>,
+    output: &mut RelayProcessorOutputNode,
+    batch: &RelayRecordBatch,
+    output_schema: &Arc<CompiledSchema>,
+) -> Result<(), PlannedGeneralError> {
+    if output.compiled_program.is_some() {
+        return Ok(());
+    }
+    let input_relays = context.filter_source.relays(context.input_relays);
+    let materialized_stream_specs = materialized_stream_specs_for_graph(
+        &context.branch.runtime,
+        &context.branch.domain,
+        context.graph,
+    );
+    let current_branching = input_relays
+        .first()
+        .and_then(|relay| {
+            context
+                .branch
+                .runtime
+                .executions
+                .get(&context.branch.domain)
+                .and_then(|execution| execution.relay_branchings.get(relay).cloned())
+        })
+        .unwrap_or_default();
+    let current_branch_schema = input_relays.first().and_then(|relay| {
+        relay_branch_schema_for_runtime(&context.branch.runtime, &context.branch.domain, relay)
+    });
+    let available_lookups = context
+        .branch
+        .runtime
+        .executions
+        .get(&context.branch.domain)
+        .map(|execution| execution.lookups.clone())
+        .unwrap_or_default();
+    let udfs = context
+        .branch
+        .runtime
+        .executions
+        .get(&context.branch.domain)
+        .map(|execution| execution.udfs.clone());
+    let input_sensitivity = processor_output_input_sensitivity(context.branch, &input_relays);
+    let compile_context = RuntimeVmCompileContext {
+        available_materialized_streams: &materialized_stream_specs,
+        available_lookups: &available_lookups,
+        current_branching: &current_branching,
+        current_branch_schema: current_branch_schema.as_ref(),
+        current_branch_sensitivity: None,
+        udfs: udfs.as_ref(),
+    };
+    let compiled = match context.filter_source {
+        ProcessorOutputFilterSource::OutputRelay => compile_finalized_output_filter_program(
+            &context.branch.domain,
+            context.processor,
+            output.construction.where_clause.as_ref(),
+            output_schema.arrow_schema(),
+            output_schema.vm_sensitivity(),
+            compile_context,
+        ),
+        ProcessorOutputFilterSource::InputRelays | ProcessorOutputFilterSource::Inferencer(_) => {
+            compile_processor_output_filter_map_program(
+                RuntimeCompileTarget {
+                    domain: &context.branch.domain,
+                    identifier: context.processor,
+                },
+                &input_relays,
+                &output.relay,
+                &output.construction,
+                RuntimeVmSchemaPair {
+                    input: batch.arrow_schema(),
+                    input_sensitivity,
+                    output: output_schema.arrow_schema(),
+                    output_sensitivity: output_schema.vm_sensitivity(),
+                },
+                context.filter_source.inferencer_tensors(),
+                compile_context,
+            )
+        }
+    };
+    match compiled {
+        Ok(program) => {
+            output.compiled_program = program;
+            Ok(())
+        }
+        Err(error) => Err(PlannedGeneralError {
+            acks: batch.acks.clone(),
+            reason: error.to_string(),
+        }),
+    }
+}
+
 async fn evaluate_processor_output_events(
     context: &mut ProcessorOutputDispatchContext<'_>,
     output: &mut RelayProcessorOutputNode,
     output_index: usize,
     batch: &RelayRecordBatch,
+    scope: &mut ProcessorOutputBatchScope,
 ) -> Result<
     (
-        Vec<PendingProcessorOutputMessage>,
         Vec<PendingProcessorOutputBatch>,
         Vec<PendingProcessorOutputMessageError>,
     ),
     PlannedGeneralError,
 > {
-    let input_relays = context.filter_source.relays(context.input_relays);
-    if output.compiled_program.is_none() {
-        let materialized_stream_specs = materialized_stream_specs_for_graph(
-            &context.branch.runtime,
-            &context.branch.domain,
-            context.graph,
-        );
-        let current_branching = input_relays
-            .first()
-            .and_then(|relay| {
-                context
-                    .branch
-                    .runtime
-                    .executions
-                    .get(&context.branch.domain)
-                    .and_then(|execution| execution.relay_branchings.get(relay).cloned())
-            })
-            .unwrap_or_default();
-        let current_branch_schema = input_relays.first().and_then(|relay| {
-            relay_branch_schema_for_runtime(&context.branch.runtime, &context.branch.domain, relay)
-        });
-        let available_lookups = context
-            .branch
-            .runtime
-            .executions
-            .get(&context.branch.domain)
-            .map(|execution| execution.lookups.clone())
-            .unwrap_or_default();
-        let udfs = context
-            .branch
-            .runtime
-            .executions
-            .get(&context.branch.domain)
-            .map(|execution| execution.udfs.clone());
-        let output_schema = match relay_schema_for_runtime(
-            &context.branch.runtime,
-            &context.branch.domain,
-            &output.relay,
-        ) {
-            Ok(schema) => schema,
-            Err(error) => {
-                return Err(PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: error.to_string(),
-                });
-            }
-        };
-        let input_sensitivity = processor_output_input_sensitivity(context.branch, &input_relays);
-        let compile_context = RuntimeVmCompileContext {
-            available_materialized_streams: &materialized_stream_specs,
-            available_lookups: &available_lookups,
-            current_branching: &current_branching,
-            current_branch_schema: current_branch_schema.as_ref(),
-            current_branch_sensitivity: None,
-            udfs: udfs.as_ref(),
-        };
-        let compiled = match context.filter_source {
-            ProcessorOutputFilterSource::OutputRelay => compile_finalized_output_filter_program(
-                &context.branch.domain,
-                context.processor,
-                output.construction.where_clause.as_ref(),
-                output_schema.arrow_schema(),
-                output_schema.vm_sensitivity(),
-                compile_context,
-            ),
-            ProcessorOutputFilterSource::InputRelays
-            | ProcessorOutputFilterSource::Inferencer(_) => {
-                compile_processor_output_filter_map_program(
-                    RuntimeCompileTarget {
-                        domain: &context.branch.domain,
-                        identifier: context.processor,
-                    },
-                    &input_relays,
-                    &output.relay,
-                    &output.construction,
-                    RuntimeVmSchemaPair {
-                        input: batch.arrow_schema(),
-                        input_sensitivity,
-                        output: output_schema.arrow_schema(),
-                        output_sensitivity: output_schema.vm_sensitivity(),
-                    },
-                    context.filter_source.inferencer_tensors(),
-                    compile_context,
-                )
-            }
-        };
-        match compiled {
-            Ok(program) => output.compiled_program = program,
-            Err(error) => {
-                return Err(PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: error.to_string(),
-                });
-            }
-        }
-    }
-
-    let Some(program) = output.compiled_program.as_ref() else {
-        let output_schema = relay_schema_for_runtime(
-            &context.branch.runtime,
-            &context.branch.domain,
-            &output.relay,
-        )
-        .map_err(|error| PlannedGeneralError {
+    let Some(output_schema) = scope.output_schemas[output_index].clone() else {
+        return Err(PlannedGeneralError {
             acks: batch.acks.clone(),
-            reason: error.to_string(),
-        })?;
+            reason: format!(
+                "{} '{}' evaluated output route '{}' without preparing its relay schema",
+                context.node_kind,
+                context.processor.as_str(),
+                output.relay.as_str()
+            ),
+        });
+    };
+    let Some(program) = output.compiled_program.as_ref() else {
         let projected = batch
             .batch
             .project(output_schema.arrow_schema())
@@ -12759,7 +13399,6 @@ async fn evaluate_processor_output_events(
                 ),
             })?;
         return Ok((
-            Vec::new(),
             vec![PendingProcessorOutputBatch {
                 output_index,
                 input_rows: (0..projected.batch().num_rows()).collect(),
@@ -12771,43 +13410,6 @@ async fn evaluate_processor_output_events(
         ));
     };
 
-    let execution_now = context
-        .branch
-        .runtime
-        .current_stream_expiration_time(&context.branch.domain)
-        .ok()
-        .flatten()
-        .unwrap_or_else(current_timestamp);
-    let side_inputs = if let Some(resolved) = context.resolved_materialized_state {
-        resolved.clone()
-    } else {
-        let owner_nodes = context
-            .branch
-            .runtime
-            .executions
-            .get(&context.branch.domain)
-            .map(|execution| execution.materialized_stream_owner_nodes.clone())
-            .unwrap_or_default();
-        context
-            .branch
-            .runtime
-            .load_materialized_side_inputs(
-                &context.branch.domain,
-                &batch.key,
-                &program.materialized_interest,
-                &owner_nodes,
-            )
-            .await
-            .map_err(|error| PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "{} '{}' failed to load materialized side inputs: {}",
-                    context.node_kind,
-                    context.processor.as_str(),
-                    error
-                ),
-            })?
-    };
     let executed = execute_filter_map_program_on_batch(
         context.node_kind,
         context.processor,
@@ -12816,31 +13418,18 @@ async fn evaluate_processor_output_events(
             carrier: &batch.batch,
             namespace_batches: &[],
             keys: &batch.keys,
-            side_inputs: &side_inputs,
+            side_inputs: &scope.side_inputs,
             ingest_metadata: None,
         },
-        execution_now,
+        scope.execution_now,
         batch.acks.clone(),
+        Some(&mut scope.shared),
     )
     .await?;
-    let state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
-    let output_schema = match relay_schema_for_runtime(
-        &context.branch.runtime,
-        &context.branch.domain,
-        &output.relay,
-    ) {
-        Ok(schema) => schema,
-        Err(error) => {
-            return Err(PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: error.to_string(),
-            });
-        }
-    };
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
-    for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
+    for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output =
                 vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();
@@ -12872,7 +13461,7 @@ async fn evaluate_processor_output_events(
                     MessageErrorOperation::Set,
                 ),
                 partial_output,
-                materialized_state: state_snapshot.clone(),
+                materialized_state: scope.state_snapshot.clone(),
             });
             continue;
         }
@@ -12916,7 +13505,7 @@ async fn evaluate_processor_output_events(
             metadata,
         }]
     };
-    Ok((Vec::new(), output_batches, message_errors))
+    Ok((output_batches, message_errors))
 }
 
 async fn dispatch_processor_outputs(
@@ -12952,19 +13541,112 @@ async fn dispatch_selected_processor_outputs(
         .iter()
         .map(|output| output.relay.clone())
         .collect::<Vec<_>>();
+    let selects_output =
+        |output_index: usize| selected_output.is_none_or(|selected| selected == output_index);
 
-    let mut pending_messages = Vec::new();
+    let mut output_schemas = vec![None; output_relays.len()];
+    for (output_index, output) in outputs.routes.iter_mut().enumerate() {
+        if !selects_output(output_index) {
+            continue;
+        }
+        tokio::task::consume_budget().await;
+        let output_schema = match relay_schema_for_runtime(
+            &context.branch.runtime,
+            &context.branch.domain,
+            &output_relays[output_index],
+        ) {
+            Ok(schema) => schema,
+            Err(error) => {
+                context
+                    .branch
+                    .runtime
+                    .handle_internal_processor_error_for_acks(
+                        &context.branch.domain,
+                        context.node_kind,
+                        context.processor,
+                        context.error_policies,
+                        batch.acks.iter(),
+                        error.to_string(),
+                    );
+                return None;
+            }
+        };
+        if let Err(error) =
+            compile_processor_output_program(&mut context, output, &batch, &output_schema)
+        {
+            context
+                .branch
+                .runtime
+                .handle_internal_processor_error_for_acks(
+                    &context.branch.domain,
+                    context.node_kind,
+                    context.processor,
+                    context.error_policies,
+                    error.acks.iter(),
+                    error.reason,
+                );
+            return None;
+        }
+        output_schemas[output_index] = Some(output_schema);
+    }
+
+    // Resolved before any route is evaluated so a state failure cannot discard routes that were
+    // already evaluated, and so every route of this batch observes one snapshot.
+    let side_inputs = match context
+        .materialized_state
+        .resolve(
+            &context.branch.runtime,
+            &context.branch.domain,
+            context.node_kind,
+            context.processor,
+            &batch.key,
+        )
+        .await
+    {
+        Ok(side_inputs) => side_inputs,
+        Err(reason) => {
+            context
+                .branch
+                .runtime
+                .handle_internal_processor_error_for_acks(
+                    &context.branch.domain,
+                    context.node_kind,
+                    context.processor,
+                    context.error_policies,
+                    batch.acks.iter(),
+                    reason,
+                );
+            return None;
+        }
+    };
+    let execution_now = context
+        .branch
+        .runtime
+        .current_stream_expiration_time(&context.branch.domain)
+        .ok()
+        .flatten()
+        .unwrap_or_else(current_timestamp);
+    let mut scope = ProcessorOutputBatchScope {
+        state_snapshot: relay_state_snapshot_from_side_inputs(&side_inputs),
+        side_inputs,
+        execution_now,
+        output_schemas,
+        shared: SharedBatchColumns::default(),
+    };
+
     let mut pending_batches = Vec::new();
     let mut pending_errors = Vec::new();
     for (output_index, output) in outputs.routes.iter_mut().enumerate() {
-        if selected_output.is_some_and(|selected| selected != output_index) {
+        if !selects_output(output_index) {
             continue;
         }
-        let (messages, batches, errors) = match evaluate_processor_output_events(
+        tokio::task::consume_budget().await;
+        let (batches, errors) = match evaluate_processor_output_events(
             &mut context,
             output,
             output_index,
             &batch,
+            &mut scope,
         )
         .await
         {
@@ -12984,15 +13666,11 @@ async fn dispatch_selected_processor_outputs(
                 return None;
             }
         };
-        pending_messages.extend(messages);
         pending_batches.extend(batches);
         pending_errors.extend(errors.into_iter().map(|error| (output_index, error)));
     }
 
     let mut delivery_counts = vec![0usize; batch.acks.len()];
-    for message in &pending_messages {
-        delivery_counts[message.row] += 1;
-    }
     for pending_batch in &pending_batches {
         for row in &pending_batch.input_rows {
             delivery_counts[*row] += 1;
@@ -13019,18 +13697,7 @@ async fn dispatch_selected_processor_outputs(
         ack_queues.push(queue);
     }
 
-    let mut messages_by_output = vec![Vec::new(); output_relays.len()];
     let mut batches_by_output = vec![Vec::new(); output_relays.len()];
-    for message in pending_messages {
-        let Some(acks) = ack_queues[message.row].pop_front() else {
-            continue;
-        };
-        messages_by_output[message.output_index].push(RelayMessage {
-            key: message.key,
-            record: message.record,
-            acks,
-        });
-    }
     for pending_batch in pending_batches {
         let mut batch_acks = Vec::with_capacity(pending_batch.input_rows.len());
         for row in &pending_batch.input_rows {
@@ -13101,75 +13768,11 @@ async fn dispatch_selected_processor_outputs(
             .await;
     }
 
-    let execution_now = context
-        .branch
-        .runtime
-        .current_stream_expiration_time(&context.branch.domain)
-        .ok()
-        .flatten()
-        .unwrap_or_else(current_timestamp);
+    let execution_now = scope.execution_now;
     let mut dispatched_acks = Vec::new();
-    for (output_index, (messages, mut batches)) in messages_by_output
-        .into_iter()
-        .zip(batches_by_output)
-        .enumerate()
-    {
+    for (output_index, mut batches) in batches_by_output.into_iter().enumerate() {
         let output = &mut outputs.routes[output_index];
         let relay = &output_relays[output_index];
-        if !messages.is_empty() {
-            let output_schema = match relay_schema_for_runtime(
-                &context.branch.runtime,
-                &context.branch.domain,
-                relay,
-            ) {
-                Ok(schema) => schema,
-                Err(error) => {
-                    let message_error_policy = output.message_error_policy.clone();
-                    for message in messages {
-                        context
-                            .branch
-                            .runtime
-                            .handle_message_error_with_policy(
-                                &context.branch.domain,
-                                context.node_kind,
-                                context.processor,
-                                &message_error_policy,
-                                message,
-                                MessageErrorFailure::new(
-                                    Some(relay),
-                                    error.to_string(),
-                                    MessageErrorOperation::Finalize,
-                                ),
-                            )
-                            .await;
-                    }
-                    return None;
-                }
-            };
-            match build_stream_record_batch_preserving_acks(output_schema, messages) {
-                Ok(batch) => batches.push(batch),
-                Err((error, acks)) => {
-                    context
-                        .branch
-                        .runtime
-                        .handle_internal_processor_error_for_acks(
-                            &context.branch.domain,
-                            context.node_kind,
-                            context.processor,
-                            context.error_policies,
-                            acks.iter(),
-                            format!(
-                                "{} '{}' failed to build output batch for relay '{}': {}",
-                                context.node_kind,
-                                context.processor.as_str(),
-                                relay.as_str(),
-                                error
-                            ),
-                        );
-                    return None;
-                }
-            }
-        }
         if batches.is_empty() {
             continue;
         }
@@ -13334,12 +13937,15 @@ async fn plan_filter_map_messages(
 ) -> Result<FilterMapPlan, PlannedGeneralError> {
     let lookup_columns = match compute_lookup_hash_map_columns(
         program,
-        &batch.batch,
-        &[],
-        &batch.keys,
-        side_inputs,
-        None,
+        &FilterMapBatchInputs {
+            carrier: &batch.batch,
+            namespace_batches: &[],
+            keys: &batch.keys,
+            side_inputs,
+            ingest_metadata: None,
+        },
         execution_now,
+        None,
     )
     .await
     {
@@ -13378,6 +13984,7 @@ async fn plan_filter_map_messages(
             lookup_columns: &lookup_columns,
             uninitialized: Some(&uninitialized),
         },
+        None,
     ) {
         Ok(vm_batch) => vm_batch,
         Err(error) => {
@@ -13424,7 +14031,7 @@ async fn plan_filter_map_messages(
     };
 
     let mut selected_rows = vec![false; acks.len()];
-    for &row in &result.selected_rows {
+    for row in result.selected_rows.iter() {
         if row < selected_rows.len() {
             selected_rows[row] = true;
         }
@@ -13438,7 +14045,7 @@ async fn plan_filter_map_messages(
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
-    for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
+    for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         if let Some(side_error) = result.batch.errors().row(output_row).first() {
             let partial_output = if program.captures_partial_output() {
                 Some(vm_partial_output_row_to_runtime_batch(
@@ -13609,13 +14216,14 @@ async fn plan_emitter_filter_map_batch(
         },
         execution_now,
         acks,
+        None,
     )
     .await?;
     let mut acks = body_result.acks;
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
 
     let mut selected_rows = vec![false; acks.len()];
-    for &row in &body_result.selected_rows {
+    for row in body_result.selected_rows.iter() {
         if row < selected_rows.len() {
             selected_rows[row] = true;
         }
@@ -13630,7 +14238,7 @@ async fn plan_emitter_filter_map_batch(
     let mut successful_input_rows = Vec::new();
     let mut headers = (!body_result.invocations.is_empty()).then(Vec::new);
     let mut message_errors = Vec::new();
-    for (output_row, &input_row) in body_result.selected_rows.iter().enumerate() {
+    for (output_row, input_row) in body_result.selected_rows.iter().enumerate() {
         let source_record = |context: &str| {
             input
                 .runtime_row(input_row)
@@ -13822,12 +14430,13 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
         },
         execution_now,
         batch.acks.clone(),
+        None,
     )
     .await?;
     let mut groups = (0..row_count)
         .map(|_| Err("SQS FIFO GROUP expression omitted its input row".to_string()))
         .collect::<Vec<_>>();
-    for (output_row, input_row) in result.selected_rows.into_iter().enumerate() {
+    for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         if input_row >= row_count {
             return Err(PlannedGeneralError {
                 acks: batch.acks.clone(),
@@ -13866,7 +14475,7 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
 
 struct ExecutedFilterMap {
     batch: VmTypedBatch,
-    selected_rows: Vec<usize>,
+    selected_rows: nervix_vm::RowSelection,
     invocations: Vec<nervix_vm::FunctionInvocation>,
     acks: Vec<AckSet>,
 }
@@ -13926,7 +14535,7 @@ struct FilterMapBatchInputs<'a> {
     namespace_batches: &'a [(&'a str, &'a RuntimeRecordBatch)],
     keys: &'a [Option<BranchKey>],
     side_inputs: &'a HashMap<String, RuntimeValue>,
-    ingest_metadata: Option<&'a [IngestFilterMapMetadata]>,
+    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
 }
 
 async fn execute_filter_map_program_on_batch(
@@ -13936,15 +14545,13 @@ async fn execute_filter_map_program_on_batch(
     inputs: FilterMapBatchInputs<'_>,
     execution_now: Timestamp,
     acks: Vec<AckSet>,
+    mut shared: Option<&mut SharedBatchColumns>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralError> {
     let lookup_columns = match compute_lookup_hash_map_columns(
         program,
-        inputs.carrier,
-        inputs.namespace_batches,
-        inputs.keys,
-        inputs.side_inputs,
-        inputs.ingest_metadata,
+        &inputs,
         execution_now,
+        shared.as_mut().map(|shared| &mut shared.lookups),
     )
     .await
     {
@@ -13987,6 +14594,7 @@ async fn execute_filter_map_program_on_batch(
             lookup_columns: &lookup_columns,
             uninitialized: uninitialized.as_ref(),
         },
+        shared.as_mut().map(|shared| &mut shared.inputs),
     ) {
         Ok(vm_batch) => vm_batch,
         Err(error) => {
@@ -14040,12 +14648,15 @@ async fn evaluate_output_branch_program(
     let namespace_batches = [("input", input), ("output", output), ("message", output)];
     let lookup_columns = compute_lookup_hash_map_columns(
         &program.program,
-        output,
-        &namespace_batches,
-        keys,
-        side_inputs,
-        None,
+        &FilterMapBatchInputs {
+            carrier: output,
+            namespace_batches: &namespace_batches,
+            keys,
+            side_inputs,
+            ingest_metadata: None,
+        },
         execution_now,
+        None,
     )
     .await?;
     let uninitialized = VmUninitializedInput {
@@ -14071,6 +14682,7 @@ async fn evaluate_output_branch_program(
             lookup_columns: &lookup_columns,
             uninitialized: Some(&uninitialized),
         },
+        None,
     )?;
     let result = execute_program_with_selection_in_context(
         &program.program.compiled,
@@ -14091,7 +14703,7 @@ async fn evaluate_output_branch_program(
     let mut outcomes = (0..row_count)
         .map(|_| Err("branch construction VM did not preserve the input row".to_string()))
         .collect::<Vec<_>>();
-    for (output_row, input_row) in result.selected_rows.iter().copied().enumerate() {
+    for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         if input_row >= outcomes.len() {
             return Err(format!(
                 "branch construction VM for '{}' selected unknown row {}",
@@ -14207,6 +14819,7 @@ async fn flush_ready_window_processor(
         error_policies,
         branch,
         output_routes,
+        materialized_state,
     } = context;
     if output_routes.routes.is_empty() {
         state.clear(aggregate);
@@ -14397,7 +15010,9 @@ async fn flush_ready_window_processor(
                     error_policies,
                     input_relays: std::slice::from_ref(&output_relay),
                     filter_source: ProcessorOutputFilterSource::OutputRelay,
-                    resolved_materialized_state: None,
+                    materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
+                        materialized_state,
+                    ),
                 },
                 output_routes,
                 forwarded,
@@ -14446,22 +15061,19 @@ async fn flush_ready_window_processor(
     changed
 }
 
-async fn persist_window_processor_live_state(
-    runtime: &Runtime,
+fn snapshot_window_processor_live_state(
     processor: &Identifier,
     replicated_state: &ReplicatedWindowProcessorState,
     state: &WindowProcessorState,
 ) -> Result<(), String> {
-    let (lsm, payload) = replicated_state.replace_state(state).map_err(|error| {
+    replicated_state.replace_state(state).map_err(|error| {
         format!(
-            "window processor '{}' failed to encode branch state: {}",
+            "window processor '{}' failed to snapshot branch state: {}",
             processor.as_str(),
             error
         )
     })?;
-    runtime
-        .persist_window_processor_snapshot(replicated_state, lsm, &payload)
-        .await
+    Ok(())
 }
 
 impl WindowAggregateAccumulator {
@@ -15017,13 +15629,16 @@ struct WindowAggregateInput {
     value: Option<RuntimeValue>,
 }
 
+#[cfg(test)]
+static WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+
 async fn evaluate_window_aggregate_inputs(
     program: &CompiledWindowAggregateProgram,
-    row: &RuntimeRow,
+    carrier: &RuntimeRecordBatch,
     execution_now: Timestamp,
-) -> Result<Vec<WindowAggregateInput>, String> {
-    let carrier = row.one_row_batch();
-    let keys = [None];
+) -> Result<Vec<Result<Vec<WindowAggregateInput>, String>>, String> {
+    let row_count = carrier.batch().num_rows();
+    let keys = vec![None; row_count];
     let side_inputs = HashMap::new();
     let lookup_columns = HashMap::new();
     let uninitialized = VmUninitializedInput {
@@ -15039,7 +15654,7 @@ async fn evaluate_window_aggregate_inputs(
     let input = project_vm_input_batch(
         &program.input_program.input_schema,
         &VmInputProjectionSources {
-            carrier: &carrier,
+            carrier,
             namespace_batches: &[],
             strict_namespaces: &[],
             keys: &keys,
@@ -15048,7 +15663,10 @@ async fn evaluate_window_aggregate_inputs(
             lookup_columns: &lookup_columns,
             uninitialized: Some(&uninitialized),
         },
+        None,
     )?;
+    #[cfg(test)]
+    WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
     let result = execute_program_with_selection_in_context(
         &program.input_program,
         &input,
@@ -15059,38 +15677,57 @@ async fn evaluate_window_aggregate_inputs(
     )
     .await
     .map_err(|error| error.to_string())?;
-    if result.selected_rows.as_slice() != [0] {
-        return Err("window aggregate input VM did not preserve its input row".to_string());
-    }
-    if let Some(error) = result.batch.errors().row(0).first() {
+    if result.batch.row_count() != row_count {
         return Err(format!(
-            "window aggregate input VM failed with {}: {}",
-            error.code.as_str(),
-            error.message
+            "window aggregate input VM produced {} rows for {row_count} input rows",
+            result.batch.row_count()
         ));
     }
-    program
+    if result.selected_rows.len() != row_count || !result.selected_rows.iter().eq(0..row_count) {
+        return Err(format!(
+            "window aggregate input VM did not preserve all {row_count} input rows"
+        ));
+    }
+    let input_columns = program
         .input_fields
         .iter()
         .map(|field_name| {
             let Some(field_name) = field_name else {
-                return Ok(WindowAggregateInput { value: None });
+                return Ok(None);
             };
             let column_index = result.batch.schema().index_of(field_name).map_err(|_| {
                 format!("window aggregate input VM produced no '{field_name}' field")
             })?;
             let field = result.batch.schema().field(column_index);
             let array = result.batch.column(column_index).to_array_ref();
-            runtime_value_from_arrow_array(
-                array.as_ref(),
-                &parse_as_type_from_arrow(field.data_type())?,
-                true,
-                0,
-                field_name,
-            )
-            .map(|value| WindowAggregateInput { value })
+            Ok(Some((
+                field_name.as_str(),
+                array,
+                parse_as_type_from_arrow(field.data_type())?,
+            )))
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((0..row_count)
+        .map(|row| {
+            if let Some(error) = result.batch.errors().row(row).first() {
+                return Err(format!(
+                    "window aggregate input VM failed with {}: {}",
+                    error.code.as_str(),
+                    error.message
+                ));
+            }
+            input_columns
+                .iter()
+                .map(|column| {
+                    let Some((field_name, array, ty)) = column else {
+                        return Ok(WindowAggregateInput { value: None });
+                    };
+                    runtime_value_from_arrow_array(array.as_ref(), ty, true, row, field_name)
+                        .map(|value| WindowAggregateInput { value })
+                })
+                .collect()
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -15794,14 +16431,56 @@ struct VmInputProjectionSources<'a> {
     strict_namespaces: &'a [&'a str],
     keys: &'a [Option<BranchKey>],
     side_inputs: &'a HashMap<String, RuntimeValue>,
-    ingest_metadata: Option<&'a [IngestFilterMapMetadata]>,
+    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
     lookup_columns: &'a HashMap<String, VmTypedArray>,
     uninitialized: Option<&'a VmUninitializedInput>,
+}
+
+/// Input columns of one dispatched batch that every output route projects identically.
+///
+/// Branch columns, broadcast materialized values, and selected ingest-metadata columns are
+/// derived from the batch alone, so a fan-out node builds each of them once rather than once per
+/// route. Carrier columns already share their Arrow buffers and need no cache.
+#[derive(Default)]
+struct SharedVmInputColumns {
+    columns: HashMap<(String, ArrowDataType, bool), VmTypedArray>,
+}
+
+/// Per-batch caches shared by every output route's program execution.
+#[derive(Default)]
+struct SharedBatchColumns {
+    inputs: SharedVmInputColumns,
+    lookups: BTreeMap<LookupHashMapCallKey, VmTypedArray>,
+}
+
+impl SharedVmInputColumns {
+    /// Returns the shared column for `field`, building it on first use.
+    ///
+    /// Routes may request the same name with a different Arrow type or nullability, so the
+    /// resolved field is part of the identity rather than the name alone.
+    fn column(
+        &mut self,
+        field: &arrow_schema::Field,
+        build: impl FnOnce() -> Result<VmTypedArray, String>,
+    ) -> Result<VmTypedArray, String> {
+        let key = (
+            field.name().clone(),
+            field.data_type().clone(),
+            field.is_nullable(),
+        );
+        if let Some(column) = self.columns.get(&key) {
+            return Ok(column.clone());
+        }
+        let column = build()?;
+        self.columns.insert(key, column.clone());
+        Ok(column)
+    }
 }
 
 fn project_vm_input_batch(
     schema: &StdArc<arrow_schema::Schema>,
     sources: &VmInputProjectionSources<'_>,
+    mut shared: Option<&mut SharedVmInputColumns>,
 ) -> Result<VmTypedBatch, String> {
     let row_count = sources.carrier.batch().num_rows();
     if sources.keys.len() != row_count {
@@ -15828,74 +16507,96 @@ fn project_vm_input_batch(
         }
     }
     let carrier_schema = sources.carrier.schema();
-    let columns = schema
-        .fields()
-        .iter()
-        .map(|field| {
-            if let Some(uninitialized) = sources.uninitialized
-                && uninitialized.contains(field)
-            {
-                return Ok(VmTypedArray::uninitialized(
-                    field.data_type().clone(),
-                    row_count,
-                ));
-            }
-            if let Some(column) = sources.lookup_columns.get(field.name()) {
-                return Ok(column.clone());
-            }
-            if let Ok(index) = carrier_schema.index_of(field.name()) {
-                return carrier_input_column(sources.carrier, index, field);
-            }
-            if let Some(value) = sources.side_inputs.get(field.name()) {
-                return runtime_values_input_column(
-                    std::iter::repeat_n(Some(value), row_count),
-                    row_count,
-                    field,
-                );
-            }
-            if let Some((namespace, field_name)) = field.name().split_once('.') {
-                if namespace == INGEST_METADATA_NAMESPACE {
-                    return runtime_values_input_column(
-                        (0..row_count).map(|row| {
-                            sources
-                                .ingest_metadata
-                                .and_then(|metadata| metadata.get(row))
-                                .and_then(|metadata| metadata.metadata_value(field_name))
-                        }),
-                        row_count,
-                        field,
-                    );
-                }
-                if namespace == BRANCH_NAMESPACE {
-                    return branch_key_input_column(sources.keys, field_name, field);
-                }
-                if let Some((_, batch)) = sources
-                    .namespace_batches
-                    .iter()
-                    .find(|(candidate, _)| *candidate == namespace)
-                    && let Ok(index) = batch.schema().index_of(field_name)
+    let mut columns = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields() {
+        columns.push(project_vm_input_column(
+            field,
+            sources,
+            &carrier_schema,
+            row_count,
+            shared.as_deref_mut(),
+        )?);
+    }
+    VmTypedBatch::try_new(schema.clone(), columns).map_err(|error| error.to_string())
+}
+
+fn project_vm_input_column(
+    field: &arrow_schema::Field,
+    sources: &VmInputProjectionSources<'_>,
+    carrier_schema: &StdArc<arrow_schema::Schema>,
+    row_count: usize,
+    shared: Option<&mut SharedVmInputColumns>,
+) -> Result<VmTypedArray, String> {
+    if let Some(uninitialized) = sources.uninitialized
+        && uninitialized.contains(field)
+    {
+        return Ok(VmTypedArray::uninitialized(
+            field.data_type().clone(),
+            row_count,
+        ));
+    }
+    if let Some(column) = sources.lookup_columns.get(field.name()) {
+        return Ok(column.clone());
+    }
+    if let Ok(index) = carrier_schema.index_of(field.name()) {
+        return carrier_input_column(sources.carrier, index, field);
+    }
+    if let Some(value) = sources.side_inputs.get(field.name()) {
+        let build = || {
+            runtime_values_input_column(
+                std::iter::repeat_n(Some(value), row_count),
+                row_count,
+                field,
+            )
+        };
+        return match shared {
+            Some(shared) => shared.column(field, build),
+            None => build(),
+        };
+    }
+    if let Some((namespace, field_name)) = field.name().split_once('.') {
+        if namespace == INGEST_METADATA_NAMESPACE {
+            let build = || {
+                if let Some(column) = sources
+                    .ingest_metadata
+                    .map(|metadata| metadata.field_column(field_name))
+                    .transpose()?
+                    .flatten()
                 {
-                    return carrier_input_column(batch, index, field);
-                }
-                if sources.strict_namespaces.contains(&namespace) {
-                    if field.is_nullable() {
-                        return runtime_values_input_column(
-                            std::iter::repeat_n(None, row_count),
-                            row_count,
-                            field,
-                        );
+                    if column.data_type() != field.data_type() {
+                        return Err(format!(
+                            "ingest metadata field '{}' expected {:?}, found {:?}",
+                            field.name(),
+                            field.data_type(),
+                            column.data_type()
+                        ));
                     }
-                    return Err(format!(
-                        "FILTER-MAP input record is missing field '{}'",
-                        field.name()
-                    ));
+                    return VmTypedArray::try_from_array_ref(column)
+                        .map_err(|error| error.to_string());
                 }
-                if namespace != INGEST_METADATA_NAMESPACE
-                    && let Ok(index) = carrier_schema.index_of(field_name)
-                {
-                    return carrier_input_column(sources.carrier, index, field);
-                }
-            }
+                runtime_values_input_column(std::iter::repeat_n(None, row_count), row_count, field)
+            };
+            return match shared {
+                Some(shared) => shared.column(field, build),
+                None => build(),
+            };
+        }
+        if namespace == BRANCH_NAMESPACE {
+            let build = || branch_key_input_column(sources.keys, field_name, field);
+            return match shared {
+                Some(shared) => shared.column(field, build),
+                None => build(),
+            };
+        }
+        if let Some((_, batch)) = sources
+            .namespace_batches
+            .iter()
+            .find(|(candidate, _)| *candidate == namespace)
+            && let Ok(index) = batch.schema().index_of(field_name)
+        {
+            return carrier_input_column(batch, index, field);
+        }
+        if sources.strict_namespaces.contains(&namespace) {
             if field.is_nullable() {
                 return runtime_values_input_column(
                     std::iter::repeat_n(None, row_count),
@@ -15903,13 +16604,24 @@ fn project_vm_input_batch(
                     field,
                 );
             }
-            Err(format!(
+            return Err(format!(
                 "FILTER-MAP input record is missing field '{}'",
                 field.name()
-            ))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    VmTypedBatch::try_new(schema.clone(), columns).map_err(|error| error.to_string())
+            ));
+        }
+        if namespace != INGEST_METADATA_NAMESPACE
+            && let Ok(index) = carrier_schema.index_of(field_name)
+        {
+            return carrier_input_column(sources.carrier, index, field);
+        }
+    }
+    if field.is_nullable() {
+        return runtime_values_input_column(std::iter::repeat_n(None, row_count), row_count, field);
+    }
+    Err(format!(
+        "FILTER-MAP input record is missing field '{}'",
+        field.name()
+    ))
 }
 
 fn carrier_input_column(
@@ -16015,19 +16727,37 @@ fn lookup_generated_input_field<'a>(
 
 async fn compute_lookup_hash_map_columns(
     program: &CompiledProgramWithMaterializedInterest,
-    carrier: &RuntimeRecordBatch,
-    namespace_batches: &[(&str, &RuntimeRecordBatch)],
-    keys: &[Option<BranchKey>],
-    side_inputs: &HashMap<String, RuntimeValue>,
-    ingest_metadata: Option<&[IngestFilterMapMetadata]>,
+    inputs: &FilterMapBatchInputs<'_>,
     execution_now: Timestamp,
+    mut shared_calls: Option<&mut BTreeMap<LookupHashMapCallKey, VmTypedArray>>,
 ) -> Result<HashMap<String, VmTypedArray>, String> {
     let mut lookup_columns = HashMap::new();
     if program.lookup_hash_maps.is_empty() {
         return Ok(lookup_columns);
     }
-    let row_count = carrier.batch().num_rows();
+    let row_count = inputs.carrier.batch().num_rows();
     for (call_index, call) in program.lookup_hash_maps.iter().enumerate() {
+        let generated_name = VmCompileNamespace::Internal(InternalFieldNamespace::LookupHashMap)
+            .qualified_field_name(&call.generated_field);
+        let Some(field) = lookup_generated_input_field(program, call_index, &generated_name) else {
+            continue;
+        };
+        // Routes of one node often spell the same lookup. The generated field name is derived from
+        // the call's position within its own program, so a shared result is looked up by the call's
+        // identity and reinserted under this route's name. The Arrow field is part of the identity
+        // because routes may resolve the same lookup at a different type or nullability.
+        let shared_key = LookupHashMapCallKey {
+            lookup: call.lookup.clone(),
+            lookup_field: call.lookup_field.clone(),
+            key_expr: call.key_expr.clone(),
+        };
+        if let Some(shared) = shared_calls.as_deref()
+            && let Some(column) = shared.get(&shared_key)
+            && column.data_type() == *field.data_type()
+        {
+            lookup_columns.insert(generated_name, column.clone());
+            continue;
+        }
         let uninitialized = VmUninitializedInput {
             fields: call
                 .key_program
@@ -16041,15 +16771,16 @@ async fn compute_lookup_hash_map_columns(
         let vm_batch = project_vm_input_batch(
             &call.key_program.input_schema,
             &VmInputProjectionSources {
-                carrier,
-                namespace_batches,
+                carrier: inputs.carrier,
+                namespace_batches: inputs.namespace_batches,
                 strict_namespaces: &[],
-                keys,
-                side_inputs,
-                ingest_metadata,
+                keys: inputs.keys,
+                side_inputs: inputs.side_inputs,
+                ingest_metadata: inputs.ingest_metadata,
                 lookup_columns: &lookup_columns,
                 uninitialized: Some(&uninitialized),
             },
+            None,
         )?;
         let result = execute_program_with_selection_in_context(
             &call.key_program,
@@ -16079,7 +16810,7 @@ async fn compute_lookup_hash_map_columns(
             })
             .transpose()?;
         let mut row_keys: Vec<Option<String>> = vec![None; row_count];
-        for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
+        for (output_row, input_row) in result.selected_rows.iter().enumerate() {
             if let Some(side_error) = result.batch.errors().row(output_row).first() {
                 return Err(format!(
                     "LOOKUP_HASH_MAP key side error {}: {} at {}",
@@ -16101,11 +16832,6 @@ async fn compute_lookup_hash_map_columns(
                 row_keys[input_row] = Some(value.to_key_fragment());
             }
         }
-        let generated_name = VmCompileNamespace::Internal(InternalFieldNamespace::LookupHashMap)
-            .qualified_field_name(&call.generated_field);
-        let Some(field) = lookup_generated_input_field(program, call_index, &generated_name) else {
-            continue;
-        };
         let lookup_values = row_keys
             .iter()
             .map(|key| {
@@ -16124,6 +16850,9 @@ async fn compute_lookup_hash_map_columns(
             row_count,
             field,
         )?;
+        if let Some(shared) = shared_calls.as_deref_mut() {
+            shared.insert(shared_key, column.clone());
+        }
         lookup_columns.insert(generated_name, column);
     }
     Ok(lookup_columns)
@@ -16147,87 +16876,6 @@ fn vm_output_value(
         row,
         field_name,
     )
-}
-
-fn compile_inferencer_input_mappings(
-    processor: &Identifier,
-    mappings: &[InferencerTensorMapping],
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    udfs: Option<&UdfExecutor>,
-) -> Result<VmCompiledProgram, String> {
-    let assignments = mappings
-        .iter()
-        .map(|mapping| {
-            Ok(nervix_models::Assignment {
-                target: nervix_models::AssignmentTarget::bare(
-                    Identifier::parse(&mapping.tensor).map_err(|error| {
-                        format!(
-                            "inferencer '{}' tensor name '{}' is not a valid field: {error}",
-                            processor, mapping.tensor
-                        )
-                    })?,
-                ),
-                value: mapping.expression.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let parsed = lower_route_construction(
-        &RouteConstruction {
-            assignments,
-            ..RouteConstruction::default()
-        },
-        SemanticNamespaces::new("input", "mapped_input"),
-    )
-    .map_err(|reason| {
-        format!(
-            "inferencer '{}' INPUTS mapping is invalid: {reason}",
-            processor
-        )
-    })?;
-    let output_schema = StdArc::new(arrow_schema::Schema::new(
-        mappings
-            .iter()
-            .map(|mapping| {
-                arrow_schema::Field::new(
-                    &mapping.tensor,
-                    crate::runtime_schema::arrow_data_type(&mapping.schema.message_type()),
-                    false,
-                )
-            })
-            .collect::<Vec<_>>(),
-    ));
-    let output_sensitivity = VmSchemaSensitivity::from_sensitive_fields(
-        mappings
-            .iter()
-            .filter(|mapping| {
-                expression_reads_sensitive_source(&mapping.expression, &input_sensitivity)
-            })
-            .map(|mapping| mapping.tensor.clone()),
-    );
-    compile_vm_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_schema.clone(),
-        output_sensitivity.clone(),
-        [
-            VmCompileBinding::readonly("input", input_schema).with_sensitivity(input_sensitivity),
-            VmCompileBinding::writeonly("mapped_input", output_schema)
-                .with_sensitivity(output_sensitivity),
-        ],
-        runtime_udf_compile_options(
-            udfs,
-            VmCompileOptions {
-                output_mode: VmOutputMode::ExplicitOnly,
-                ..VmCompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        format!(
-            "inferencer '{}' INPUTS compile failed: {}",
-            processor, error.message
-        )
-    })
 }
 
 fn vm_typed_batch_to_runtime_batch(batch: &VmTypedBatch) -> Result<RuntimeRecordBatch, String> {
@@ -16323,6 +16971,7 @@ async fn flush_branch_junction(context: JunctionFlushContext<'_>, forwarded: Rel
         error_policies,
         input_relays,
         output_routes,
+        materialized_values,
     } = context;
     if let Some(acks) = dispatch_processor_outputs(
         ProcessorOutputDispatchContext {
@@ -16334,7 +16983,7 @@ async fn flush_branch_junction(context: JunctionFlushContext<'_>, forwarded: Rel
             error_policies,
             input_relays,
             filter_source: ProcessorOutputFilterSource::InputRelays,
-            resolved_materialized_state: None,
+            materialized_state: ProcessorMaterializedState::Admitted(materialized_values),
         },
         output_routes,
         forwarded,
@@ -16364,8 +17013,10 @@ async fn flush_branch_inferencer_output(
         file,
         inputs,
         output_schema,
+        compiled_input_program,
         input_relays,
         session,
+        materialized_state,
     } = context;
     output_routes.routes[output_index].clear_flush_deadline();
     let pending = output_buffer.take_pending();
@@ -16516,38 +17167,10 @@ async fn flush_branch_inferencer_output(
         );
         return;
     };
-    let input_sensitivity = input_relays
-        .first()
-        .and_then(|relay| {
-            relay_schema_for_runtime(&branch.runtime, &branch.domain, relay)
-                .ok()
-                .map(|schema| schema.vm_sensitivity())
-        })
-        .unwrap_or_default();
-    let mapped_program = match compile_inferencer_input_mappings(
-        processor,
-        inputs,
-        input_batch.schema().clone(),
-        input_sensitivity,
-        branch.runtime.udf_executor(&branch.domain).as_ref(),
-    ) {
-        Ok(program) => program,
-        Err(error) => {
-            branch.runtime.handle_internal_processor_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                messages.iter().map(|message| &message.acks),
-                error,
-            );
-            return;
-        }
-    };
     let side_inputs = HashMap::default();
     let lookup_columns = HashMap::default();
     let mapped_vm_input = match project_vm_input_batch(
-        &mapped_program.input_schema,
+        &compiled_input_program.program.input_schema,
         &VmInputProjectionSources {
             carrier: &input_batch,
             namespace_batches: &[],
@@ -16558,6 +17181,7 @@ async fn flush_branch_inferencer_output(
             lookup_columns: &lookup_columns,
             uninitialized: None,
         },
+        None,
     ) {
         Ok(batch) => batch,
         Err(error) => {
@@ -16572,9 +17196,8 @@ async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let mapped_program = Arc::new(mapped_program);
     let mapped_result = match execute_program_with_selection_in_context(
-        &mapped_program,
+        &compiled_input_program.program,
         &mapped_vm_input,
         &VmExecutionContext {
             now: current_timestamp(),
@@ -16755,7 +17378,7 @@ async fn flush_branch_inferencer_output(
             error_policies,
             input_relays,
             filter_source: ProcessorOutputFilterSource::Inferencer(inferencer_tensors),
-            resolved_materialized_state: None,
+            materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(materialized_state),
         },
         output_routes,
         output_batch,
@@ -18187,12 +18810,15 @@ async fn dispatch_wasm_output_route(
     };
     let lookup_columns = match compute_lookup_hash_map_columns(
         program,
-        &decoded.batch.batch,
-        &[],
-        &decoded.batch.keys,
-        &side_inputs,
-        None,
+        &FilterMapBatchInputs {
+            carrier: &decoded.batch.batch,
+            namespace_batches: &[],
+            keys: &decoded.batch.keys,
+            side_inputs: &side_inputs,
+            ingest_metadata: None,
+        },
         execution_now,
+        None,
     )
     .await
     {
@@ -18229,6 +18855,7 @@ async fn dispatch_wasm_output_route(
             lookup_columns: &lookup_columns,
             uninitialized: Some(&uninitialized_input),
         },
+        None,
     ) {
         Ok(input) => input,
         Err(error) => {
@@ -18285,7 +18912,7 @@ async fn dispatch_wasm_output_route(
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
-    for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
+    for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output =
                 vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();
@@ -18906,7 +19533,7 @@ async fn execute_generator_program_on_context(
             result.batch.row_count()
         ));
     }
-    if let Some(side_error) = result.batch.errors().iter().flatten().next() {
+    if let Some(side_error) = result.batch.errors().first() {
         return Ok(SingleRecordFilterMapOutcome::MessageError {
             error: program.structured_side_error(
                 format!(

@@ -254,11 +254,11 @@ impl RabbitMqIngestor {
                                                                 output_routes: &task_output_routes,
                                                                 filter_where: task_filter_where.as_ref(),
                                                                 records: vec![record],
-                                                                metadata: vec![
+                                                                metadata: Some(
                                                                     IngestFilterMapMetadata::from_headers(
                                                                         headers.clone(),
                                                                     ),
-                                                                ],
+                                                                ),
                                                                 ingested_at: current_timestamp(),
                                                                 acks: vec![if !task_branched_senders.is_empty() {
                                                                     acks.attached()

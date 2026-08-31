@@ -237,8 +237,8 @@ partial-envelope publication.
 
 Header output is supported only on codec emitters for Kafka, NATS, Pulsar, RabbitMQ, and SQS.
 Kafka and NATS preserve ordered repeated values. Pulsar, RabbitMQ, and SQS use last-write-wins
-behavior. Redis, MQTT, ZeroMQ, Sentry, OTEL, direct database sinks, and Iceberg reject header
-writes.
+behavior. Redis, MQTT, Syslog, ZeroMQ, Sentry, OTEL, direct database sinks, and Iceberg reject
+header writes.
 
 Emitter expressions use the same typed surface as other runtime nodes:
 
@@ -292,6 +292,9 @@ Transport-specific expectations:
 - `CLICKHOUSE`: use an `https://...` `addr`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
 - `POSTGRES`: include `sslmode=require` in `addr`; Nervix honors `tls_ca_file`.
 - `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
+- `SYSLOG`: select `'protocol' = 'tls'`. Optional `tls_ca_file` adds a server trust root;
+  optional `tls_cert_file` and `tls_key_file` configure client authentication and must appear
+  together.
 
 Example Kafka TLS emitter client:
 
@@ -410,6 +413,20 @@ TO ZEROMQ <client>
 
 ZeroMQ has no delivery acknowledgment; success is socket acceptance. Transient socket failures are
 paced by the declared retry policy.
+
+### Syslog
+
+```nspl,ignore
+TO SYSLOG <client>
+  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
+  ENCODE USING <codec>
+```
+
+The client sends UDP datagrams, persistent RFC 6587 TCP frames, or RFC 5425 TLS frames. TCP uses
+octet-counting by default and may select non-transparent framing; TLS always uses octet counting.
+Success is local socket acceptance and flush, not remote delivery confirmation. The sink requires
+a codec and rejects header writes. See [Syslog](syslog.md) for client configuration, framing,
+message errors, retry behavior, and limits.
 
 ### SQS
 

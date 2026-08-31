@@ -17,6 +17,7 @@ mod rabbitmq;
 mod redis;
 mod sentry;
 mod sqs;
+mod syslog;
 mod zeromq;
 
 use clickhouse::ClickHouseEmitter;
@@ -36,6 +37,7 @@ use rabbitmq::RabbitMqEmitter;
 use redis::RedisEmitter;
 use sentry::SentryEmitter;
 use sqs::{SqsEmitter, SqsPublishingMode};
+use syslog::SyslogEmitter;
 use zeromq::ZeroMqEmitter;
 
 const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
@@ -410,7 +412,6 @@ struct EmitterBatchContext<'a> {
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     sqs_fifo_group: Option<&'a CompiledSqsFifoGroup>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
-    materialized_stream_owner_nodes: &'a HashMap<Identifier, Option<String>>,
 }
 
 #[derive(Clone)]
@@ -1366,6 +1367,7 @@ async fn execute_sql_values_program(
             lookup_columns: &lookup_columns,
             uninitialized: None,
         },
+        None,
     )
     .map_err(|error| Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error))?;
     let result = execute_program_with_selection_in_context(
@@ -1585,6 +1587,7 @@ enum SinkEmitter {
     Mqtt(MqttEmitter),
     Nats(NatsEmitter),
     ZeroMq(ZeroMqEmitter),
+    Syslog(SyslogEmitter),
     Sqs(SqsEmitter),
     Sentry(SentryEmitter),
     Otel(OtelEmitter),
@@ -1718,6 +1721,12 @@ impl SinkEmitter {
                 match ZeroMqEmitter::new(client, resolved).await {
                     Ok(emitter) => Self::ZeroMq(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("zeromq", context, &error),
+                }
+            }
+            (EmitSink::Syslog { .. }, Some(Model::ClientSyslog(client)), _) => {
+                match SyslogEmitter::new(client, resolved).await {
+                    Ok(emitter) => Self::Syslog(emitter),
+                    Err(error) => Self::missing_after_emitter_init_error("syslog", context, &error),
                 }
             }
             (EmitSink::Sqs { queue, .. }, Some(Model::ClientSqs(client)), _) => {
@@ -1996,6 +2005,7 @@ impl SinkEmitter {
             | Self::Mqtt(_)
             | Self::Nats(_)
             | Self::ZeroMq(_)
+            | Self::Syslog(_)
             | Self::Sqs(_)
             | Self::Sentry(_)
             | Self::Otel(_)
@@ -2377,6 +2387,7 @@ impl SinkEmitter {
         | EmitSink::Mqtt { .. }
         | EmitSink::Nats { .. }
         | EmitSink::ZeroMq { .. }
+        | EmitSink::Syslog { .. }
         | EmitSink::Sqs { .. }
         | EmitSink::Sentry { .. } = sink
             && codec.is_none()
@@ -2431,6 +2442,13 @@ impl SinkEmitter {
             return finish_per_record_publish(context, batches, outcome).await;
         }
         if let (Some(codec), EmitSink::ZeroMq { .. }, Self::ZeroMq(emitter)) =
+            (codec.clone(), sink, &mut *self)
+        {
+            let records = encode_broker_records(codec, context, batches).await?;
+            let outcome = emitter.publish_records(records).await;
+            return finish_per_record_publish(context, batches, outcome).await;
+        }
+        if let (Some(codec), EmitSink::Syslog { .. }, Self::Syslog(emitter)) =
             (codec.clone(), sink, &mut *self)
         {
             let records = encode_broker_records(codec, context, batches).await?;
@@ -3030,6 +3048,7 @@ impl EmitSinkLabel for EmitSink {
             EmitSink::Mqtt { .. } => "mqtt",
             EmitSink::Nats { .. } => "nats",
             EmitSink::ZeroMq { .. } => "zeromq",
+            EmitSink::Syslog { .. } => "syslog",
             EmitSink::Sqs { .. } => "sqs",
             EmitSink::Sentry { .. } => "sentry",
             EmitSink::Otel { .. } => "otel",
@@ -3060,7 +3079,6 @@ impl EmitterTask {
             input_schema,
             input_branching,
             materialized_relay_specs: materialized_stream_specs,
-            materialized_relay_owner_nodes: materialized_stream_owner_nodes,
             lookups,
         } = deps;
         let codec = if let Some(codec_name) = &emitter.encode_using_codec {
@@ -3293,7 +3311,6 @@ impl EmitterTask {
                 filter_map: filter_map.as_ref(),
                 sqs_fifo_group: sqs_fifo_group.as_ref(),
                 materialized_state: &task_materialized_state,
-                materialized_stream_owner_nodes: &materialized_stream_owner_nodes,
             };
             loop {
                 tokio::task::consume_budget().await;
@@ -3918,6 +3935,23 @@ fn resolve_emitter_client(
         (EmitSink::ZeroMq { .. }, Some(Model::ClientZeroMq(client))) => {
             Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
+        (EmitSink::Syslog { .. }, Some(Model::ClientSyslog(client))) => Some(
+            runtime
+                .resolve_client_config(domain, client.mount.as_ref(), &client.config)
+                .and_then(|resolved| {
+                    let config = crate::runtime::syslog::SyslogClientConfig::parse(
+                        &resolved.entries,
+                        crate::runtime::syslog::SyslogDirection::Emit,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    if config.protocol == crate::runtime::syslog::SyslogProtocol::Tls {
+                        config
+                            .tls_client_config()
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Ok(resolved)
+                }),
+        ),
         (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client))) => {
             Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
@@ -4121,7 +4155,7 @@ impl EmitterBatchContext<'_> {
             )
             .await
         {
-            Ok(Some(batch)) => batch,
+            Ok(Some(resolved)) => resolved,
             Ok(None) => return None,
             Err(error) => {
                 self.runtime.handle_internal_processor_error_for_acks(
@@ -4138,7 +4172,12 @@ impl EmitterBatchContext<'_> {
                 return None;
             }
         };
-        let batch = self.filter_source_batch(input_relay, batch).await?;
+        // The node-wide dependencies are resolved once for the batch, so every emitter program
+        // reads that snapshot instead of re-reading the state store per program.
+        let (batch, materialized_values) = batch;
+        let batch = self
+            .filter_source_batch(input_relay, batch, &materialized_values)
+            .await?;
         let execution_now = self
             .runtime
             .current_stream_expiration_time(self.domain)
@@ -4159,38 +4198,12 @@ impl EmitterBatchContext<'_> {
                 })
                 .collect(),
             Some(CompiledSqsFifoGroup::Expression(program)) => {
-                let side_inputs = match self
-                    .runtime
-                    .load_materialized_side_inputs(
-                        self.domain,
-                        &batch.key,
-                        &program.materialized_interest,
-                        self.materialized_stream_owner_nodes,
-                    )
-                    .await
-                {
-                    Ok(values) => values,
-                    Err(error) => {
-                        self.runtime.handle_general_error_for_acks(
-                            self.domain,
-                            "emitter",
-                            self.emitter,
-                            self.error_policies,
-                            batch.acks.iter(),
-                            format!(
-                                "emitter '{}' failed to load SQS FIFO GROUP side inputs: {error}",
-                                self.emitter.as_str()
-                            ),
-                        );
-                        return None;
-                    }
-                };
                 match evaluate_sqs_fifo_group_program(
                     self.emitter,
                     program,
                     &batch,
                     execution_now,
-                    &side_inputs,
+                    &materialized_values,
                 )
                 .await
                 {
@@ -4230,39 +4243,12 @@ impl EmitterBatchContext<'_> {
                 }
             };
         };
-        let side_inputs = match self
-            .runtime
-            .load_materialized_side_inputs(
-                self.domain,
-                &batch.key,
-                &filter_map.materialized_interest,
-                self.materialized_stream_owner_nodes,
-            )
-            .await
-        {
-            Ok(values) => values,
-            Err(error) => {
-                self.runtime.handle_general_error_for_acks(
-                    self.domain,
-                    "emitter",
-                    self.emitter,
-                    self.error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "emitter '{}' failed to load materialized side inputs: {}",
-                        self.emitter.as_str(),
-                        error
-                    ),
-                );
-                return None;
-            }
-        };
         match plan_emitter_filter_map_batch(
             self.emitter,
             filter_map,
             batch,
             execution_now,
-            &side_inputs,
+            &materialized_values,
         )
         .await
         {
@@ -4327,37 +4313,10 @@ impl EmitterBatchContext<'_> {
         &self,
         input_relay: &Identifier,
         batch: RelayRecordBatch,
+        side_inputs: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
         let Some(program) = self.source_filters.get(input_relay) else {
             return Some(batch);
-        };
-        let side_inputs = match self
-            .runtime
-            .load_materialized_side_inputs(
-                self.domain,
-                &batch.key,
-                &program.materialized_interest,
-                self.materialized_stream_owner_nodes,
-            )
-            .await
-        {
-            Ok(values) => values,
-            Err(error) => {
-                self.runtime.handle_general_error_for_acks(
-                    self.domain,
-                    "emitter",
-                    self.emitter,
-                    self.error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "emitter '{}' failed to load FROM WHERE side inputs for relay '{}': {}",
-                        self.emitter.as_str(),
-                        input_relay.as_str(),
-                        error
-                    ),
-                );
-                return None;
-            }
         };
         let plan = match plan_filter_map_messages(
             "emitter",
@@ -4370,7 +4329,7 @@ impl EmitterBatchContext<'_> {
                 .ok()
                 .flatten()
                 .unwrap_or_else(current_timestamp),
-            &side_inputs,
+            side_inputs,
         )
         .await
         {
@@ -5608,6 +5567,7 @@ mod tests {
                 "nats",
             ),
             (EmitSink::ZeroMq { client: id.clone() }, "zeromq"),
+            (EmitSink::Syslog { client: id.clone() }, "syslog"),
             (
                 EmitSink::Sqs {
                     client: id.clone(),

@@ -669,3 +669,141 @@ Feature: Processor output routing
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  Scenario Outline: Processor output routes isolate materialized state across interleaved branches
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        tenant STRING,
+        id STRING,
+        source STRING,
+        note STRING OPTIONAL
+      );
+        CREATE SCHEMA preference (
+        tenant STRING,
+        theme STRING,
+        hint STRING OPTIONAL
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        tenant string,
+        id string,
+        source string,
+        note string OPTIONAL
+      );
+        CREATE WIRE JSON SCHEMA preference_wire MODE STRICT (
+        tenant string,
+        theme string,
+        hint string OPTIONAL
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE CODEC preference_codec
+        FROM WIRE JSON SCHEMA preference_wire
+        TO SCHEMA preference;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_branch_state SCHEMA tenant_branch TTL 5m;
+        CREATE RELAY tenant_preferences
+        SCHEMA preference BRANCHED BY by_branch_state
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+        CREATE RELAY incoming SCHEMA notification BRANCHED BY by_branch_state;
+        CREATE RELAY primary_out SCHEMA notification BRANCHED BY by_branch_state;
+        CREATE RELAY audit_out SCHEMA notification BRANCHED BY by_branch_state;
+        CREATE VHOST edge http-branch-state-{{test_id}}.example.com;
+        CREATE ENDPOINT state_ingress ON edge PATH '/branch-state' TYPE HTTP;
+        CREATE ENDPOINT ingress ON edge PATH '/branch-input' TYPE HTTP;
+        CREATE INGESTOR preference_source
+        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING preference_codec
+        TO tenant_preferences
+        INHERIT ALL
+        BRANCHED BY by_branch_state
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE INGESTOR notification_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO incoming
+        INHERIT ALL
+        BRANCHED BY by_branch_state
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DEDUPLICATOR branch_state_fanout FROM incoming
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
+        BRANCHED BY by_branch_state
+        USING MATERIALIZED STATE tenant_preferences REQUIRED WAIT
+        TO primary_out
+          INHERIT ALL
+          SET source = relay_state.tenant_preferences.theme,
+              note = relay_state.tenant_preferences.hint
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        TO audit_out
+          INHERIT ALL
+          SET source = relay_state.tenant_preferences.theme,
+              note = relay_state.tenant_preferences.hint
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION primary_subscription TO primary_out;
+        CREATE SUBSCRIPTION audit_subscription TO audit_out;
+        START;
+      """
+    When http payload is posted to node "node-1" with host "http-branch-state-{{test_id}}.example.com" path "/branch-state"
+      """
+      {"tenant":"acme","theme":"acme-theme","hint":"acme-hint"}
+      """
+    And http payload is posted to node "node-1" with host "http-branch-state-{{test_id}}.example.com" path "/branch-state"
+      """
+      {"tenant":"globex","theme":"globex-theme","hint":"globex-hint"}
+      """
+    Then within "10s" node "node-1" eventually reports materialized state for relay "tenant_preferences" containing
+      """
+      key={"tenant":"acme"} payload={"hint":"acme-hint","tenant":"acme","theme":"acme-theme"}
+      """
+    And within "10s" node "node-1" eventually reports materialized state for relay "tenant_preferences" containing
+      """
+      key={"tenant":"globex"} payload={"hint":"globex-hint","tenant":"globex","theme":"globex-theme"}
+      """
+    When http payload is posted to node "node-1" with host "http-branch-state-{{test_id}}.example.com" path "/branch-input"
+      """
+      {"tenant":"acme","id":"a-1","source":"input","note":"incoming"}
+      """
+    And http payload is posted to node "node-1" with host "http-branch-state-{{test_id}}.example.com" path "/branch-input"
+      """
+      {"tenant":"globex","id":"g-1","source":"input","note":"incoming"}
+      """
+    And http payload is posted to node "node-1" with host "http-branch-state-{{test_id}}.example.com" path "/branch-input"
+      """
+      {"tenant":"acme","id":"a-2","source":"input","note":"incoming"}
+      """
+    And http payload is posted to node "node-1" with host "http-branch-state-{{test_id}}.example.com" path "/branch-input"
+      """
+      {"tenant":"globex","id":"g-2","source":"input","note":"incoming"}
+      """
+    Then within "10s" the relay subscription receives payloads
+      """
+      {"id":"a-1","note":"acme-hint","source":"acme-theme","tenant":"acme"}
+      {"id":"a-1","note":"acme-hint","source":"acme-theme","tenant":"acme"}
+      {"id":"g-1","note":"globex-hint","source":"globex-theme","tenant":"globex"}
+      {"id":"g-1","note":"globex-hint","source":"globex-theme","tenant":"globex"}
+      {"id":"a-2","note":"acme-hint","source":"acme-theme","tenant":"acme"}
+      {"id":"a-2","note":"acme-hint","source":"acme-theme","tenant":"acme"}
+      {"id":"g-2","note":"globex-hint","source":"globex-theme","tenant":"globex"}
+      {"id":"g-2","note":"globex-hint","source":"globex-theme","tenant":"globex"}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |

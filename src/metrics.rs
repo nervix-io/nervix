@@ -36,14 +36,18 @@ const JEMALLOC_SUBSYSTEM: &str = "jemalloc";
 const DOMAIN_TARGET_KIND: &str = "DOMAIN";
 const DOMAIN_INPUT_OUTPUT_TARGET: &str = "input_output";
 const DOMAIN_PROCESSED_TARGET: &str = "processed";
-const MESSAGE_BATCH_BUCKETS: &[f64] = &[1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0];
+const MESSAGE_BATCH_BUCKETS: &[f64] = &[
+    1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 1024.0, 2048.0, 4096.0, 8192.0, 16_384.0,
+    32_768.0, 65_536.0,
+];
 const LATENCY_BUCKETS: &[f64] = &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0];
 const RELAY_BUFFER_LEN_BUCKETS: &[f64] = &[
     1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0,
 ];
 const INTERNAL_MESSAGE_BATCH_BUCKETS: &[f64] = &[
     1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0,
-    100.0, 150.0, 200.0, 300.0, 500.0, 750.0, 1000.0,
+    100.0, 150.0, 200.0, 300.0, 500.0, 750.0, 1000.0, 1024.0, 2048.0, 4096.0, 8192.0, 16_384.0,
+    32_768.0, 65_536.0,
 ];
 const INTERNAL_LATENCY_BUCKETS: &[f64] = &[
     0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
@@ -3829,6 +3833,21 @@ mod tests {
         assert!(line.contains("p50_1m=2.0"), "{line}");
         assert!(line.contains("p90_1m=2.0"), "{line}");
         assert!(line.contains("p99_1m=2.0"), "{line}");
+    }
+
+    #[test]
+    fn messages_per_batch_percentiles_preserve_batches_through_65536_messages() {
+        let mut histogram = TimeRollingHistogram::new(
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            INTERNAL_MESSAGE_BATCH_BUCKETS,
+        );
+        histogram.observe_at(65_536.0, 0);
+
+        let summary = histogram.summary_at(1_000_000_000);
+        assert_histogram_percentile_near(summary.p50, 65_536.0);
+        assert_histogram_percentile_near(summary.p90, 65_536.0);
+        assert_histogram_percentile_near(summary.p99, 65_536.0);
     }
 
     #[test]

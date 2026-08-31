@@ -111,6 +111,7 @@ fn vm_input_from_test_rows(
             lookup_columns: &lookup_columns,
             uninitialized: None,
         },
+        None,
     )
 }
 
@@ -887,6 +888,48 @@ async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array(
             RuntimeValue::F64(OrderedFloat(35.0)),
         ]))
     );
+}
+
+#[tokio::test]
+async fn window_aggregate_inputs_evaluate_one_batch_in_one_vm_execution() {
+    let output_schema = test_schema(&[("adjusted_total", ParseAsType::I64)]);
+    let aggregate = window_aggregate("SET adjusted_total = SUM(120 / input.latency)");
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
+    let rows = [10, 0, 30]
+        .into_iter()
+        .map(|latency| test_runtime_row([("latency".to_string(), RuntimeValue::I64(latency))]))
+        .collect::<Vec<_>>();
+    let carrier = RuntimeRecordBatch::from_rows(rows[0].batch().schema(), rows.iter())
+        .expect("window input rows should form one Arrow batch");
+    super::WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let evaluated =
+        super::evaluate_window_aggregate_inputs(&compiled, &carrier, Timestamp::from_unix_nanos(1))
+            .await
+            .expect("batched window aggregate inputs should evaluate");
+
+    assert_eq!(
+        super::WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "all input rows must share one aggregate-input VM execution"
+    );
+    assert_eq!(evaluated.len(), 3);
+    let first = evaluated[0]
+        .as_ref()
+        .expect("the first window input row should evaluate");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].value, Some(RuntimeValue::I64(12)));
+    assert!(
+        evaluated[1]
+            .as_ref()
+            .expect_err("division by zero should fail only its input row")
+            .contains("division_by_zero")
+    );
+    let third = evaluated[2]
+        .as_ref()
+        .expect("the third window input row should evaluate");
+    assert_eq!(third.len(), 1);
+    assert_eq!(third[0].value, Some(RuntimeValue::I64(4)));
 }
 
 #[tokio::test]
@@ -4184,6 +4227,133 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
     );
 }
 
+async fn wait_for_persisted_runtime_state_lsm(
+    runtime: &super::Runtime,
+    placement: &RuntimeStatePlacement,
+    expected_lsm: u64,
+) {
+    let store = runtime
+        .state_store
+        .as_ref()
+        .expect("test runtime should have a state store")
+        .clone();
+    timeout(Duration::from_secs(1), async {
+        loop {
+            tokio::task::consume_budget().await;
+            if store
+                .latest_snapshot(placement)
+                .expect("snapshot lookup should succeed")
+                .is_some_and(|snapshot| snapshot.lsm == expected_lsm)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("dirty state should persist within the snapshot interval");
+}
+
+#[tokio::test]
+async fn deduplicator_snapshot_task_persists_dirty_state_on_interval() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let runtime =
+        super::Runtime::with_persistence(Some(db), Duration::from_millis(10), Default::default())
+            .expect("runtime should open persisted state");
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::Deduplicator,
+        kind: ModelKind::Deduplicator,
+        identifier: identifier("dedup_orders"),
+        schema_fingerprint: [0; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let state = runtime
+        .replicated_deduplicator_state(placement.clone())
+        .expect("deduplicator state should initialize");
+    let (shutdown_tx, _) = watch::channel(false);
+    let task = runtime
+        .spawn_deduplicator_snapshot_task(&shutdown_tx, state.clone())
+        .expect("persisted runtime should spawn a snapshot task");
+
+    assert!(state.reserve_new_key(
+        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
+        Timestamp::from_unix_nanos(1),
+        Duration::from_secs(600),
+    ));
+    let expected_lsm = state.current_lsm.load(Ordering::SeqCst);
+
+    wait_for_persisted_runtime_state_lsm(&runtime, &placement, expected_lsm).await;
+    assert_eq!(
+        state.last_persisted_lsm.load(Ordering::SeqCst),
+        expected_lsm
+    );
+    assert!(!state.dirty.load(Ordering::SeqCst));
+
+    shutdown_tx.send_replace(true);
+    task.await.expect("snapshot task should stop cleanly");
+}
+
+#[tokio::test]
+async fn window_processor_snapshot_task_persists_dirty_state_on_interval() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let runtime =
+        super::Runtime::with_persistence(Some(db), Duration::from_millis(10), Default::default())
+            .expect("runtime should open persisted state");
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::WindowProcessor,
+        kind: ModelKind::WindowProcessor,
+        identifier: identifier("latency_window"),
+        schema_fingerprint: [0; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let state = runtime
+        .replicated_window_processor_state(placement.clone())
+        .expect("window processor state should initialize");
+    let (shutdown_tx, _) = watch::channel(false);
+    let (snapshot_request_tx, mut snapshot_requests) = mpsc::channel(1);
+    let task = runtime
+        .spawn_window_processor_snapshot_task(&shutdown_tx, state.clone(), snapshot_request_tx)
+        .expect("persisted runtime should spawn a snapshot task");
+    let live_state =
+        WindowProcessorState::new(&window_aggregate("SET count = COUNT(input.latency)"));
+    let snapshot_state = state.clone();
+    let snapshot_owner = tokio::spawn(async move {
+        let response = timeout(Duration::from_secs(1), snapshot_requests.recv())
+            .await
+            .expect("snapshot task should request live state")
+            .expect("snapshot request channel should remain open");
+        let result = snapshot_state
+            .replace_state(&live_state)
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        let _ = response.send(result);
+    });
+
+    state.mark_live_dirty();
+    let expected_lsm = 1;
+
+    wait_for_persisted_runtime_state_lsm(&runtime, &placement, expected_lsm).await;
+    snapshot_owner
+        .await
+        .expect("snapshot owner should stop cleanly");
+    assert_eq!(
+        state.last_persisted_lsm.load(Ordering::SeqCst),
+        expected_lsm
+    );
+    assert!(!state.dirty.load(Ordering::SeqCst));
+
+    shutdown_tx.send_replace(true);
+    task.await.expect("snapshot task should stop cleanly");
+}
+
 #[test]
 fn runtime_state_store_purges_only_stale_schema_fingerprints() {
     let dir = tempdir().expect("temp dir should open");
@@ -4691,16 +4861,14 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
-        .replicated_deduplicator_state(placement.clone(), Vec::new(), 0)
+        .replicated_deduplicator_state(placement.clone())
         .expect("deduplicator state should initialize");
-    let (lsm, _payload) = state
-        .apply_new_key(
-            "txn-1".to_string(),
-            Timestamp::from_unix_nanos(1),
-            Duration::from_secs(600),
-        )
-        .expect("deduplicator update should succeed")
-        .expect("deduplicator key should be new");
+    assert!(state.reserve_new_key(
+        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
+        Timestamp::from_unix_nanos(1),
+        Duration::from_secs(600),
+    ));
+    let lsm = state.current_lsm.load(Ordering::SeqCst);
 
     let first = runtime
         .handle_state_sync_request(&placement, 0)
@@ -4714,6 +4882,27 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .await
         .expect("state sync request should succeed");
     assert!(none.is_none());
+}
+
+#[test]
+fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::Deduplicator,
+        kind: ModelKind::Deduplicator,
+        identifier: identifier("dedup_orders"),
+        schema_fingerprint: [0; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let state = super::ReplicatedDeduplicatorState::new(placement, None)
+        .expect("deduplicator state should initialize");
+    let seen_at = Timestamp::from_unix_nanos(1);
+    let max_time = Duration::from_secs(600);
+
+    let key = super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]);
+    assert!(state.reserve_new_key(key.clone(), seen_at, max_time));
+    assert!(!state.reserve_new_key(key, seen_at, max_time));
+    assert_eq!(state.current_lsm.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -4795,38 +4984,30 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         None,
     );
     let original = runtime
-        .replicated_deduplicator_state(original_placement.clone(), Vec::new(), 0)
+        .replicated_deduplicator_state(original_placement.clone())
         .expect("state should initialize");
 
     runtime.install_state_schema_fingerprints(&schedule([1; 32]));
     let unchanged = runtime
-        .replicated_deduplicator_state(
-            runtime.state_placement(
-                &domain,
-                RuntimeStateKind::Deduplicator,
-                ModelKind::Deduplicator,
-                &identifier,
-                None,
-            ),
-            Vec::new(),
-            0,
-        )
+        .replicated_deduplicator_state(runtime.state_placement(
+            &domain,
+            RuntimeStateKind::Deduplicator,
+            ModelKind::Deduplicator,
+            &identifier,
+            None,
+        ))
         .expect("unchanged state should initialize");
     assert!(Arc::ptr_eq(&original, &unchanged));
 
     runtime.install_state_schema_fingerprints(&schedule([2; 32]));
     let changed = runtime
-        .replicated_deduplicator_state(
-            runtime.state_placement(
-                &domain,
-                RuntimeStateKind::Deduplicator,
-                ModelKind::Deduplicator,
-                &identifier,
-                None,
-            ),
-            Vec::new(),
-            0,
-        )
+        .replicated_deduplicator_state(runtime.state_placement(
+            &domain,
+            RuntimeStateKind::Deduplicator,
+            ModelKind::Deduplicator,
+            &identifier,
+            None,
+        ))
         .expect("changed state should initialize");
     assert!(!Arc::ptr_eq(&original, &changed));
     runtime
@@ -4837,41 +5018,6 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
             .replicated_deduplicator_states
             .contains_key(&original_placement)
     );
-}
-
-#[tokio::test]
-async fn replica_quorum_waits_for_replication_ack() {
-    let runtime = super::Runtime::default();
-    let placement = RuntimeStatePlacement {
-        domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
-        kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
-        schema_fingerprint: [0; 32],
-        branch_key: string_branch_key("tenant", "acme"),
-    };
-    let state = Arc::new(
-        super::ReplicatedDeduplicatorState::new(placement, vec!["node-2".to_string()], 1, None)
-            .expect("replicated state should initialize"),
-    );
-    let (lsm, _payload) = state
-        .apply_new_key(
-            "txn-1".to_string(),
-            Timestamp::from_unix_nanos(1),
-            Duration::from_secs(600),
-        )
-        .expect("deduplicator update should succeed")
-        .expect("deduplicator key should be new");
-
-    let waiter = {
-        let runtime = runtime.clone();
-        let state = state.clone();
-        tokio::spawn(async move { runtime.wait_for_replica_quorum(&state, lsm).await })
-    };
-    sleep(Duration::from_millis(50)).await;
-    state.mark_replica_progress("node-2", lsm);
-
-    assert!(waiter.await.expect("waiter task should join").is_ok());
 }
 
 #[tokio::test]
@@ -5240,6 +5386,109 @@ fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
         messages[1].record.metadata().ingested_at_low_watermark(),
         Timestamp::from_unix_nanos(200)
     );
+}
+
+#[tokio::test]
+async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sidecars() {
+    let schema = test_schema(&[("sequence", ParseAsType::U32)]);
+    let batch = |rows: Vec<(u32, i64, AckSet)>| {
+        super::RelayRecordBatch::from_messages(
+            schema.clone(),
+            rows.into_iter()
+                .map(|(sequence, ingested_at, acks)| RelayMessage {
+                    key: None,
+                    record: test_runtime_row([(
+                        "sequence".to_string(),
+                        RuntimeValue::U32(sequence),
+                    )])
+                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(ingested_at)),
+                    acks,
+                })
+                .collect(),
+        )
+        .expect("test relay batch should build")
+    };
+    let (first_ordered_acks, first_ordered_completion) = AckSet::root();
+    let mut buffer = super::ReordererOutputBuffer::default();
+    buffer.push(
+        batch(vec![
+            (3, 300, AckSet::empty()),
+            (1, 100, first_ordered_acks),
+        ]),
+        Arc::new(vec![
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(3)],
+                arrival_sequence: 0,
+            },
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(1)],
+                arrival_sequence: 1,
+            },
+        ]),
+        Timestamp::from_unix_nanos(10),
+    );
+    buffer.push(
+        batch(vec![(2, 200, AckSet::empty()), (1, 101, AckSet::empty())]),
+        Arc::new(vec![
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(2)],
+                arrival_sequence: 2,
+            },
+            super::ReordererRowOrder {
+                key: vec![super::ReorderKeyPart::UInt64(1)],
+                arrival_sequence: 3,
+            },
+        ]),
+        Timestamp::from_unix_nanos(20),
+    );
+
+    let ordered = buffer
+        .take_ordered_batch()
+        .expect("buffered Arrow batches should reorder");
+
+    let sequences = (0..ordered.batch.batch().num_rows())
+        .map(|row| {
+            ordered
+                .batch
+                .value(row, "sequence")
+                .expect("sequence should decode")
+                .expect("sequence should be initialized")
+        })
+        .collect::<Vec<_>>();
+    let watermarks = ordered
+        .metadata
+        .iter()
+        .map(RuntimeRecordMetadata::ingested_at_low_watermark)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        sequences,
+        [
+            RuntimeValue::U32(1),
+            RuntimeValue::U32(1),
+            RuntimeValue::U32(2),
+            RuntimeValue::U32(3),
+        ]
+    );
+    assert_eq!(
+        watermarks,
+        [
+            Timestamp::from_unix_nanos(100),
+            Timestamp::from_unix_nanos(101),
+            Timestamp::from_unix_nanos(200),
+            Timestamp::from_unix_nanos(300),
+        ]
+    );
+    assert_eq!(ordered.acks.len(), 4);
+    ordered.acks[0].ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), first_ordered_completion.wait())
+            .await
+            .expect("the first reordered row should retain its source ACK"),
+        AckOutcome::Ack
+    );
+    assert!(buffer.is_empty());
+    assert_eq!(buffer.estimated_bytes(), 0);
 }
 
 #[test]
@@ -6078,8 +6327,16 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
         ),
     ]);
     let right = test_runtime_row([("id".to_string(), RuntimeValue::U32(2))]);
-
-    let combined = super::correlator_input_row(&left, &right)
+    let left = RuntimeRecordBatch::from_rows(left.batch().schema(), std::iter::once(&left))
+        .expect("left batch should build");
+    let right = RuntimeRecordBatch::from_rows(right.batch().schema(), std::iter::once(&right))
+        .expect("right batch should build");
+    let materialized_state = [super::CorrelatorMaterializedState {
+        left: Arc::new(HashMap::default()),
+        right: Arc::new(HashMap::default()),
+    }];
+    let combined = super::correlator_input_batch(&left, &right, &[], &materialized_state)
+        .and_then(|batch| batch.runtime_row(0, RuntimeRecordMetadata::test()))
         .expect("correlator inputs should form one Arrow row");
 
     assert_eq!(row_value(&combined, "left.id"), Some(RuntimeValue::U32(1)));
@@ -6092,8 +6349,134 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
     assert_eq!(row_value(&combined, "id"), None);
 }
 
+#[test]
+fn ingest_group_rows_share_the_group_batch_allocation() {
+    let first = test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]);
+    let second = test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]);
+    let batch =
+        RuntimeRecordBatch::from_rows(first.batch().schema(), [&first, &second].into_iter())
+            .expect("test rows should form one ingest group");
+    let rows = super::IngestGroupRows {
+        batch: Arc::new(batch),
+        record_metadata: vec![RuntimeRecordMetadata::test(); 2],
+        ingest_metadata: None,
+        acks: vec![AckSet::empty(), AckSet::empty()],
+    };
+
+    let first = rows.row(0).expect("first row should exist");
+    let second = rows.row(1).expect("second row should exist");
+
+    assert!(
+        Arc::ptr_eq(first.batch(), second.batch()),
+        "row views from one ingest group must retain the same batch allocation"
+    );
+}
+
 #[tokio::test]
-async fn correlator_output_reads_branch_and_declared_materialized_state() {
+async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
+    let left_schema = test_schema(&[("id", ParseAsType::U32), ("marker", ParseAsType::I64)]);
+    let right_schema = test_schema(&[("id", ParseAsType::U32)]);
+    let processor = identifier("join_profiles");
+    let program = super::compile_correlator_where_program(
+        &processor,
+        &expression("left.id = right.id"),
+        &[identifier("left_profiles")],
+        left_schema.arrow_schema(),
+        &[identifier("right_profiles")],
+        right_schema.arrow_schema(),
+        None,
+    )
+    .expect("correlator WHERE should compile");
+    let now = super::current_timestamp();
+    let pending = |id, marker| super::CorrelatorPendingMessage {
+        received_at: now,
+        message: RelayMessage {
+            key: None,
+            record: test_runtime_row([
+                ("id".to_string(), RuntimeValue::U32(id)),
+                ("marker".to_string(), RuntimeValue::I64(marker)),
+            ]),
+            acks: AckSet::empty(),
+        },
+        materialized_state: Arc::new(HashMap::default()),
+    };
+    let mut state = super::CorrelatorBranchState {
+        pending_left: vec![pending(7, 1), pending(8, 2), pending(7, 3)],
+        pending_right: Vec::new(),
+    };
+    let incoming = super::CorrelatorPendingMessage {
+        received_at: now,
+        message: RelayMessage {
+            key: None,
+            record: test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]),
+            acks: AckSet::empty(),
+        },
+        materialized_state: Arc::new(HashMap::default()),
+    };
+    super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let (matched_left, _matched_right) = super::correlate_incoming_message(
+        &processor,
+        &program,
+        super::CorrelatorSide::Right,
+        nervix_models::CorrelatorMatchPolicy::Latest,
+        &mut state,
+        incoming,
+        now,
+    )
+    .await
+    .expect("batched WHERE evaluation should succeed")
+    .expect("matching candidates should produce a correlation");
+
+    assert_eq!(
+        super::CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "all candidate pairs must share one WHERE VM execution"
+    );
+    assert_eq!(
+        row_value(&matched_left.message.record, "marker"),
+        Some(RuntimeValue::I64(3))
+    );
+    assert_eq!(state.pending_left.len(), 1);
+    assert_eq!(
+        row_value(&state.pending_left[0].message.record, "marker"),
+        Some(RuntimeValue::I64(2))
+    );
+
+    let incoming_left = pending(7, 4);
+    let right_candidate = |id| super::CorrelatorPendingMessage {
+        received_at: now,
+        message: RelayMessage {
+            key: None,
+            record: test_runtime_row([("id".to_string(), RuntimeValue::U32(id))]),
+            acks: AckSet::empty(),
+        },
+        materialized_state: Arc::new(HashMap::default()),
+    };
+    let right_candidates = vec![right_candidate(7), right_candidate(8), right_candidate(7)];
+    super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let matching = super::evaluate_correlator_where_matches(
+        &processor,
+        &program,
+        super::CorrelatorSide::Left,
+        &incoming_left,
+        &right_candidates,
+        now,
+    )
+    .await
+    .expect("left-side arrival should evaluate its right-side candidates");
+
+    assert_eq!(matching, vec![true, false, true]);
+    assert_eq!(
+        super::CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "a left-side arrival must also batch all candidate pairs"
+    );
+}
+
+#[tokio::test]
+async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
     let left_schema = test_schema(&[("id", ParseAsType::U32)]);
     let right_schema = test_schema(&[("score", ParseAsType::I64)]);
     let output_schema = test_schema(&[
@@ -6123,7 +6506,7 @@ async fn correlator_output_reads_branch_and_declared_materialized_state() {
         output_sensitivity: super::VmSchemaSensitivity::default(),
         construction: &construction(
             "SET tenant = branch.tenant, status = relay_state.profiles.status, score = \
-             right.score WHERE relay_state.profiles.status = \"active\"",
+             right.score WHERE relay_state.profiles.status != \"blocked\"",
         ),
         runtime: super::RuntimeVmCompileContext {
             available_materialized_streams: &materialized_specs,
@@ -6135,42 +6518,108 @@ async fn correlator_output_reads_branch_and_declared_materialized_state() {
         },
     }
     .compile()
-    .expect("correlator output should compile with branch and materialized state bindings");
-    let left = test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]);
-    let right = test_runtime_row([("score".to_string(), RuntimeValue::I64(42))]);
-    let combined = super::correlator_input_row(&left, &right)
-        .expect("correlator inputs should form one Arrow row");
-    let materialized_state = HashMap::from_iter([(
-        "relay_state.profiles.status".to_string(),
-        RuntimeValue::String("active".to_string()),
-    )]);
-    let message = match super::evaluate_correlator_output_message(
+    .expect("correlator output should compile");
+    let left_batch = Arc::new(
+        left_schema
+            .batch_from_test_rows([
+                [("id".to_string(), RuntimeValue::U32(7))],
+                [("id".to_string(), RuntimeValue::U32(8))],
+            ])
+            .expect("left rows should build"),
+    );
+    let right_batch = Arc::new(
+        right_schema
+            .batch_from_test_rows([
+                [("score".to_string(), RuntimeValue::I64(41))],
+                [("score".to_string(), RuntimeValue::I64(42))],
+            ])
+            .expect("right rows should build"),
+    );
+    let now = super::current_timestamp();
+    let key = string_branch_key("tenant", "acme");
+    let correlation = |row, status: &str| {
+        let state = Arc::new(HashMap::from_iter([(
+            "relay_state.profiles.status".to_string(),
+            RuntimeValue::String(status.to_string()),
+        )]));
+        (
+            super::CorrelatorPendingMessage {
+                received_at: now,
+                message: RelayMessage {
+                    key: key.clone(),
+                    record: RuntimeRow::new(left_batch.clone(), row, RuntimeRecordMetadata::test())
+                        .expect("left row should exist"),
+                    acks: AckSet::empty(),
+                },
+                materialized_state: Arc::new(HashMap::default()),
+            },
+            super::CorrelatorPendingMessage {
+                received_at: now,
+                message: RelayMessage {
+                    key: key.clone(),
+                    record: RuntimeRow::new(
+                        right_batch.clone(),
+                        row,
+                        RuntimeRecordMetadata::test(),
+                    )
+                    .expect("right row should exist"),
+                    acks: AckSet::empty(),
+                },
+                materialized_state: state,
+            },
+        )
+    };
+    let correlations = vec![correlation(0, "active"), correlation(1, "paused")];
+    let matched = super::CorrelatorMatchedBatch::from_correlations(&correlations, &[&program])
+        .expect("matched pairs should form one Arrow batch");
+    super::CORRELATOR_OUTPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let outcomes = super::evaluate_correlator_output_batch(
         &identifier("join_profiles"),
         &program,
-        string_branch_key("tenant", "acme"),
-        combined,
-        &materialized_state,
-        AckSet::empty(),
-        super::current_timestamp(),
+        &matched,
+        vec![AckSet::empty(), AckSet::empty()],
+        now,
     )
     .await
-    {
-        Ok(Some(message)) => message,
-        Ok(None) => panic!("route predicate should select the output"),
-        Err(error) => panic!("correlator output should evaluate: {}", error.error.message),
-    };
+    .expect("batched correlator output should evaluate");
+    let messages = outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            Ok(Some(message)) => message,
+            Ok(None) => panic!("route WHERE must retain every eligible pair"),
+            Err(error) => panic!("correlator output should succeed: {}", error.error.message),
+        })
+        .collect::<Vec<_>>();
 
     assert_eq!(
-        row_value(&message.record, "tenant"),
-        Some(RuntimeValue::String("acme".to_string()))
+        super::CORRELATOR_OUTPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "all matched pairs for one route must share one output VM execution"
     );
+    assert_eq!(messages.len(), 2);
     assert_eq!(
-        row_value(&message.record, "status"),
+        row_value(&messages[0].record, "status"),
         Some(RuntimeValue::String("active".to_string()))
     );
     assert_eq!(
-        row_value(&message.record, "score"),
+        row_value(&messages[1].record, "status"),
+        Some(RuntimeValue::String("paused".to_string()))
+    );
+    assert_eq!(
+        row_value(&messages[0].record, "score"),
+        Some(RuntimeValue::I64(41))
+    );
+    assert_eq!(
+        row_value(&messages[1].record, "score"),
         Some(RuntimeValue::I64(42))
+    );
+    let output_batch = messages[0].record.batch().clone();
+    let relay_batch = super::build_stream_record_batch_preserving_acks(output_schema, messages)
+        .expect("batched correlator output should form one relay batch");
+    assert!(
+        Arc::ptr_eq(&relay_batch.batch, &output_batch),
+        "relay batching must preserve the correlator's shared output allocation"
     );
 }
 
@@ -10448,6 +10897,39 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     assert!(row_value(&output, "active").is_none());
     assert!(row_value(&output, "amount").is_none());
     assert!(row_value(&output, "raw").is_none());
+
+    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
+        metadata,
+        super::IngestFilterMapMetadata::kafka(
+            "logic_notifications_t123".to_string(),
+            3,
+            43,
+            None,
+            Vec::new(),
+        ),
+    ])
+    .expect("Kafka metadata must concatenate column-wise");
+    let offsets = grouped_metadata
+        .field_column("offset")
+        .expect("metadata projection must succeed")
+        .expect("Kafka offset column must exist");
+    let offsets = offsets
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .expect("Kafka offsets must remain INT64");
+    assert_eq!(offsets.values(), &[42, 43]);
+    let selected = grouped_metadata
+        .select(&[false, true])
+        .expect("metadata row selection must succeed");
+    let selected_offset = selected
+        .field_column("offset")
+        .expect("selected metadata projection must succeed")
+        .expect("selected Kafka offset column must exist");
+    let selected_offset = selected_offset
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .expect("selected Kafka offset must remain INT64");
+    assert_eq!(selected_offset.values(), &[43]);
 }
 
 #[tokio::test]
@@ -10553,6 +11035,78 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         Some(RuntimeValue::String("primary".to_string()))
     );
     assert_eq!(row_value(&output, "total"), Some(RuntimeValue::I64(2)));
+
+    let second_record = test_runtime_row([
+        (
+            "tenant".to_string(),
+            RuntimeValue::String("acme".to_string()),
+        ),
+        (
+            "header_name".to_string(),
+            RuntimeValue::String("route".to_string()),
+        ),
+        (
+            "raw".to_string(),
+            RuntimeValue::String("second".to_string()),
+        ),
+    ]);
+    let grouped_carrier =
+        RuntimeRecordBatch::concat(&[&record.one_row_batch(), &second_record.one_row_batch()])
+            .expect("grouped carrier must concatenate");
+    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
+        metadata.clone(),
+        super::IngestFilterMapMetadata::from_headers(vec![
+            ("tenant".to_string(), "acme".to_string()),
+            ("route".to_string(), "backup".to_string()),
+        ]),
+    ])
+    .expect("grouped metadata must concatenate");
+    let grouped_runtime_metadata =
+        vec![record.metadata().clone(), second_record.metadata().clone()];
+    let grouped_keys = vec![None, None];
+    let grouped_outcomes = super::evaluate_filter_map_on_batch(
+        ModelKind::Ingestor.as_str(),
+        &identifier("header_ingestor"),
+        &program,
+        super::FilterMapOutcomeInputs {
+            carrier: &grouped_carrier,
+            record_metadata: &grouped_runtime_metadata,
+            keys: &grouped_keys,
+            filter_map_metadata: Some(&grouped_metadata),
+            side_inputs: &HashMap::default(),
+        },
+        Timestamp::from_unix_nanos(1),
+    )
+    .await
+    .expect("grouped header filter-map must execute");
+    let grouped_outputs = grouped_outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            super::SingleRecordFilterMapOutcome::Output(record) => record,
+            super::SingleRecordFilterMapOutcome::Filtered => {
+                panic!("grouped header row must be selected")
+            }
+            super::SingleRecordFilterMapOutcome::MessageError { error, .. } => {
+                panic!("grouped header row failed: {}", error.message)
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        row_value(&grouped_outputs[0], "first"),
+        Some(RuntimeValue::String("primary".to_string()))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[0], "total"),
+        Some(RuntimeValue::I64(2))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[1], "first"),
+        Some(RuntimeValue::String("backup".to_string()))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[1], "total"),
+        Some(RuntimeValue::I64(1))
+    );
 
     let top_filter = super::compile_expression_filter_program(
         super::RuntimeCompileTarget {

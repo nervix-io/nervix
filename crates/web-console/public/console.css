@@ -1175,6 +1175,15 @@ button {
   opacity: 1;
 }
 
+.zoom-group .graph-fit {
+  min-width: 30px;
+  color: var(--text-c);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  opacity: 1;
+}
+
 .zoom-group .sidebar-icon,
 .fullscreen-button .sidebar-icon {
   width: 12px;
@@ -1244,26 +1253,12 @@ button {
   transition: transform 160ms ease-out;
 }
 
-.charming-graph,
 .graph-branch-layer,
 .graph-pulse-layer,
 .graph-branch-label-layer,
 .graph-hit-layer {
   position: absolute;
   inset: 0;
-}
-
-.charming-graph {
-  z-index: 0;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.charming-graph > div,
-.charming-graph canvas,
-.charming-graph svg {
-  width: 100%;
-  height: 100%;
 }
 
 .graph-branch-layer {
@@ -1273,23 +1268,11 @@ button {
   pointer-events: none;
 }
 
-.graph-branch-body,
-.graph-branch-stack,
-.graph-branch-callout {
+.graph-branch-body {
   fill: rgba(30, 58, 186, 0.08);
   stroke: rgba(6, 182, 212, 0.22);
-  stroke-width: 1;
   stroke-dasharray: 7 5;
   stroke-linejoin: round;
-}
-
-.graph-branch-stack {
-  fill: rgba(30, 58, 186, 0.045);
-  opacity: 0.68;
-}
-
-.graph-branch-stack-back {
-  opacity: 0.38;
 }
 
 .graph-pulse-layer {
@@ -1304,7 +1287,7 @@ button {
   pointer-events: none;
 }
 
-.graph-branch-header {
+.graph-branch-label {
   position: absolute;
   display: grid;
   grid-template-rows: 15px 13px;
@@ -1320,13 +1303,13 @@ button {
   text-align: left;
 }
 
-.graph-branch-header:hover {
+.graph-branch-label:hover {
   border-color: rgba(6, 182, 212, 0.44);
   background: rgba(6, 182, 212, 0.1);
 }
 
-.graph-branch-header strong,
-.graph-branch-header span {
+.graph-branch-label strong,
+.graph-branch-label span {
   overflow: hidden;
   color: var(--cyan);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1334,13 +1317,13 @@ button {
   white-space: nowrap;
 }
 
-.graph-branch-header strong {
+.graph-branch-label strong {
   font-size: 10px;
   font-weight: 800;
   line-height: 14px;
 }
 
-.graph-branch-header span {
+.graph-branch-label span {
   color: var(--text-c);
   font-size: 8px;
   font-weight: 700;
@@ -1380,6 +1363,17 @@ button {
   stroke-dasharray: 2 5;
 }
 
+/* A materialized-state dependency carries no records, so it is drawn as a quiet reference line. */
+.graph-edge--state-link {
+  stroke: rgba(148, 163, 184, 0.5);
+  stroke-dasharray: 1 6;
+  stroke-linecap: round;
+}
+
+.graph-edge[data-feedback="true"] {
+  stroke-dasharray: 10 4;
+}
+
 .graph-edge-shadow {
   fill: none;
   stroke: rgba(6, 182, 212, 0.08);
@@ -1404,40 +1398,59 @@ button {
   fill: rgba(6, 182, 212, 0.58);
 }
 
-.graph-edge-group:hover .graph-edge {
+.graph-arrow-head.hollow {
+  fill: none;
+  stroke: rgba(148, 163, 184, 0.62);
+  stroke-width: 0.7;
+  stroke-linejoin: round;
+}
+
+.graph-edge-group:hover .graph-edge,
+.graph-edge-group.emphasis .graph-edge {
   stroke: rgba(103, 232, 249, 0.96);
   stroke-width: 2.8;
   filter: drop-shadow(0 0 7px rgba(6, 182, 212, 0.72));
 }
 
-.graph-edge-group:hover .graph-edge-shadow {
+.graph-edge-group:hover .graph-edge-shadow,
+.graph-edge-group.emphasis .graph-edge-shadow {
   stroke: rgba(6, 182, 212, 0.24);
   stroke-width: 9;
 }
 
-.graph-edge-group:hover .graph-edge.graph-edge--correlation-timeout {
+.graph-edge-group:hover .graph-edge.graph-edge--correlation-timeout,
+.graph-edge-group.emphasis .graph-edge.graph-edge--correlation-timeout {
   stroke: rgba(196, 181, 253, 0.96);
   filter: drop-shadow(0 0 7px rgba(168, 85, 247, 0.68));
 }
 
-.graph-edge-group:hover .graph-edge-shadow.graph-edge--correlation-timeout {
+.graph-edge-group:hover .graph-edge-shadow.graph-edge--correlation-timeout,
+.graph-edge-group.emphasis .graph-edge-shadow.graph-edge--correlation-timeout {
   stroke: rgba(168, 85, 247, 0.28);
 }
 
-.graph-edge-group:hover .graph-edge.graph-edge--message-error {
+.graph-edge-group:hover .graph-edge.graph-edge--message-error,
+.graph-edge-group.emphasis .graph-edge.graph-edge--message-error {
   stroke: rgba(253, 186, 116, 0.96);
   filter: drop-shadow(0 0 7px rgba(249, 115, 22, 0.68));
 }
 
-.graph-edge-group:hover .graph-edge-shadow.graph-edge--message-error {
+.graph-edge-group:hover .graph-edge-shadow.graph-edge--message-error,
+.graph-edge-group.emphasis .graph-edge-shadow.graph-edge--message-error {
   stroke: rgba(249, 115, 22, 0.3);
 }
 
+/* Only an edge that is carrying records shows a pulse, so a stopped domain draws a still graph. */
 .graph-pulse {
+  display: none;
   fill: var(--cyan);
   opacity: 0.9;
   filter: drop-shadow(0 0 6px rgba(6, 182, 212, 0.75));
   pointer-events: none;
+}
+
+.graph-edge-group.flowing .graph-pulse {
+  display: inline;
 }
 
 .graph-edge-metric {
@@ -1522,6 +1535,19 @@ button {
 .node-hit.search-highlight .node-status,
 .relay-hit.search-highlight .relay-port {
   box-shadow: 0 0 12px rgba(250, 204, 21, 0.8);
+}
+
+/* While a search is active everything that does not match recedes. */
+.node-hit[data-search-dimmed="true"],
+.relay-hit[data-search-dimmed="true"] {
+  opacity: 0.32;
+}
+
+.node-hit.emphasis,
+.relay-hit.emphasis {
+  border-color: rgba(6, 182, 212, 0.72);
+  box-shadow: 0 0 18px rgba(6, 182, 212, 0.32);
+  opacity: 1;
 }
 
 .graph-action-scrim {
@@ -2275,6 +2301,15 @@ button {
   background: var(--orange);
 }
 
+.legend-row .relay {
+  background: #38bdf8;
+  border-radius: 999px;
+}
+
+.legend-row .client {
+  background: var(--text-c);
+}
+
 .legend-row em {
   margin-left: auto;
   color: var(--text-d);
@@ -2573,4 +2608,25 @@ button {
     width: min(100%, 220px);
   }
 
+}
+
+/* A reader who has asked for less motion gets a still graph: no travelling pulses, no easing on
+   the zoom layer, and no animated emphasis. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .graph-pulse {
+    display: none;
+  }
+
+  .graph-zoom-layer {
+    transition: none;
+  }
 }
