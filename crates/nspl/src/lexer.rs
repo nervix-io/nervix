@@ -193,6 +193,7 @@ pub enum Identifier {
     Zeromq,
     Sqs,
     Sentry,
+    Syslog,
     Otel,
     Logs,
     Traces,

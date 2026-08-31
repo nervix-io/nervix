@@ -59,18 +59,51 @@ domains, non-relay graph nodes, and relays across the current cluster graph.
 ![The execution graph for the quickstart pipeline](images/console-graph.png)
 
 The graph is redrawn from snapshots the leader pushes twice a second. It shows external clients,
-ingestors, processors, relays, and emitters, connected in the direction records flow. Node colour
-follows the legend — ingestor, processor, emitter — and relays are drawn as labelled ports between
-them, with a bar per buffer quantile and the p50/p90/p99 depths on hover.
+ingestors, processors, relays, and emitters, connected in the direction records flow.
 
-When traffic is flowing, each edge carries its own rate: messages per second, bytes per second, and
-batches per second, with a pulse travelling along the edge. Branch groups are drawn as a stacked
-outline around the part of the graph that runs per branch; clicking one opens its key schema and
-active branch count.
+Records always travel from left to right. Items sit in columns ordered by how far a record has
+travelled, and every item appears to the right of everything that feeds it. Relays get columns of
+their own between the processing columns, drawn as labelled capsules with a bar per buffer quantile
+and the p50/p90/p99 depths on hover, so a relay reads as the port its producers converge on and its
+consumers fan out from. A pipeline with no branching or fan-out is drawn as a single straight line.
 
-The toolbar controls framing. Search highlights matching items and brings them into view; the zoom
-buttons step between 70% and 160%, and `Ctrl`/`Cmd` with the scroll wheel ranges from 25% to 300%;
-the fullscreen button expands the graph over the whole window. Dragging pans.
+Edges run horizontally and vertically with rounded corners, through gutters kept clear of the
+items, so no edge ever passes under a node, a capsule, or a label. Each edge leaves and arrives at
+its own attachment point, so a node with several outputs fans out visibly rather than from one
+spot. Edge style carries meaning:
+
+- **solid** — records flowing
+- **dashed, error tint** — a route's `ON MESSAGE ERROR` destination
+- **dashed, warning tint** — a correlator's `ON TIMEOUT` destination; a correlator's two inputs are
+  labelled `LEFT` and `RIGHT`
+- **dotted, hollow arrow** — a materialized-state dependency, including the relay a generator reads
+  with `USING MATERIALIZED STATE`. State is looked up rather than delivered, so these edges carry
+  no rate
+
+A graph that feeds back on itself — a reingestor writing a relay that reaches it again — draws that
+one edge as a marked return path above the items it spans, so backwards travel is never mistaken
+for forward flow. Disconnected parts of a graph are stacked as separate bands.
+
+When traffic is flowing, each edge carries its own rate, with the full messages, bytes, and batches
+per second on hover, and a pulse travelling along the edge. Where a node declares several routes to
+the same relay they are drawn as one edge, and hovering reports how many routes it stands for.
+
+Branch groups are drawn as a tinted region with a stacked outline around the part of the graph that
+runs per branch, containing exactly the items that run per branch and nothing else. The region is
+headed with the branch name, its key fields, and how many branch instances are currently live; the
+outline thickens with that count. The ingestors and reingestors that construct the branch, and the
+emitters and reingestors that collapse it, sit on the region's border rather than inside it.
+Clicking the header opens the branch's key schema and its live instances.
+
+The toolbar controls framing. Search highlights matching items, dims the rest, and brings the
+matches into view; the zoom buttons step in tens and `Ctrl`/`Cmd` with the scroll wheel is
+continuous, both between 25% and 300%; **FIT** frames the whole graph, which is also the view you
+start with; the fullscreen button expands the graph over the whole window. Dragging pans. The
+graph moves only when the topology changes, and never because traffic changed.
+
+The header carries the domain's lifecycle state — `RUNNING`, `PAUSED`, or `STOPPED` — and the state
+of the feed: `LIVE` while snapshots arrive, `STALE` when they stop, and `OFFLINE` when the session
+is disconnected. A stopped domain still draws its whole graph, with no rates and no pulses.
 
 A domain with no installed graph shows `NO ACTIVE DATAFLOW GRAPH` instead.
 

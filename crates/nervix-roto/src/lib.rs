@@ -21,8 +21,8 @@ use arrow_schema::{DataType, Field, TimeUnit};
 use arrow_select::{nullif::nullif, zip::zip};
 use nervix_models::{CreateUdf, ParseAsType, Timestamp};
 use nervix_vm::{
-    ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RuntimeError, SideError,
-    TypedArray, UdfParameter, UdfSignature, UdfSignatures,
+    ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
+    RuntimeError, SideError, TypedArray, UdfParameter, UdfSignature, UdfSignatures,
 };
 use parking_lot::Mutex;
 use regex::Regex;
@@ -902,7 +902,7 @@ impl CompiledUdf {
         row_count: usize,
         span: nervix_nspl::vm_program::Span,
         now: Timestamp,
-        prior_error_rows: &[bool],
+        prior_error_rows: RowErrorMask<'_>,
     ) -> Result<InjectedResult, RuntimeError> {
         if arguments.len() != self.model.arguments.len() {
             return Err(RuntimeError::InjectedFunctionFailed {
@@ -933,7 +933,7 @@ impl CompiledUdf {
             }
             argument_arrays.push(argument);
         }
-        let mut propagation = prior_error_rows.to_vec();
+        let mut propagation = prior_error_rows.iter().collect::<Vec<_>>();
         if propagation.len() != row_count {
             return Err(RuntimeError::InjectedFunctionFailed {
                 function: self.model.name.to_string(),
@@ -1155,7 +1155,7 @@ impl FunctionInjector for UdfExecutor {
             row_count,
             span,
             Timestamp::now(),
-            &vec![false; row_count],
+            RowErrorMask::none(row_count),
         )
     }
 
@@ -1166,7 +1166,7 @@ impl FunctionInjector for UdfExecutor {
         row_count: usize,
         span: nervix_nspl::vm_program::Span,
         now: Timestamp,
-        prior_error_rows: &[bool],
+        prior_error_rows: RowErrorMask<'_>,
     ) -> Result<InjectedResult, RuntimeError> {
         let nervix_nspl::vm_program::FunctionName::Udf(name) = function else {
             return Err(RuntimeError::MissingFunctionInjector {

@@ -441,7 +441,6 @@ where
 
             Ok(Program {
                 filter,
-                branch_filters: Vec::new(),
                 set: set.unwrap_or_default(),
                 invoke: invoke.unwrap_or_default(),
             })
@@ -517,7 +516,6 @@ mod tests {
         .expect("program must parse");
 
         assert!(parsed.inner.filter.is_some());
-        assert!(parsed.inner.branch_filters.is_empty());
         assert_eq!(parsed.inner.set.len(), 2);
         assert_eq!(parsed.inner.set[0].0.relay, "input");
         assert_eq!(parsed.inner.set[0].0.field, "total");
@@ -534,7 +532,6 @@ mod tests {
         .expect("program must parse");
 
         assert!(parsed.inner.filter.is_some());
-        assert!(parsed.inner.branch_filters.is_empty());
         assert_eq!(parsed.inner.set.len(), 1);
         assert_eq!(parsed.inner.invoke.len(), 2);
         assert_eq!(
@@ -835,7 +832,6 @@ mod tests {
         let parsed = parse_program("WHERE input.active").expect("program must parse");
 
         assert!(parsed.inner.filter.is_some());
-        assert!(parsed.inner.branch_filters.is_empty());
         assert!(parsed.inner.set.is_empty());
     }
 

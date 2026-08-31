@@ -239,7 +239,9 @@ General notes:
 - nested predicates and nested/chained builtin calls are supported
 - leader-side validation requires every required output and branch field to be initialized
 - public Models store structured expressions; the runtime never reparses NSPL
-- source-specific transport metadata may be exposed through `metadata.<field>` when the ingestor supports it; Kafka currently provides `metadata.topic`, `metadata.partition`, and `metadata.offset`
+- source-specific transport metadata may be exposed through `metadata.<field>` when the ingestor
+  supports it; Kafka provides `metadata.topic`, `metadata.partition`, and `metadata.offset`, while
+  Syslog provides `metadata.peer_addr`
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -293,8 +295,8 @@ SET route = read_header(lower(input.route_header))
 WHERE read_header("tenant") = output.tenant
 ```
 
-MQTT, Redis Pub/Sub, Prometheus, ZeroMQ, and WebSockets client ingestors do not support header
-reads. Leader-side validation rejects these functions for a source without header support.
+MQTT, Redis Pub/Sub, Prometheus, Syslog, ZeroMQ, and WebSockets client ingestors do not support
+header reads. Leader-side validation rejects these functions for a source without header support.
 
 ## TLS Client Configuration
 
@@ -324,6 +326,8 @@ Transport-specific schemes and keys:
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file`.
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`. This is primarily useful for SQS-compatible local/test endpoints.
+- `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
+  `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
 
 Example Kafka TLS client:
 
@@ -527,6 +531,23 @@ ON QUIESCE SUSPEND
 The source is a PULL socket. `SUSPEND` keeps it open but unread, so transport buffers fill and the
 peer's own high-water-mark policy determines whether sends queue, block, or drop. Buffered transport
 data is read on resume. `BUFFER` and `DROP` keep reading locally.
+
+### Syslog
+
+```nspl,ignore
+FROM SYSLOG <client>
+MODE NO_ACK SEQUENTIAL
+ON QUIESCE SUSPEND
+  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+  | DROP
+```
+
+The client binds a UDP, TCP, or TLS listener. UDP treats one datagram as one message; TCP detects
+RFC 6587 octet-counted or LF-terminated framing per frame; TLS uses RFC 5425 octet counting.
+Messages expose optional `metadata.peer_addr`. The source takes no `INSTANCES` clause and has no
+application acknowledgment. Every live cluster node runs the listener; it is independent of the
+leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
+cluster lifecycle, framing, TLS, limits, and failure semantics.
 
 ### SQS
 

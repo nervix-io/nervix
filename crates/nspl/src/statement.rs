@@ -141,6 +141,9 @@ pub fn statement_parser<'src>()
         crate::client::create_client_websockets_parser().map(|create| {
             Statement::Create(create.map_body(Model::ClientWebsockets).map_body(Box::new))
         }),
+        crate::client::create_client_syslog_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientSyslog).map_body(Box::new))
+        }),
         crate::client::create_client_clickhouse_parser().map(|create| {
             Statement::Create(create.map_body(Model::ClientClickHouse).map_body(Box::new))
         }),
@@ -260,18 +263,18 @@ mod tests {
         CodecWireFormat, CordonNode, CreateClientAzureBlob, CreateClientGcs,
         CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
         CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-        CreateClientS3, CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator,
-        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction,
-        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, DescribeRelay,
-        DrainNode, DropModel, DropNode, EmitSink, EmitterPublishingMode, EndpointIngestMode,
-        EndpointType, ErrorPolicies, GeneralErrorPolicy, Identifier as ModelIdentifier,
-        IngestQuiesceMode, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
-        KafkaOffsetMode, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
-        OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SchemaField,
-        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral,
-        UncordonNode, WireSchemaField, ZeroMqIngestMode,
+        CreateClientS3, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec,
+        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor,
+        CreateJunction, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema,
+        DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EmitterPublishingMode,
+        EndpointIngestMode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
+        Identifier as ModelIdentifier, IngestQuiesceMode, IngestSource, JsonType, KafkaConfigEntry,
+        KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession,
+        NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy,
+        SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+        SignalingWaitStep, SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding,
+        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
     };
 
     use super::*;
@@ -455,7 +458,7 @@ mod tests {
 
     fn gen_model(bytes: &[u8]) -> Model {
         let mut g = ByteGen::new(bytes);
-        match g.next_u8() % 29 {
+        match g.next_u8() % 30 {
             0 => {
                 let field_count = (g.next_u8() as usize % 5) + 1;
                 let mut fields = Vec::with_capacity(field_count);
@@ -1118,6 +1121,20 @@ mod tests {
                     },
                     timeout: "5s".to_string(),
                 },
+            }),
+            29 => Model::ClientSyslog(CreateClientSyslog {
+                name: g.ident(),
+                mount: None,
+                config: vec![
+                    ClientConfigEntry {
+                        key: "protocol".to_string(),
+                        value: "udp".to_string(),
+                    },
+                    ClientConfigEntry {
+                        key: "addr".to_string(),
+                        value: "127.0.0.1:514".to_string(),
+                    },
+                ],
             }),
             _ => Model::Ingestor(CreateIngestor {
                 name: g.ident(),

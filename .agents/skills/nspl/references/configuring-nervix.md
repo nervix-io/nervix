@@ -27,6 +27,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Roto language syntax for UDF bodies | `Roto Language Reference` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
 | Resources, uploads, mounts, and TLS files | `Resources` |
+| Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and sinks | `Common` → `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `NSPL Overview` and `Examples` |
@@ -125,13 +126,18 @@ relay. Do not use them to scan across branches.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
   schedulable runtime nodes or materialized relays. Treat coverage as path-gated, allow a valid
   zero-effect rule, use lower `RANK` numbers for stronger claims, and never invent hard separation.
-- Every schema and wire schema is non-empty; types and optionality match exactly. JSON, CBOR, and
-  AVRO wire schemas are separate entity kinds even when their names coincide. Every wire schema
-  declares `MODE STRICT|LOOSE` after its name, and a mode-only change uses `ALTER WIRE <format>
-  SCHEMA <wire_schema> MODE STRICT|LOOSE`.
+- Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
+  optionality match exactly. Declared wire formats are separate entity kinds even when their names
+  coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
+  WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`. SYSLOG is a predefined singleton wire
+  schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
 - Every codec explicitly handles any wire/internal datetime or shape difference. Every JAQ-backed
   codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
   order.
+- Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
+  documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
+  use only `NO_ACK` source/sink modes, and configure TLS identity and framing for the client
+  direction that consumes it.
 - Every relay declares a schema and explicit branch selection.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
 - Every multi-input emitter source declares the same payload schema. Its sources may use different
@@ -198,9 +204,11 @@ Choose checks relevant to the configured graph:
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics.
-- The observability server's `/metrics` endpoint reports `nervix_branch_instances` per domain,
-  branch declaration, and physical node, plus `nervix_branch_evictions_total` split by
-  `reason="lru"` or `reason="ttl"`.
+- The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
+  including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
+  Observability` for the current histogram buckets. The endpoint also reports
+  `nervix_branch_instances` per domain, branch declaration, and physical node, plus
+  `nervix_branch_evictions_total` split by `reason="lru"` or `reason="ttl"`.
 - `DESCRIBE RESOURCE` confirms uploads and versions.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.

@@ -400,3 +400,81 @@ Feature: Reingestor repartitioning
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: Reingestor routes read defaulted materialized state
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        tenant STRING,
+        user_id I64,
+        note STRING OPTIONAL
+      );
+        CREATE SCHEMA preference (
+        tenant STRING,
+        user_id I64,
+        theme STRING,
+        hint STRING OPTIONAL
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        tenant string,
+        user_id integer,
+        note string OPTIONAL
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_reingest_default SCHEMA tenant_user_id_branch TTL 5m;
+        CREATE RELAY default_preferences
+        SCHEMA preference BRANCHED BY by_reingest_default
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_reingest_default;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_reingest_default_out SCHEMA tenant_branch TTL 5m;
+        CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_reingest_default_out;
+        CREATE VHOST edge http-reingest-default-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
+        ON edge
+        PATH '/reingest-default'
+        TYPE HTTP;
+        CREATE INGESTOR http_notifications
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_reingest_default
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE REINGESTOR tenant_partition FROM notifications
+        USING MATERIALIZED STATE default_preferences DEFAULT { tenant = "unknown", user_id = 0, theme = "system", hint = "unset" }
+        TO tenant_notifications
+        INHERIT ALL
+        BRANCHED BY by_reingest_default_out
+        SET tenant = relay_state.default_preferences.theme
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications;
+        START;
+      """
+    When http payload is posted to node "node-1" with host "http-reingest-default-{{test_id}}.example.com" path "/reingest-default"
+      """
+      {"tenant":"ACME","user_id":42,"note":"incoming"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"note":"incoming","tenant":"ACME","user_id":42}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"system"}'
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |

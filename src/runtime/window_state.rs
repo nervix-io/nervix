@@ -1,11 +1,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use ahash::RandomState;
-use dashmap::DashMap;
 use nervix_models::Timestamp;
 use nervix_nspl::window_processor::aggregate::WindowAggregateProgram;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::sync::Notify;
 
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
@@ -75,15 +72,11 @@ pub(super) struct WindowProcessorStateSnapshot {
 #[derive(Debug)]
 pub(super) struct ReplicatedWindowProcessorState {
     pub(super) placement: RuntimeStatePlacement,
-    pub(super) required_replica_acks: usize,
-    pub(super) primary_node: Option<String>,
-    pub(super) replica_nodes: Vec<String>,
     pub(super) snapshot: parking_lot::Mutex<Option<WindowProcessorStateSnapshot>>,
     pub(super) current_lsm: AtomicU64,
     pub(super) last_persisted_lsm: AtomicU64,
+    pub(super) live_dirty: AtomicBool,
     pub(super) dirty: AtomicBool,
-    pub(super) replica_progress: DashMap<String, u64, RandomState>,
-    pub(super) replication_notify: Notify,
 }
 
 fn encode_window_processor_snapshot(
@@ -104,9 +97,6 @@ fn decode_window_processor_snapshot(
 impl ReplicatedWindowProcessorState {
     pub(super) fn new(
         placement: RuntimeStatePlacement,
-        primary_node: Option<String>,
-        replica_nodes: Vec<String>,
-        required_replica_acks: usize,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
         let mut current_lsm = 0;
@@ -119,15 +109,11 @@ impl ReplicatedWindowProcessorState {
         }
         Ok(Self {
             placement,
-            required_replica_acks,
-            primary_node,
-            replica_nodes,
             snapshot: parking_lot::Mutex::new(snapshot),
             current_lsm: AtomicU64::new(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
+            live_dirty: AtomicBool::new(false),
             dirty: AtomicBool::new(false),
-            replica_progress: DashMap::default(),
-            replication_notify: Notify::new(),
         })
     }
 
@@ -145,18 +131,22 @@ impl ReplicatedWindowProcessorState {
     pub(super) fn replace_state(
         &self,
         state: &WindowProcessorState,
-    ) -> Result<(u64, Vec<u8>), RuntimePersistenceError> {
+    ) -> Result<u64, RuntimePersistenceError> {
         let snapshot = state
             .to_snapshot()
             .map_err(RuntimePersistenceError::EncodeState)?;
-        let payload = encode_window_processor_snapshot(&snapshot)?;
         *self.snapshot.lock() = Some(snapshot);
         let lsm = self
             .current_lsm
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
+        self.live_dirty.store(false, Ordering::SeqCst);
         self.dirty.store(true, Ordering::SeqCst);
-        Ok((lsm, payload))
+        Ok(lsm)
+    }
+
+    pub(super) fn mark_live_dirty(&self) {
+        self.live_dirty.store(true, Ordering::SeqCst);
     }
 
     pub(super) fn latest_snapshot(
@@ -176,22 +166,5 @@ impl ReplicatedWindowProcessorState {
             schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_window_processor_snapshot(&snapshot)?,
         })
-    }
-
-    pub(super) fn mark_replica_progress(&self, node_id: &str, lsm: u64) {
-        self.replica_progress.insert(node_id.to_string(), lsm);
-        self.replication_notify.notify_waiters();
-    }
-
-    pub(super) fn replica_quorum_satisfied(&self, lsm: u64) -> bool {
-        self.replica_nodes
-            .iter()
-            .filter(|node_id| {
-                self.replica_progress
-                    .get(node_id.as_str())
-                    .is_some_and(|observed| *observed >= lsm)
-            })
-            .count()
-            >= self.required_replica_acks
     }
 }
