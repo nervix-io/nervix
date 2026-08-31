@@ -11172,20 +11172,47 @@ async fn finalized_output_filter_reads_constructed_output_values() {
 }
 
 #[tokio::test]
-async fn generator_set_program_can_project_from_materialized_relay_namespace() {
+async fn generator_set_program_projects_columnar_state_and_branch_context() {
     let source_schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("amount", ParseAsType::I64),
+        (
+            "samples",
+            ParseAsType::Array {
+                element: Box::new(ParseAsType::F32),
+                len: 2,
+            },
+        ),
+        (
+            "labels",
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::String),
+            },
+        ),
     ]);
     let output_schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("amount", ParseAsType::I64),
+        (
+            "samples",
+            ParseAsType::Array {
+                element: Box::new(ParseAsType::F32),
+                len: 2,
+            },
+        ),
+        (
+            "labels",
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::String),
+            },
+        ),
     ]);
+    let branch_schema = test_schema(&[("tenant", ParseAsType::String)]);
     let output = ProcessorOutput {
         relay: identifier("generated_notifications"),
         construction: construction(
-            "SET tenant = relay_state.notifications.tenant, amount = \
-             relay_state.notifications.amount + 1",
+            "SET tenant = branch.tenant, amount = relay_state.notifications.amount + 1, samples = \
+             relay_state.notifications.samples, labels = relay_state.notifications.labels",
         ),
         flush_policy: Some(nervix_models::OutputFlushPolicy {
             flush_each: "100ms".to_string(),
@@ -11210,33 +11237,73 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
             output: output_schema.arrow_schema(),
             output_sensitivity: super::VmSchemaSensitivity::default(),
             source: source_schema.arrow_schema(),
-            branch: None,
+            branch: Some(branch_schema.arrow_schema()),
         },
         None,
     )
     .expect("generator set program must compile");
 
-    let mut values = HashMap::default();
-    values.insert(
-        "relay_state.notifications.tenant".to_string(),
-        RuntimeValue::String("acme".to_string()),
+    let samples = RuntimeValue::Array(vec![
+        RuntimeValue::F32(OrderedFloat(1.0)),
+        RuntimeValue::F32(OrderedFloat(2.5)),
+    ]);
+    let labels = RuntimeValue::Vec(vec![
+        RuntimeValue::String("api".to_string()),
+        RuntimeValue::String("prod".to_string()),
+    ]);
+    let source = source_schema
+        .batch_from_test_rows([[
+            (
+                "tenant".to_string(),
+                RuntimeValue::String("acme".to_string()),
+            ),
+            ("amount".to_string(), RuntimeValue::I64(7)),
+            ("samples".to_string(), samples.clone()),
+            ("labels".to_string(), labels.clone()),
+        ]])
+        .expect("generator source batch must build");
+    let branch_key = string_branch_key("tenant", "acme");
+    let context_projection = super::GeneratorContextProjection::new(
+        &identifier("notifications"),
+        source_schema.arrow_schema().as_ref(),
+        Some(branch_schema.arrow_schema().as_ref()),
     );
-    values.insert(
-        "relay_state.notifications.amount".to_string(),
-        RuntimeValue::I64(7),
-    );
-    let input = super::generator_context_batch(&program.compiled.input_schema, &values)
-        .expect("generator input batch must build");
+    let context = context_projection
+        .project(&source, &branch_key)
+        .expect("generator context must project");
+    let source_samples = source
+        .schema()
+        .index_of("samples")
+        .expect("source samples column must exist");
+    let context_samples = context
+        .schema()
+        .index_of("relay_state.notifications.samples")
+        .expect("context samples column must exist");
+    assert!(StdArc::ptr_eq(
+        source.batch().column(source_samples),
+        context.batch().column(context_samples),
+    ));
+    let input = super::GeneratorRouteInputProjection::new(&program.compiled.input_schema)
+        .project(&program.compiled.input_schema, &context, &branch_key)
+        .expect("generator route input must project");
+    let input_samples = input
+        .schema()
+        .index_of("relay_state.notifications.samples")
+        .expect("route input samples column must exist");
+    let input_samples = input.column(input_samples).to_array_ref();
+    assert!(StdArc::ptr_eq(
+        context.batch().column(context_samples),
+        &input_samples,
+    ));
 
     let output = super::execute_generator_program_on_context(
         &program,
         &input,
         Timestamp::from_unix_nanos(1),
-        &values,
     )
     .await
     .expect("generator program must execute");
-    let super::SingleRecordFilterMapOutcome::Output(output) = output else {
+    let super::GeneratorProgramOutcome::Output(output) = output else {
         panic!("generator program must emit one row");
     };
 
@@ -11245,6 +11312,8 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
         Some(RuntimeValue::String("acme".to_string()))
     );
     assert_eq!(row_value(&output, "amount"), Some(RuntimeValue::I64(8)));
+    assert_eq!(row_value(&output, "samples"), Some(samples));
+    assert_eq!(row_value(&output, "labels"), Some(labels));
 }
 
 #[tokio::test]
