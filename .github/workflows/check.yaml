@@ -165,7 +165,7 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      NERVIX_TEST_CONCURRENCY_FACTOR: "3"
+      NERVIX_TEST_CONCURRENCY_FACTOR: "2"
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98
