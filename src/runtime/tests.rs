@@ -891,6 +891,48 @@ async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array(
 }
 
 #[tokio::test]
+async fn window_aggregate_inputs_evaluate_one_batch_in_one_vm_execution() {
+    let output_schema = test_schema(&[("adjusted_total", ParseAsType::I64)]);
+    let aggregate = window_aggregate("SET adjusted_total = SUM(120 / input.latency)");
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
+    let rows = [10, 0, 30]
+        .into_iter()
+        .map(|latency| test_runtime_row([("latency".to_string(), RuntimeValue::I64(latency))]))
+        .collect::<Vec<_>>();
+    let carrier = RuntimeRecordBatch::from_rows(&rows.iter().collect::<Vec<_>>())
+        .expect("window input rows should form one Arrow batch");
+    super::WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let evaluated =
+        super::evaluate_window_aggregate_inputs(&compiled, &carrier, Timestamp::from_unix_nanos(1))
+            .await
+            .expect("batched window aggregate inputs should evaluate");
+
+    assert_eq!(
+        super::WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "all input rows must share one aggregate-input VM execution"
+    );
+    assert_eq!(evaluated.len(), 3);
+    let first = evaluated[0]
+        .as_ref()
+        .expect("the first window input row should evaluate");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].value, Some(RuntimeValue::I64(12)));
+    assert!(
+        evaluated[1]
+            .as_ref()
+            .expect_err("division by zero should fail only its input row")
+            .contains("division_by_zero")
+    );
+    let third = evaluated[2]
+        .as_ref()
+        .expect("the third window input row should evaluate");
+    assert_eq!(third.len(), 1);
+    assert_eq!(third[0].value, Some(RuntimeValue::I64(4)));
+}
+
+#[tokio::test]
 async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
     let output_schema = compile_schema(&CreateSchema {
         name: identifier("summary"),
