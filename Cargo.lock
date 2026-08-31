@@ -6745,6 +6745,7 @@ name = "nervix-test-environment"
 version = "0.1.0-dev"
 dependencies = [
  "blake3",
+ "clap",
  "reqwest 0.13.4",
  "serde_json",
  "tempfile",
