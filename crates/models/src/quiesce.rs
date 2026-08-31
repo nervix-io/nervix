@@ -435,6 +435,7 @@ impl Model {
             | (Self::ClientZeroMq(_), Self::ClientZeroMq(_))
             | (Self::ClientSqs(_), Self::ClientSqs(_))
             | (Self::ClientWebsockets(_), Self::ClientWebsockets(_))
+            | (Self::ClientSyslog(_), Self::ClientSyslog(_))
             | (Self::ClientClickHouse(_), Self::ClientClickHouse(_))
             | (Self::ClientPostgres(_), Self::ClientPostgres(_))
             | (Self::ClientMySql(_), Self::ClientMySql(_))
@@ -463,6 +464,7 @@ impl Model {
             | (Self::ClientZeroMq(_), _)
             | (Self::ClientSqs(_), _)
             | (Self::ClientWebsockets(_), _)
+            | (Self::ClientSyslog(_), _)
             | (Self::ClientClickHouse(_), _)
             | (Self::ClientPostgres(_), _)
             | (Self::ClientMySql(_), _)
@@ -1436,6 +1438,7 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
             },
         ) => base_subject == candidate_subject,
         (EmitSink::ZeroMq { client: _ }, EmitSink::ZeroMq { client: _ })
+        | (EmitSink::Syslog { client: _ }, EmitSink::Syslog { client: _ })
         | (EmitSink::Sentry { client: _ }, EmitSink::Sentry { client: _ }) => true,
         (
             EmitSink::Otel {
@@ -1594,6 +1597,7 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
             | EmitSink::ZeroMq { .. }
             | EmitSink::Sqs { .. }
             | EmitSink::Sentry { .. }
+            | EmitSink::Syslog { .. }
             | EmitSink::Otel { .. }
             | EmitSink::ClickHouse { .. }
             | EmitSink::Postgres { .. }

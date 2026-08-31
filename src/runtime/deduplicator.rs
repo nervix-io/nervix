@@ -190,24 +190,21 @@ impl ReplicatedDeduplicatorState {
         })
     }
 
-    pub(super) fn apply_new_key(
+    pub(super) fn reserve_new_key(
         &self,
         key: DeduplicatorKey,
         seen_at: Timestamp,
         max_time: Duration,
-    ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
+    ) -> bool {
         let mut recent_keys = self.recent_keys.lock();
         Self::prune_expired_recent_keys(&mut recent_keys, seen_at, max_time);
         if recent_keys.contains_key(&key) {
-            return Ok(None);
+            return false;
         }
         recent_keys.insert(key, seen_at);
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        self.current_lsm.fetch_add(1, Ordering::SeqCst);
         self.dirty.store(true, Ordering::SeqCst);
-        Ok(Some((lsm, encode_deduplicator_snapshot(&recent_keys)?)))
+        true
     }
 
     pub(super) fn remove_reserved_keys(&self, keys: &[DeduplicatorKey]) {

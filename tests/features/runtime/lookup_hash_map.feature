@@ -236,3 +236,147 @@ Feature: LOOKUP_HASH_MAP filter-map function
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  Scenario Outline: Output routes resolve LOOKUP_HASH_MAP calls independently per route
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "titles_dir" containing
+      """
+      {
+        "lookup.jsonl": "{\"normalized_title\":\"mr\",\"city_name\":\"Chicago\",\"region_name\":\"IL\"}\n{\"normalized_title\":\"dr\",\"city_name\":\"Austin\",\"region_name\":\"TX\"}\n{\"normalized_title\":\"ms\",\"city_name\":\"Denver\",\"region_name\":\"CO\"}\n"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE RESOURCE titles_data;
+      UPLOAD RESOURCE titles_data VERSION '{{titles_dir}}';
+      """
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification_in (
+        id STRING,
+        title STRING,
+        alternate STRING
+      );
+
+      CREATE SCHEMA notification_out (
+        id STRING,
+        city STRING OPTIONAL,
+        region STRING OPTIONAL
+      );
+
+      CREATE SCHEMA title_lookup (
+        normalized_title STRING,
+        city_name STRING,
+        region_name STRING
+      );
+
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        id string,
+        title string,
+        alternate string
+      );
+
+      CREATE WIRE JSON SCHEMA title_lookup_wire MODE STRICT (
+        normalized_title string,
+        city_name string,
+        region_name string
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification_in;
+
+      CREATE CODEC title_lookup_codec
+        FROM WIRE JSON SCHEMA title_lookup_wire
+        TO SCHEMA title_lookup;
+
+      CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
+      CREATE RELAY primary_logs SCHEMA notification_out UNBRANCHED;
+      CREATE RELAY mirrored_logs SCHEMA notification_out UNBRANCHED;
+      CREATE RELAY alternate_logs SCHEMA notification_out UNBRANCHED;
+
+      CREATE HASH MAP titles_by_normalized
+        KEY normalized_title
+        FROM RESOURCE titles_data
+        PATH 'lookup.jsonl'
+        DECODE USING title_lookup_codec;
+
+      CREATE VHOST edge http-lookup-routes-{{test_id}}.example.com;
+
+      CREATE ENDPOINT ingress
+        ON edge
+        PATH '/lookup-routes'
+        TYPE HTTP;
+
+      CREATE INGESTOR source_logs
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO incoming_logs
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      CREATE JUNCTION fan_out_lookups
+        FROM incoming_logs
+        UNBRANCHED
+        TO primary_logs
+          INHERIT ALL EXCEPT title, alternate
+          SET city = LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), "city_name"),
+              region = LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), "region_name")
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        TO mirrored_logs
+          INHERIT ALL EXCEPT title, alternate
+          SET city = LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), "city_name"),
+              region = LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), "region_name")
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        TO alternate_logs
+          INHERIT ALL EXCEPT title, alternate
+          SET city = LOOKUP_HASH_MAP("titles_by_normalized", lower(input.alternate), "city_name"),
+              region = LOOKUP_HASH_MAP("titles_by_normalized", lower(input.alternate), "region_name")
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+
+      CREATE SUBSCRIPTION primary_subscription TO primary_logs;
+      CREATE SUBSCRIPTION mirrored_subscription TO mirrored_logs;
+      CREATE SUBSCRIPTION alternate_subscription TO alternate_logs;
+
+      START;
+      """
+    When http payload is posted to node "node-1" with host "http-lookup-routes-{{test_id}}.example.com" path "/lookup-routes"
+      """
+      {"id":"row-1","title":"MR","alternate":"DR"}
+      """
+    Then within "10s" the relay subscription receives payloads
+      """
+      {"city":"Chicago","id":"row-1","region":"IL"}
+      {"city":"Chicago","id":"row-1","region":"IL"}
+      {"city":"Austin","id":"row-1","region":"TX"}
+      """
+    When http payload is posted to node "node-1" with host "http-lookup-routes-{{test_id}}.example.com" path "/lookup-routes"
+      """
+      {"id":"row-2","title":"MS","alternate":"Unknown"}
+      """
+    Then within "10s" the relay subscription receives payloads
+      """
+      {"city":"Denver","id":"row-2","region":"CO"}
+      {"city":"Denver","id":"row-2","region":"CO"}
+      {"id":"row-2"}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |

@@ -1,4 +1,7 @@
-use std::hash::{Hash, Hasher};
+use std::{
+    cmp::Ordering,
+    hash::{Hash, Hasher},
+};
 
 use arrow_schema::DataType;
 use chumsky::span::{SimpleSpan, Spanned};
@@ -8,18 +11,18 @@ pub type Span = SimpleSpan<usize>;
 pub type SpannedNode<T> = Spanned<T, Span>;
 pub type SpannedExpr = SpannedNode<Expr>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldRef {
     pub relay: String,
     pub field: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum InternalFieldNamespace {
     LookupHashMap,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InternalFieldRef {
     pub namespace: InternalFieldNamespace,
     pub field: String,
@@ -28,7 +31,6 @@ pub struct InternalFieldRef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub filter: Option<SpannedExpr>,
-    pub branch_filters: Vec<SpannedExpr>,
     pub set: Vec<(FieldRef, SpannedExpr)>,
     pub invoke: Vec<SpannedInvocation>,
 }
@@ -41,7 +43,7 @@ pub struct Invocation {
 
 pub type SpannedInvocation = SpannedNode<Invocation>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     Literal(Literal),
     FieldRef(FieldRef),
@@ -70,13 +72,166 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CaseArm {
     pub when: SpannedExpr,
     pub result: SpannedExpr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Compares two expressions ignoring their source spans.
+///
+/// Spans record where an expression was written, not what it computes. Two routes of the same
+/// node spell an identical `LOOKUP_HASH_MAP` key at different offsets, so span-sensitive
+/// comparison would report them as distinct and defeat any sharing keyed on expression identity.
+fn cmp_spanned(left: &SpannedExpr, right: &SpannedExpr) -> Ordering {
+    left.inner.cmp(&right.inner)
+}
+
+fn cmp_spanned_slice(left: &[SpannedExpr], right: &[SpannedExpr]) -> Ordering {
+    left.len().cmp(&right.len()).then_with(|| {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| cmp_spanned(left, right))
+            .find(|ordering| ordering.is_ne())
+            .unwrap_or(Ordering::Equal)
+    })
+}
+
+fn cmp_spanned_option(left: Option<&SpannedExpr>, right: Option<&SpannedExpr>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left), Some(right)) => cmp_spanned(left, right),
+    }
+}
+
+impl Ord for CaseArm {
+    fn cmp(&self, other: &Self) -> Ordering {
+        cmp_spanned(&self.when, &other.when).then_with(|| cmp_spanned(&self.result, &other.result))
+    }
+}
+
+impl PartialOrd for CaseArm {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for CaseArm {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for CaseArm {}
+
+impl Expr {
+    const fn discriminant(&self) -> u8 {
+        match self {
+            Self::Literal(_) => 0,
+            Self::FieldRef(_) => 1,
+            Self::InternalFieldRef(_) => 2,
+            Self::Unary { .. } => 3,
+            Self::Binary { .. } => 4,
+            Self::Cast { .. } => 5,
+            Self::Call { .. } => 6,
+            Self::Case { .. } => 7,
+        }
+    }
+}
+
+impl Ord for Expr {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Literal(left), Self::Literal(right)) => left.cmp(right),
+            (Self::FieldRef(left), Self::FieldRef(right)) => left.cmp(right),
+            (Self::InternalFieldRef(left), Self::InternalFieldRef(right)) => left.cmp(right),
+            (
+                Self::Unary {
+                    op: left_op,
+                    expr: left_expr,
+                },
+                Self::Unary {
+                    op: right_op,
+                    expr: right_expr,
+                },
+            ) => left_op
+                .cmp(right_op)
+                .then_with(|| cmp_spanned(left_expr, right_expr)),
+            (
+                Self::Binary {
+                    op: left_op,
+                    left: left_left,
+                    right: left_right,
+                },
+                Self::Binary {
+                    op: right_op,
+                    left: right_left,
+                    right: right_right,
+                },
+            ) => left_op
+                .cmp(right_op)
+                .then_with(|| cmp_spanned(left_left, right_left))
+                .then_with(|| cmp_spanned(left_right, right_right)),
+            (
+                Self::Cast {
+                    expr: left_expr,
+                    data_type: left_type,
+                },
+                Self::Cast {
+                    expr: right_expr,
+                    data_type: right_type,
+                },
+            ) => left_type
+                .cmp(right_type)
+                .then_with(|| cmp_spanned(left_expr, right_expr)),
+            (
+                Self::Call {
+                    function: left_function,
+                    args: left_args,
+                },
+                Self::Call {
+                    function: right_function,
+                    args: right_args,
+                },
+            ) => left_function
+                .cmp(right_function)
+                .then_with(|| cmp_spanned_slice(left_args, right_args)),
+            (
+                Self::Case {
+                    operand: left_operand,
+                    branches: left_branches,
+                    else_result: left_else,
+                },
+                Self::Case {
+                    operand: right_operand,
+                    branches: right_branches,
+                    else_result: right_else,
+                },
+            ) => cmp_spanned_option(left_operand.as_deref(), right_operand.as_deref())
+                .then_with(|| left_branches.cmp(right_branches))
+                .then_with(|| cmp_spanned_option(left_else.as_deref(), right_else.as_deref())),
+            _ => self.discriminant().cmp(&other.discriminant()),
+        }
+    }
+}
+
+impl PartialOrd for Expr {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Expr {}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FunctionName {
     Now,
     UuidV4,
@@ -178,6 +333,25 @@ impl Hash for WindowAggregateInvocation {
         self.demand_id.hash(state);
         self.function.hash(state);
         self.percentile.map(f64::to_bits).hash(state);
+    }
+}
+
+impl Ord for WindowAggregateInvocation {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.demand_id
+            .cmp(&other.demand_id)
+            .then_with(|| self.function.cmp(&other.function))
+            .then_with(|| {
+                self.percentile
+                    .map(f64::to_bits)
+                    .cmp(&other.percentile.map(f64::to_bits))
+            })
+    }
+}
+
+impl PartialOrd for WindowAggregateInvocation {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -332,7 +506,7 @@ impl FunctionName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Literal {
     Int64(i64),
     Float64(f64),
@@ -341,13 +515,54 @@ pub enum Literal {
     Null,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+impl Literal {
+    /// Orders variants by declaration, with `Float64` keyed on its bit pattern so the type has a
+    /// total order. The order is a stable identity, not a numeric comparison.
+    const fn discriminant(&self) -> u8 {
+        match self {
+            Self::Int64(_) => 0,
+            Self::Float64(_) => 1,
+            Self::Bool(_) => 2,
+            Self::String(_) => 3,
+            Self::Null => 4,
+        }
+    }
+}
+
+impl Ord for Literal {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Int64(left), Self::Int64(right)) => left.cmp(right),
+            (Self::Float64(left), Self::Float64(right)) => left.to_bits().cmp(&right.to_bits()),
+            (Self::Bool(left), Self::Bool(right)) => left.cmp(right),
+            (Self::String(left), Self::String(right)) => left.cmp(right),
+            (Self::Null, Self::Null) => Ordering::Equal,
+            _ => self.discriminant().cmp(&other.discriminant()),
+        }
+    }
+}
+
+impl PartialOrd for Literal {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Literal {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Literal {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum UnaryOp {
     Neg,
     Not,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BinaryOp {
     Add,
     Sub,

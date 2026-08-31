@@ -15,7 +15,8 @@ Feature: Window processor metrics
       );
         CREATE SCHEMA metric_summary (
         tenant STRING,
-        sample_count I64
+        sample_count I64,
+        adjusted_total I64
       );
         CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
@@ -45,7 +46,7 @@ Feature: Window processor metrics
         STEP 3 MESSAGES
         BRANCHED BY by_window_metrics_source
         TO metrics_summary
-        SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency)
+        SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), adjusted_total = SUM(input.latency * 2)
         ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION metrics_summary_subscription TO metrics_summary;
         START;
@@ -58,6 +59,10 @@ Feature: Window processor metrics
       """
     Then within "5s" the relay subscription receives a payload
       """
+      "adjusted_total":120
+      """
+    And the last relay subscription payload contains
+      """
       "sample_count":3
       """
     When http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/window-metrics"
@@ -67,6 +72,10 @@ Feature: Window processor metrics
       {"tenant":"acme","latency":60}
       """
     Then within "5s" the relay subscription receives a payload
+      """
+      "adjusted_total":300
+      """
+    And the last relay subscription payload contains
       """
       "sample_count":3
       """

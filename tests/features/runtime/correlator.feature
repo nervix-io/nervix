@@ -145,6 +145,10 @@ Feature: Relay correlation
       """
       {"tenant":"acme","first_name":"JOHN","marker":2}
       """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
+      """
+      {"tenant":"acme","first_name":"Jane","marker":3}
+      """
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right"
       """
       {"tenant":"beta","first_name":"john","surname":"wrong"}
@@ -161,6 +165,15 @@ Feature: Relay correlation
       """
     And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
     And the last relay subscription payload does not contain "memo\""
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right-alias"
+      """
+      {"tenant":"acme","first_name":"jane","surname":"doe"}
+      """
+    Then within "5s" the relay subscription receives payloads containing all fragments
+      """
+      "left_marker":3 | "normalized_name":"jane" | "surname":"DOE"
+      "audit_name":"JANE DOE"
+      """
 
     Examples:
       | cluster_size | replica_count | match_policy | expected_left_marker |

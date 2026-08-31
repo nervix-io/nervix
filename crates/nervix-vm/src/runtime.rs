@@ -1,4 +1,8 @@
-use std::{fmt, sync::Arc as StdArc};
+use std::{
+    fmt::{self, Write as _},
+    ops::Range,
+    sync::Arc as StdArc,
+};
 
 use ahash::{HashMap, HashMapExt};
 use arrow_arith::{
@@ -7,21 +11,32 @@ use arrow_arith::{
     numeric::{add, div, mul, neg, rem, sub},
 };
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Datum, FixedSizeListArray, Float32Array, Float64Array,
-    Int8Array, Int16Array, Int32Array, Int64Array, ListArray, PrimitiveArray, StringArray,
-    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, ArrowNumericType, BooleanArray, Datum, FixedSizeListArray, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray, PrimitiveArray,
+    StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     builder::{
         BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder,
-        Int64Builder, StringBuilder, TimestampNanosecondBuilder, UInt8Builder, UInt16Builder,
-        UInt32Builder, UInt64Builder,
+        Int64Builder, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
     },
     new_null_array,
-    types::ArrowPrimitiveType,
+    types::{
+        ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
+        UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    },
 };
-use arrow_cast::cast::{CastOptions, cast_with_options};
+use arrow_buffer::{NullBuffer, NullBufferBuilder, OffsetBuffer};
+use arrow_cast::{
+    cast::{CastOptions, cast_with_options},
+    display::FormatOptions,
+};
 use arrow_ord::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow_schema::{ArrowError, DataType};
-use arrow_select::{filter::FilterBuilder, nullif::nullif, zip::zip};
+use arrow_select::{
+    filter::FilterBuilder,
+    nullif::nullif,
+    take::{TakeOptions, take},
+    zip::zip,
+};
 use arrow_string::like::{
     contains as string_contains, ends_with as string_ends_with, starts_with as string_starts_with,
 };
@@ -583,7 +598,6 @@ pub async fn execute_program(
 pub struct ExecutionResult {
     pub batch: TypedBatch,
     pub selected_rows: RowSelection,
-    pub branch_selected_rows: Vec<Vec<usize>>,
     pub invocations: Vec<FunctionInvocation>,
 }
 
@@ -835,20 +849,6 @@ fn execute_program_with_selection_in_context_sync(
         None
     };
 
-    let branch_selected_rows = program
-        .branch_filters
-        .iter()
-        .map(|filter_reg| {
-            let predicate = registers.boolean(*filter_reg)?;
-            let predicate = if let Some(global_predicate) = &global_predicate {
-                filter_boolean(predicate, global_predicate)
-            } else {
-                predicate.clone()
-            };
-            Ok(selected_rows(&predicate))
-        })
-        .collect::<Result<Vec<_>, RuntimeError>>()?;
-
     let (columns, row_errors, selected_rows) = if let Some(predicate) = global_predicate.as_ref() {
         let selected = selected_rows(predicate);
         for invocation in &mut invocations {
@@ -868,7 +868,6 @@ fn execute_program_with_selection_in_context_sync(
     Ok(ExecutionResult {
         batch: TypedBatch::with_errors(program.output_schema.clone(), columns, row_errors)?,
         selected_rows,
-        branch_selected_rows,
         invocations,
     })
 }
@@ -1707,8 +1706,49 @@ define_integer_binary!(
     (execute_binary_i64, Int64Array, Int64Builder, i64, Int64, Int64)
 );
 
+macro_rules! execute_float_arithmetic {
+    ($left:expr, $right:expr, $array:ty, $typed_variant:ident, $row_errors:expr, $span:expr, $op:expr) => {{
+        // Reuse the input validity and build values once. A new validity buffer is only needed
+        // on the exceptional path where a valid input row produces a non-finite result.
+        let input_nulls = NullBuffer::union($left.nulls(), $right.nulls());
+        let mut values = Vec::with_capacity($left.len());
+        let mut failure_nulls = None;
+        for (row, (left, right)) in $left.values().iter().zip($right.values()).enumerate() {
+            let value = $op(*left, *right);
+            if !value.is_finite() && input_nulls.as_ref().is_none_or(|nulls| nulls.is_valid(row)) {
+                let output_nulls = failure_nulls.get_or_insert_with(|| {
+                    let mut output_nulls = NullBufferBuilder::new($left.len());
+                    if let Some(input_nulls) = &input_nulls {
+                        output_nulls.append_buffer(input_nulls);
+                    } else {
+                        output_nulls.append_n_non_nulls($left.len());
+                    }
+                    output_nulls
+                });
+                output_nulls.set_bit(row, false);
+                push_error(
+                    $row_errors,
+                    row,
+                    ErrorCode::InvalidArgument,
+                    "floating-point operation produced a non-finite result",
+                    $span,
+                );
+            }
+            values.push(value);
+        }
+        let output_nulls = match failure_nulls {
+            Some(mut output_nulls) => output_nulls.finish(),
+            None => input_nulls,
+        };
+        Ok(TypedArray::$typed_variant(<$array>::new(
+            values.into(),
+            output_nulls,
+        )))
+    }};
+}
+
 macro_rules! define_float_binary {
-    ($(($fn_name:ident, $array:ty, $builder:ty, $typed_variant:ident, $reg_ty:ident));+ $(;)?) => {
+    ($(($fn_name:ident, $array:ty, $typed_variant:ident, $reg_ty:ident));+ $(;)?) => {
         $(
             fn $fn_name(
                 left: &$array,
@@ -1718,61 +1758,21 @@ macro_rules! define_float_binary {
                 span: Span,
             ) -> Result<TypedArray, RuntimeError> {
                 match op {
-                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                        if let Some(output) = try_execute_numeric_kernel(left, right, op) {
-                            let typed = array_ref_to_typed_array(output)
-                                .expect("float arithmetic kernel must produce matching float output");
-                            return Ok(match typed {
-                                TypedArray::Float32(output) => TypedArray::Float32(
-                                    sanitize_float32_non_finite(
-                                        &output,
-                                        row_errors,
-                                        span,
-                                        "floating-point operation produced a non-finite result",
-                                    ),
-                                ),
-                                TypedArray::Float64(output) => TypedArray::Float64(
-                                    sanitize_float64_non_finite(
-                                        &output,
-                                        row_errors,
-                                        span,
-                                        "floating-point operation produced a non-finite result",
-                                    ),
-                                ),
-                                _ => unreachable!("float arithmetic kernel must produce float output"),
-                            });
-                        }
-                        let mut builder = <$builder>::new();
-                        for row in 0..left.len() {
-                            if left.is_null(row) || right.is_null(row) {
-                                builder.append_null();
-                                continue;
-                            }
-                            let lhs = left.value(row);
-                            let rhs = right.value(row);
-                            let value = match op {
-                                BinaryOp::Add => lhs + rhs,
-                                BinaryOp::Sub => lhs - rhs,
-                                BinaryOp::Mul => lhs * rhs,
-                                BinaryOp::Div => lhs / rhs,
-                                BinaryOp::Rem => lhs % rhs,
-                                _ => unreachable!(),
-                            };
-                            if value.is_finite() {
-                                builder.append_value(value);
-                            } else {
-                                builder.append_null();
-                                push_error(
-                                    row_errors,
-                                    row,
-                                    ErrorCode::InvalidArgument,
-                                    "floating-point operation produced a non-finite result",
-                                    span,
-                                );
-                            }
-                        }
-                        Ok(TypedArray::$typed_variant(builder.finish()))
-                    }
+                    BinaryOp::Add => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs + rhs
+                    ),
+                    BinaryOp::Sub => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs - rhs
+                    ),
+                    BinaryOp::Mul => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs * rhs
+                    ),
+                    BinaryOp::Div => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs / rhs
+                    ),
+                    BinaryOp::Rem => execute_float_arithmetic!(
+                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs % rhs
+                    ),
                     // The arrow comparison kernels order floats by the IEEE 754 total order,
                     // which makes NaN equal to itself and greater than every other value.
                     // Float comparisons here keep Rust's IEEE semantics, where any comparison
@@ -1804,8 +1804,8 @@ macro_rules! define_float_binary {
 }
 
 define_float_binary!(
-    (execute_binary_f32, Float32Array, Float32Builder, Float32, Float32);
-    (execute_binary_f64, Float64Array, Float64Builder, Float64, Float64)
+    (execute_binary_f32, Float32Array, Float32, Float32);
+    (execute_binary_f64, Float64Array, Float64, Float64)
 );
 
 fn execute_binary_bool(
@@ -2069,175 +2069,207 @@ fn execute_builtin(
     }
 }
 
+#[derive(Clone, Copy)]
 enum ListItem {
     First,
     Last,
     Nth,
 }
 
-fn generic_list_array(input: &TypedArray) -> Result<&dyn Array, RuntimeError> {
-    let TypedArray::Generic(array) = input else {
-        return Err(RuntimeError::InvalidBatch {
-            message: format!(
-                "list builtin requires ARRAY or VEC input, found {:?}",
-                input.data_type()
-            ),
-        });
-    };
-    match array.data_type() {
-        DataType::List(_) | DataType::FixedSizeList(_, _) => Ok(array.as_ref()),
-        other => Err(RuntimeError::InvalidBatch {
-            message: format!("list builtin requires ARRAY or VEC input, found {other:?}"),
-        }),
-    }
+#[derive(Clone, Copy)]
+enum ListColumn<'a> {
+    Variable(&'a ListArray),
+    Fixed(&'a FixedSizeListArray),
 }
 
-fn list_value(array: &dyn Array, row: usize) -> Result<Option<ArrayRef>, RuntimeError> {
-    if array.is_null(row) {
-        return Ok(None);
+impl<'a> ListColumn<'a> {
+    fn from_typed(input: &'a TypedArray) -> Result<Self, RuntimeError> {
+        let TypedArray::Generic(array) = input else {
+            return Err(RuntimeError::InvalidBatch {
+                message: format!(
+                    "list builtin requires ARRAY or VEC input, found {:?}",
+                    input.data_type()
+                ),
+            });
+        };
+        match array.data_type() {
+            DataType::List(_) => array
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .map(Self::Variable)
+                .ok_or_else(|| RuntimeError::InvalidBatch {
+                    message: "list data type is not backed by ListArray".to_string(),
+                }),
+            DataType::FixedSizeList(_, _) => array
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .map(Self::Fixed)
+                .ok_or_else(|| RuntimeError::InvalidBatch {
+                    message: "fixed-size list data type is not backed by FixedSizeListArray"
+                        .to_string(),
+                }),
+            other => Err(RuntimeError::InvalidBatch {
+                message: format!("list builtin requires ARRAY or VEC input, found {other:?}"),
+            }),
+        }
     }
-    if let Some(array) = array.as_any().downcast_ref::<ListArray>() {
-        return Ok(Some(array.value(row)));
-    }
-    if let Some(array) = array.as_any().downcast_ref::<FixedSizeListArray>() {
-        return Ok(Some(array.value(row)));
-    }
-    Err(RuntimeError::InvalidBatch {
-        message: format!("expected list array, found {:?}", array.data_type()),
-    })
-}
 
-fn list_element_data_type(array: &dyn Array) -> Result<DataType, RuntimeError> {
-    match array.data_type() {
-        DataType::List(field) | DataType::FixedSizeList(field, _) => Ok(field.data_type().clone()),
-        other => Err(RuntimeError::InvalidBatch {
-            message: format!("expected list array, found {other:?}"),
-        }),
+    fn len(self) -> usize {
+        match self {
+            Self::Variable(array) => array.len(),
+            Self::Fixed(array) => array.len(),
+        }
+    }
+
+    fn is_null(self, row: usize) -> bool {
+        match self {
+            Self::Variable(array) => array.is_null(row),
+            Self::Fixed(array) => array.is_null(row),
+        }
+    }
+
+    fn nulls(self) -> Option<&'a NullBuffer> {
+        match self {
+            Self::Variable(array) => array.nulls(),
+            Self::Fixed(array) => array.nulls(),
+        }
+    }
+
+    fn values(self) -> &'a ArrayRef {
+        match self {
+            Self::Variable(array) => array.values(),
+            Self::Fixed(array) => array.values(),
+        }
+    }
+
+    fn element_data_type(self) -> &'a DataType {
+        self.values().data_type()
+    }
+
+    fn value_range(self, row: usize) -> Range<usize> {
+        match self {
+            Self::Variable(array) => {
+                let offsets = array.value_offsets();
+                let start = usize::try_from(offsets[row])
+                    .expect("validated list offset must be non-negative");
+                let end = usize::try_from(offsets[row + 1])
+                    .expect("validated list offset must be non-negative");
+                start..end
+            }
+            Self::Fixed(array) => {
+                let width = usize::try_from(array.value_length())
+                    .expect("validated fixed-size list width must be non-negative");
+                let start = row * width;
+                start..start + width
+            }
+        }
     }
 }
 
 fn execute_list_count(input: &TypedArray) -> Result<Int64Array, RuntimeError> {
-    let array = generic_list_array(input)?;
-    let mut builder = Int64Builder::new();
-    for row in 0..array.len() {
-        let Some(values) = list_value(array, row)? else {
-            builder.append_null();
-            continue;
-        };
-        builder.append_value(i64::try_from(values.len()).unwrap_or(i64::MAX));
-    }
-    Ok(builder.finish())
+    let list = ListColumn::from_typed(input)?;
+    let lengths = (0..list.len())
+        .map(|row| i64::try_from(list.value_range(row).len()).unwrap_or(i64::MAX))
+        .collect::<Vec<_>>();
+    Ok(Int64Array::new(lengths.into(), list.nulls().cloned()))
 }
 
-macro_rules! execute_list_sum_for_primitive {
-    ($array:expr, $array_ty:ty, $builder:ty) => {{
-        let mut builder = <$builder>::new();
-        for row in 0..$array.len() {
-            let Some(values) = list_value($array, row)? else {
-                builder.append_null();
-                continue;
-            };
-            let values = values.as_any().downcast_ref::<$array_ty>().ok_or_else(|| {
-                RuntimeError::InvalidBatch {
-                    message: format!("list values are not {}", stringify!($array_ty)),
-                }
-            })?;
-            if let Some(sum) = arrow_sum(values) {
-                builder.append_value(sum);
-            } else {
-                builder.append_null();
-            }
+fn execute_list_sum_for_primitive<T>(
+    list: ListColumn<'_>,
+) -> Result<PrimitiveArray<T>, RuntimeError>
+where
+    T: ArrowNumericType,
+{
+    let values = list
+        .values()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| RuntimeError::InvalidBatch {
+            message: format!("list values are not backed by {:?}", T::DATA_TYPE),
+        })?;
+    Ok(PrimitiveArray::<T>::from_iter((0..list.len()).map(|row| {
+        if list.is_null(row) {
+            return None;
         }
-        Ok(builder.finish())
-    }};
+        let range = list.value_range(row);
+        let values = values.slice(range.start, range.len());
+        arrow_sum(&values)
+    })))
 }
 
 fn execute_list_sum(input: &TypedArray) -> Result<TypedArray, RuntimeError> {
-    let array = generic_list_array(input)?;
-    match list_element_data_type(array)? {
-        DataType::UInt8 => {
-            execute_list_sum_for_primitive!(array, UInt8Array, UInt8Builder).map(TypedArray::UInt8)
+    let list = ListColumn::from_typed(input)?;
+    match list.element_data_type() {
+        DataType::UInt8 => execute_list_sum_for_primitive::<UInt8Type>(list).map(TypedArray::UInt8),
+        DataType::Int8 => execute_list_sum_for_primitive::<Int8Type>(list).map(TypedArray::Int8),
+        DataType::UInt16 => {
+            execute_list_sum_for_primitive::<UInt16Type>(list).map(TypedArray::UInt16)
         }
-        DataType::Int8 => {
-            execute_list_sum_for_primitive!(array, Int8Array, Int8Builder).map(TypedArray::Int8)
+        DataType::Int16 => execute_list_sum_for_primitive::<Int16Type>(list).map(TypedArray::Int16),
+        DataType::UInt32 => {
+            execute_list_sum_for_primitive::<UInt32Type>(list).map(TypedArray::UInt32)
         }
-        DataType::UInt16 => execute_list_sum_for_primitive!(array, UInt16Array, UInt16Builder)
-            .map(TypedArray::UInt16),
-        DataType::Int16 => {
-            execute_list_sum_for_primitive!(array, Int16Array, Int16Builder).map(TypedArray::Int16)
+        DataType::Int32 => execute_list_sum_for_primitive::<Int32Type>(list).map(TypedArray::Int32),
+        DataType::UInt64 => {
+            execute_list_sum_for_primitive::<UInt64Type>(list).map(TypedArray::UInt64)
         }
-        DataType::UInt32 => execute_list_sum_for_primitive!(array, UInt32Array, UInt32Builder)
-            .map(TypedArray::UInt32),
-        DataType::Int32 => {
-            execute_list_sum_for_primitive!(array, Int32Array, Int32Builder).map(TypedArray::Int32)
+        DataType::Int64 => execute_list_sum_for_primitive::<Int64Type>(list).map(TypedArray::Int64),
+        DataType::Float32 => {
+            execute_list_sum_for_primitive::<Float32Type>(list).map(TypedArray::Float32)
         }
-        DataType::UInt64 => execute_list_sum_for_primitive!(array, UInt64Array, UInt64Builder)
-            .map(TypedArray::UInt64),
-        DataType::Int64 => {
-            execute_list_sum_for_primitive!(array, Int64Array, Int64Builder).map(TypedArray::Int64)
+        DataType::Float64 => {
+            execute_list_sum_for_primitive::<Float64Type>(list).map(TypedArray::Float64)
         }
-        DataType::Float32 => execute_list_sum_for_primitive!(array, Float32Array, Float32Builder)
-            .map(TypedArray::Float32),
-        DataType::Float64 => execute_list_sum_for_primitive!(array, Float64Array, Float64Builder)
-            .map(TypedArray::Float64),
         other => Err(RuntimeError::InvalidBatch {
             message: format!("sum requires numeric ARRAY or VEC elements, found {other:?}"),
         }),
     }
 }
 
-fn list_item_index(
-    item: &ListItem,
-    values_len: usize,
-    row: usize,
-    index_input: Option<&TypedArray>,
-) -> Result<Option<usize>, RuntimeError> {
-    match item {
-        ListItem::First => Ok((values_len > 0).then_some(0)),
-        ListItem::Last => Ok(values_len.checked_sub(1)),
-        ListItem::Nth => {
-            let Some(index_input) = index_input else {
-                return Err(RuntimeError::InvalidBatch {
-                    message: "nth requires an index input".to_string(),
-                });
-            };
-            let Some(index) = integral_value_at(index_input, row)? else {
-                return Ok(None);
-            };
-            if index < 0 {
-                return Ok(None);
-            }
-            let index = usize::try_from(index).unwrap_or(usize::MAX);
-            Ok((index < values_len).then_some(index))
+fn list_nth_indices(index_input: Option<&TypedArray>) -> Result<Int64Array, RuntimeError> {
+    let Some(index_input) = index_input else {
+        return Err(RuntimeError::InvalidBatch {
+            message: "nth requires an index input".to_string(),
+        });
+    };
+    match index_input {
+        TypedArray::UInt8(_)
+        | TypedArray::Int8(_)
+        | TypedArray::UInt16(_)
+        | TypedArray::Int16(_)
+        | TypedArray::UInt32(_)
+        | TypedArray::Int32(_)
+        | TypedArray::UInt64(_)
+        | TypedArray::Int64(_) => {}
+        other => {
+            return Err(RuntimeError::InvalidBatch {
+                message: format!(
+                    "builtin requires integer input, found {:?}",
+                    other.data_type()
+                ),
+            });
         }
     }
-}
-
-macro_rules! execute_list_item_for_primitive {
-    ($array:expr, $item:expr, $index_input:expr, $array_ty:ty, $builder:ty) => {{
-        let mut builder = <$builder>::new();
-        for row in 0..$array.len() {
-            let Some(values) = list_value($array, row)? else {
-                builder.append_null();
-                continue;
-            };
-            let Some(index) = list_item_index(&$item, values.len(), row, $index_input)? else {
-                builder.append_null();
-                continue;
-            };
-            let values = values.as_any().downcast_ref::<$array_ty>().ok_or_else(|| {
-                RuntimeError::InvalidBatch {
-                    message: format!("list values are not {}", stringify!($array_ty)),
-                }
-            })?;
-            if values.is_null(index) {
-                builder.append_null();
-            } else {
-                builder.append_value(values.value(index));
-            }
-        }
-        Ok(builder.finish())
-    }};
+    let options = CastOptions {
+        safe: true,
+        ..CastOptions::default()
+    };
+    let indices = cast_with_options(
+        typed_array_as_array(index_input),
+        &DataType::Int64,
+        &options,
+    )
+    .map_err(|error| arrow_kernel_error("list index cast kernel failed", error))?;
+    indices
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .cloned()
+        .ok_or_else(|| RuntimeError::InvalidBatch {
+            message: format!(
+                "list index cast produced {:?} instead of Int64",
+                indices.data_type()
+            ),
+        })
 }
 
 fn execute_list_item(
@@ -2245,116 +2277,72 @@ fn execute_list_item(
     item: ListItem,
     index_input: Option<&TypedArray>,
 ) -> Result<TypedArray, RuntimeError> {
-    let array = generic_list_array(input)?;
-    match list_element_data_type(array)? {
-        DataType::UInt8 => {
-            execute_list_item_for_primitive!(array, item, index_input, UInt8Array, UInt8Builder)
-                .map(TypedArray::UInt8)
-        }
-        DataType::Int8 => {
-            execute_list_item_for_primitive!(array, item, index_input, Int8Array, Int8Builder)
-                .map(TypedArray::Int8)
-        }
-        DataType::UInt16 => {
-            execute_list_item_for_primitive!(array, item, index_input, UInt16Array, UInt16Builder)
-                .map(TypedArray::UInt16)
-        }
-        DataType::Int16 => {
-            execute_list_item_for_primitive!(array, item, index_input, Int16Array, Int16Builder)
-                .map(TypedArray::Int16)
-        }
-        DataType::UInt32 => {
-            execute_list_item_for_primitive!(array, item, index_input, UInt32Array, UInt32Builder)
-                .map(TypedArray::UInt32)
-        }
-        DataType::Int32 => {
-            execute_list_item_for_primitive!(array, item, index_input, Int32Array, Int32Builder)
-                .map(TypedArray::Int32)
-        }
-        DataType::UInt64 => {
-            execute_list_item_for_primitive!(array, item, index_input, UInt64Array, UInt64Builder)
-                .map(TypedArray::UInt64)
-        }
-        DataType::Int64 => {
-            execute_list_item_for_primitive!(array, item, index_input, Int64Array, Int64Builder)
-                .map(TypedArray::Int64)
-        }
-        DataType::Float32 => {
-            execute_list_item_for_primitive!(array, item, index_input, Float32Array, Float32Builder)
-                .map(TypedArray::Float32)
-        }
-        DataType::Float64 => {
-            execute_list_item_for_primitive!(array, item, index_input, Float64Array, Float64Builder)
-                .map(TypedArray::Float64)
-        }
-        DataType::Boolean => {
-            execute_list_item_for_primitive!(array, item, index_input, BooleanArray, BooleanBuilder)
-                .map(TypedArray::Boolean)
-        }
-        DataType::Utf8 => {
-            let mut builder = StringBuilder::new();
-            for row in 0..array.len() {
-                let Some(values) = list_value(array, row)? else {
-                    builder.append_null();
-                    continue;
-                };
-                let Some(index) = list_item_index(&item, values.len(), row, index_input)? else {
-                    builder.append_null();
-                    continue;
-                };
-                let values = values
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| RuntimeError::InvalidBatch {
-                        message: "list values are not StringArray".to_string(),
-                    })?;
-                if values.is_null(index) {
-                    builder.append_null();
-                } else {
-                    builder.append_value(values.value(index));
-                }
-            }
-            Ok(TypedArray::Utf8(builder.finish()))
-        }
+    let list = ListColumn::from_typed(input)?;
+    match list.element_data_type() {
+        DataType::UInt8
+        | DataType::Int8
+        | DataType::UInt16
+        | DataType::Int16
+        | DataType::UInt32
+        | DataType::Int32
+        | DataType::UInt64
+        | DataType::Int64
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Boolean
+        | DataType::Utf8 => {}
         DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
-            if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
-        {
-            let mut builder = TimestampNanosecondBuilder::new().with_data_type(
-                DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some("+00:00".into())),
-            );
-            for row in 0..array.len() {
-                let Some(values) = list_value(array, row)? else {
-                    builder.append_null();
-                    continue;
-                };
-                let Some(index) = list_item_index(&item, values.len(), row, index_input)? else {
-                    builder.append_null();
-                    continue;
-                };
-                let values = values
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .ok_or_else(|| RuntimeError::InvalidBatch {
-                        message: "list values are not TimestampNanosecondArray".to_string(),
-                    })?;
-                if values.is_null(index) {
-                    builder.append_null();
-                } else {
-                    builder.append_value(values.value(index));
-                }
-            }
-            Ok(TypedArray::Datetime(builder.finish()))
+            if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" => {}
+        other => {
+            return Err(RuntimeError::InvalidBatch {
+                message: format!("list item function does not support element type {other:?}"),
+            });
         }
-        other => Err(RuntimeError::InvalidBatch {
-            message: format!("list item function does not support element type {other:?}"),
-        }),
     }
+
+    let nth_indices = match item {
+        ListItem::Nth => Some(list_nth_indices(index_input)?),
+        ListItem::First | ListItem::Last => None,
+    };
+    let indices = UInt64Array::from_iter((0..list.len()).map(|row| {
+        if list.is_null(row) {
+            return None;
+        }
+        let range = list.value_range(row);
+        let relative = match item {
+            ListItem::First => (!range.is_empty()).then_some(0),
+            ListItem::Last => range.len().checked_sub(1),
+            ListItem::Nth => nth_indices.as_ref().and_then(|indices| {
+                if indices.is_null(row) {
+                    return None;
+                }
+                let index = indices.value(row);
+                if index < 0 {
+                    return None;
+                }
+                usize::try_from(index)
+                    .ok()
+                    .filter(|index| *index < range.len())
+            }),
+        }?;
+        u64::try_from(range.start + relative).ok()
+    }));
+    let output = take(
+        list.values().as_ref(),
+        &indices,
+        Some(TakeOptions { check_bounds: true }),
+    )
+    .map_err(|error| arrow_kernel_error("list item take kernel failed", error))?;
+    array_ref_to_typed_array(output)
 }
 
 /// A string builder sized for an output shaped like `input`, so appending rows does not
 /// repeatedly grow and copy the offset and value buffers.
 fn string_builder_like(input: &StringArray) -> StringBuilder {
-    StringBuilder::with_capacity(input.len(), input.values().len())
+    let offsets = input.value_offsets();
+    let value_bytes = usize::try_from(offsets[input.len()] - offsets[0])
+        .expect("validated Utf8 offsets must define a non-negative visible byte span");
+    StringBuilder::with_capacity(input.len(), value_bytes)
 }
 
 /// ASCII case conversion never changes a value's byte length, and never touches a byte of a
@@ -2379,28 +2367,60 @@ fn execute_upper(input: &StringArray) -> StringArray {
     execute_ascii_case(input, u8::to_ascii_uppercase)
 }
 
-fn execute_trim(input: &StringArray) -> StringArray {
-    let mut builder = string_builder_like(input);
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-        } else {
-            builder.append_value(input.value(row).trim());
+/// Rebuilds one UTF-8 column from borrowed slices of its input while carrying the input validity
+/// bitmap over unchanged. Trim operations only select substrings, so the visible input byte span
+/// is an exact upper bound for the output buffer and no per-row `String` allocation is needed.
+fn execute_string_slice_transform(
+    input: &StringArray,
+    transform: impl for<'a> Fn(&'a str) -> &'a str,
+) -> StringArray {
+    let input_offsets = input.value_offsets();
+    let start =
+        usize::try_from(input_offsets[0]).expect("validated string offset must be non-negative");
+    let end = usize::try_from(input_offsets[input.len()])
+        .expect("validated string offset must be non-negative");
+    let mut values = Vec::with_capacity(end - start);
+    let mut offsets = Vec::with_capacity(input.len() + 1);
+    offsets.push(0_i32);
+    for value in input.iter() {
+        if let Some(value) = value {
+            values.extend_from_slice(transform(value).as_bytes());
         }
+        offsets.push(
+            i32::try_from(values.len())
+                .expect("trimmed Utf8 output cannot exceed its input's i32 offset range"),
+        );
     }
-    builder.finish()
+    StringArray::new(
+        OffsetBuffer::new(offsets.into()),
+        values.into(),
+        input.nulls().cloned(),
+    )
+}
+
+fn execute_trim(input: &StringArray) -> StringArray {
+    execute_string_slice_transform(input, str::trim)
 }
 
 fn execute_length(input: &StringArray) -> Int64Array {
-    let mut builder = Int64Builder::with_capacity(input.len());
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-        } else {
-            builder.append_value(input.value(row).chars().count() as i64);
-        }
-    }
-    builder.finish()
+    let bytes = input.values().as_slice();
+    let lengths = input
+        .value_offsets()
+        .windows(2)
+        .map(|offsets| {
+            let start =
+                usize::try_from(offsets[0]).expect("validated string offset must be non-negative");
+            let end =
+                usize::try_from(offsets[1]).expect("validated string offset must be non-negative");
+            bytes[start..end]
+                .iter()
+                .filter(|byte| **byte & 0b1100_0000 != 0b1000_0000)
+                .count()
+                .try_into()
+                .expect("Utf8 character count cannot exceed its i32 offset range")
+        })
+        .collect::<Vec<_>>();
+    Int64Array::new(lengths.into(), input.nulls().cloned())
 }
 
 macro_rules! define_identity_abs {
@@ -2545,15 +2565,12 @@ fn as_utf8(value: &TypedArray) -> Result<&StringArray, RuntimeError> {
 }
 
 fn execute_bit_length(input: &StringArray) -> Int64Array {
-    let mut builder = Int64Builder::new();
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-        } else {
-            builder.append_value((input.value(row).len() * 8) as i64);
-        }
-    }
-    builder.finish()
+    let lengths = input
+        .value_offsets()
+        .windows(2)
+        .map(|offsets| i64::from(offsets[1] - offsets[0]) * 8)
+        .collect::<Vec<_>>();
+    Int64Array::new(lengths.into(), input.nulls().cloned())
 }
 
 fn execute_ascii(input: &StringArray) -> Int64Array {
@@ -2575,27 +2592,11 @@ fn execute_ascii(input: &StringArray) -> Int64Array {
 }
 
 fn execute_ltrim(input: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-        } else {
-            builder.append_value(input.value(row).trim_start());
-        }
-    }
-    builder.finish()
+    execute_string_slice_transform(input, str::trim_start)
 }
 
 fn execute_rtrim(input: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-        } else {
-            builder.append_value(input.value(row).trim_end());
-        }
-    }
-    builder.finish()
+    execute_string_slice_transform(input, str::trim_end)
 }
 
 fn execute_initcap(input: &StringArray) -> StringArray {
@@ -3296,13 +3297,27 @@ fn execute_regexp_substr(
 }
 
 fn execute_replace(input: &StringArray, from: &StringArray, to: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
-    for row in 0..input.len() {
-        if input.is_null(row) || from.is_null(row) || to.is_null(row) {
+    let mut builder = string_builder_like(input);
+    for ((value, from), to) in input.iter().zip(from.iter()).zip(to.iter()) {
+        let (Some(value), Some(from), Some(to)) = (value, from, to) else {
             builder.append_null();
-        } else {
-            builder.append_value(input.value(row).replace(from.value(row), to.value(row)));
+            continue;
+        };
+
+        let mut copied_until = 0;
+        for (start, matched) in value.match_indices(from) {
+            builder
+                .write_str(&value[copied_until..start])
+                .expect("StringBuilder writes are infallible");
+            builder
+                .write_str(to)
+                .expect("StringBuilder writes are infallible");
+            copied_until = start + matched.len();
         }
+        builder
+            .write_str(&value[copied_until..])
+            .expect("StringBuilder writes are infallible");
+        builder.append_value("");
     }
     builder.finish()
 }
@@ -3618,17 +3633,6 @@ fn string_right(value: &str, count: i64) -> &str {
     }
 }
 
-#[derive(Clone, Debug)]
-enum CastScalar {
-    UInt(u64),
-    Int(i64),
-    Float32(f32),
-    Float64(f64),
-    Bool(bool),
-    String(String),
-    Datetime(i64),
-}
-
 fn cast_typed_array(
     input: TypedArray,
     target: RegisterType,
@@ -3639,349 +3643,92 @@ fn cast_typed_array(
         return Ok(input);
     }
 
-    if cast_requires_custom_semantics(&input, target) {
-        return cast_typed_array_fallback(input, target, row_errors, span);
-    }
-
-    let input_ref = typed_array_to_array_ref(input.clone());
     let cast_options = CastOptions {
         safe: true,
-        ..CastOptions::default()
+        format_options: FormatOptions::new().with_timestamp_tz_format(Some("%+")),
     };
-    if let Ok(output) = cast_with_options(input_ref.as_ref(), &target.data_type(), &cast_options) {
-        let output = array_ref_to_typed_array(output)?;
-        annotate_cast_failures(&input, &output, row_errors, span);
-        return Ok(output);
-    }
-
-    cast_typed_array_fallback(input, target, row_errors, span)
+    let output: ArrayRef = match (&input, target) {
+        (TypedArray::Float32(values), RegisterType::Utf8) => {
+            StdArc::new(display_values_as_utf8(values.len(), values.iter()))
+        }
+        (TypedArray::Float64(values), RegisterType::Utf8) => {
+            StdArc::new(display_values_as_utf8(values.len(), values.iter()))
+        }
+        (TypedArray::Utf8(values), RegisterType::Datetime) => {
+            StdArc::new(parse_rfc3339_datetimes(values))
+        }
+        (TypedArray::Boolean(values), RegisterType::Datetime) => {
+            new_null_array(&target.data_type(), values.len())
+        }
+        (TypedArray::Datetime(values), RegisterType::Boolean) => {
+            new_null_array(&target.data_type(), values.len())
+        }
+        _ => cast_with_options(
+            typed_array_as_array(&input),
+            &target.data_type(),
+            &cast_options,
+        )
+        .map_err(|error| arrow_kernel_error("cast kernel failed", error))?,
+    };
+    let output = array_ref_to_typed_array(output)?;
+    annotate_cast_failures(&input, &output, target, row_errors, span);
+    Ok(output)
 }
 
-fn cast_requires_custom_semantics(input: &TypedArray, target: RegisterType) -> bool {
-    if target == RegisterType::Utf8 {
-        return true;
+fn display_values_as_utf8<T>(len: usize, values: impl Iterator<Item = Option<T>>) -> StringArray
+where
+    T: fmt::Display,
+{
+    let mut builder = StringBuilder::with_capacity(len, len.saturating_mul(8));
+    for value in values {
+        let Some(value) = value else {
+            builder.append_null();
+            continue;
+        };
+        write!(&mut builder, "{value}").expect("StringBuilder writes are infallible");
+        builder.append_value("");
     }
+    builder.finish()
+}
 
-    matches!(
-        (input, target),
-        (TypedArray::Utf8(_), RegisterType::Datetime)
-    )
+fn parse_rfc3339_datetimes(input: &StringArray) -> TimestampNanosecondArray {
+    TimestampNanosecondArray::from_iter(input.iter().map(|value| {
+        value.and_then(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .ok()
+                .and_then(|value| value.timestamp_nanos_opt())
+        })
+    }))
+    .with_timezone_utc()
 }
 
 fn annotate_cast_failures(
     input: &TypedArray,
     output: &TypedArray,
-    row_errors: &mut RowErrors,
-    span: Span,
-) {
-    for row in 0..row_errors.row_count() {
-        if !typed_array_is_null(input, row) && typed_array_is_null(output, row) {
-            push_error(
-                row_errors,
-                row,
-                ErrorCode::CastFailed,
-                &format!("cannot cast value to {}", output.data_type()),
-                span,
-            );
-        }
-    }
-}
-
-fn cast_typed_array_fallback(
-    input: TypedArray,
     target: RegisterType,
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<TypedArray, RuntimeError> {
-    if input.data_type() == target.data_type() {
-        return Ok(input);
+) {
+    let input = typed_array_as_array(input);
+    let output = typed_array_as_array(output);
+    // Casts propagate every input null, so equal cached null counts prove that the kernel did not
+    // introduce a failure without comparing the full validity buffers.
+    if input.null_count() == output.null_count() {
+        return;
     }
 
-    let values = cast_scalars(input);
-
-    macro_rules! build_cast_array {
-        ($builder:ty, $variant:ident, $message:literal, $convert:expr) => {{
-            let mut builder = <$builder>::new();
-            for (row, value) in values.iter().enumerate() {
-                match value {
-                    None => builder.append_null(),
-                    Some(value) => match $convert(value) {
-                        Some(value) => builder.append_value(value),
-                        None => {
-                            builder.append_null();
-                            push_error(row_errors, row, ErrorCode::CastFailed, $message, span);
-                        }
-                    },
-                }
-            }
-            Ok(TypedArray::$variant(builder.finish()))
-        }};
-    }
-
-    match target {
-        RegisterType::UInt8 => build_cast_array!(
-            UInt8Builder,
-            UInt8,
-            "cannot cast value to UInt8",
-            cast_scalar_to_u8
-        ),
-        RegisterType::Int8 => build_cast_array!(
-            Int8Builder,
-            Int8,
-            "cannot cast value to Int8",
-            cast_scalar_to_i8
-        ),
-        RegisterType::UInt16 => build_cast_array!(
-            UInt16Builder,
-            UInt16,
-            "cannot cast value to UInt16",
-            cast_scalar_to_u16
-        ),
-        RegisterType::Int16 => build_cast_array!(
-            Int16Builder,
-            Int16,
-            "cannot cast value to Int16",
-            cast_scalar_to_i16
-        ),
-        RegisterType::UInt32 => build_cast_array!(
-            UInt32Builder,
-            UInt32,
-            "cannot cast value to UInt32",
-            cast_scalar_to_u32
-        ),
-        RegisterType::Int32 => build_cast_array!(
-            Int32Builder,
-            Int32,
-            "cannot cast value to Int32",
-            cast_scalar_to_i32
-        ),
-        RegisterType::UInt64 => build_cast_array!(
-            UInt64Builder,
-            UInt64,
-            "cannot cast value to UInt64",
-            cast_scalar_to_u64
-        ),
-        RegisterType::Int64 => build_cast_array!(
-            Int64Builder,
-            Int64,
-            "cannot cast value to Int64",
-            cast_scalar_to_i64
-        ),
-        RegisterType::Float32 => build_cast_array!(
-            Float32Builder,
-            Float32,
-            "cannot cast value to Float32",
-            cast_scalar_to_f32
-        ),
-        RegisterType::Float64 => build_cast_array!(
-            Float64Builder,
-            Float64,
-            "cannot cast value to Float64",
-            cast_scalar_to_f64
-        ),
-        RegisterType::Boolean => build_cast_array!(
-            BooleanBuilder,
-            Boolean,
-            "cannot cast value to Boolean",
-            cast_scalar_to_bool
-        ),
-        RegisterType::Utf8 => {
-            let mut builder = StringBuilder::new();
-            for (row, value) in values.iter().enumerate() {
-                match value {
-                    None => builder.append_null(),
-                    Some(value) => match cast_scalar_to_utf8(value) {
-                        Some(value) => builder.append_value(value),
-                        None => {
-                            builder.append_null();
-                            push_error(
-                                row_errors,
-                                row,
-                                ErrorCode::CastFailed,
-                                "cannot cast value to Utf8",
-                                span,
-                            );
-                        }
-                    },
-                }
-            }
-            Ok(TypedArray::Utf8(builder.finish()))
-        }
-        RegisterType::Datetime => {
-            let mut builder = TimestampNanosecondBuilder::new();
-            for (row, value) in values.iter().enumerate() {
-                match value {
-                    None => builder.append_null(),
-                    Some(value) => match cast_scalar_to_datetime(value) {
-                        Some(value) => builder.append_value(value),
-                        None => {
-                            builder.append_null();
-                            push_error(
-                                row_errors,
-                                row,
-                                ErrorCode::CastFailed,
-                                "cannot cast value to Datetime",
-                                span,
-                            );
-                        }
-                    },
-                }
-            }
-            Ok(TypedArray::Datetime(builder.finish().with_timezone_utc()))
-        }
-        RegisterType::Generic => Err(RuntimeError::InvalidBatch {
-            message: "casts to generic Arrow arrays are not supported".to_string(),
-        }),
-    }
-}
-
-fn cast_scalars(input: TypedArray) -> Vec<Option<CastScalar>> {
-    match input {
-        TypedArray::UInt8(values) => values
-            .iter()
-            .map(|v| v.map(|v| CastScalar::UInt(v as u64)))
-            .collect(),
-        TypedArray::Int8(values) => values
-            .iter()
-            .map(|v| v.map(|v| CastScalar::Int(v as i64)))
-            .collect(),
-        TypedArray::UInt16(values) => values
-            .iter()
-            .map(|v| v.map(|v| CastScalar::UInt(v as u64)))
-            .collect(),
-        TypedArray::Int16(values) => values
-            .iter()
-            .map(|v| v.map(|v| CastScalar::Int(v as i64)))
-            .collect(),
-        TypedArray::UInt32(values) => values
-            .iter()
-            .map(|v| v.map(|v| CastScalar::UInt(v as u64)))
-            .collect(),
-        TypedArray::Int32(values) => values
-            .iter()
-            .map(|v| v.map(|v| CastScalar::Int(v as i64)))
-            .collect(),
-        TypedArray::UInt64(values) => values.iter().map(|v| v.map(CastScalar::UInt)).collect(),
-        TypedArray::Int64(values) => values.iter().map(|v| v.map(CastScalar::Int)).collect(),
-        TypedArray::Float32(values) => values.iter().map(|v| v.map(CastScalar::Float32)).collect(),
-        TypedArray::Float64(values) => values.iter().map(|v| v.map(CastScalar::Float64)).collect(),
-        TypedArray::Boolean(values) => values.iter().map(|v| v.map(CastScalar::Bool)).collect(),
-        TypedArray::Utf8(values) => values
-            .iter()
-            .map(|v| v.map(|v| CastScalar::String(v.to_string())))
-            .collect(),
-        TypedArray::Datetime(values) => {
-            values.iter().map(|v| v.map(CastScalar::Datetime)).collect()
-        }
-        TypedArray::Generic(_) => Vec::new(),
-        TypedArray::Uninitialized { len, .. } => vec![None; len],
-    }
-}
-
-fn cast_float_to_int<T>(value: f64) -> Option<T>
-where
-    T: TryFrom<i128>,
-{
-    if value.is_finite() && value >= i128::MIN as f64 && value <= i128::MAX as f64 {
-        T::try_from(value.trunc() as i128).ok()
-    } else {
-        None
-    }
-}
-
-macro_rules! define_scalar_int_casts {
-    ($(($fn_name:ident, $target_ty:ty));+ $(;)?) => {
-        $(
-            fn $fn_name(value: &CastScalar) -> Option<$target_ty> {
-                match value {
-                    CastScalar::UInt(value) => <$target_ty>::try_from(*value).ok(),
-                    CastScalar::Int(value) => <$target_ty>::try_from(*value).ok(),
-                    CastScalar::Float32(value) => cast_float_to_int::<$target_ty>(*value as f64),
-                    CastScalar::Float64(value) => cast_float_to_int::<$target_ty>(*value),
-                    CastScalar::Bool(value) => <$target_ty>::try_from(u8::from(*value)).ok(),
-                    CastScalar::String(value) => value.parse::<$target_ty>().ok(),
-                    CastScalar::Datetime(value) => <$target_ty>::try_from(*value).ok(),
-                }
-            }
-        )+
+    let input_nulls = input.nulls();
+    let output_nulls = output
+        .nulls()
+        .expect("a cast that introduced nulls must have an output null buffer");
+    let invalid_output = !output_nulls.inner();
+    let failures = match input_nulls {
+        Some(input_nulls) => input_nulls.inner() & &invalid_output,
+        None => invalid_output,
     };
-}
-
-define_scalar_int_casts!(
-    (cast_scalar_to_u8, u8);
-    (cast_scalar_to_i8, i8);
-    (cast_scalar_to_u16, u16);
-    (cast_scalar_to_i16, i16);
-    (cast_scalar_to_u32, u32);
-    (cast_scalar_to_i32, i32);
-    (cast_scalar_to_u64, u64);
-    (cast_scalar_to_i64, i64)
-);
-
-macro_rules! define_scalar_float_casts {
-    ($(($fn_name:ident, $target_ty:ty));+ $(;)?) => {
-        $(
-            fn $fn_name(value: &CastScalar) -> Option<$target_ty> {
-                let value = match value {
-                    CastScalar::UInt(value) => *value as $target_ty,
-                    CastScalar::Int(value) => *value as $target_ty,
-                    CastScalar::Float32(value) => *value as $target_ty,
-                    CastScalar::Float64(value) => *value as $target_ty,
-                    CastScalar::Bool(value) => if *value { 1.0 } else { 0.0 },
-                    CastScalar::String(value) => value.parse::<$target_ty>().ok()?,
-                    CastScalar::Datetime(value) => *value as $target_ty,
-                };
-                value.is_finite().then_some(value)
-            }
-        )+
-    };
-}
-
-define_scalar_float_casts!(
-    (cast_scalar_to_f32, f32);
-    (cast_scalar_to_f64, f64)
-);
-
-fn cast_scalar_to_bool(value: &CastScalar) -> Option<bool> {
-    match value {
-        CastScalar::UInt(0) | CastScalar::Int(0) => Some(false),
-        CastScalar::UInt(1) | CastScalar::Int(1) => Some(true),
-        CastScalar::Float32(value) if *value == 0.0 => Some(false),
-        CastScalar::Float32(value) if *value == 1.0 => Some(true),
-        CastScalar::Float64(value) if *value == 0.0 => Some(false),
-        CastScalar::Float64(value) if *value == 1.0 => Some(true),
-        CastScalar::Bool(value) => Some(*value),
-        CastScalar::String(value) => match value.to_ascii_lowercase().as_str() {
-            "true" => Some(true),
-            "false" => Some(false),
-            _ => None,
-        },
-        CastScalar::Datetime(_) => None,
-        _ => None,
-    }
-}
-
-fn cast_scalar_to_utf8(value: &CastScalar) -> Option<String> {
-    match value {
-        CastScalar::UInt(value) => Some(value.to_string()),
-        CastScalar::Int(value) => Some(value.to_string()),
-        CastScalar::Float32(value) => Some(value.to_string()),
-        CastScalar::Float64(value) => Some(value.to_string()),
-        CastScalar::Bool(value) => Some(value.to_string()),
-        CastScalar::String(value) => Some(value.clone()),
-        CastScalar::Datetime(value) => Some(DateTime::from_timestamp_nanos(*value).to_rfc3339()),
-    }
-}
-
-fn cast_scalar_to_datetime(value: &CastScalar) -> Option<i64> {
-    match value {
-        CastScalar::UInt(value) => i64::try_from(*value).ok(),
-        CastScalar::Int(value) => Some(*value),
-        CastScalar::String(value) => DateTime::parse_from_rfc3339(value)
-            .ok()
-            .and_then(|value| value.timestamp_nanos_opt()),
-        CastScalar::Datetime(value) => Some(*value),
-        CastScalar::Float32(_) | CastScalar::Float64(_) | CastScalar::Bool(_) => None,
+    let message = format!("cannot cast value to {target}");
+    for row in failures.set_indices() {
+        push_error(row_errors, row, ErrorCode::CastFailed, &message, span);
     }
 }
 
@@ -4003,20 +3750,6 @@ fn filter_columns(
             array_ref_to_typed_array(filtered)
         })
         .collect()
-}
-
-fn filter_boolean(values: &BooleanArray, predicate: &BooleanArray) -> BooleanArray {
-    let mut builder = BooleanBuilder::with_capacity(values.len());
-    for row in 0..values.len() {
-        if row_selected(predicate, row) {
-            if values.is_null(row) {
-                builder.append_null();
-            } else {
-                builder.append_value(values.value(row));
-            }
-        }
-    }
-    builder.finish()
 }
 
 fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
@@ -4450,7 +4183,6 @@ mod tests {
 
         assert_eq!(output.batch.row_count(), 2);
         assert_eq!(output.selected_rows, RowSelection::Selected(vec![0, 2]));
-        assert!(output.branch_selected_rows.is_empty());
         assert_eq!(lowered.value(0), "error");
         assert_eq!(lowered.value(1), "error");
     }
@@ -4525,19 +4257,29 @@ mod tests {
 
     #[test]
     fn executes_array_builtins() {
-        let values = StdArc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([
-            Some(vec![Some(1), Some(2), Some(3)]),
-            Some(vec![]),
-            None,
-        ]));
-        let fixed = StdArc::new(FixedSizeListArray::from_iter_primitive::<Int64Type, _, _>(
-            [
-                Some(vec![Some(10), Some(20)]),
-                Some(vec![Some(30), Some(40)]),
-                Some(vec![Some(50), Some(60)]),
-            ],
-            2,
-        ));
+        let values = StdArc::new(
+            ListArray::from_iter_primitive::<Int64Type, _, _>([
+                Some(vec![Some(99)]),
+                Some(vec![Some(1), None, Some(3)]),
+                Some(vec![]),
+                None,
+                Some(vec![Some(100)]),
+            ])
+            .slice(1, 3),
+        );
+        let fixed = StdArc::new(
+            FixedSizeListArray::from_iter_primitive::<Int64Type, _, _>(
+                [
+                    Some(vec![Some(98), Some(99)]),
+                    Some(vec![Some(10), Some(20)]),
+                    Some(vec![Some(30), Some(40)]),
+                    Some(vec![Some(50), Some(60)]),
+                    Some(vec![Some(70), Some(80)]),
+                ],
+                2,
+            )
+            .slice(1, 3),
+        );
         let parsed = parse_program(
             "SET input.total = sum(input.values), input.first_value = first(input.values), \
              input.last_value = last(input.values), input.second_value = nth(input.values, 1), \
@@ -4589,7 +4331,7 @@ mod tests {
             panic!("fixed_last must be Int64");
         };
 
-        assert_eq!(total.value(0), 6);
+        assert_eq!(total.value(0), 4);
         assert!(total.is_null(1));
         assert!(total.is_null(2));
         assert_eq!(first_value.value(0), 1);
@@ -4598,7 +4340,7 @@ mod tests {
         assert_eq!(last_value.value(0), 3);
         assert!(last_value.is_null(1));
         assert!(last_value.is_null(2));
-        assert_eq!(second_value.value(0), 2);
+        assert!(second_value.is_null(0));
         assert!(second_value.is_null(1));
         assert!(second_value.is_null(2));
         assert_eq!(value_count.value(0), 3);
@@ -4796,6 +4538,95 @@ mod tests {
     }
 
     #[test]
+    fn reports_non_finite_float_arithmetic_per_row() {
+        let parsed = parse_program(
+            "SET input.f64_result = input.f64_left / input.f64_right, input.f32_result = \
+             input.f32_left * input.f32_right;",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("f64_left", DataType::Float64, true),
+            Field::new("f64_right", DataType::Float64, true),
+            Field::new("f32_left", DataType::Float32, true),
+            Field::new("f32_right", DataType::Float32, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("f64_result", DataType::Float64, true),
+                Field::new("f32_result", DataType::Float32, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Float64(
+                    Float64Array::from(vec![Some(-99.0), Some(6.0), Some(1.0), None, Some(-99.0)])
+                        .slice(1, 3),
+                ),
+                TypedArray::Float64(
+                    Float64Array::from(vec![
+                        Some(-99.0),
+                        Some(3.0),
+                        Some(0.0),
+                        Some(0.0),
+                        Some(-99.0),
+                    ])
+                    .slice(1, 3),
+                ),
+                TypedArray::Float32(
+                    Float32Array::from(vec![
+                        Some(-99.0),
+                        Some(2.0),
+                        Some(f32::MAX),
+                        Some(3.0),
+                        Some(-99.0),
+                    ])
+                    .slice(1, 3),
+                ),
+                TypedArray::Float32(
+                    Float32Array::from(vec![
+                        Some(-99.0),
+                        Some(4.0),
+                        Some(2.0),
+                        Some(f32::NAN),
+                        Some(-99.0),
+                    ])
+                    .slice(1, 3),
+                ),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Float64(f64_result) = output_column(&output, "f64_result") else {
+            panic!("f64_result must be Float64");
+        };
+        let TypedArray::Float32(f32_result) = output_column(&output, "f32_result") else {
+            panic!("f32_result must be Float32");
+        };
+
+        assert_eq!(f64_result.value(0), 2.0);
+        assert_eq!(f32_result.value(0), 8.0);
+        assert!(f64_result.is_null(1));
+        assert!(f32_result.is_null(1));
+        assert!(f64_result.is_null(2));
+        assert!(f32_result.is_null(2));
+        assert!(output.errors().row(0).is_empty());
+        assert_eq!(output.errors().row(1).len(), 2);
+        assert_eq!(output.errors().row(2).len(), 1);
+        assert!(
+            output
+                .errors()
+                .row(1)
+                .iter()
+                .chain(output.errors().row(2))
+                .all(|error| error.code == ErrorCode::InvalidArgument)
+        );
+    }
+
+    #[test]
     fn executes_cast_matrix_and_reports_failures() {
         let parsed = parse_program(
             "SET input.i_from_f = input.flt AS INT64, input.i_from_b = input.flag AS INT64, \
@@ -4890,6 +4721,130 @@ mod tests {
         assert!(f_from_s.value(1).is_nan());
         assert_eq!(output.errors().row(0).len(), 1);
         assert_eq!(output.errors().row(1).len(), 1);
+    }
+
+    #[test]
+    fn kernel_casts_only_report_new_nulls() {
+        let parsed = parse_program(
+            "SET input.parsed = input.text AS INT64, input.narrowed = input.wide AS INT8;",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("wide", DataType::Int64, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("parsed", DataType::Int64, true),
+                Field::new("narrowed", DataType::Int8, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec![
+                    Some("7"),
+                    None,
+                    Some("bad"),
+                    Some("-2"),
+                ])),
+                TypedArray::Int64(Int64Array::from(vec![Some(1), None, Some(128), Some(-2)])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Int64(parsed) = output_column(&output, "parsed") else {
+            panic!("parsed must be Int64");
+        };
+        let TypedArray::Int8(narrowed) = output_column(&output, "narrowed") else {
+            panic!("narrowed must be Int8");
+        };
+
+        assert_eq!(parsed.value(0), 7);
+        assert_eq!(narrowed.value(0), 1);
+        assert!(parsed.is_null(1));
+        assert!(narrowed.is_null(1));
+        assert!(parsed.is_null(2));
+        assert!(narrowed.is_null(2));
+        assert_eq!(parsed.value(3), -2);
+        assert_eq!(narrowed.value(3), -2);
+        assert!(output.errors().row(0).is_empty());
+        assert!(output.errors().row(1).is_empty());
+        assert_eq!(output.errors().row(2).len(), 2);
+        assert!(
+            output
+                .errors()
+                .row(2)
+                .iter()
+                .all(|error| error.code == ErrorCode::CastFailed)
+        );
+        assert!(output.errors().row(3).is_empty());
+    }
+
+    #[test]
+    fn preserves_row_errors_for_nonconvertible_scalar_cast_pairs() {
+        let parsed = parse_program(
+            "SET input.datetime_from_bool = input.flag AS DATETIME, input.bool_from_datetime = \
+             input.occurred_at AS BOOLEAN;",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("flag", DataType::Boolean, true),
+            Field::new(
+                "occurred_at",
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+                true,
+            ),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new(
+                    "datetime_from_bool",
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+                    true,
+                ),
+                Field::new("bool_from_datetime", DataType::Boolean, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Boolean(BooleanArray::from(vec![Some(true), None])),
+                TypedArray::Datetime(
+                    TimestampNanosecondArray::from(vec![Some(1), None]).with_timezone_utc(),
+                ),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Datetime(datetime_from_bool) = output_column(&output, "datetime_from_bool")
+        else {
+            panic!("datetime_from_bool must be Datetime");
+        };
+        let TypedArray::Boolean(bool_from_datetime) = output_column(&output, "bool_from_datetime")
+        else {
+            panic!("bool_from_datetime must be Boolean");
+        };
+
+        assert!(datetime_from_bool.is_null(0));
+        assert!(datetime_from_bool.is_null(1));
+        assert!(bool_from_datetime.is_null(0));
+        assert!(bool_from_datetime.is_null(1));
+        assert_eq!(output.errors().row(0).len(), 2);
+        assert!(
+            output
+                .errors()
+                .row(0)
+                .iter()
+                .all(|error| error.code == ErrorCode::CastFailed)
+        );
+        assert!(output.errors().row(1).is_empty());
     }
 
     #[test]
@@ -5232,6 +5187,72 @@ mod tests {
     }
 
     #[test]
+    fn text_buffer_builtins_preserve_unicode_nulls_and_slices() {
+        let input = StringArray::from(vec![
+            Some("skipped"),
+            Some("\u{2003}é界\u{2009}"),
+            None,
+            Some(" plain "),
+            Some(""),
+            Some("ignored"),
+        ])
+        .slice(1, 4);
+
+        assert_eq!(
+            execute_trim(&input),
+            StringArray::from(vec![Some("é界"), None, Some("plain"), Some("")])
+        );
+        assert_eq!(
+            execute_ltrim(&input),
+            StringArray::from(vec![Some("é界\u{2009}"), None, Some("plain "), Some("")])
+        );
+        assert_eq!(
+            execute_rtrim(&input),
+            StringArray::from(vec![Some("\u{2003}é界"), None, Some(" plain"), Some("")])
+        );
+        assert_eq!(
+            execute_length(&input),
+            Int64Array::from(vec![Some(4), None, Some(7), Some(0)])
+        );
+        assert_eq!(
+            execute_bit_length(&input),
+            Int64Array::from(vec![Some(88), None, Some(56), Some(0)])
+        );
+
+        let replace_input = StringArray::from(vec![
+            Some("skipped"),
+            Some("é界é"),
+            None,
+            Some("banana"),
+            Some(""),
+            Some("ignored"),
+        ])
+        .slice(1, 4);
+        let from = StringArray::from(vec![
+            Some("skip"),
+            Some("é"),
+            Some("x"),
+            Some("na"),
+            Some(""),
+            Some("ignore"),
+        ])
+        .slice(1, 4);
+        let to = StringArray::from(vec![
+            Some("skip"),
+            Some("X"),
+            Some("y"),
+            Some("_"),
+            Some("-"),
+            Some("ignore"),
+        ])
+        .slice(1, 4);
+        assert_eq!(
+            execute_replace(&replace_input, &from, &to),
+            StringArray::from(vec![Some("X界X"), None, Some("ba__"), Some("-")])
+        );
+    }
+
+    #[test]
     fn compares_nan_floats_with_ieee_semantics() {
         let parsed = parse_program(
             "SET input.eq = input.left = input.right, input.neq = input.left != input.right, \
@@ -5324,10 +5345,11 @@ mod tests {
                 Field::new("occurred_nanos", DataType::Int64, true),
             ],
         );
-        let expected_occured_nanos = chrono::DateTime::parse_from_rfc3339("2026-04-07T12:34:56Z")
-            .expect("valid timestamp")
-            .timestamp_nanos_opt()
-            .expect("timestamp must fit in nanoseconds");
+        let expected_occured_nanos =
+            chrono::DateTime::parse_from_rfc3339("2026-04-07T12:34:56.123456789Z")
+                .expect("valid timestamp")
+                .timestamp_nanos_opt()
+                .expect("timestamp must fit in nanoseconds");
         let batch = TypedBatch::try_new(
             schema,
             vec![TypedArray::Datetime(
@@ -5359,7 +5381,10 @@ mod tests {
         };
 
         assert_eq!(output.row_count(), 1);
-        assert_eq!(occurred_text.value(0), "2026-04-07T12:34:56+00:00");
+        assert_eq!(
+            occurred_text.value(0),
+            "2026-04-07T12:34:56.123456789+00:00"
+        );
         assert_eq!(occurred_roundtrip.value(0), expected_occured_nanos);
         assert_eq!(occurred_nanos.value(0), expected_occured_nanos);
         assert!(output.errors().row(0).is_empty());
@@ -5890,7 +5915,6 @@ mod tests {
                 error_mask: None,
             }],
             filter: None,
-            branch_filters: Vec::new(),
             invocations: Vec::new(),
             outputs: vec![OutputBinding {
                 output_index: 0,
@@ -5961,7 +5985,6 @@ mod tests {
                 error_mask: None,
             }],
             filter: None,
-            branch_filters: Vec::new(),
             invocations: Vec::new(),
             outputs: vec![OutputBinding {
                 output_index: 0,

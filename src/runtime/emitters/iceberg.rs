@@ -1000,6 +1000,7 @@ impl IcebergEmitter {
                 lookup_columns: &lookup_columns,
                 uninitialized: None,
             },
+            None,
         )
         .map_err(|error| Report::new(IcebergEmitterError::MapBatch).attach_printable(error))?;
         let result = execute_program_with_selection_in_context(

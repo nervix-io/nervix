@@ -87,6 +87,9 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   contracts before a graph becomes active.
 - Runtime execution is materialized per concrete branch. Branch-local state, scheduling, buffering,
   and materialized views must remain visibly branch-local in types and ownership.
+- Every server-side runtime entity that binds a configured listening port executes on every live
+  Nervix node. Its listener is independent of leadership and placement and must remain present
+  across all cluster events, including leader changes, node joins, node restarts, and recovery.
 - Selected execution state may use node-owned snapshot or replication mechanisms.
 - Records, batches, payload attempts, handoff state, ACK guards, ACK tokens, and ACK maps are
   in-memory hot-path state and are never persisted.
@@ -390,6 +393,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - Keep parser tests near the grammar they protect.
 - Final implementation reports must name the cucumber scenario added or updated. If none was added,
   state the explicit user-approved reason.
+- After completing requested repository changes, include a proposed Conventional Commit title and
+  description in the final response. Follow Conventional Commits and select the title type from the
+  current `type-enum` in `./commitlint.config.js`.
+- When the user requests follow-up changes, regenerate both so the final response contains an
+  updated title and description that reflect the complete resulting change instead of a stale
+  earlier proposal.
 
 ## Error and Diagnostic Quality
 
