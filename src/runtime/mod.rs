@@ -4948,45 +4948,8 @@ impl RelayProcessorNode {
                         return;
                     };
 
-                    match state.latest_snapshot() {
-                        Ok(snapshot) => {
-                            if let Err(error) = branch
-                                .runtime
-                                .persist_deduplicator_snapshot(
-                                    state,
-                                    snapshot.lsm,
-                                    &snapshot.payload,
-                                )
-                                .await
-                            {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    dispatched_acks.iter(),
-                                    error,
-                                );
-                                return;
-                            }
-                            for ack in dispatched_acks {
-                                ack.ack_success();
-                            }
-                        }
-                        Err(error) => {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                dispatched_acks.iter(),
-                                format!(
-                                    "deduplicator '{}' failed to update state: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
-                            );
-                        }
+                    for ack in dispatched_acks {
+                        ack.ack_success();
                     }
                 }
                 RelayProcessorOperationNode::WindowProcessor {
@@ -5139,9 +5102,13 @@ impl RelayProcessorNode {
                                 ),
                             );
                             state.clear(aggregate);
+                            replicated_state.mark_live_dirty();
                             continue;
                         }
-                        flush_ready_window_processor(
+                        replicated_state.mark_live_dirty();
+                        let due =
+                            window_width_met(state, *width_messages, *width_duration, timestamp);
+                        let changed = flush_ready_window_processor(
                             WindowFlushContext {
                                 graph,
                                 node_kind: self.kind.as_str(),
@@ -5163,23 +5130,24 @@ impl RelayProcessorNode {
                             timestamp,
                         )
                         .await;
-                        if let Err(error) = persist_window_processor_live_state(
-                            &branch.runtime,
-                            &self.processor,
-                            replicated_state,
-                            state,
-                        )
-                        .await
-                        {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
+                        if due || changed {
+                            replicated_state.mark_live_dirty();
+                            if let Err(error) = snapshot_window_processor_live_state(
                                 &self.processor,
-                                &self.error_policies,
-                                state.entries.iter().map(|entry| &entry.message.acks),
-                                error,
-                            );
-                            state.clear(aggregate);
+                                replicated_state,
+                                state,
+                            ) {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    state.entries.iter().map(|entry| &entry.message.acks),
+                                    error,
+                                );
+                                state.clear(aggregate);
+                                replicated_state.mark_live_dirty();
+                            }
                         }
                     }
                 }
@@ -6061,24 +6029,24 @@ impl RelayProcessorNode {
                         now,
                     )
                     .await;
-                    if (due || changed)
-                        && let Err(error) = persist_window_processor_live_state(
-                            &branch.runtime,
+                    if due || changed {
+                        replicated_state.mark_live_dirty();
+                        if let Err(error) = snapshot_window_processor_live_state(
                             &self.processor,
                             replicated_state,
                             state,
-                        )
-                        .await
-                    {
-                        branch.runtime.handle_internal_processor_error_for_acks(
-                            &branch.domain,
-                            self.kind.as_str(),
-                            &self.processor,
-                            &self.error_policies,
-                            state.entries.iter().map(|entry| &entry.message.acks),
-                            error,
-                        );
-                        state.clear(aggregate);
+                        ) {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
+                                &self.processor,
+                                &self.error_policies,
+                                state.entries.iter().map(|entry| &entry.message.acks),
+                                error,
+                            );
+                            state.clear(aggregate);
+                            replicated_state.mark_live_dirty();
+                        }
                     }
                 }
                 RelayProcessorOperationNode::Junction { .. } => {}
@@ -6415,6 +6383,70 @@ impl RelayProcessorNode {
         })
     }
 
+    fn snapshot_live_state(&mut self, branch: &mut BranchRuntime) -> Result<(), String> {
+        let RelayProcessorOperationNode::WindowProcessor {
+            aggregate,
+            state,
+            replicated_state,
+            ..
+        } = &mut self.operation
+        else {
+            return Ok(());
+        };
+        if !replicated_state.live_dirty.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if let Err(error) =
+            snapshot_window_processor_live_state(&self.processor, replicated_state, state)
+        {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                self.kind.as_str(),
+                &self.processor,
+                &self.error_policies,
+                state.entries.iter().map(|entry| &entry.message.acks),
+                error.clone(),
+            );
+            state.clear(aggregate);
+            replicated_state.mark_live_dirty();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn spawn_snapshot_task(
+        &self,
+        runtime: &Runtime,
+        shutdown_tx: &watch::Sender<bool>,
+    ) -> (
+        Option<JoinHandle<()>>,
+        Option<mpsc::Receiver<WindowProcessorSnapshotRequest>>,
+    ) {
+        match &self.operation {
+            RelayProcessorOperationNode::Deduplicator { state, .. } => (
+                runtime.spawn_deduplicator_snapshot_task(shutdown_tx, state.clone()),
+                None,
+            ),
+            RelayProcessorOperationNode::WindowProcessor {
+                replicated_state, ..
+            } => {
+                let (request_tx, request_rx) = mpsc::channel(1);
+                let task = runtime.spawn_window_processor_snapshot_task(
+                    shutdown_tx,
+                    replicated_state.clone(),
+                    request_tx,
+                );
+                let requests = task.is_some().then_some(request_rx);
+                (task, requests)
+            }
+            RelayProcessorOperationNode::Junction { .. }
+            | RelayProcessorOperationNode::Reorderer { .. }
+            | RelayProcessorOperationNode::Correlator { .. }
+            | RelayProcessorOperationNode::Inferencer { .. }
+            | RelayProcessorOperationNode::WasmProcessor { .. } => (None, None),
+        }
+    }
+
     fn next_deadline(&self) -> Option<Timestamp> {
         let operation_deadline = match &self.operation {
             RelayProcessorOperationNode::Deduplicator { .. } => None,
@@ -6586,17 +6618,13 @@ impl RelayProcessorTemplate {
                     max_time: *max_time,
                     compiled_key_program: None,
                     state: runtime
-                        .replicated_deduplicator_state(
-                            runtime.state_placement(
-                                domain,
-                                RuntimeStateKind::Deduplicator,
-                                self.kind,
-                                &self.processor,
-                                key.clone(),
-                            ),
-                            Vec::new(),
-                            0,
-                        )
+                        .replicated_deduplicator_state(runtime.state_placement(
+                            domain,
+                            RuntimeStateKind::Deduplicator,
+                            self.kind,
+                            &self.processor,
+                            key.clone(),
+                        ))
                         .map_err(|error| error.to_string())?,
                 },
                 RelayProcessorOperationTemplate::WindowProcessor {
@@ -6609,18 +6637,13 @@ impl RelayProcessorTemplate {
                     compiled_aggregates,
                 } => {
                     let replicated_state = runtime
-                        .replicated_window_processor_state(
-                            runtime.state_placement(
-                                domain,
-                                RuntimeStateKind::WindowProcessor,
-                                self.kind,
-                                &self.processor,
-                                key.clone(),
-                            ),
-                            None,
-                            Vec::new(),
-                            0,
-                        )
+                        .replicated_window_processor_state(runtime.state_placement(
+                            domain,
+                            RuntimeStateKind::WindowProcessor,
+                            self.kind,
+                            &self.processor,
+                            key.clone(),
+                        ))
                         .map_err(|error| error.to_string())?;
                     let input_relay = self.input_relays.first().ok_or_else(|| {
                         format!(
@@ -7009,6 +7032,15 @@ impl BranchRuntime {
         self.processors
             .get(processor_id)
             .is_some_and(|processor| !processor.pending_materialized.is_empty())
+    }
+
+    fn snapshot_processor_live_state(&mut self, processor_id: &Identifier) -> Result<(), String> {
+        let Some(mut processor) = self.processors.remove(processor_id) else {
+            return Ok(());
+        };
+        let result = processor.snapshot_live_state(self);
+        self.processors.insert(processor_id.clone(), processor);
+        result
     }
 
     async fn retry_processor_pending_materialized(
@@ -8275,6 +8307,14 @@ struct ProcessorBranchInput {
     work: NodeQuiesceWorkGuard,
 }
 
+type WindowProcessorSnapshotRequest = oneshot::Sender<Result<(), String>>;
+
+struct ProcessorSnapshotTask {
+    shutdown_tx: watch::Sender<bool>,
+    task: Option<JoinHandle<()>>,
+    requests: Option<mpsc::Receiver<WindowProcessorSnapshotRequest>>,
+}
+
 #[derive(Debug)]
 struct ProcessorBranchHandoff {
     key: Option<BranchKey>,
@@ -8928,6 +8968,19 @@ fn spawn_processor_branch_task(
     let (input_tx, input_rx) = mpsc::channel(1);
     let (stop_tx, stop_rx) = mpsc::channel(1);
     let processor = template.source.clone();
+    let (snapshot_shutdown_tx, _) = watch::channel(false);
+    let (snapshot_task, snapshot_requests) = branch
+        .processors
+        .get(&processor)
+        .map(|processor| {
+            processor.spawn_snapshot_task(&context.runtime_handle, &snapshot_shutdown_tx)
+        })
+        .unwrap_or((None, None));
+    let snapshot_task = ProcessorSnapshotTask {
+        shutdown_tx: snapshot_shutdown_tx,
+        task: snapshot_task,
+        requests: snapshot_requests,
+    };
     let quiesce_counters = context
         .runtime_handle
         .node_quiesce_counters(&context.domain, &processor);
@@ -8938,12 +8991,41 @@ fn spawn_processor_branch_task(
         input_rx,
         stop_rx,
         quiesce_counters,
+        snapshot_task,
     ));
     Ok(ProcessorBranchTask {
         input: input_tx,
         stop: stop_tx,
         task: parking_lot::Mutex::new(Some(task)),
     })
+}
+
+async fn stop_processor_snapshot_task(
+    branch: &mut BranchRuntime,
+    processor: &Identifier,
+    snapshot: &mut ProcessorSnapshotTask,
+) {
+    if let Some(requests) = snapshot.requests.as_mut() {
+        requests.close();
+        while let Some(response) = requests.recv().await {
+            tokio::task::consume_budget().await;
+            let result = branch.snapshot_processor_live_state(processor);
+            let _ = response.send(result);
+        }
+    }
+    if snapshot.task.is_some() && branch.snapshot_processor_live_state(processor).is_err() {
+        let _ = branch.snapshot_processor_live_state(processor);
+    }
+    snapshot.shutdown_tx.send_replace(true);
+    if let Some(task) = snapshot.task.take()
+        && let Err(error) = task.await
+    {
+        warn!(
+            processor = processor.as_str(),
+            error = %error,
+            "processor state snapshot task join failed"
+        );
+    }
 }
 
 async fn run_processor_branch_task(
@@ -8953,6 +9035,7 @@ async fn run_processor_branch_task(
     mut input: mpsc::Receiver<ProcessorBranchInput>,
     mut stop_rx: mpsc::Receiver<ProcessorBranchStopMode>,
     quiesce_counters: Arc<NodeQuiesceCounters>,
+    mut snapshot: ProcessorSnapshotTask,
 ) {
     let ProcessorRuntimeContext {
         runtime_handle,
@@ -8990,6 +9073,21 @@ async fn run_processor_branch_task(
             mode = stop_rx.recv() => {
                 stop_mode = Some(mode.unwrap_or(ProcessorBranchStopMode::Detach));
                 break;
+            }
+            snapshot_request = async {
+                snapshot.requests
+                    .as_mut()
+                    .expect("enabled window snapshot receiver must exist")
+                    .recv()
+                    .await
+            }, if snapshot.requests.is_some() => {
+                match snapshot_request {
+                    Some(response) => {
+                        let result = branch.snapshot_processor_live_state(&processor);
+                        let _ = response.send(result);
+                    }
+                    None => snapshot.requests = None,
+                }
             }
             received = input.recv() => {
                 match received {
@@ -9031,9 +9129,8 @@ async fn run_processor_branch_task(
         quiesce_gauges.observe(&branch, &processor);
         drop(work);
     }
-    match stop_mode {
-        Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
-        Some(ProcessorBranchStopMode::Handoff(response)) => {
+    let handoff_timestamp = match &stop_mode {
+        Some(ProcessorBranchStopMode::Handoff(_)) => {
             branch
                 .flush_processor_collected_inputs(&graph, &processor)
                 .await;
@@ -9043,6 +9140,21 @@ async fn run_processor_branch_task(
                 .flatten()
                 .unwrap_or_else(current_timestamp);
             branch.force_flush(&graph, now).await;
+            Some(now)
+        }
+        Some(ProcessorBranchStopMode::Detach) | None => {
+            branch
+                .flush_processor_collected_inputs(&graph, &processor)
+                .await;
+            None
+        }
+        Some(ProcessorBranchStopMode::Evict) => None,
+    };
+    stop_processor_snapshot_task(&mut branch, &processor, &mut snapshot).await;
+    match stop_mode {
+        Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
+        Some(ProcessorBranchStopMode::Handoff(response)) => {
+            let restored_at = handoff_timestamp.expect("handoff timestamp must be captured");
             let pending_materialized = branch
                 .processors
                 .get_mut(&processor)
@@ -9050,16 +9162,13 @@ async fn run_processor_branch_task(
                 .unwrap_or_default();
             let handoff = ProcessorBranchHandoff {
                 key: branch.key.clone(),
-                restored_at: now,
+                restored_at,
                 pending_materialized,
             };
             branch.detach();
             let _ = response.send(handoff);
         }
         Some(ProcessorBranchStopMode::Detach) | None => {
-            branch
-                .flush_processor_collected_inputs(&graph, &processor)
-                .await;
             branch.detach();
         }
     }
@@ -14952,22 +15061,19 @@ async fn flush_ready_window_processor(
     changed
 }
 
-async fn persist_window_processor_live_state(
-    runtime: &Runtime,
+fn snapshot_window_processor_live_state(
     processor: &Identifier,
     replicated_state: &ReplicatedWindowProcessorState,
     state: &WindowProcessorState,
 ) -> Result<(), String> {
-    let (lsm, payload) = replicated_state.replace_state(state).map_err(|error| {
+    replicated_state.replace_state(state).map_err(|error| {
         format!(
-            "window processor '{}' failed to encode branch state: {}",
+            "window processor '{}' failed to snapshot branch state: {}",
             processor.as_str(),
             error
         )
     })?;
-    runtime
-        .persist_window_processor_snapshot(replicated_state, lsm, &payload)
-        .await
+    Ok(())
 }
 
 impl WindowAggregateAccumulator {
