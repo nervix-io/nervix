@@ -1058,7 +1058,7 @@ impl MqttIngestor {
                 output_routes: &context.output_routes,
                 filter_where: context.filter_where.as_ref(),
                 records: vec![record],
-                metadata: Vec::new(),
+                metadata: None,
                 ingested_at: current_timestamp(),
                 acks: vec![acks],
             })
