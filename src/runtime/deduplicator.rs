@@ -7,12 +7,10 @@ use std::{
 };
 
 use ahash::RandomState;
-use dashmap::DashMap;
 use indexmap::IndexMap;
 use nervix_models::{Expression, Identifier, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::sync::Notify;
 use triomphe::Arc;
 
 use super::{
@@ -30,14 +28,10 @@ pub(super) struct CompiledDeduplicatorKeyProgram {
 #[derive(Debug)]
 pub(super) struct ReplicatedDeduplicatorState {
     pub(super) placement: RuntimeStatePlacement,
-    pub(super) required_replica_acks: usize,
-    pub(super) replica_nodes: Vec<String>,
     recent_keys: parking_lot::Mutex<IndexMap<String, Timestamp, RandomState>>,
     pub(super) current_lsm: AtomicU64,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
-    pub(super) replica_progress: DashMap<String, u64, RandomState>,
-    pub(super) replication_notify: Notify,
 }
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -97,8 +91,6 @@ impl ReplicatedDeduplicatorState {
 
     pub(super) fn new(
         placement: RuntimeStatePlacement,
-        replica_nodes: Vec<String>,
-        required_replica_acks: usize,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
         let mut recent_keys = IndexMap::with_hasher(RandomState::default());
@@ -111,35 +103,28 @@ impl ReplicatedDeduplicatorState {
         }
         Ok(Self {
             placement,
-            required_replica_acks,
-            replica_nodes,
             recent_keys: parking_lot::Mutex::new(recent_keys),
             current_lsm: AtomicU64::new(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
-            replica_progress: DashMap::default(),
-            replication_notify: Notify::new(),
         })
     }
 
-    pub(super) fn apply_new_key(
+    pub(super) fn reserve_new_key(
         &self,
         key: String,
         seen_at: Timestamp,
         max_time: Duration,
-    ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
+    ) -> bool {
         let mut recent_keys = self.recent_keys.lock();
         Self::prune_expired_recent_keys(&mut recent_keys, seen_at, max_time);
         if recent_keys.contains_key(&key) {
-            return Ok(None);
+            return false;
         }
         recent_keys.insert(key, seen_at);
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        self.current_lsm.fetch_add(1, Ordering::SeqCst);
         self.dirty.store(true, Ordering::SeqCst);
-        Ok(Some((lsm, encode_deduplicator_snapshot(&recent_keys)?)))
+        true
     }
 
     pub(super) fn remove_reserved_keys(&self, keys: &[String]) {
@@ -163,23 +148,6 @@ impl ReplicatedDeduplicatorState {
             schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_deduplicator_snapshot(&recent_keys)?,
         })
-    }
-
-    pub(super) fn mark_replica_progress(&self, node_id: &str, lsm: u64) {
-        self.replica_progress.insert(node_id.to_string(), lsm);
-        self.replication_notify.notify_waiters();
-    }
-
-    pub(super) fn replica_quorum_satisfied(&self, lsm: u64) -> bool {
-        self.replica_nodes
-            .iter()
-            .filter(|node_id| {
-                self.replica_progress
-                    .get(node_id.as_str())
-                    .is_some_and(|observed| *observed >= lsm)
-            })
-            .count()
-            >= self.required_replica_acks
     }
 }
 

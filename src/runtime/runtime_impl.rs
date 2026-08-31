@@ -240,6 +240,61 @@ impl ProtobufDescriptorCompileConfig {
     }
 }
 
+fn persist_dirty_runtime_state_snapshot(
+    store: &RuntimeStateStore,
+    placement: &RuntimeStatePlacement,
+    last_persisted_lsm: &AtomicU64,
+    dirty: &AtomicBool,
+    latest_snapshot: impl FnOnce() -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError>,
+) -> Result<(), RuntimePersistenceError> {
+    if !dirty.swap(false, Ordering::SeqCst) {
+        return Ok(());
+    }
+    let result = (|| {
+        let snapshot = latest_snapshot()?;
+        if snapshot.lsm <= last_persisted_lsm.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        store.persist_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)?;
+        last_persisted_lsm.fetch_max(snapshot.lsm, Ordering::SeqCst);
+        Ok(())
+    })();
+    if result.is_err() {
+        dirty.store(true, Ordering::SeqCst);
+    }
+    result
+}
+
+async fn persist_window_processor_state_snapshot(
+    store: &RuntimeStateStore,
+    state: &ReplicatedWindowProcessorState,
+    snapshot_requests: &mpsc::Sender<WindowProcessorSnapshotRequest>,
+) -> Result<(), String> {
+    if state.live_dirty.load(Ordering::SeqCst) {
+        let (response_tx, response_rx) = oneshot::channel();
+        snapshot_requests.send(response_tx).await.map_err(|_| {
+            format!(
+                "window processor '{}' snapshot owner is unavailable",
+                state.placement.identifier.as_str()
+            )
+        })?;
+        response_rx.await.map_err(|_| {
+            format!(
+                "window processor '{}' snapshot owner dropped its response",
+                state.placement.identifier.as_str()
+            )
+        })??;
+    }
+    persist_dirty_runtime_state_snapshot(
+        store,
+        &state.placement,
+        &state.last_persisted_lsm,
+        &state.dirty,
+        || state.latest_snapshot(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 impl Runtime {
     async fn compile_domain_codec(
         &self,
@@ -1605,9 +1660,6 @@ impl Runtime {
     }
 
     pub(crate) fn handle_state_replication_ack(&self, node_id: &str, ack: StateSyncAck) {
-        if let Some(state) = self.replicated_deduplicator_states.get(&ack.placement) {
-            state.mark_replica_progress(node_id, ack.lsm);
-        }
         if let Some(state) = self.replicated_kafka_offset_states.get(&ack.placement) {
             state.mark_replica_progress(node_id, ack.lsm);
         }
@@ -1615,9 +1667,6 @@ impl Runtime {
             .replicated_materialized_stream_states
             .get(&ack.placement)
         {
-            state.mark_replica_progress(node_id, ack.lsm);
-        }
-        if let Some(state) = self.replicated_window_processor_states.get(&ack.placement) {
             state.mark_replica_progress(node_id, ack.lsm);
         }
         if let Some(state) = self.replicated_wasm_processor_states.get(&ack.placement) {
@@ -1687,51 +1736,6 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) async fn wait_for_replica_quorum(
-        &self,
-        state: &ReplicatedDeduplicatorState,
-        lsm: u64,
-    ) -> Result<(), String> {
-        if state.required_replica_acks == 0 {
-            return Ok(());
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            tokio::task::consume_budget().await;
-            if state.replica_quorum_satisfied(lsm) {
-                return Ok(());
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(format!(
-                    "timed out waiting for replica quorum for '{}' at lsm {}",
-                    state.placement.identifier.as_str(),
-                    lsm
-                ));
-            }
-            tokio::select! {
-                _ = state.replication_notify.notified() => {}
-                _ = sleep_until(deadline) => {}
-            }
-        }
-    }
-
-    pub(in crate::runtime) async fn persist_deduplicator_snapshot(
-        &self,
-        state: &ReplicatedDeduplicatorState,
-        lsm: u64,
-        payload: &[u8],
-    ) -> Result<(), String> {
-        if let Some(store) = &self.state_store {
-            store
-                .persist_latest_snapshot(&state.placement, lsm, payload)
-                .map_err(|error| error.to_string())?;
-            state.last_persisted_lsm.store(lsm, Ordering::SeqCst);
-            state.dirty.store(false, Ordering::SeqCst);
-        }
-        self.wait_for_replica_quorum(state, lsm).await
-    }
-
     pub(in crate::runtime) async fn wait_for_kafka_offset_replica_quorum(
         &self,
         state: &ReplicatedKafkaOffsetState,
@@ -1780,38 +1784,6 @@ impl Runtime {
                 return Err(format!(
                     "timed out waiting for replica quorum for '{}' at lsm {}",
                     state.placement.identifier.as_str(),
-                    lsm
-                ));
-            }
-            tokio::select! {
-                _ = state.replication_notify.notified() => {}
-                _ = sleep_until(deadline) => {}
-            }
-        }
-    }
-
-    pub(in crate::runtime) async fn wait_for_window_processor_replica_quorum(
-        &self,
-        state: &ReplicatedWindowProcessorState,
-        lsm: u64,
-    ) -> Result<(), String> {
-        if state.required_replica_acks == 0 {
-            return Ok(());
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            tokio::task::consume_budget().await;
-            if state.replica_quorum_satisfied(lsm) {
-                return Ok(());
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(format!(
-                    "timed out waiting for replica quorum for '{}' branch '{}' primary '{}' at \
-                     lsm {}",
-                    state.placement.identifier.as_str(),
-                    state.placement.concrete_branch_key(),
-                    state.primary_node.as_deref().unwrap_or("-"),
                     lsm
                 ));
             }
@@ -1912,23 +1884,6 @@ impl Runtime {
             .await
     }
 
-    pub(in crate::runtime) async fn persist_window_processor_snapshot(
-        &self,
-        state: &ReplicatedWindowProcessorState,
-        lsm: u64,
-        payload: &[u8],
-    ) -> Result<(), String> {
-        if let Some(store) = &self.state_store {
-            store
-                .persist_latest_snapshot(&state.placement, lsm, payload)
-                .map_err(|error| error.to_string())?;
-            state.last_persisted_lsm.store(lsm, Ordering::SeqCst);
-            state.dirty.store(false, Ordering::SeqCst);
-        }
-        self.wait_for_window_processor_replica_quorum(state, lsm)
-            .await
-    }
-
     pub(in crate::runtime) async fn persist_wasm_processor_snapshot(
         &self,
         state: &ReplicatedWasmProcessorState,
@@ -1984,8 +1939,6 @@ impl Runtime {
     pub(in crate::runtime) fn replicated_deduplicator_state(
         &self,
         placement: RuntimeStatePlacement,
-        replica_nodes: Vec<String>,
-        required_replica_acks: usize,
     ) -> Result<Arc<ReplicatedDeduplicatorState>, RuntimePersistenceError> {
         if let Some(existing) = self.replicated_deduplicator_states.get(&placement) {
             return Ok(existing.clone());
@@ -1998,8 +1951,6 @@ impl Runtime {
             .flatten();
         let state = Arc::new(ReplicatedDeduplicatorState::new(
             placement.clone(),
-            replica_nodes,
-            required_replica_acks,
             initial,
         )?);
         self.replicated_deduplicator_states
@@ -2071,9 +2022,6 @@ impl Runtime {
     pub(in crate::runtime) fn replicated_window_processor_state(
         &self,
         placement: RuntimeStatePlacement,
-        primary_node: Option<String>,
-        replica_nodes: Vec<String>,
-        required_replica_acks: usize,
     ) -> Result<Arc<ReplicatedWindowProcessorState>, RuntimePersistenceError> {
         if let Some(existing) = self.replicated_window_processor_states.get(&placement) {
             return Ok(existing.clone());
@@ -2086,9 +2034,6 @@ impl Runtime {
             .flatten();
         let state = Arc::new(ReplicatedWindowProcessorState::new(
             placement.clone(),
-            primary_node,
-            replica_nodes,
-            required_replica_acks,
             initial,
         )?);
         self.replicated_window_processor_states
@@ -2212,6 +2157,46 @@ impl Runtime {
         }))
     }
 
+    pub(in crate::runtime) fn spawn_deduplicator_snapshot_task(
+        &self,
+        shutdown_tx: &watch::Sender<bool>,
+        state: Arc<ReplicatedDeduplicatorState>,
+    ) -> Option<JoinHandle<()>> {
+        let store = self.state_store.as_ref()?.clone();
+        let snapshot_interval = self.state_snapshot_interval;
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            let flush_latest_snapshot =
+                |state: &ReplicatedDeduplicatorState, store: &RuntimeStateStore| {
+                    persist_dirty_runtime_state_snapshot(
+                        store,
+                        &state.placement,
+                        &state.last_persisted_lsm,
+                        &state.dirty,
+                        || state.latest_snapshot(),
+                    )
+                };
+            loop {
+                tokio::task::consume_budget().await;
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            if let Err(error) = flush_latest_snapshot(&state, &store) {
+                                warn!(error = %error, "failed to flush deduplicator snapshot during shutdown");
+                            }
+                            break;
+                        }
+                    }
+                    _ = sleep(snapshot_interval) => {
+                        if let Err(error) = flush_latest_snapshot(&state, &store) {
+                            warn!(error = %error, "failed to persist deduplicator snapshot");
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
     pub(in crate::runtime) fn spawn_materialized_stream_snapshot_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
@@ -2258,6 +2243,45 @@ impl Runtime {
                     _ = sleep(snapshot_interval) => {
                         if let Err(error) = flush_latest_snapshot(&state, &metrics, &store) {
                             warn!(error = %error, "failed to persist materialized relay snapshot");
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
+    pub(in crate::runtime) fn spawn_window_processor_snapshot_task(
+        &self,
+        shutdown_tx: &watch::Sender<bool>,
+        state: Arc<ReplicatedWindowProcessorState>,
+        snapshot_requests: mpsc::Sender<WindowProcessorSnapshotRequest>,
+    ) -> Option<JoinHandle<()>> {
+        let store = self.state_store.as_ref()?.clone();
+        let snapshot_interval = self.state_snapshot_interval;
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            loop {
+                tokio::task::consume_budget().await;
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            if let Err(error) = persist_window_processor_state_snapshot(
+                                &store,
+                                &state,
+                                &snapshot_requests,
+                            ).await {
+                                warn!(error = %error, "failed to flush window processor snapshot during shutdown");
+                            }
+                            break;
+                        }
+                    }
+                    _ = sleep(snapshot_interval) => {
+                        if let Err(error) = persist_window_processor_state_snapshot(
+                            &store,
+                            &state,
+                            &snapshot_requests,
+                        ).await {
+                            warn!(error = %error, "failed to persist window processor snapshot");
                         }
                     }
                 }
