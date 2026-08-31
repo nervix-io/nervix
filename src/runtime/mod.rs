@@ -3194,9 +3194,16 @@ pub(crate) enum MaterializedLookupKeyMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaterializedFieldInterest {
+    name: String,
+    column_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaterializedRelayInterest {
     relay: Identifier,
-    fields: Vec<String>,
+    schema: StdArc<arrow_schema::Schema>,
+    fields: Vec<MaterializedFieldInterest>,
     key_mode: MaterializedLookupKeyMode,
 }
 
@@ -3210,6 +3217,33 @@ pub(crate) struct RuntimeMaterializedRelaySpec {
     pub(crate) schema: StdArc<arrow_schema::Schema>,
     pub(crate) sensitivity: VmSchemaSensitivity,
     pub(crate) branching: Vec<Identifier>,
+    fields: Arc<Vec<MaterializedFieldInterest>>,
+}
+
+impl RuntimeMaterializedRelaySpec {
+    pub(crate) fn new(
+        schema: StdArc<arrow_schema::Schema>,
+        sensitivity: VmSchemaSensitivity,
+        branching: Vec<Identifier>,
+    ) -> Self {
+        let fields = Arc::new(
+            schema
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(column_index, field)| MaterializedFieldInterest {
+                    name: field.name().clone(),
+                    column_index,
+                })
+                .collect(),
+        );
+        Self {
+            schema,
+            sensitivity,
+            branching,
+            fields,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -6840,6 +6874,22 @@ impl BranchInstanceTemplate {
             .iter()
             .filter(|relay| !runtime.materialized_relay_is_scheduled(domain, relay))
             .map(|relay| {
+                let schema = runtime
+                    .executions
+                    .get(domain)
+                    .and_then(|execution| {
+                        execution
+                            .materialized_stream_specs
+                            .get(relay)
+                            .map(|spec| spec.schema.clone())
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "materialized relay '{}' is not instantiated in domain '{}'",
+                            relay.as_str(),
+                            domain.as_str()
+                        )
+                    })?;
                 let placement = runtime.state_placement(
                     domain,
                     RuntimeStateKind::MaterializedRelay,
@@ -6848,7 +6898,7 @@ impl BranchInstanceTemplate {
                     key.clone(),
                 );
                 runtime
-                    .replicated_materialized_stream_state(placement, None, Vec::new(), 0)
+                    .replicated_materialized_stream_state(placement, schema, None)
                     .map(|state| (relay.clone(), state))
                     .map_err(|error| error.to_string())
             })
@@ -6901,7 +6951,7 @@ impl BranchRuntime {
             processor.drop_collected_inputs("processor branch was evicted");
         }
         self.detach();
-        for (relay, materialized_state) in &self.materializers {
+        for materialized_state in self.materializers.values() {
             let local_node_id = self.runtime.local_node_id.read().clone();
             let is_primary = match (
                 materialized_state.primary_node.as_deref(),
@@ -6911,19 +6961,9 @@ impl BranchRuntime {
                 (None, _) => true,
                 _ => false,
             };
-            if is_primary
-                && let Err(error) = self
-                    .runtime
-                    .delete_materialized_stream_key(materialized_state, &self.key)
-                    .await
-            {
-                warn!(
-                    domain = self.domain.as_str(),
-                    relay = relay.as_str(),
-                    key = branch_key_display(&self.key),
-                    error = %error,
-                    "failed to delete evicted materialized relay key"
-                );
+            if is_primary {
+                self.runtime
+                    .delete_materialized_stream_key(materialized_state, &self.key);
             }
         }
     }
@@ -6957,6 +6997,24 @@ impl BranchRuntime {
         self.materializers
             .retain(|identifier, _| desired_relays.contains(identifier));
         if desired_relays.contains(relay) && !self.materializers.contains_key(relay) {
+            let Some(schema) = self
+                .runtime
+                .executions
+                .get(&self.domain)
+                .and_then(|execution| {
+                    execution
+                        .materialized_stream_specs
+                        .get(relay)
+                        .map(|spec| spec.schema.clone())
+                })
+            else {
+                warn!(
+                    domain = self.domain.as_str(),
+                    relay = relay.as_str(),
+                    "failed to reconcile materialized relay without its schema"
+                );
+                return;
+            };
             let placement = self.runtime.state_placement(
                 &self.domain,
                 RuntimeStateKind::MaterializedRelay,
@@ -6966,7 +7024,7 @@ impl BranchRuntime {
             );
             match self
                 .runtime
-                .replicated_materialized_stream_state(placement, None, Vec::new(), 0)
+                .replicated_materialized_stream_state(placement, schema, None)
             {
                 Ok(state) => {
                     self.materializers.insert(relay.clone(), state);
@@ -7012,19 +7070,11 @@ impl BranchRuntime {
         };
         for message in messages {
             tokio::task::consume_budget().await;
-            if let Err(error) = self
-                .runtime
-                .update_materialized_stream_last_by_timestamp(state, &batch.key, &message.record)
-                .await
-            {
-                warn!(
-                    domain = self.domain.as_str(),
-                    relay = relay.as_str(),
-                    branch = branch_key_display(&self.key),
-                    error = %error,
-                    "failed to update branch-local materialized relay state"
-                );
-            }
+            self.runtime.update_materialized_stream_last_by_timestamp(
+                state,
+                &batch.key,
+                &message.record,
+            );
         }
     }
 
@@ -9888,6 +9938,24 @@ fn referenced_materialized_stream_bindings(
                 .filter(|field| spec.sensitivity.is_sensitive(field))
                 .cloned(),
         );
+        let field_interests = ordered_fields
+            .iter()
+            .map(|name| {
+                spec.schema
+                    .index_of(name)
+                    .map(|column_index| MaterializedFieldInterest {
+                        name: name.clone(),
+                        column_index,
+                    })
+                    .map_err(|_| {
+                        format!(
+                            "materialized relay '{}' has no field '{}'",
+                            relay.as_str(),
+                            name
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         bindings.push(
             VmCompileBinding::readonly(
                 format!("relay_state.{}", relay.as_str()),
@@ -9897,7 +9965,8 @@ fn referenced_materialized_stream_bindings(
         );
         interest.push(MaterializedRelayInterest {
             relay,
-            fields: ordered_fields,
+            schema: spec.schema.clone(),
+            fields: field_interests,
             key_mode: if spec.branching.is_empty() {
                 MaterializedLookupKeyMode::Root
             } else {
@@ -16140,18 +16209,6 @@ fn compare_runtime_values(left: &RuntimeValue, right: &RuntimeValue) -> std::cmp
     }
 }
 
-fn materialized_record_from_entries(
-    entries: Vec<(String, nervix_models::RemoteRuntimeRecord)>,
-    key: Option<&str>,
-) -> Option<nervix_models::RemoteRuntimeRecord> {
-    let Some(key) = key else {
-        return entries.into_iter().next().map(|(_, record)| record);
-    };
-    entries
-        .into_iter()
-        .find_map(|(entry_key, record)| (entry_key == key).then_some(record))
-}
-
 macro_rules! append_filter_map_numeric_list_value {
     ($builder:expr, $value:expr, $field:expr, $pattern:path) => {{
         match $value {
@@ -19973,20 +20030,6 @@ fn domain_clock_window_matches(
     }
 
     Ok(false)
-}
-
-fn materialized_record_is_newer(
-    existing: &nervix_models::RemoteRuntimeRecordMetadata,
-    candidate: &nervix_models::RemoteRuntimeRecordMetadata,
-) -> bool {
-    let existing_high = existing.ingested_at_high_watermark;
-    let candidate_high = candidate.ingested_at_high_watermark;
-    if candidate_high != existing_high {
-        return candidate_high > existing_high;
-    }
-    let existing_low = existing.ingested_at_low_watermark;
-    let candidate_low = candidate.ingested_at_low_watermark;
-    candidate_low > existing_low
 }
 
 fn current_domain_logical_time(

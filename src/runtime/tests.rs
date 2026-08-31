@@ -4298,6 +4298,67 @@ async fn deduplicator_snapshot_task_persists_dirty_state_on_interval() {
 }
 
 #[tokio::test]
+async fn materialized_relay_snapshot_task_owns_persistence() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let runtime =
+        super::Runtime::with_persistence(Some(db), Duration::from_secs(3_600), Default::default())
+            .expect("runtime should open persisted state");
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::MaterializedRelay,
+        kind: ModelKind::Materializer,
+        identifier: identifier("latest_orders"),
+        schema_fingerprint: [0; 32],
+        branch_key: None,
+    };
+    let schema = test_schema(&[("status", ParseAsType::String)]);
+    let state = runtime
+        .replicated_materialized_stream_state(placement.clone(), schema.arrow_schema(), None)
+        .expect("materialized relay state should initialize");
+    let (shutdown_tx, _) = watch::channel(false);
+    let task = runtime
+        .spawn_materialized_stream_snapshot_task(&shutdown_tx, state.clone())
+        .expect("persisted runtime should spawn a snapshot task");
+    let record = test_runtime_row([(
+        "status".to_string(),
+        RuntimeValue::String("ready".to_string()),
+    )]);
+
+    runtime.update_materialized_stream_last_by_timestamp(&state, &None, &record);
+
+    assert_eq!(state.current_lsm.load(Ordering::SeqCst), 1);
+    assert!(state.dirty.load(Ordering::SeqCst));
+    assert_eq!(state.last_persisted_lsm.load(Ordering::SeqCst), 0);
+    assert!(
+        runtime
+            .state_store
+            .as_ref()
+            .expect("test runtime should have a state store")
+            .latest_snapshot(&placement)
+            .expect("snapshot lookup should succeed")
+            .is_none(),
+        "the materializer hot path must not persist a snapshot"
+    );
+
+    shutdown_tx.send_replace(true);
+    task.await.expect("snapshot task should stop cleanly");
+    assert_eq!(
+        runtime
+            .state_store
+            .as_ref()
+            .expect("test runtime should have a state store")
+            .latest_snapshot(&placement)
+            .expect("snapshot lookup should succeed")
+            .expect("shutdown should flush the dirty snapshot")
+            .lsm,
+        1
+    );
+}
+
+#[tokio::test]
 async fn window_processor_snapshot_task_persists_dirty_state_on_interval() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
@@ -5675,9 +5736,8 @@ async fn materializer_shutdown_drains_every_ready_relay_batch() {
                 schema_fingerprint: [0; 32],
                 branch_key: None,
             },
+            schema.arrow_schema(),
             None,
-            Vec::new(),
-            0,
         )
         .expect("materialized state should initialize");
     let broadcast = super::RelayBroadcast::with_capacity(nonzero_capacity(2));
@@ -6222,11 +6282,11 @@ async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
     ]);
     let materialized_specs = HashMap::from_iter([(
         identifier("profiles"),
-        super::RuntimeMaterializedRelaySpec {
-            schema: state_schema.arrow_schema(),
-            sensitivity: super::VmSchemaSensitivity::default(),
-            branching: Vec::new(),
-        },
+        super::RuntimeMaterializedRelaySpec::new(
+            state_schema.arrow_schema(),
+            super::VmSchemaSensitivity::default(),
+            Vec::new(),
+        ),
     )]);
     let assignments = construction(
         "SET input_id = input.input_id, message_digest = md5(error.message), attempted = \
@@ -6489,11 +6549,11 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
     let branch = identifier("by_tenant");
     let materialized_specs = HashMap::from_iter([(
         identifier("profiles"),
-        super::RuntimeMaterializedRelaySpec {
-            schema: state_schema.arrow_schema(),
-            sensitivity: super::VmSchemaSensitivity::default(),
-            branching: vec![branch.clone()],
-        },
+        super::RuntimeMaterializedRelaySpec::new(
+            state_schema.arrow_schema(),
+            super::VmSchemaSensitivity::default(),
+            vec![branch.clone()],
+        ),
     )]);
     let program = super::CorrelatorOutputCompileContext {
         processor: &identifier("join_profiles"),
@@ -8970,6 +9030,10 @@ fn branch_runtime_detach_removes_relay_presence_without_deleting_materialized_st
     let branch_key = string_branch_key("tenant", "acme");
     let registry = super::RelayRegistry::new();
     registry.touch(&branch_key, Timestamp::from_unix_nanos(1));
+    let materialized_record = test_runtime_row([(
+        "tenant".to_string(),
+        RuntimeValue::String("acme".to_string()),
+    )]);
     let materialized_state = Arc::new(
         super::ReplicatedMaterializedRelayState::new(
             RuntimeStatePlacement {
@@ -8980,24 +9044,17 @@ fn branch_runtime_detach_removes_relay_presence_without_deleting_materialized_st
                 schema_fingerprint: [0; 32],
                 branch_key: branch_key.clone(),
             },
+            materialized_record.arrow_schema(),
             None,
             "node-1".to_string(),
-            Vec::new(),
-            0,
             &RuntimeMetrics::default(),
             None,
         )
         .expect("materialized state should build"),
     );
-    materialized_state.entries.insert(
-        branch_key.clone(),
-        test_runtime_row([(
-            "tenant".to_string(),
-            RuntimeValue::String("acme".to_string()),
-        )])
-        .to_remote()
-        .expect("materialized fixture should persist"),
-    );
+    materialized_state
+        .entries
+        .insert(branch_key.clone(), materialized_record);
     let branch = super::BranchRuntime {
         key: branch_key.clone(),
         runtime: runtime.clone(),
@@ -11301,11 +11358,11 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
         .map(|relay| {
             (
                 identifier(relay),
-                super::RuntimeMaterializedRelaySpec {
-                    schema: state_schema.arrow_schema(),
-                    sensitivity: super::VmSchemaSensitivity::default(),
-                    branching: Vec::new(),
-                },
+                super::RuntimeMaterializedRelaySpec::new(
+                    state_schema.arrow_schema(),
+                    super::VmSchemaSensitivity::default(),
+                    Vec::new(),
+                ),
             )
         })
         .collect();
