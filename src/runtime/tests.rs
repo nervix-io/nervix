@@ -4227,6 +4227,133 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
     );
 }
 
+async fn wait_for_persisted_runtime_state_lsm(
+    runtime: &super::Runtime,
+    placement: &RuntimeStatePlacement,
+    expected_lsm: u64,
+) {
+    let store = runtime
+        .state_store
+        .as_ref()
+        .expect("test runtime should have a state store")
+        .clone();
+    timeout(Duration::from_secs(1), async {
+        loop {
+            tokio::task::consume_budget().await;
+            if store
+                .latest_snapshot(placement)
+                .expect("snapshot lookup should succeed")
+                .is_some_and(|snapshot| snapshot.lsm == expected_lsm)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("dirty state should persist within the snapshot interval");
+}
+
+#[tokio::test]
+async fn deduplicator_snapshot_task_persists_dirty_state_on_interval() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let runtime =
+        super::Runtime::with_persistence(Some(db), Duration::from_millis(10), Default::default())
+            .expect("runtime should open persisted state");
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::Deduplicator,
+        kind: ModelKind::Deduplicator,
+        identifier: identifier("dedup_orders"),
+        schema_fingerprint: [0; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let state = runtime
+        .replicated_deduplicator_state(placement.clone())
+        .expect("deduplicator state should initialize");
+    let (shutdown_tx, _) = watch::channel(false);
+    let task = runtime
+        .spawn_deduplicator_snapshot_task(&shutdown_tx, state.clone())
+        .expect("persisted runtime should spawn a snapshot task");
+
+    assert!(state.reserve_new_key(
+        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
+        Timestamp::from_unix_nanos(1),
+        Duration::from_secs(600),
+    ));
+    let expected_lsm = state.current_lsm.load(Ordering::SeqCst);
+
+    wait_for_persisted_runtime_state_lsm(&runtime, &placement, expected_lsm).await;
+    assert_eq!(
+        state.last_persisted_lsm.load(Ordering::SeqCst),
+        expected_lsm
+    );
+    assert!(!state.dirty.load(Ordering::SeqCst));
+
+    shutdown_tx.send_replace(true);
+    task.await.expect("snapshot task should stop cleanly");
+}
+
+#[tokio::test]
+async fn window_processor_snapshot_task_persists_dirty_state_on_interval() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let runtime =
+        super::Runtime::with_persistence(Some(db), Duration::from_millis(10), Default::default())
+            .expect("runtime should open persisted state");
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::WindowProcessor,
+        kind: ModelKind::WindowProcessor,
+        identifier: identifier("latency_window"),
+        schema_fingerprint: [0; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let state = runtime
+        .replicated_window_processor_state(placement.clone())
+        .expect("window processor state should initialize");
+    let (shutdown_tx, _) = watch::channel(false);
+    let (snapshot_request_tx, mut snapshot_requests) = mpsc::channel(1);
+    let task = runtime
+        .spawn_window_processor_snapshot_task(&shutdown_tx, state.clone(), snapshot_request_tx)
+        .expect("persisted runtime should spawn a snapshot task");
+    let live_state =
+        WindowProcessorState::new(&window_aggregate("SET count = COUNT(input.latency)"));
+    let snapshot_state = state.clone();
+    let snapshot_owner = tokio::spawn(async move {
+        let response = timeout(Duration::from_secs(1), snapshot_requests.recv())
+            .await
+            .expect("snapshot task should request live state")
+            .expect("snapshot request channel should remain open");
+        let result = snapshot_state
+            .replace_state(&live_state)
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        let _ = response.send(result);
+    });
+
+    state.mark_live_dirty();
+    let expected_lsm = 1;
+
+    wait_for_persisted_runtime_state_lsm(&runtime, &placement, expected_lsm).await;
+    snapshot_owner
+        .await
+        .expect("snapshot owner should stop cleanly");
+    assert_eq!(
+        state.last_persisted_lsm.load(Ordering::SeqCst),
+        expected_lsm
+    );
+    assert!(!state.dirty.load(Ordering::SeqCst));
+
+    shutdown_tx.send_replace(true);
+    task.await.expect("snapshot task should stop cleanly");
+}
+
 #[test]
 fn runtime_state_store_purges_only_stale_schema_fingerprints() {
     let dir = tempdir().expect("temp dir should open");
@@ -4734,7 +4861,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
-        .replicated_deduplicator_state(placement.clone(), Vec::new(), 0)
+        .replicated_deduplicator_state(placement.clone())
         .expect("deduplicator state should initialize");
     assert!(state.reserve_new_key(
         super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
@@ -4767,7 +4894,7 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
         schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
-    let state = super::ReplicatedDeduplicatorState::new(placement, Vec::new(), 0, None)
+    let state = super::ReplicatedDeduplicatorState::new(placement, None)
         .expect("deduplicator state should initialize");
     let seen_at = Timestamp::from_unix_nanos(1);
     let max_time = Duration::from_secs(600);
@@ -4857,38 +4984,30 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         None,
     );
     let original = runtime
-        .replicated_deduplicator_state(original_placement.clone(), Vec::new(), 0)
+        .replicated_deduplicator_state(original_placement.clone())
         .expect("state should initialize");
 
     runtime.install_state_schema_fingerprints(&schedule([1; 32]));
     let unchanged = runtime
-        .replicated_deduplicator_state(
-            runtime.state_placement(
-                &domain,
-                RuntimeStateKind::Deduplicator,
-                ModelKind::Deduplicator,
-                &identifier,
-                None,
-            ),
-            Vec::new(),
-            0,
-        )
+        .replicated_deduplicator_state(runtime.state_placement(
+            &domain,
+            RuntimeStateKind::Deduplicator,
+            ModelKind::Deduplicator,
+            &identifier,
+            None,
+        ))
         .expect("unchanged state should initialize");
     assert!(Arc::ptr_eq(&original, &unchanged));
 
     runtime.install_state_schema_fingerprints(&schedule([2; 32]));
     let changed = runtime
-        .replicated_deduplicator_state(
-            runtime.state_placement(
-                &domain,
-                RuntimeStateKind::Deduplicator,
-                ModelKind::Deduplicator,
-                &identifier,
-                None,
-            ),
-            Vec::new(),
-            0,
-        )
+        .replicated_deduplicator_state(runtime.state_placement(
+            &domain,
+            RuntimeStateKind::Deduplicator,
+            ModelKind::Deduplicator,
+            &identifier,
+            None,
+        ))
         .expect("changed state should initialize");
     assert!(!Arc::ptr_eq(&original, &changed));
     runtime
@@ -4899,39 +5018,6 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
             .replicated_deduplicator_states
             .contains_key(&original_placement)
     );
-}
-
-#[tokio::test]
-async fn replica_quorum_waits_for_replication_ack() {
-    let runtime = super::Runtime::default();
-    let placement = RuntimeStatePlacement {
-        domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
-        kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
-        schema_fingerprint: [0; 32],
-        branch_key: string_branch_key("tenant", "acme"),
-    };
-    let state = Arc::new(
-        super::ReplicatedDeduplicatorState::new(placement, vec!["node-2".to_string()], 1, None)
-            .expect("replicated state should initialize"),
-    );
-    assert!(state.reserve_new_key(
-        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
-        Timestamp::from_unix_nanos(1),
-        Duration::from_secs(600),
-    ));
-    let lsm = state.current_lsm.load(Ordering::SeqCst);
-
-    let waiter = {
-        let runtime = runtime.clone();
-        let state = state.clone();
-        tokio::spawn(async move { runtime.wait_for_replica_quorum(&state, lsm).await })
-    };
-    sleep(Duration::from_millis(50)).await;
-    state.mark_replica_progress("node-2", lsm);
-
-    assert!(waiter.await.expect("waiter task should join").is_ok());
 }
 
 #[tokio::test]
