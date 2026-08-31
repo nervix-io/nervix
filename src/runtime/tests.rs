@@ -6387,16 +6387,8 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
         ),
     ]);
     let right = test_runtime_row([("id".to_string(), RuntimeValue::U32(2))]);
-    let left = RuntimeRecordBatch::from_rows(left.batch().schema(), std::iter::once(&left))
-        .expect("left batch should build");
-    let right = RuntimeRecordBatch::from_rows(right.batch().schema(), std::iter::once(&right))
-        .expect("right batch should build");
-    let materialized_state = [super::CorrelatorMaterializedState {
-        left: Arc::new(HashMap::default()),
-        right: Arc::new(HashMap::default()),
-    }];
-    let combined = super::correlator_input_batch(&left, &right, &[], &materialized_state)
-        .and_then(|batch| batch.runtime_row(0, RuntimeRecordMetadata::test()))
+
+    let combined = super::correlator_input_row(&left, &right)
         .expect("correlator inputs should form one Arrow row");
 
     assert_eq!(row_value(&combined, "left.id"), Some(RuntimeValue::U32(1)));
@@ -6407,29 +6399,6 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
     );
     assert_eq!(row_value(&combined, "relay_state.profiles.status"), None);
     assert_eq!(row_value(&combined, "id"), None);
-}
-
-#[test]
-fn ingest_group_rows_share_the_group_batch_allocation() {
-    let first = test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]);
-    let second = test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]);
-    let batch =
-        RuntimeRecordBatch::from_rows(first.batch().schema(), [&first, &second].into_iter())
-            .expect("test rows should form one ingest group");
-    let rows = super::IngestGroupRows {
-        batch: Arc::new(batch),
-        record_metadata: vec![RuntimeRecordMetadata::test(); 2],
-        ingest_metadata: None,
-        acks: vec![AckSet::empty(), AckSet::empty()],
-    };
-
-    let first = rows.row(0).expect("first row should exist");
-    let second = rows.row(1).expect("second row should exist");
-
-    assert!(
-        Arc::ptr_eq(first.batch(), second.batch()),
-        "row views from one ingest group must retain the same batch allocation"
-    );
 }
 
 #[tokio::test]
@@ -6458,7 +6427,7 @@ async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
             ]),
             acks: AckSet::empty(),
         },
-        materialized_state: Arc::new(HashMap::default()),
+        materialized_state: HashMap::default(),
     };
     let mut state = super::CorrelatorBranchState {
         pending_left: vec![pending(7, 1), pending(8, 2), pending(7, 3)],
@@ -6471,7 +6440,7 @@ async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
             record: test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]),
             acks: AckSet::empty(),
         },
-        materialized_state: Arc::new(HashMap::default()),
+        materialized_state: HashMap::default(),
     };
     super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
 
@@ -6511,7 +6480,7 @@ async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
             record: test_runtime_row([("id".to_string(), RuntimeValue::U32(id))]),
             acks: AckSet::empty(),
         },
-        materialized_state: Arc::new(HashMap::default()),
+        materialized_state: HashMap::default(),
     };
     let right_candidates = vec![right_candidate(7), right_candidate(8), right_candidate(7)];
     super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
@@ -6536,7 +6505,7 @@ async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
 }
 
 #[tokio::test]
-async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
+async fn correlator_output_reads_branch_and_declared_materialized_state() {
     let left_schema = test_schema(&[("id", ParseAsType::U32)]);
     let right_schema = test_schema(&[("score", ParseAsType::I64)]);
     let output_schema = test_schema(&[
@@ -6566,7 +6535,7 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
         output_sensitivity: super::VmSchemaSensitivity::default(),
         construction: &construction(
             "SET tenant = branch.tenant, status = relay_state.profiles.status, score = \
-             right.score WHERE relay_state.profiles.status != \"blocked\"",
+             right.score WHERE relay_state.profiles.status = \"active\"",
         ),
         runtime: super::RuntimeVmCompileContext {
             available_materialized_streams: &materialized_specs,
@@ -6578,108 +6547,42 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
         },
     }
     .compile()
-    .expect("correlator output should compile");
-    let left_batch = Arc::new(
-        left_schema
-            .batch_from_test_rows([
-                [("id".to_string(), RuntimeValue::U32(7))],
-                [("id".to_string(), RuntimeValue::U32(8))],
-            ])
-            .expect("left rows should build"),
-    );
-    let right_batch = Arc::new(
-        right_schema
-            .batch_from_test_rows([
-                [("score".to_string(), RuntimeValue::I64(41))],
-                [("score".to_string(), RuntimeValue::I64(42))],
-            ])
-            .expect("right rows should build"),
-    );
-    let now = super::current_timestamp();
-    let key = string_branch_key("tenant", "acme");
-    let correlation = |row, status: &str| {
-        let state = Arc::new(HashMap::from_iter([(
-            "relay_state.profiles.status".to_string(),
-            RuntimeValue::String(status.to_string()),
-        )]));
-        (
-            super::CorrelatorPendingMessage {
-                received_at: now,
-                message: RelayMessage {
-                    key: key.clone(),
-                    record: RuntimeRow::new(left_batch.clone(), row, RuntimeRecordMetadata::test())
-                        .expect("left row should exist"),
-                    acks: AckSet::empty(),
-                },
-                materialized_state: Arc::new(HashMap::default()),
-            },
-            super::CorrelatorPendingMessage {
-                received_at: now,
-                message: RelayMessage {
-                    key: key.clone(),
-                    record: RuntimeRow::new(
-                        right_batch.clone(),
-                        row,
-                        RuntimeRecordMetadata::test(),
-                    )
-                    .expect("right row should exist"),
-                    acks: AckSet::empty(),
-                },
-                materialized_state: state,
-            },
-        )
-    };
-    let correlations = vec![correlation(0, "active"), correlation(1, "paused")];
-    let matched = super::CorrelatorMatchedBatch::from_correlations(&correlations, &[&program])
-        .expect("matched pairs should form one Arrow batch");
-    super::CORRELATOR_OUTPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
-
-    let outcomes = super::evaluate_correlator_output_batch(
+    .expect("correlator output should compile with branch and materialized state bindings");
+    let left = test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]);
+    let right = test_runtime_row([("score".to_string(), RuntimeValue::I64(42))]);
+    let combined = super::correlator_input_row(&left, &right)
+        .expect("correlator inputs should form one Arrow row");
+    let materialized_state = HashMap::from_iter([(
+        "relay_state.profiles.status".to_string(),
+        RuntimeValue::String("active".to_string()),
+    )]);
+    let message = match super::evaluate_correlator_output_message(
         &identifier("join_profiles"),
         &program,
-        &matched,
-        vec![AckSet::empty(), AckSet::empty()],
-        now,
+        string_branch_key("tenant", "acme"),
+        combined,
+        &materialized_state,
+        AckSet::empty(),
+        super::current_timestamp(),
     )
     .await
-    .expect("batched correlator output should evaluate");
-    let messages = outcomes
-        .into_iter()
-        .map(|outcome| match outcome {
-            Ok(Some(message)) => message,
-            Ok(None) => panic!("route WHERE must retain every eligible pair"),
-            Err(error) => panic!("correlator output should succeed: {}", error.error.message),
-        })
-        .collect::<Vec<_>>();
+    {
+        Ok(Some(message)) => message,
+        Ok(None) => panic!("route predicate should select the output"),
+        Err(error) => panic!("correlator output should evaluate: {}", error.error.message),
+    };
 
     assert_eq!(
-        super::CORRELATOR_OUTPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
-        1,
-        "all matched pairs for one route must share one output VM execution"
+        row_value(&message.record, "tenant"),
+        Some(RuntimeValue::String("acme".to_string()))
     );
-    assert_eq!(messages.len(), 2);
     assert_eq!(
-        row_value(&messages[0].record, "status"),
+        row_value(&message.record, "status"),
         Some(RuntimeValue::String("active".to_string()))
     );
     assert_eq!(
-        row_value(&messages[1].record, "status"),
-        Some(RuntimeValue::String("paused".to_string()))
-    );
-    assert_eq!(
-        row_value(&messages[0].record, "score"),
-        Some(RuntimeValue::I64(41))
-    );
-    assert_eq!(
-        row_value(&messages[1].record, "score"),
+        row_value(&message.record, "score"),
         Some(RuntimeValue::I64(42))
-    );
-    let output_batch = messages[0].record.batch().clone();
-    let relay_batch = super::build_stream_record_batch_preserving_acks(output_schema, messages)
-        .expect("batched correlator output should form one relay batch");
-    assert!(
-        Arc::ptr_eq(&relay_batch.batch, &output_batch),
-        "relay batching must preserve the correlator's shared output allocation"
     );
 }
 

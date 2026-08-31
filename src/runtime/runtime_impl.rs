@@ -4367,7 +4367,7 @@ impl Runtime {
                     .map(|(_, record)| record.one_row_batch())
                     .collect::<Vec<_>>();
                 let batch_refs = batches.iter().collect::<Vec<_>>();
-                rows.batch = Arc::new(RuntimeRecordBatch::concat(&batch_refs)?);
+                rows.batch = RuntimeRecordBatch::concat(&batch_refs)?;
             }
         }
         if rows.is_empty() {
