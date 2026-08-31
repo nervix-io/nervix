@@ -9022,9 +9022,6 @@ fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec
     if let Some(filter) = &program.filter {
         collect_expr_field_refs(filter, &mut refs);
     }
-    for branch_filter in &program.branch_filters {
-        collect_expr_field_refs(branch_filter, &mut refs);
-    }
     for (_field_ref, expr) in &program.set {
         collect_expr_field_refs(expr, &mut refs);
     }
@@ -9277,12 +9274,6 @@ fn rewrite_lookup_hash_map_program(
             .as_ref()
             .map(|expr| rewrite_lookup_hash_map_expr(expr, available_lookups, &mut pending_calls))
             .transpose()?,
-        branch_filters: parsed
-            .inner
-            .branch_filters
-            .iter()
-            .map(|expr| rewrite_lookup_hash_map_expr(expr, available_lookups, &mut pending_calls))
-            .collect::<Result<Vec<_>, _>>()?,
         set: parsed
             .inner
             .set
@@ -9352,7 +9343,6 @@ fn compile_lookup_hash_map_calls(
         let key_program = nervix_nspl::vm_program::SpannedNode {
             inner: nervix_nspl::vm_program::Program {
                 filter: None,
-                branch_filters: Vec::new(),
                 set: vec![(
                     nervix_nspl::vm_program::FieldRef {
                         relay: writable_namespace.to_string(),
@@ -9999,15 +9989,6 @@ fn compile_processor_output_filter_map_program(
             identifier
         ),
     })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
     let inherited_count = if inferencer_tensors.is_some() {
         0
     } else {
@@ -10282,15 +10263,6 @@ fn compile_wasm_output_filter_map_program(
                     identifier
                 ),
             })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
     if !parsed.inner.invoke.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
@@ -10985,10 +10957,7 @@ impl CorrelatorOutputCompileContext<'_> {
             self.construction,
             SemanticNamespaces::new("__invalid_correlator_bare_read", "output"),
         )?;
-        if !parsed.inner.branch_filters.is_empty()
-            || !parsed.inner.invoke.is_empty()
-            || parsed.inner.set.is_empty()
-        {
+        if !parsed.inner.invoke.is_empty() || parsed.inner.set.is_empty() {
             return Err(format!(
                 "correlator '{}' TO output '{}' must contain SET assignments and may contain WHERE",
                 self.processor.as_str(),
@@ -11957,15 +11926,6 @@ fn compile_ingestor_filter_map_program(
             ),
         },
     )?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
     let inherited_count = parsed
         .inner
         .set
