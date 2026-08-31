@@ -423,37 +423,7 @@ impl CompiledSchema {
         &self,
         record: RemoteRuntimeRecord,
     ) -> Result<RuntimeRow, String> {
-        let metadata = RuntimeRecordMetadata::from_remote(record.metadata);
-        let mut seen = HashSet::default();
-        for field in &record.fields {
-            if !seen.insert(field.name.as_str()) {
-                return Err(format!(
-                    "persisted runtime record contains duplicate field '{}'",
-                    field.name
-                ));
-            }
-            if !self
-                .fields
-                .iter()
-                .any(|expected| expected.name == field.name)
-            {
-                return Err(format!(
-                    "persisted runtime record contains unknown field '{}'",
-                    field.name
-                ));
-            }
-        }
-        let mut builder = self.batch_builder(1);
-        for expected in &self.fields {
-            let value = record
-                .fields
-                .iter()
-                .find(|field| field.name == expected.name)
-                .map(|field| RuntimeValue::from_remote(field.value.clone()));
-            builder.append(value.as_ref())?;
-        }
-        builder.finish_row()?;
-        builder.finish()?.runtime_row(0, metadata)
+        RuntimeRow::from_remote(self.arrow_schema.clone(), record)
     }
 
     fn validate_arrow_batch(&self, batch: &RuntimeRecordBatch) -> Result<(), String> {
@@ -850,13 +820,38 @@ impl RuntimeRecordBatch {
             Ok(index) => index,
             Err(_) => return Ok(None),
         };
-        let field = self.schema.field(column_index);
+        self.value_at(row, column_index)
+    }
+
+    pub(crate) fn value_at(
+        &self,
+        row: usize,
+        column_index: usize,
+    ) -> Result<Option<RuntimeValue>, String> {
+        if row >= self.batch.num_rows() {
+            return Err(format!(
+                "Arrow batch row {row} is outside batch with {} rows",
+                self.batch.num_rows()
+            ));
+        }
+        let field = self.schema.fields().get(column_index).ok_or_else(|| {
+            format!(
+                "Arrow column index {column_index} is outside schema with {} fields",
+                self.schema.fields().len()
+            )
+        })?;
+        let column = self.batch.columns().get(column_index).ok_or_else(|| {
+            format!(
+                "Arrow column index {column_index} is outside batch with {} columns",
+                self.batch.num_columns()
+            )
+        })?;
         runtime_value_from_arrow_array(
-            self.batch.column(column_index).as_ref(),
+            column.as_ref(),
             &parse_as_type_from_arrow(field.data_type())?,
             field.is_nullable(),
             row,
-            name,
+            field.name(),
         )
     }
 
@@ -1120,6 +1115,11 @@ impl RuntimeRow {
         &self.batch
     }
 
+    #[cfg(test)]
+    pub(crate) fn arrow_schema(&self) -> StdArc<ArrowSchema> {
+        self.batch.schema.clone()
+    }
+
     pub(crate) fn index(&self) -> usize {
         self.row
     }
@@ -1144,6 +1144,44 @@ impl RuntimeRow {
         self.batch.value(self.row, name)
     }
 
+    pub(crate) fn value_at(&self, column_index: usize) -> Result<Option<RuntimeValue>, String> {
+        self.batch.value_at(self.row, column_index)
+    }
+
+    pub(crate) fn from_remote(
+        schema: StdArc<ArrowSchema>,
+        record: RemoteRuntimeRecord,
+    ) -> Result<Self, String> {
+        let metadata = RuntimeRecordMetadata::from_remote(record.metadata);
+        let mut seen = HashSet::default();
+        for field in &record.fields {
+            if !seen.insert(field.name.as_str()) {
+                return Err(format!(
+                    "persisted runtime record contains duplicate field '{}'",
+                    field.name
+                ));
+            }
+            if schema.index_of(&field.name).is_err() {
+                return Err(format!(
+                    "persisted runtime record contains unknown field '{}'",
+                    field.name
+                ));
+            }
+        }
+        let mut builder = RuntimeRecordBatchBuilder::from_arrow_schema(schema, 1)?;
+        let expected_fields = builder.fields.clone();
+        for expected in &expected_fields {
+            let value = record
+                .fields
+                .iter()
+                .find(|field| field.name == expected.name)
+                .map(|field| RuntimeValue::from_remote(field.value.clone()));
+            builder.append(value.as_ref())?;
+        }
+        builder.finish_row()?;
+        builder.finish()?.runtime_row(0, metadata)
+    }
+
     pub(crate) fn one_row_batch(&self) -> RuntimeRecordBatch {
         RuntimeRecordBatch {
             schema: self.batch.schema.clone(),
@@ -1165,8 +1203,8 @@ impl RuntimeRow {
 
     pub(crate) fn to_remote(&self) -> Result<RemoteRuntimeRecord, String> {
         let mut fields = Vec::with_capacity(self.batch.schema.fields().len());
-        for field in self.batch.schema.fields() {
-            if let Some(value) = self.value(field.name())? {
+        for (column_index, field) in self.batch.schema.fields().iter().enumerate() {
+            if let Some(value) = self.value_at(column_index)? {
                 fields.push(RemoteRuntimeField {
                     name: field.name().clone(),
                     value: value.to_remote(),
@@ -1198,6 +1236,32 @@ pub(crate) fn remote_runtime_record_to_json_string(record: &RemoteRuntimeRecord)
 }
 
 impl RuntimeRecordBatchBuilder {
+    fn from_arrow_schema(schema: StdArc<ArrowSchema>, capacity: usize) -> Result<Self, String> {
+        let fields = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                Ok(CompiledSchemaField {
+                    name: field.name().clone(),
+                    ty: parse_as_type_from_arrow(field.data_type())?,
+                    optional: field.is_nullable(),
+                    sensitive: false,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let builders = fields
+            .iter()
+            .map(|field| make_builder(&arrow_data_type(&field.ty), capacity))
+            .collect();
+        Ok(Self {
+            schema,
+            fields,
+            builders,
+            rows: 0,
+            next_column: 0,
+        })
+    }
+
     fn next_field_index(&self) -> Result<usize, String> {
         let index = self.next_column;
         self.fields.get(index).ok_or_else(|| {
@@ -1375,6 +1439,13 @@ impl RuntimeRecordMetadata {
 
     pub fn ingested_at_high_watermark(&self) -> Timestamp {
         self.ingested_at_high_watermark
+    }
+
+    pub(crate) fn is_newer_than(&self, existing: &Self) -> bool {
+        if self.ingested_at_high_watermark != existing.ingested_at_high_watermark {
+            return self.ingested_at_high_watermark > existing.ingested_at_high_watermark;
+        }
+        self.ingested_at_low_watermark > existing.ingested_at_low_watermark
     }
 
     pub(crate) fn to_remote(&self) -> RemoteRuntimeRecordMetadata {
