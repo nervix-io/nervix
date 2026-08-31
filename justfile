@@ -121,6 +121,44 @@ benchmark-all-local *args: build-web-console
         --nervix-mode local \
         --server-binary "{{ cargo_target_dir }}/release/nervix-server" {{ args }}
 
+# Local same-hardware A/B: build the baseline ref and the current tree once each into cached
+# binaries under target/ab/, then interleave runs per arm so machine drift cancels out. This is
+# how performance claims are established; CI benchmark comments are only a same-run smoke signal.
+benchmark-ab baseline_ref runs="3" benchmark_name="kafka-filter-map" *args: build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    baseline_commit="$(git rev-parse --verify --end-of-options {{ quote(baseline_ref) }}'^{commit}')" || {
+        echo "error:" {{ quote(baseline_ref) }} "does not resolve to a commit" >&2
+        exit 1
+    }
+    ab_root="{{ cargo_target_dir }}/ab"
+    case "${ab_root}" in /*) ;; *) ab_root="${PWD}/${ab_root}" ;; esac
+    baseline_binary="${ab_root}/${baseline_commit}/nervix-server"
+    if [[ ! -x "${baseline_binary}" ]]; then
+        worktree="${ab_root}/worktree"
+        git worktree prune
+        if [[ -e "${worktree}" ]]; then
+            git worktree remove --force "${worktree}" || { rm -rf "${worktree}"; git worktree prune; }
+        fi
+        git worktree add --detach "${worktree}" "${baseline_commit}"
+        (cd "${worktree}" \
+            && export CARGO_TARGET_DIR="${ab_root}/build" \
+            && just build-web-console \
+            && cargo build --release --package nervix-server --bin nervix-server)
+        install -D "${ab_root}/build/release/nervix-server" "${baseline_binary}"
+        git worktree remove --force "${worktree}"
+    fi
+    cargo build --release \
+        --package nervix-server --bin nervix-server \
+        --package nervix-benchmark --bins
+    install -D "{{ cargo_target_dir }}/release/nervix-server" "${ab_root}/candidate/nervix-server"
+    "{{ cargo_target_dir }}/release/nervix-benchmark" run-ab {{ quote(benchmark_name) }} \
+        --baseline-binary "${baseline_binary}" \
+        --candidate-binary "${ab_root}/candidate/nervix-server" \
+        --baseline-label {{ quote(baseline_ref) }}" @ ${baseline_commit:0:12}" \
+        --candidate-label "working tree" \
+        --runs {{ quote(runs) }} {{ args }}
+
 # Build only the benchmark harness, then run it against an already-built Nervix image. The harness
 # configures the server directly through client-core and never rebuilds a product binary.
 benchmark-ci nervix_image artifacts_root *args:

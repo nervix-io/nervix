@@ -1,9 +1,11 @@
+mod ab;
 mod catalog;
 mod comparison;
 mod definition;
 mod kafka;
 mod settings;
 
+pub use ab::{AbArm, AbError, AbSummary};
 pub use catalog::{BenchmarkCatalog, BenchmarkError, KafkaRenderInputs, LoadedBenchmark};
 pub use comparison::{BenchmarkComparison, ComparisonError};
 pub use definition::{

@@ -20,44 +20,50 @@ struct BenchmarkRuns {
 }
 
 #[derive(Debug)]
-struct RunArtifact {
-    directory: PathBuf,
-    manifest: RunManifest,
-    report: LoadReport,
+pub(crate) struct RunArtifact {
+    pub(crate) directory: PathBuf,
+    pub(crate) manifest: RunManifest,
+    pub(crate) report: LoadReport,
     image_identity: Option<ImageIdentity>,
 }
 
 #[derive(Debug, Deserialize)]
-struct RunManifest {
-    benchmark: String,
-    description: String,
-    duration_seconds: u64,
-    git_dirty: Option<bool>,
-    git_revision: Option<String>,
+pub(crate) struct RunManifest {
+    pub(crate) benchmark: String,
+    pub(crate) description: String,
+    pub(crate) duration_seconds: u64,
+    pub(crate) git_dirty: Option<bool>,
+    pub(crate) git_revision: Option<String>,
     image: Option<String>,
-    implementation: String,
-    max_backlog_messages: u64,
-    partitions: u32,
+    pub(crate) implementation: String,
+    pub(crate) max_backlog_messages: u64,
+    pub(crate) partitions: u32,
     subject: String,
-    value_bytes: u64,
-    parameters: toml::Table,
+    pub(crate) value_bytes: u64,
+    pub(crate) parameters: toml::Table,
 }
 
 #[derive(Debug, Deserialize)]
-struct LoadReport {
+pub(crate) struct LoadReport {
     target_duration_seconds: f64,
     generation_seconds: f64,
     drain_seconds: f64,
     end_to_end_seconds: f64,
-    wire_bytes_per_message: u64,
+    pub(crate) wire_bytes_per_message: u64,
     partitions: u32,
-    max_backlog_messages: u64,
-    peak_backlog_messages: u64,
+    pub(crate) max_backlog_messages: u64,
+    pub(crate) peak_backlog_messages: u64,
     input_messages: u64,
     output_messages: u64,
     output_messages_per_second_during_generation: f64,
-    end_to_end_messages_per_second: f64,
+    pub(crate) end_to_end_messages_per_second: f64,
     end_to_end_payload_mib_per_second: f64,
+}
+
+impl LoadReport {
+    pub(crate) fn saturated_backlog(&self) -> bool {
+        self.peak_backlog_messages == self.max_backlog_messages
+    }
 }
 
 #[derive(Debug)]
@@ -246,8 +252,7 @@ impl BenchmarkRuns {
             let backlog_percentage = run.report.peak_backlog_messages as f64
                 / run.report.max_backlog_messages as f64
                 * 100.0;
-            let cap_marker = if run.report.peak_backlog_messages == run.report.max_backlog_messages
-            {
+            let cap_marker = if run.report.saturated_backlog() {
                 "⚠️ "
             } else {
                 ""
@@ -288,7 +293,7 @@ impl BenchmarkRuns {
         let saturated = self
             .runs
             .iter()
-            .filter(|run| run.report.peak_backlog_messages == run.report.max_backlog_messages)
+            .filter(|run| run.report.saturated_backlog())
             .map(|run| display_name(&run.manifest.implementation))
             .collect::<Vec<_>>();
         if !saturated.is_empty() {
@@ -344,7 +349,7 @@ impl BenchmarkRuns {
 }
 
 impl RunArtifact {
-    fn load(directory: &Path) -> Result<Self, ComparisonError> {
+    pub(crate) fn load(directory: &Path) -> Result<Self, ComparisonError> {
         let status_path = directory.join("status.txt");
         let status = read(&status_path)?;
         if status.trim() != "pass" {
@@ -499,32 +504,41 @@ fn validate_matching_configuration(
 ) -> Result<(), ComparisonError> {
     let baseline = &runs[0];
     for run in &runs[1..] {
-        let mismatch = |field| ComparisonError::MismatchedConfiguration {
-            benchmark: benchmark.to_string(),
-            implementation: run.manifest.implementation.clone(),
-            field,
-        };
-        if run.manifest.description != baseline.manifest.description {
-            return Err(mismatch("description"));
-        }
-        if run.manifest.duration_seconds != baseline.manifest.duration_seconds {
-            return Err(mismatch("duration_seconds"));
-        }
-        if run.manifest.partitions != baseline.manifest.partitions {
-            return Err(mismatch("partitions"));
-        }
-        if run.manifest.value_bytes != baseline.manifest.value_bytes {
-            return Err(mismatch("value_bytes"));
-        }
-        if run.manifest.max_backlog_messages != baseline.manifest.max_backlog_messages {
-            return Err(mismatch("max_backlog_messages"));
-        }
-        if run.manifest.parameters != baseline.manifest.parameters {
-            return Err(mismatch("parameters"));
-        }
-        if run.report.wire_bytes_per_message != baseline.report.wire_bytes_per_message {
-            return Err(mismatch("wire_bytes_per_message"));
-        }
+        ensure_matching_run_configuration(benchmark, baseline, run)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_matching_run_configuration(
+    benchmark: &str,
+    baseline: &RunArtifact,
+    run: &RunArtifact,
+) -> Result<(), ComparisonError> {
+    let mismatch = |field| ComparisonError::MismatchedConfiguration {
+        benchmark: benchmark.to_string(),
+        implementation: run.manifest.implementation.clone(),
+        field,
+    };
+    if run.manifest.description != baseline.manifest.description {
+        return Err(mismatch("description"));
+    }
+    if run.manifest.duration_seconds != baseline.manifest.duration_seconds {
+        return Err(mismatch("duration_seconds"));
+    }
+    if run.manifest.partitions != baseline.manifest.partitions {
+        return Err(mismatch("partitions"));
+    }
+    if run.manifest.value_bytes != baseline.manifest.value_bytes {
+        return Err(mismatch("value_bytes"));
+    }
+    if run.manifest.max_backlog_messages != baseline.manifest.max_backlog_messages {
+        return Err(mismatch("max_backlog_messages"));
+    }
+    if run.manifest.parameters != baseline.manifest.parameters {
+        return Err(mismatch("parameters"));
+    }
+    if run.report.wire_bytes_per_message != baseline.report.wire_bytes_per_message {
+        return Err(mismatch("wire_bytes_per_message"));
     }
     Ok(())
 }
@@ -540,7 +554,7 @@ fn implementation_sort_key(implementation: &str) -> (bool, &str) {
     (implementation != "nervix", implementation)
 }
 
-fn display_name(value: &str) -> String {
+pub(crate) fn display_name(value: &str) -> String {
     value
         .split('-')
         .map(|word| match word {
@@ -561,7 +575,7 @@ fn display_name(value: &str) -> String {
         .replace('|', "\\|")
 }
 
-fn single_line(value: &str) -> String {
+pub(crate) fn single_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -578,7 +592,7 @@ fn human_list(values: &[String]) -> String {
     }
 }
 
-fn format_count(value: u64) -> String {
+pub(crate) fn format_count(value: u64) -> String {
     let digits = value.to_string();
     let first_group = digits.len() % 3;
     let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
@@ -594,7 +608,7 @@ fn format_count(value: u64) -> String {
     formatted
 }
 
-fn format_percentage(value: f64) -> String {
+pub(crate) fn format_percentage(value: f64) -> String {
     if value < 0.0 {
         format!("−{:.1}%", value.abs())
     } else {
@@ -602,7 +616,7 @@ fn format_percentage(value: f64) -> String {
     }
 }
 
-fn emphasize_best(rendered: String, value: f64, best: f64) -> String {
+pub(crate) fn emphasize_best(rendered: String, value: f64, best: f64) -> String {
     if value == best {
         format!("**{rendered}**")
     } else {
@@ -610,7 +624,7 @@ fn emphasize_best(rendered: String, value: f64, best: f64) -> String {
     }
 }
 
-fn render_parameters(parameters: &toml::Table) -> String {
+pub(crate) fn render_parameters(parameters: &toml::Table) -> String {
     let mut entries = parameters
         .iter()
         .filter(|entry| {
