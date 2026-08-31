@@ -2210,12 +2210,16 @@ mod tests {
     }
 
     #[test]
-    fn test_parallelism_args_default_to_one_and_accept_a_positive_factor() {
-        let defaults = TestCli::try_parse_from(["test"]).expect("default arguments should parse");
+    fn test_parallelism_args_declare_default_and_accept_a_positive_factor() {
+        let command = TestCli::command();
+        let factor = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "concurrency_factor")
+            .expect("concurrency factor argument should exist");
         let configured = TestCli::try_parse_from(["test", "--concurrency-factor", "3"])
             .expect("positive concurrency factor should parse");
 
-        assert_eq!(defaults.parallelism.concurrency_factor().get(), 1);
+        assert_eq!(factor.get_default_values(), [OsStr::new("1")]);
         assert_eq!(configured.parallelism.concurrency_factor().get(), 3);
         assert!(TestCli::try_parse_from(["test", "--concurrency-factor", "0"]).is_err());
     }
