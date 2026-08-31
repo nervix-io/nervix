@@ -3846,7 +3846,7 @@ async fn publish_nats_with_headers(
     let client = nats_client(dependencies).await?;
     let mut header_map = async_nats::HeaderMap::new();
     for (name, value) in headers {
-        header_map.insert(*name, *value);
+        header_map.append(*name, *value);
     }
     client
         .publish_with_headers(

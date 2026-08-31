@@ -10714,6 +10714,39 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     assert!(row_value(&output, "active").is_none());
     assert!(row_value(&output, "amount").is_none());
     assert!(row_value(&output, "raw").is_none());
+
+    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
+        metadata,
+        super::IngestFilterMapMetadata::kafka(
+            "logic_notifications_t123".to_string(),
+            3,
+            43,
+            None,
+            Vec::new(),
+        ),
+    ])
+    .expect("Kafka metadata must concatenate column-wise");
+    let offsets = grouped_metadata
+        .field_column("offset")
+        .expect("metadata projection must succeed")
+        .expect("Kafka offset column must exist");
+    let offsets = offsets
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .expect("Kafka offsets must remain INT64");
+    assert_eq!(offsets.values(), &[42, 43]);
+    let selected = grouped_metadata
+        .select(&[false, true])
+        .expect("metadata row selection must succeed");
+    let selected_offset = selected
+        .field_column("offset")
+        .expect("selected metadata projection must succeed")
+        .expect("selected Kafka offset column must exist");
+    let selected_offset = selected_offset
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .expect("selected Kafka offset must remain INT64");
+    assert_eq!(selected_offset.values(), &[43]);
 }
 
 #[tokio::test]
@@ -10819,6 +10852,78 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         Some(RuntimeValue::String("primary".to_string()))
     );
     assert_eq!(row_value(&output, "total"), Some(RuntimeValue::I64(2)));
+
+    let second_record = test_runtime_row([
+        (
+            "tenant".to_string(),
+            RuntimeValue::String("acme".to_string()),
+        ),
+        (
+            "header_name".to_string(),
+            RuntimeValue::String("route".to_string()),
+        ),
+        (
+            "raw".to_string(),
+            RuntimeValue::String("second".to_string()),
+        ),
+    ]);
+    let grouped_carrier =
+        RuntimeRecordBatch::concat(&[&record.one_row_batch(), &second_record.one_row_batch()])
+            .expect("grouped carrier must concatenate");
+    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
+        metadata.clone(),
+        super::IngestFilterMapMetadata::from_headers(vec![
+            ("tenant".to_string(), "acme".to_string()),
+            ("route".to_string(), "backup".to_string()),
+        ]),
+    ])
+    .expect("grouped metadata must concatenate");
+    let grouped_runtime_metadata =
+        vec![record.metadata().clone(), second_record.metadata().clone()];
+    let grouped_keys = vec![None, None];
+    let grouped_outcomes = super::evaluate_filter_map_on_batch(
+        ModelKind::Ingestor.as_str(),
+        &identifier("header_ingestor"),
+        &program,
+        super::FilterMapOutcomeInputs {
+            carrier: &grouped_carrier,
+            record_metadata: &grouped_runtime_metadata,
+            keys: &grouped_keys,
+            filter_map_metadata: Some(&grouped_metadata),
+            side_inputs: &HashMap::default(),
+        },
+        Timestamp::from_unix_nanos(1),
+    )
+    .await
+    .expect("grouped header filter-map must execute");
+    let grouped_outputs = grouped_outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            super::SingleRecordFilterMapOutcome::Output(record) => record,
+            super::SingleRecordFilterMapOutcome::Filtered => {
+                panic!("grouped header row must be selected")
+            }
+            super::SingleRecordFilterMapOutcome::MessageError { error, .. } => {
+                panic!("grouped header row failed: {}", error.message)
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        row_value(&grouped_outputs[0], "first"),
+        Some(RuntimeValue::String("primary".to_string()))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[0], "total"),
+        Some(RuntimeValue::I64(2))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[1], "first"),
+        Some(RuntimeValue::String("backup".to_string()))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[1], "total"),
+        Some(RuntimeValue::I64(1))
+    );
 
     let top_filter = super::compile_expression_filter_program(
         super::RuntimeCompileTarget {

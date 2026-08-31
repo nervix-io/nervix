@@ -307,7 +307,7 @@ impl PulsarIngestor {
                                                             output_routes: &task_output_routes,
                                                             filter_where: task_filter_where.as_ref(),
                                                             records: vec![record],
-                                                            metadata: vec![filter_map_metadata],
+                                                            metadata: Some(filter_map_metadata),
                                                             ingested_at: current_timestamp(),
                                                             acks: vec![AckSet::empty()],
                                                         })
@@ -440,9 +440,9 @@ impl PulsarIngestor {
                                                         output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
                                                         records: vec![entry.record.clone()],
-                                                        metadata: vec![
+                                                        metadata: Some(
                                                             entry.filter_map_metadata.clone(),
-                                                        ],
+                                                        ),
                                                         ingested_at: current_timestamp(),
                                                         acks: vec![if !task_branched_senders.is_empty() {
                                                             acks.attached()
@@ -679,21 +679,25 @@ impl PulsarIngestor {
                                                     group_records.push(record);
                                                     group_metadata.push(filter_map_metadata);
                                                 }
-                                                let dispatched = task_runtime
-                                                    .dispatch_ingested_records(IngestGroupDispatch {
-                                                        collector: &mut collector,
-                                                        domain: &task_domain,
-                                                        ingestor: &task_ingestor,
-                                                        timestamp_source: task_timestamp_source
-                                                            .as_ref(),
-                                                        output_routes: &task_output_routes,
-                                                        filter_where: task_filter_where.as_ref(),
-                                                        records: group_records,
-                                                        metadata: group_metadata,
-                                                        acks: dispatch_acks,
-                                                        ingested_at,
-                                                    })
-                                                    .await
+                                                let dispatch_result = match IngestFilterMapMetadata::concat(&group_metadata) {
+                                                    Ok(metadata) => task_runtime
+                                                        .dispatch_ingested_records(IngestGroupDispatch {
+                                                            collector: &mut collector,
+                                                            domain: &task_domain,
+                                                            ingestor: &task_ingestor,
+                                                            timestamp_source: task_timestamp_source
+                                                                .as_ref(),
+                                                            output_routes: &task_output_routes,
+                                                            filter_where: task_filter_where.as_ref(),
+                                                            records: group_records,
+                                                            metadata: Some(metadata),
+                                                            acks: dispatch_acks,
+                                                            ingested_at,
+                                                        })
+                                                        .await,
+                                                    Err(error) => Err(error),
+                                                };
+                                                let dispatched = dispatch_result
                                                     .map(|()| true)
                                                     .unwrap_or_else(|error| {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
