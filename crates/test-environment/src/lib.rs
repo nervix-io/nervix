@@ -4,6 +4,7 @@ use std::{
     env,
     ffi::OsString,
     fmt, fs, io,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -46,6 +47,29 @@ const DEPENDENCY_CONFIGURATION_FILES: &[&[u8]] = &[
     include_bytes!("../../../docker/rabbitmq/rabbitmq.conf"),
     include_bytes!("../../../docker/redis/redis.conf"),
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestParallelism {
+    available_cpus: NonZeroUsize,
+}
+
+impl TestParallelism {
+    pub fn detect() -> Self {
+        Self::from_available_cpus(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+    }
+
+    const fn from_available_cpus(available_cpus: NonZeroUsize) -> Self {
+        Self { available_cpus }
+    }
+
+    pub const fn max_concurrent_scenarios(self) -> usize {
+        self.available_cpus.get()
+    }
+
+    pub const fn tokio_worker_threads(self) -> usize {
+        self.available_cpus.get()
+    }
+}
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -2151,7 +2175,19 @@ impl Image for KafkaImage {
 
 #[cfg(test)]
 mod tests {
-    use super::KafkaImage;
+    use std::num::NonZeroUsize;
+
+    use super::{KafkaImage, TestParallelism};
+
+    #[test]
+    fn test_parallelism_scales_from_available_cpus() {
+        let parallelism = TestParallelism::from_available_cpus(
+            NonZeroUsize::new(12).expect("test CPU count is non-zero"),
+        );
+
+        assert_eq!(parallelism.max_concurrent_scenarios(), 12);
+        assert_eq!(parallelism.tokio_worker_threads(), 12);
+    }
 
     #[test]
     fn kafka_advertises_separate_host_and_docker_listeners() {
