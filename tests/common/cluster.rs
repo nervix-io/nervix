@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::OpenOptions,
     io,
-    net::{IpAddr, Ipv4Addr, TcpListener},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
     path::PathBuf,
     str::FromStr,
     sync::{Arc as StdArc, LazyLock, OnceLock},
@@ -497,6 +497,8 @@ impl Cluster {
         for index in 1..=node_count {
             let node_id = format!("node-{index}");
             let spec = NodeSpec::new(&root_dir, &node_id, index == 1)?;
+            runtime_test_hooks
+                .set_syslog_ingestor_bind_ip(node_id.clone(), spec.syslog_ingestor_host);
             nodes.insert(
                 node_id.clone(),
                 NodeHandle::new(spec, runtime_test_hooks.clone(), config.clone()),
@@ -628,6 +630,64 @@ impl Cluster {
                 .await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn add_node(&mut self, node_id: &str) -> io::Result<()> {
+        if self.nodes.contains_key(node_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("node '{node_id}' already exists"),
+            ));
+        }
+        let bootstrap_host = self
+            .nodes
+            .values()
+            .find(|node| node.task.is_some())
+            .map(|node| node.spec.cluster_addr())
+            .ok_or_else(|| io::Error::other("a running bootstrap node is required"))?;
+        let config = self
+            .nodes
+            .values()
+            .next()
+            .expect("an existing cluster has at least one node")
+            .config
+            .clone();
+        let mut spec = NodeSpec::new(&self._root_dir, node_id, false)?;
+        spec.bootstrap_host = Some(bootstrap_host);
+        self.runtime_test_hooks
+            .set_syslog_ingestor_bind_ip(node_id.to_string(), spec.syslog_ingestor_host);
+        self.nodes.insert(
+            node_id.to_string(),
+            NodeHandle::new(spec, self.runtime_test_hooks.clone(), config),
+        );
+        self.start_node(node_id).await?;
+
+        let node_ids = self.node_ids();
+        self.wait_for_any_leader(node_id).await?;
+        let voter_refs = node_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        self.wait_for_voters(node_id, &voter_refs).await?;
+        self.wait_for_consistent_leader_on_all_nodes().await?;
+        self.wait_for_full_interconnect(&node_ids).await
+    }
+
+    pub(crate) fn syslog_ingestor_addr(
+        &self,
+        node_id: &str,
+        configured: &str,
+    ) -> io::Result<String> {
+        let configured = configured.parse::<SocketAddr>().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid server ingestor address '{configured}': {error}"),
+            )
+        })?;
+        let host = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"))
+            .spec
+            .syslog_ingestor_host;
+        Ok(SocketAddr::new(host, configured.port()).to_string())
     }
 
     pub(crate) async fn stop_node(&mut self, node_id: &str) -> io::Result<()> {
@@ -1961,6 +2021,7 @@ impl NodeHandle {
 struct NodeSpec {
     node_id: String,
     base_dir: PathBuf,
+    syslog_ingestor_host: IpAddr,
     allow_bootstrap: bool,
     bootstrap_host: Option<String>,
     grpc_port: u16,
@@ -2014,10 +2075,12 @@ impl NodeSpec {
         let base_dir = root.path().join(node_id);
         std::fs::create_dir_all(&base_dir)?;
         let ports = NodePorts::allocate()?;
+        let syslog_ingestor_host = Self::syslog_ingestor_host(node_id)?;
 
         Ok(Self {
             node_id: node_id.to_string(),
             base_dir,
+            syslog_ingestor_host,
             allow_bootstrap,
             bootstrap_host: None,
             grpc_port: ports.grpc,
@@ -2032,6 +2095,20 @@ impl NodeSpec {
             interconnect_port: ports.interconnect,
             interconnect_https_port: ports.interconnect_https,
         })
+    }
+
+    fn syslog_ingestor_host(node_id: &str) -> io::Result<IpAddr> {
+        let node_index = node_id
+            .strip_prefix("node-")
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|value| (1..=254).contains(value))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("test node id '{node_id}' must have the form node-1 through node-254"),
+                )
+            })?;
+        Ok(IpAddr::V4(Ipv4Addr::new(127, 0, 0, node_index)))
     }
 
     fn reallocate_ports(&mut self) -> io::Result<()> {

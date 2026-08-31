@@ -65,6 +65,10 @@ CREATE [IF NOT EXISTS] CODEC <name>
   [ON INGESTION '<program>']
   [ON EMITTING '<program>'];
 
+CREATE [IF NOT EXISTS] CODEC <name>
+  FROM SYSLOG
+  TO SCHEMA <schema>;
+
 CREATE [IF NOT EXISTS] RELAY <name> SCHEMA <schema> [CAPACITY <n>]
   [WITH MATERIALIZED STATE LAST BY TIMESTAMP];
 
@@ -409,8 +413,9 @@ General expression rules:
 - generated routes allow bare reads from immutable generated state until the same-named output is
   initialized; `message` and `input` are unavailable
 - `branch.field` must be explicit and is unavailable in successful emitter expressions
-- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; Kafka also
-  exposes typed `metadata.topic`, `metadata.partition`, and `metadata.offset`
+- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; Kafka exposes
+  typed `metadata.topic`, `metadata.partition`, and `metadata.offset`, while Syslog exposes
+  optional `metadata.peer_addr`
 - supported codec emitters stage ordered `write_header(name, value)` calls in `INVOKE`
 
 Example:
@@ -570,6 +575,7 @@ Current built-in client transport kinds include:
 - `MQTT`
 - `NATS`
 - `ZEROMQ`
+- `SYSLOG`
 - `SQS`
 - `WEBSOCKETS`
 - `S3`

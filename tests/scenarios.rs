@@ -62,7 +62,7 @@ use playwright_rs::{
 };
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
-use rustls_pki_types::{CertificateDer, pem::PemObject};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use tempfile::TempDir;
 use tokio_postgres::{Client as PostgresClient, NoTls};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -92,7 +92,8 @@ static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
-const WEB_CONSOLE_FEATURE_NAME: &str = "Web console NSPL REPL";
+const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
+    ["Web console NSPL REPL", "Web console execution graph"];
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
 
@@ -124,6 +125,9 @@ struct ScenarioWorld {
     test_id: String,
     zeromq_ingest_addr: String,
     zeromq_emit_addr: String,
+    syslog_ingest_addr: String,
+    syslog_emit_addr: String,
+    syslog_udp_observer: Option<tokio::net::UdpSocket>,
     placeholders: BTreeMap<String, String>,
     mqtt_ingestors_by_domain: BTreeMap<String, BTreeSet<String>>,
     avro_http_field_order: Vec<String>,
@@ -198,6 +202,7 @@ impl fmt::Debug for ScenarioWorld {
             )
             .field("mongodb_collection", &self.mongodb_collection)
             .field("mongodb_tls", &self.mongodb_tls)
+            .field("syslog_udp_observer", &self.syslog_udp_observer.is_some())
             .field("placeholder_count", &self.placeholders.len())
             .field(
                 "mqtt_ingestor_domain_count",
@@ -278,6 +283,14 @@ fn initialize_scenario_identity(world: &mut ScenarioWorld) {
     world.zeromq_emit_addr = format!(
         "tcp://127.0.0.1:{}",
         crate::common::cluster::next_port().expect("failed to allocate ZeroMQ emit port")
+    );
+    world.syslog_ingest_addr = format!(
+        "127.0.0.1:{}",
+        crate::common::cluster::next_port().expect("failed to allocate Syslog ingest port")
+    );
+    world.syslog_emit_addr = format!(
+        "127.0.0.1:{}",
+        crate::common::cluster::next_port().expect("failed to allocate Syslog emit port")
     );
 }
 
@@ -1599,7 +1612,10 @@ fn build_ingestor_logic_commands(
         uppered STRING,
         regex_ok BOOL,
         regex_replaced STRING,
-        regex_piece STRING
+        regex_piece STRING,
+        unicode_chars I64,
+        unicode_trimmed STRING,
+        empty_replaced STRING
       );
 
       CREATE SCHEMA logic_notification_cast_matrix (
@@ -2942,6 +2958,16 @@ async fn when_node_is_started(world: &mut ScenarioWorld, node_id: String) {
         .expect("failed to start node");
 }
 
+#[when(expr = "node {string} is added to the cluster")]
+async fn when_node_is_added_to_the_cluster(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .add_node(&node_id)
+        .await
+        .expect("failed to add node");
+}
+
 #[when(expr = "leadership is transferred from node {string} to node {string}")]
 async fn when_leadership_is_transferred_from_node_to_node(
     world: &mut ScenarioWorld,
@@ -3305,7 +3331,10 @@ fn expand_placeholders(world: &ScenarioWorld, input: &str) -> String {
         .replace("{{test_id}}", &world.test_id)
         .replace("{{domain}}", &world.domain)
         .replace("{{zeromq_ingest_addr}}", &world.zeromq_ingest_addr)
-        .replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr);
+        .replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr)
+        .replace("{{syslog_ingest_addr}}", &world.syslog_ingest_addr)
+        .replace("{{syslog_emit_addr}}", &world.syslog_emit_addr)
+        .replace("{{syslog_pri}}", "<34>");
     for (key, value) in &world.placeholders {
         output = output.replace(&format!("{{{{{key}}}}}"), value);
     }
@@ -5760,6 +5789,463 @@ async fn then_graph_search_highlights_exactly_graph_items(
     }
 }
 
+/// Shared preamble for graph geometry probes: item boxes, edge sample points, and badge boxes,
+/// all in screen space so assertions read the same picture the user sees.
+const GRAPH_GEOMETRY_HELPERS: &str = r#"
+    const itemBoxes = () => Array
+        .from(document.querySelectorAll(".graph-hit-layer button"))
+        .map((element) => ({
+            label: element.dataset.label,
+            box: element.getBoundingClientRect(),
+        }));
+    const badgeBoxes = () => Array
+        .from(document.querySelectorAll(".graph-edge-metric"))
+        .map((element) => ({
+            source: element.dataset.source,
+            target: element.dataset.target,
+            box: element.getBoundingClientRect(),
+        }));
+    const edgePaths = () => Array.from(document.querySelectorAll("path.graph-edge"));
+    const edgePath = (source, target) => edgePaths()
+        .find((path) => path.dataset.source.endsWith(":" + source)
+            && path.dataset.target.endsWith(":" + target));
+    const samplePath = (path) => {
+        const matrix = path.getScreenCTM();
+        const total = path.getTotalLength();
+        const points = [];
+        for (let at = 0; at <= total; at += 6) {
+            const raw = path.getPointAtLength(at);
+            points.push({
+                x: raw.x * matrix.a + raw.y * matrix.c + matrix.e,
+                y: raw.x * matrix.b + raw.y * matrix.d + matrix.f,
+            });
+        }
+        return points;
+    };
+    const inside = (point, box, margin) => point.x > box.left + margin
+        && point.x < box.right - margin
+        && point.y > box.top + margin
+        && point.y < box.bottom - margin;
+    const overlaps = (a, b) => a.left < b.right && b.left < a.right
+        && a.top < b.bottom && b.top < a.bottom;
+"#;
+
+#[then(expr = "graph items {string} are horizontally aligned")]
+async fn then_graph_items_are_horizontally_aligned(world: &mut ScenarioWorld, items: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let items = expand_placeholders(world, &items);
+    let labels = items
+        .split(',')
+        .map(|label| label.trim().to_string())
+        .collect::<Vec<_>>();
+    let script = format!(
+        r#"
+        () => {{
+            {GRAPH_GEOMETRY_HELPERS}
+            const wanted = {labels:?};
+            const boxes = itemBoxes();
+            const centres = [];
+            for (const label of wanted) {{
+                const found = boxes.find((entry) => entry.label === label);
+                if (!found) {{
+                    return `missing item ${{label}}`;
+                }}
+                centres.push(Math.round((found.box.top + found.box.bottom) / 2));
+            }}
+            const first = centres[0];
+            if (centres.every((centre) => Math.abs(centre - first) <= 1)) {{
+                return "OK";
+            }}
+            return `not aligned: ${{JSON.stringify(wanted.map((l, i) => [l, centres[i]]))}}`;
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "items should share one horizontal axis").await;
+}
+
+#[then(expr = "graph item {string} is left of graph item {string}")]
+async fn then_graph_item_is_left_of_graph_item(
+    world: &mut ScenarioWorld,
+    first: String,
+    second: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let first = expand_placeholders(world, &first);
+    let second = expand_placeholders(world, &second);
+    let script = format!(
+        r#"
+        () => {{
+            {GRAPH_GEOMETRY_HELPERS}
+            const boxes = itemBoxes();
+            const left = boxes.find((entry) => entry.label === {first:?});
+            const right = boxes.find((entry) => entry.label === {second:?});
+            if (!left || !right) {{
+                return `missing item left=${{Boolean(left)}} right=${{Boolean(right)}}`;
+            }}
+            if (left.box.right <= right.box.left) {{
+                return "OK";
+            }}
+            return `not left of: ${{Math.round(left.box.right)}} vs ${{Math.round(right.box.left)}}`;
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "records must read left to right").await;
+}
+
+#[then("no graph edge crosses any graph item")]
+async fn then_no_graph_edge_crosses_any_graph_item(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let script = format!(
+        r#"
+        () => {{
+            {GRAPH_GEOMETRY_HELPERS}
+            const boxes = itemBoxes();
+            if (boxes.length === 0) {{
+                return "no graph items rendered";
+            }}
+            for (const path of edgePaths()) {{
+                const source = path.dataset.source;
+                const target = path.dataset.target;
+                for (const point of samplePath(path)) {{
+                    for (const entry of boxes) {{
+                        if (source.endsWith(":" + entry.label) || target.endsWith(":" + entry.label)) {{
+                            continue;
+                        }}
+                        if (inside(point, entry.box, 1)) {{
+                            return `edge ${{source}} -> ${{target}} crosses ${{entry.label}}`;
+                        }}
+                    }}
+                }}
+            }}
+            return "OK";
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "edges must stay clear of items").await;
+}
+
+#[then("no graph badge overlaps another graph item or badge")]
+async fn then_no_graph_badge_overlaps(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let script = format!(
+        r#"
+        () => {{
+            {GRAPH_GEOMETRY_HELPERS}
+            const badges = badgeBoxes();
+            const boxes = itemBoxes();
+            for (let index = 0; index < badges.length; index += 1) {{
+                for (const entry of boxes) {{
+                    if (overlaps(badges[index].box, entry.box)) {{
+                        return `badge ${{badges[index].source}} -> ${{badges[index].target}} covers ${{entry.label}}`;
+                    }}
+                }}
+                for (let other = index + 1; other < badges.length; other += 1) {{
+                    if (overlaps(badges[index].box, badges[other].box)) {{
+                        return `badges ${{badges[index].target}} and ${{badges[other].target}} overlap`;
+                    }}
+                }}
+            }}
+            return "OK";
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "badges must not cover anything").await;
+}
+
+#[then(
+    expr = "graph edge from {string} to {string} departs at a different port than graph edge from \
+            {string} to {string}"
+)]
+async fn then_graph_edges_depart_at_different_ports(
+    world: &mut ScenarioWorld,
+    first_source: String,
+    first_target: String,
+    second_source: String,
+    second_target: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let first_source = expand_placeholders(world, &first_source);
+    let first_target = expand_placeholders(world, &first_target);
+    let second_source = expand_placeholders(world, &second_source);
+    let second_target = expand_placeholders(world, &second_target);
+    let script = format!(
+        r#"
+        () => {{
+            {GRAPH_GEOMETRY_HELPERS}
+            const first = edgePath({first_source:?}, {first_target:?});
+            const second = edgePath({second_source:?}, {second_target:?});
+            if (!first || !second) {{
+                return `missing edge first=${{Boolean(first)}} second=${{Boolean(second)}}`;
+            }}
+            const start = (path) => samplePath(path)[0];
+            const a = start(first);
+            const b = start(second);
+            if (Math.abs(a.y - b.y) >= 8) {{
+                return "OK";
+            }}
+            return `shared port at y=${{Math.round(a.y)}} and ${{Math.round(b.y)}}`;
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "fan-out must leave through distinct ports").await;
+}
+
+#[then(expr = "graph edge from {string} to {string} is a return path")]
+async fn then_graph_edge_is_a_return_path(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let source = expand_placeholders(world, &source);
+    let target = expand_placeholders(world, &target);
+    let script = format!(
+        r#"
+        () => {{
+            {GRAPH_GEOMETRY_HELPERS}
+            const path = edgePath({source:?}, {target:?});
+            if (!path) {{
+                return "edge is not drawn";
+            }}
+            return path.dataset.feedback === "true" ? "OK" : "edge is not marked as a return path";
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "a backwards edge must be marked").await;
+}
+
+#[then(expr = "branch group {string} header shows key fields {string}")]
+async fn then_branch_group_header_shows_key_fields(
+    world: &mut ScenarioWorld,
+    branch: String,
+    fields: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let branch = expand_placeholders(world, &branch);
+    let fields = expand_placeholders(world, &fields);
+    let expected = fields
+        .split(',')
+        .map(|field| field.trim().to_string())
+        .collect::<Vec<_>>();
+    let script = format!(
+        r#"
+        () => {{
+            const body = Array
+                .from(document.querySelectorAll("path.graph-branch-body"))
+                .find((element) => element.dataset.branch === {branch:?});
+            if (!body) {{
+                return "branch group is not drawn";
+            }}
+            const declared = (body.dataset.keyFields || "")
+                .split(",")
+                .map((field) => field.trim())
+                .filter((field) => field.length > 0);
+            const wanted = {expected:?};
+            if (declared.length === wanted.length
+                && wanted.every((field, index) => declared[index] === field)) {{
+                return "OK";
+            }}
+            return `key fields are ${{JSON.stringify(declared)}}`;
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "a branch group names its own key fields").await;
+}
+
+#[then(expr = "branch group {string} contains graph item {string}")]
+async fn then_branch_group_contains_graph_item(
+    world: &mut ScenarioWorld,
+    branch: String,
+    item: String,
+) {
+    then_branch_group_containment(world, branch, item, true).await;
+}
+
+#[then(expr = "branch group {string} does not contain graph item {string}")]
+async fn then_branch_group_does_not_contain_graph_item(
+    world: &mut ScenarioWorld,
+    branch: String,
+    item: String,
+) {
+    then_branch_group_containment(world, branch, item, false).await;
+}
+
+async fn then_branch_group_containment(
+    world: &mut ScenarioWorld,
+    branch: String,
+    item: String,
+    expected: bool,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let branch = expand_placeholders(world, &branch);
+    let item = expand_placeholders(world, &item);
+    let script = format!(
+        r#"
+        () => {{
+            {GRAPH_GEOMETRY_HELPERS}
+            const body = Array
+                .from(document.querySelectorAll("path.graph-branch-body"))
+                .find((element) => element.dataset.branch === {branch:?});
+            const entry = itemBoxes().find((candidate) => candidate.label === {item:?});
+            if (!body || !entry) {{
+                return `missing group=${{Boolean(body)}} item=${{Boolean(entry)}}`;
+            }}
+            const region = body.getBoundingClientRect();
+            const contained = overlaps(region, entry.box);
+            return contained === {expected} ? "OK" : `containment is ${{contained}}`;
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "a branch group holds exactly its members").await;
+}
+
+#[then("the whole graph is visible in the graph viewport")]
+async fn then_the_whole_graph_is_visible(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let script = format!(
+        r#"
+        () => {{
+            {GRAPH_GEOMETRY_HELPERS}
+            const stage = document.querySelector(".graph-stage");
+            const boxes = itemBoxes();
+            if (!stage || boxes.length === 0) {{
+                return "graph is not rendered";
+            }}
+            const view = stage.getBoundingClientRect();
+            for (const entry of boxes) {{
+                if (entry.box.left < view.left || entry.box.right > view.right
+                    || entry.box.top < view.top || entry.box.bottom > view.bottom) {{
+                    return `${{entry.label}} is outside the viewport`;
+                }}
+            }}
+            return "OK";
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "the initial view frames the whole graph").await;
+}
+
+#[then(expr = "graph zoom stays within {int} and {int} percent")]
+async fn then_graph_zoom_stays_within(world: &mut ScenarioWorld, minimum: i32, maximum: i32) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let script = format!(
+        r#"
+        async () => {{
+            const label = () => Array
+                .from(document.querySelectorAll(".zoom-group button"))
+                .find((button) => button.getAttribute("title") === "Reset zoom");
+            const press = (title) => {{
+                const button = Array
+                    .from(document.querySelectorAll(".zoom-group button"))
+                    .find((candidate) => candidate.getAttribute("title") === title);
+                if (button) {{
+                    button.click();
+                }}
+            }};
+            const reading = () => Number.parseInt(label().textContent.replace("%", ""), 10);
+            for (let step = 0; step < 40; step += 1) {{
+                press("Zoom out");
+            }}
+            const lowest = reading();
+            for (let step = 0; step < 80; step += 1) {{
+                press("Zoom in");
+            }}
+            const highest = reading();
+            if (lowest < {minimum} || highest > {maximum}) {{
+                return `zoom ranged ${{lowest}}%..${{highest}}%`;
+            }}
+            return "OK";
+        }}
+        "#
+    );
+    assert_graph_probe(page, &script, "zoom shares one range everywhere").await;
+}
+
+#[then("graph geometry does not change while snapshots arrive")]
+async fn then_graph_geometry_does_not_change(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    // Canvas coordinates, not screen ones: this asserts that the arrangement holds still, which
+    // is independent of where the viewport happens to be panned or zoomed.
+    let sample = r#"
+        () => JSON.stringify(Array
+            .from(document.querySelectorAll(".graph-hit-layer button"))
+            .map((element) => [
+                element.dataset.label,
+                element.style.left,
+                element.style.top,
+            ]))
+    "#
+    .to_string();
+    let first = page
+        .evaluate::<(), String>(&sample, None::<&()>)
+        .await
+        .expect("graph geometry must be readable");
+    // Several leader snapshots land in this window, so an unchanged topology has been redrawn
+    // repeatedly by the time the second reading is taken.
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    let second = page
+        .evaluate::<(), String>(&sample, None::<&()>)
+        .await
+        .expect("graph geometry must be readable");
+    assert_eq!(
+        first, second,
+        "statistics updates must not move the drawing"
+    );
+}
+
+/// Poll a probe that returns "OK" or a description of what is wrong.
+async fn assert_graph_probe(page: &playwright_rs::Page, script: &str, expectation: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let last = page
+            .evaluate::<(), String>(script, None::<&()>)
+            .await
+            .expect("graph probe must be readable");
+        if last == "OK" {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected {expectation}, but {last}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[then(expr = "graph search result {string} is visible in the graph viewport")]
 async fn then_graph_search_result_is_visible_in_the_graph_viewport(
     world: &mut ScenarioWorld,
@@ -5935,7 +6421,9 @@ async fn when_graph_edge_from_to_is_clicked_with_viewport_focused_on_its_middle(
                 return failure(`missing zoom controls reset=${{Boolean(reset)}} zoomIn=${{Boolean(zoomIn)}}`);
             }}
             reset.click();
-            for (let index = 0; index < 6; index += 1) {{
+            // Zoom to the top of the range: the arrangement is compact, so an edge's middle only
+            // clears both of its endpoints well past the default framing.
+            for (let index = 0; index < 20; index += 1) {{
                 zoomIn.click();
             }}
             await waitForStableTransform();
@@ -6275,7 +6763,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
-    schema: String,
+    branch: String,
 ) {
     let page = world
         .browser_page
@@ -6283,7 +6771,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
         .expect("a browser page must be opened before graph assertions");
     let source = expand_placeholders(world, &source);
     let target = expand_placeholders(world, &target);
-    let schema = expand_placeholders(world, &schema);
+    let branch = expand_placeholders(world, &branch);
     let script = format!(
         r#"
         () => {{
@@ -6298,7 +6786,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
                 );
             const bodies = Array
                 .from(document.querySelectorAll(".graph-branch-body"))
-                .filter((path) => path.dataset.schema === {schema:?});
+                .filter((path) => path.dataset.branch === {branch:?});
             if (!edge || bodies.length === 0) {{
                 return `missing edge=${{Boolean(edge)}} bodies=${{bodies.length}}`;
             }}
@@ -6307,10 +6795,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
                 const box = bodyScreenBox(body);
                 if (pathIntersectsScreenBox(edge, box, 2)) {{
                     return `intersects path=${{path}} body=${{JSON.stringify({{
-                        x: body.dataset.x,
-                        y: body.dataset.y,
-                        width: body.dataset.width,
-                        height: body.dataset.height,
+                        branch: body.dataset.branch,
                         box,
                     }})}}`;
                 }}
@@ -6318,28 +6803,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
             return "OK";
 
             function bodyScreenBox(body) {{
-                const matrix = body.getScreenCTM();
-                const svg = body.ownerSVGElement;
-                if (!matrix || !svg) {{
-                    return null;
-                }}
-                const point = svg.createSVGPoint();
-                const x = Number(body.dataset.x);
-                const y = Number(body.dataset.y);
-                const width = Number(body.dataset.width);
-                const height = Number(body.dataset.height);
-                point.x = x;
-                point.y = y;
-                const topLeft = point.matrixTransform(matrix);
-                point.x = x + width;
-                point.y = y + height;
-                const bottomRight = point.matrixTransform(matrix);
-                return {{
-                    left: Math.min(topLeft.x, bottomRight.x),
-                    right: Math.max(topLeft.x, bottomRight.x),
-                    top: Math.min(topLeft.y, bottomRight.y),
-                    bottom: Math.max(topLeft.y, bottomRight.y),
-                }};
+                return body.getBoundingClientRect();
             }}
 
             function pathIntersectsScreenBox(path, box, inset) {{
@@ -6386,7 +6850,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
         assert!(
             Instant::now() < deadline,
             "expected graph edge from '{source}' to '{target}' not to intersect branch group \
-             '{schema}' body: {result}"
+             '{branch}' body: {result}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -7002,59 +7466,6 @@ async fn then_graph_edge_from_to_has_source_plug_at_least(
     }
 }
 
-#[then(expr = "graph edge from {string} to {string} uses a direct curve")]
-async fn then_graph_edge_from_to_uses_direct_curve(
-    world: &mut ScenarioWorld,
-    source: String,
-    target: String,
-) {
-    let page = world
-        .browser_page
-        .as_ref()
-        .expect("a browser page must be opened before graph assertions");
-    let source = expand_placeholders(world, &source);
-    let target = expand_placeholders(world, &target);
-    let script = format!(
-        r#"
-        () => {{
-            const source = {source:?};
-            const target = {target:?};
-            const edge = Array
-                .from(document.querySelectorAll(".graph-edge"))
-                .find((path) =>
-                    path.dataset.kind === "DATA"
-                    && path.dataset.source.endsWith(`:${{source}}`)
-                    && path.dataset.target.endsWith(`:${{target}}`)
-                );
-            if (!edge) {{
-                return "missing edge";
-            }}
-            const path = edge.getAttribute("d") ?? "";
-            if (path.includes(" C")) {{
-                return "OK";
-            }}
-            return `not a direct curve path=${{path}}`;
-        }}
-        "#
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        tokio::task::consume_budget().await;
-        let result = page
-            .evaluate::<(), String>(&script, None::<&()>)
-            .await
-            .expect("graph edge path must be readable");
-        if result == "OK" {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "expected graph edge from '{source}' to '{target}' to use a direct curve: {result}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 #[then(expr = "graph action edge {string} from {string} to {string} is visible")]
 async fn then_graph_action_edge_from_to_is_visible(
     world: &mut ScenarioWorld,
@@ -7147,9 +7558,9 @@ async fn when_graph_topology_render_count_observation_starts(world: &mut Scenari
         .expect("a browser page must be opened before graph assertions");
     let script = r##"
         () => {
-            const chart = document.querySelector("#execution-graph-chart");
-            const renderCount = Number(chart?.dataset?.renderCount ?? NaN);
-            if (!chart || !Number.isFinite(renderCount) || renderCount <= 0) {
+            const layer = document.querySelector(".graph-zoom-layer");
+            const renderCount = Number(layer?.dataset?.renderCount ?? NaN);
+            if (!layer || !Number.isFinite(renderCount) || renderCount <= 0) {
                 return false;
             }
             window.__nervixGraphTopologyObservedRenderCount = renderCount;
@@ -7184,9 +7595,9 @@ async fn then_graph_topology_render_count_does_not_change_during_observed_traffi
         .expect("a browser page must be opened before graph assertions");
     let script = r##"
         () => {
-            const chart = document.querySelector("#execution-graph-chart");
+            const layer = document.querySelector(".graph-zoom-layer");
             const observed = Number(window.__nervixGraphTopologyObservedRenderCount ?? NaN);
-            const current = Number(chart?.dataset?.renderCount ?? NaN);
+            const current = Number(layer?.dataset?.renderCount ?? NaN);
             if (!Number.isFinite(observed) || !Number.isFinite(current)) {
                 return `missing render count observed=${observed} current=${current}`;
             }
@@ -7398,61 +7809,17 @@ async fn then_graph_edge_from_to_has_exact_hover_target(
     }
 }
 
-#[then(expr = "branch group {string} has {int} initiator callout and {int} finalizer callout")]
-async fn then_branch_group_has_callouts(
-    world: &mut ScenarioWorld,
-    schema: String,
-    initiator_count: usize,
-    finalizer_count: usize,
-) {
-    let page = world
-        .browser_page
-        .as_ref()
-        .expect("a browser page must be opened before graph assertions");
-    let schema = expand_placeholders(world, &schema);
-    let script = format!(
-        r#"
-        () => {{
-            const groups = Array
-                .from(document.querySelectorAll(".graph-branch-body"))
-                .filter((path) => path.dataset.schema === {schema:?});
-            return groups.some((path) =>
-                Number(path.dataset.leftCallouts) === {initiator_count}
-                    && Number(path.dataset.rightCallouts) === {finalizer_count}
-            );
-        }}
-        "#
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        tokio::task::consume_budget().await;
-        let has_callouts = page
-            .evaluate::<(), bool>(&script, None::<&()>)
-            .await
-            .expect("branch group callouts must be readable");
-        if has_callouts {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "expected branch group '{schema}' to have {initiator_count} initiator callout(s) and \
-             {finalizer_count} finalizer callout(s)"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 #[then(expr = "branch group {string} body does not overlap graph item {string}")]
 async fn then_branch_group_body_does_not_overlap_graph_item(
     world: &mut ScenarioWorld,
-    schema: String,
+    branch: String,
     item: String,
 ) {
     let page = world
         .browser_page
         .as_ref()
         .expect("a browser page must be opened before graph assertions");
-    let schema = expand_placeholders(world, &schema);
+    let branch = expand_placeholders(world, &branch);
     let item = expand_placeholders(world, &item);
     let script = format!(
         r#"
@@ -7462,35 +7829,12 @@ async fn then_branch_group_body_does_not_overlap_graph_item(
                 .find((element) => element.dataset.label === {item:?});
             const paths = Array
                 .from(document.querySelectorAll(".graph-branch-body"))
-                .filter((path) => path.dataset.schema === {schema:?});
+                .filter((path) => path.dataset.branch === {branch:?});
             if (!item || paths.length === 0) {{
                 return false;
             }}
             const itemBox = item.getBoundingClientRect();
-            const bodyBox = (path) => {{
-                const matrix = path.getScreenCTM();
-                const svg = path.ownerSVGElement;
-                if (!matrix || !svg) {{
-                    return null;
-                }}
-                const point = svg.createSVGPoint();
-                const x = Number(path.dataset.x);
-                const y = Number(path.dataset.y);
-                const width = Number(path.dataset.width);
-                const height = Number(path.dataset.height);
-                point.x = x;
-                point.y = y;
-                const topLeft = point.matrixTransform(matrix);
-                point.x = x + width;
-                point.y = y + height;
-                const bottomRight = point.matrixTransform(matrix);
-                return {{
-                    left: Math.min(topLeft.x, bottomRight.x),
-                    right: Math.max(topLeft.x, bottomRight.x),
-                    top: Math.min(topLeft.y, bottomRight.y),
-                    bottom: Math.max(topLeft.y, bottomRight.y),
-                }};
-            }};
+            const bodyBox = (path) => path.getBoundingClientRect();
             return paths.some((path) => {{
                 const body = bodyBox(path);
                 return body
@@ -7516,7 +7860,7 @@ async fn then_branch_group_body_does_not_overlap_graph_item(
         }
         assert!(
             Instant::now() < deadline,
-            "expected branch group '{schema}' body not to overlap graph item '{item}'"
+            "expected branch group '{branch}' body not to overlap graph item '{item}'"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -7525,14 +7869,14 @@ async fn then_branch_group_body_does_not_overlap_graph_item(
 #[then(expr = "branch group {string} body overlaps graph item {string}")]
 async fn then_branch_group_body_overlaps_graph_item(
     world: &mut ScenarioWorld,
-    schema: String,
+    branch: String,
     item: String,
 ) {
     let page = world
         .browser_page
         .as_ref()
         .expect("a browser page must be opened before graph assertions");
-    let schema = expand_placeholders(world, &schema);
+    let branch = expand_placeholders(world, &branch);
     let item = expand_placeholders(world, &item);
     let script = format!(
         r#"
@@ -7542,35 +7886,12 @@ async fn then_branch_group_body_overlaps_graph_item(
                 .find((element) => element.dataset.label === {item:?});
             const bodies = Array
                 .from(document.querySelectorAll(".graph-branch-body"))
-                .filter((path) => path.dataset.schema === {schema:?});
+                .filter((path) => path.dataset.branch === {branch:?});
             if (!item || bodies.length === 0) {{
                 return false;
             }}
             const itemBox = item.getBoundingClientRect();
-            const bodyBox = (path) => {{
-                const matrix = path.getScreenCTM();
-                const svg = path.ownerSVGElement;
-                if (!matrix || !svg) {{
-                    return null;
-                }}
-                const point = svg.createSVGPoint();
-                const x = Number(path.dataset.x);
-                const y = Number(path.dataset.y);
-                const width = Number(path.dataset.width);
-                const height = Number(path.dataset.height);
-                point.x = x;
-                point.y = y;
-                const topLeft = point.matrixTransform(matrix);
-                point.x = x + width;
-                point.y = y + height;
-                const bottomRight = point.matrixTransform(matrix);
-                return {{
-                    left: Math.min(topLeft.x, bottomRight.x),
-                    right: Math.max(topLeft.x, bottomRight.x),
-                    top: Math.min(topLeft.y, bottomRight.y),
-                    bottom: Math.max(topLeft.y, bottomRight.y),
-                }};
-            }};
+            const bodyBox = (path) => path.getBoundingClientRect();
             return bodies.some((path) => {{
                 const body = bodyBox(path);
                 return body
@@ -7594,103 +7915,7 @@ async fn then_branch_group_body_overlaps_graph_item(
         }
         assert!(
             Instant::now() < deadline,
-            "expected branch group '{schema}' body to overlap graph item '{item}'"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-#[then(expr = "branch group {string} left callout points to graph item {string}")]
-async fn then_branch_group_left_callout_points_to_graph_item(
-    world: &mut ScenarioWorld,
-    schema: String,
-    item: String,
-) {
-    then_branch_group_callout_points_to_graph_item(world, schema, item, "left").await;
-}
-
-#[then(expr = "branch group {string} right callout points to graph item {string}")]
-async fn then_branch_group_right_callout_points_to_graph_item(
-    world: &mut ScenarioWorld,
-    schema: String,
-    item: String,
-) {
-    then_branch_group_callout_points_to_graph_item(world, schema, item, "right").await;
-}
-
-async fn then_branch_group_callout_points_to_graph_item(
-    world: &mut ScenarioWorld,
-    schema: String,
-    item: String,
-    side: &str,
-) {
-    let page = world
-        .browser_page
-        .as_ref()
-        .expect("a browser page must be opened before graph assertions");
-    let schema = expand_placeholders(world, &schema);
-    let item = expand_placeholders(world, &item);
-    let script = format!(
-        r#"
-        () => {{
-            const item = Array
-                .from(document.querySelectorAll(".graph-hit-layer button"))
-                .find((element) => element.dataset.label === {item:?});
-            const body = Array
-                .from(document.querySelectorAll(".graph-branch-body"))
-                .find((path) => path.dataset.schema === {schema:?});
-            if (!item || !body) {{
-                return false;
-            }}
-            const itemBox = item.getBoundingClientRect();
-            const bodyMatrix = body.getScreenCTM();
-            const svg = body.ownerSVGElement;
-            if (!bodyMatrix || !svg) {{
-                return false;
-            }}
-            const point = svg.createSVGPoint();
-            const x = Number(body.dataset.x);
-            const y = Number(body.dataset.y);
-            const width = Number(body.dataset.width);
-            const height = Number(body.dataset.height);
-            const side = {side:?};
-            point.x = side === "left" ? x : x + width;
-            point.y = y + height / 2;
-            const bodySide = point.matrixTransform(bodyMatrix).x;
-            const targetX = side === "left" ? itemBox.right : itemBox.left;
-            const targetY = itemBox.top + itemBox.height / 2;
-            const callout = Array
-                .from(document.querySelectorAll(".graph-branch-callout"))
-                .some((path) => {{
-                    const segments = path.getAttribute("d").match(/-?\d+(?:\.\d+)?/g);
-                    if (!segments || segments.length < 6) {{
-                        return false;
-                    }}
-                    const tip = svg.createSVGPoint();
-                    tip.x = Number(segments[2]);
-                    tip.y = Number(segments[3]);
-                    const tipOnScreen = tip.matrixTransform(path.getScreenCTM());
-                    return Math.abs(tipOnScreen.x - targetX) <= 3
-                        && Math.abs(tipOnScreen.y - targetY) <= itemBox.height / 2 + 3;
-                }});
-            const calloutLength = Math.abs(bodySide - targetX);
-            return callout && calloutLength >= 2 && calloutLength <= 64;
-        }}
-        "#
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        tokio::task::consume_budget().await;
-        let points_to_item = page
-            .evaluate::<(), bool>(&script, None::<&()>)
-            .await
-            .expect("branch group callout position must be readable");
-        if points_to_item {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "expected branch group '{schema}' {side} callout to point to graph item '{item}'"
+            "expected branch group '{branch}' body to overlap graph item '{item}'"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -9065,6 +9290,19 @@ async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, a
     );
 }
 
+#[given(expr = "Syslog UDP emission endpoint {string} is observed")]
+async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
+    initialize_scenario_identity(world);
+    let addr = expand_placeholders(world, &addr);
+    world.syslog_udp_observer = Some(
+        tokio::net::UdpSocket::bind(&addr)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to observe Syslog UDP endpoint '{addr}': {error}")
+            }),
+    );
+}
+
 #[given(expr = "ClickHouse table {string} exists")]
 async fn given_clickhouse_table_exists(world: &mut ScenarioWorld, table: String) {
     let table = expand_placeholders(world, &table);
@@ -9785,6 +10023,214 @@ async fn when_zeromq_message_is_published(world: &mut ScenarioWorld, #[step] ste
         .publish_zeromq(&world.zeromq_ingest_addr, &payload)
         .await
         .expect("failed to publish zeromq message");
+}
+
+#[when(expr = "Syslog UDP message is published to {string}")]
+async fn when_syslog_udp_message_is_published_to(
+    world: &mut ScenarioWorld,
+    addr: String,
+    #[step] step: &Step,
+) {
+    let addr = expand_placeholders(world, &addr);
+    let payload = expand_placeholders(world, docstring(step));
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind Syslog UDP test sender");
+    socket
+        .send_to(payload.trim().as_bytes(), &addr)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to publish Syslog UDP message to '{addr}': {error}")
+        });
+}
+
+#[then(
+    expr = "node {string} eventually forwards Syslog UDP message {string} at {string} to the \
+            observed endpoint"
+)]
+async fn then_node_eventually_forwards_syslog_udp_message(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    message: String,
+    addr: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let message = expand_placeholders(world, &message);
+    let configured_addr = expand_placeholders(world, &addr);
+    let addr = world
+        .cluster()
+        .syslog_ingestor_addr(&node_id, &configured_addr)
+        .expect("failed to resolve node-local Syslog ingestor address");
+    let payload =
+        format!("<34>1 2003-10-11T22:14:15.003Z lifecycle.example test 1 ID47 - {message}");
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind Syslog UDP test sender");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = vec![0_u8; 65_535];
+
+    loop {
+        tokio::task::consume_budget().await;
+        let _ = socket.send_to(payload.as_bytes(), &addr).await;
+        let next = tokio::time::timeout(
+            Duration::from_millis(250),
+            world
+                .syslog_udp_observer
+                .as_ref()
+                .expect("a Syslog UDP observer must exist before assertion")
+                .recv_from(&mut received),
+        )
+        .await;
+        if let Ok(Ok((length, _))) = next
+            && let Ok(actual) = std::str::from_utf8(&received[..length])
+            && actual.contains(&message)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for node '{node_id}' Syslog UDP traffic to reach the observed \
+             endpoint"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[when(expr = "Syslog TCP messages are published with mixed framing to {string}")]
+async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
+    world: &mut ScenarioWorld,
+    addr: String,
+    #[step] step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let addr = expand_placeholders(world, &addr);
+    let messages = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages.len(),
+        2,
+        "mixed Syslog TCP framing step requires exactly two messages"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(stream) => break stream,
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out connecting to Syslog TCP listener '{addr}': {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    let octet_counted = messages[0].as_bytes();
+    stream
+        .write_all(octet_counted.len().to_string().as_bytes())
+        .await
+        .expect("failed to write Syslog octet count");
+    stream
+        .write_all(b" ")
+        .await
+        .expect("failed to write Syslog octet-count delimiter");
+    stream
+        .write_all(octet_counted)
+        .await
+        .expect("failed to write octet-counted Syslog message");
+    stream
+        .write_all(messages[1].as_bytes())
+        .await
+        .expect("failed to write non-transparent Syslog message");
+    stream
+        .write_all(b"\r\n")
+        .await
+        .expect("failed to terminate non-transparent Syslog message");
+    stream
+        .shutdown()
+        .await
+        .expect("failed to close Syslog TCP test sender");
+}
+
+#[when(
+    expr = "Syslog TLS message is published to {string} using identity and CA from resource \
+            directory {string}"
+)]
+async fn when_syslog_tls_message_is_published_to(
+    world: &mut ScenarioWorld,
+    addr: String,
+    ca_resource_directory: String,
+    #[step] step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    nervix_interconnect::install_rustls_crypto_provider();
+    let addr = expand_placeholders(world, &addr);
+    let parsed = url::Url::parse(&format!("syslog://{addr}"))
+        .unwrap_or_else(|error| panic!("invalid Syslog TLS test address '{addr}': {error}"));
+    let server_name = parsed
+        .host_str()
+        .expect("Syslog TLS test address must have a host")
+        .to_string();
+    let ca_pem = resource_directory_ca_pem(world, &ca_resource_directory);
+    let mut roots = RootCertStore::empty();
+    for certificate in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
+        roots
+            .add(certificate.expect("Syslog TLS test CA must contain a valid certificate"))
+            .expect("Syslog TLS test CA certificate must be accepted");
+    }
+    let identity_dir = resource_directory_path(world, &ca_resource_directory);
+    let certificate_pem = std::fs::read(identity_dir.join("tls.crt"))
+        .expect("Syslog TLS test client certificate must be readable");
+    let certificates = CertificateDer::pem_slice_iter(&certificate_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("Syslog TLS test client certificate must be valid PEM");
+    let key_pem = std::fs::read(identity_dir.join("tls.key"))
+        .expect("Syslog TLS test client key must be readable");
+    let key = PrivateKeyDer::from_pem_slice(&key_pem)
+        .expect("Syslog TLS test client key must be valid PEM");
+    let config = RustlsClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certificates, key)
+        .expect("Syslog TLS test client identity must be valid");
+    let connector = tokio_rustls::TlsConnector::from(StdArc::new(config));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let stream = loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(stream) => break stream,
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out connecting to Syslog TLS listener '{addr}': {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    let server_name =
+        ServerName::try_from(server_name).expect("Syslog TLS test server name must be valid");
+    let mut stream = connector
+        .connect(server_name, stream)
+        .await
+        .expect("failed to establish Syslog TLS test session");
+    let payload = expand_placeholders(world, docstring(step));
+    let payload = payload.trim().as_bytes();
+    stream
+        .write_all(format!("{} ", payload.len()).as_bytes())
+        .await
+        .expect("failed to write Syslog TLS octet count");
+    stream
+        .write_all(payload)
+        .await
+        .expect("failed to write Syslog TLS payload");
+    stream
+        .shutdown()
+        .await
+        .expect("failed to close Syslog TLS test sender");
 }
 
 #[when(expr = "websocket message is published to host {string} path {string}")]
@@ -11450,6 +11896,30 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
     );
 }
 
+#[then("the observed Syslog UDP endpoint receives a payload")]
+async fn then_observed_syslog_udp_endpoint_receives_payload(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let expected = expand_placeholders(world, docstring(step));
+    let observer = world
+        .syslog_udp_observer
+        .as_ref()
+        .expect("a Syslog UDP observer must exist before assertion");
+    let mut payload = vec![0_u8; 65_535];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(10), observer.recv_from(&mut payload))
+        .await
+        .expect("timed out waiting for Syslog UDP payload")
+        .expect("failed to receive Syslog UDP payload");
+    let actual = std::str::from_utf8(&payload[..len])
+        .expect("emitted Syslog UDP payload must be valid UTF-8");
+    assert!(
+        payload_matches_expected(actual, &expected),
+        "expected Syslog UDP payload fragment {}, got: {actual}",
+        expected.trim()
+    );
+}
+
 #[then("the last observed broker message has headers")]
 async fn then_last_observed_broker_message_has_headers(
     world: &mut ScenarioWorld,
@@ -13090,7 +13560,10 @@ async fn run_scenarios() -> Option<String> {
                 append_cucumber_log_line(&format!(
                     "scenario started: feature={feature_name:?} scenario={scenario_name:?}"
                 ));
-                if feature_name == WEB_CONSOLE_FEATURE_NAME {
+                if WEB_CONSOLE_FEATURE_NAMES
+                    .iter()
+                    .any(|name| *name == feature_name)
+                {
                     // Starting many three-node clusters and optimized WASM consoles together can
                     // starve Chromium renderer event loops under the suite's global concurrency.
                     world.web_console_scenario_permit = Some(

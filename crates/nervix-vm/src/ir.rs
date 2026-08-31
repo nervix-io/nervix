@@ -353,7 +353,6 @@ pub struct CompiledProgram {
     pub inputs: Vec<InputBinding>,
     pub instructions: Vec<Instruction>,
     pub filter: Option<RegisterRef>,
-    pub branch_filters: Vec<RegisterRef>,
     pub outputs: Vec<OutputBinding>,
     pub invocations: Vec<InvocationBinding>,
     pub layouts: RegisterLayouts,

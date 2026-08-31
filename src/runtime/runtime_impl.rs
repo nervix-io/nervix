@@ -363,7 +363,6 @@ impl Runtime {
             input_schema,
             input_branching,
             materialized_relay_specs: deps.materialized_relay_specs.clone(),
-            materialized_relay_owner_nodes: deps.materialized_relay_owner_nodes.clone(),
             lookups: deps.lookups.clone(),
         })
     }
@@ -443,6 +442,8 @@ impl Runtime {
             transaction_commit_pauses: hooks.transaction_commit_pauses,
             #[cfg(feature = "testing")]
             entity_gate_pauses: hooks.entity_gate_pauses,
+            #[cfg(feature = "testing")]
+            syslog_ingestor_bind_address_overrides: hooks.syslog_ingestor_bind_address_overrides,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
             remote_dispatcher: Arc::new(RwLock::new(None)),
@@ -1318,6 +1319,17 @@ impl Runtime {
             next_remote_ack_id: self.next_remote_ack_id.clone(),
             pending_remote_acks: self.pending_remote_acks.clone(),
         }));
+    }
+
+    pub(in crate::runtime) fn syslog_ingestor_bind_addr(&self, configured: &str) -> String {
+        #[cfg(feature = "testing")]
+        if let Some(node_id) = self.local_node_id.read().as_deref() {
+            return self
+                .syslog_ingestor_bind_address_overrides
+                .resolve(node_id, configured);
+        }
+
+        configured.to_string()
     }
 
     pub fn attach_resources(
@@ -4061,12 +4073,15 @@ impl Runtime {
         );
         let lookup_columns = compute_lookup_hash_map_columns(
             program,
-            &carrier,
-            &namespace_batches,
-            &keys,
-            &side_inputs,
-            ingest_metadata,
+            &FilterMapBatchInputs {
+                carrier: &carrier,
+                namespace_batches: &namespace_batches,
+                keys: &keys,
+                side_inputs: &side_inputs,
+                ingest_metadata,
+            },
             execution_now,
+            None,
         )
         .await?;
         let uninitialized = VmUninitializedInput {
@@ -4091,6 +4106,7 @@ impl Runtime {
                 lookup_columns: &lookup_columns,
                 uninitialized: Some(&uninitialized),
             },
+            None,
         )?;
         let result = execute_program_with_selection_in_context(
             &program.compiled,
@@ -5512,8 +5528,6 @@ impl Runtime {
                                 relay_schemas: &execution.relay_schemas,
                                 relay_branchings: &execution.relay_branchings,
                                 materialized_relay_specs: &execution.materialized_stream_specs,
-                                materialized_relay_owner_nodes: &execution
-                                    .materialized_stream_owner_nodes,
                                 lookups: &execution.lookups,
                             },
                             &desired_emitter,
@@ -6479,7 +6493,8 @@ impl Runtime {
                 | Model::ClientS3(_)
                 | Model::ClientGcs(_)
                 | Model::ClientAzureBlob(_)
-                | Model::ClientIcebergRest(_) => {
+                | Model::ClientIcebergRest(_)
+                | Model::ClientSyslog(_) => {
                     transports.insert(node.identifier.clone(), Arc::new((*node.config).clone()));
                 }
                 Model::Vhost(vhost) => {
@@ -7214,7 +7229,6 @@ impl Runtime {
             relay_schemas: &relay_schemas,
             relay_branchings: &relay_branchings,
             materialized_relay_specs: &materialized_stream_specs,
-            materialized_relay_owner_nodes: &materialized_stream_owner_nodes,
             lookups: &lookup_runtimes,
         };
 
@@ -8625,6 +8639,9 @@ impl Runtime {
         branch_key: &Option<BranchKey>,
         dependencies: &[nervix_models::MaterializedStateDependency],
     ) -> Result<MaterializedDependencyResolution, String> {
+        if dependencies.is_empty() {
+            return Ok(MaterializedDependencyResolution::Ready(HashMap::default()));
+        }
         let owner_nodes = self
             .executions
             .get(domain)
@@ -8686,7 +8703,7 @@ impl Runtime {
         batch: RelayRecordBatch,
         shutdown_rx: &mut watch::Receiver<bool>,
         wait_for_required_state: bool,
-    ) -> Result<Option<RelayRecordBatch>, String> {
+    ) -> Result<Option<(RelayRecordBatch, HashMap<String, RuntimeValue>)>, String> {
         loop {
             tokio::task::consume_budget().await;
             let changed = self.materialized_state_changed.notified();
@@ -8694,7 +8711,9 @@ impl Runtime {
                 .resolve_materialized_dependencies(domain, &batch.key, dependencies)
                 .await?
             {
-                MaterializedDependencyResolution::Ready(_values) => return Ok(Some(batch)),
+                MaterializedDependencyResolution::Ready(values) => {
+                    return Ok(Some((batch, values)));
+                }
                 MaterializedDependencyResolution::Skip => {
                     for ack in batch.acks.iter() {
                         ack.ack_success();
@@ -9018,7 +9037,8 @@ impl Runtime {
                 | Model::ClientS3(_)
                 | Model::ClientGcs(_)
                 | Model::ClientAzureBlob(_)
-                | Model::ClientIcebergRest(_) => {
+                | Model::ClientIcebergRest(_)
+                | Model::ClientSyslog(_) => {
                     transports.insert(node.identifier.clone(), node.config.clone());
                 }
                 Model::Vhost(vhost) => {
@@ -9408,7 +9428,6 @@ impl Runtime {
             relay_schemas: &relay_schemas,
             relay_branchings: &relay_branchings,
             materialized_relay_specs: &materialized_stream_specs,
-            materialized_relay_owner_nodes: &materialized_stream_owner_nodes,
             lookups: &lookup_runtimes,
         };
 
@@ -10392,20 +10411,24 @@ impl Runtime {
 
     async fn evaluate_reingestor_output_events(
         &self,
-        domain: &Domain,
-        reingestor: &Identifier,
-        from_relay: &Identifier,
+        context: ReingestorDispatchContext<'_>,
         output: &mut RelayProcessorOutputNode,
         output_index: usize,
         batch: &RelayRecordBatch,
+        scope: &mut ProcessorOutputBatchScope,
     ) -> Result<
         (
-            Vec<PendingProcessorOutputMessage>,
             Vec<PendingProcessorOutputBatch>,
             Vec<PendingProcessorOutputMessageError>,
         ),
         PlannedGeneralError,
     > {
+        let ReingestorDispatchContext {
+            domain,
+            reingestor,
+            from_relay,
+            ..
+        } = context;
         if output.compiled_program.is_none() {
             let (
                 input_schema,
@@ -10557,40 +10580,14 @@ impl Runtime {
                     ),
                 })?;
             let keys = if let Some(branch_program) = output.compiled_branch_program.as_ref() {
-                let owner_nodes = self
-                    .executions
-                    .get(domain)
-                    .map(|execution| execution.materialized_stream_owner_nodes.clone())
-                    .unwrap_or_default();
-                let side_inputs = self
-                    .load_materialized_side_inputs(
-                        domain,
-                        &batch.key,
-                        &branch_program.program.materialized_interest,
-                        &owner_nodes,
-                    )
-                    .await
-                    .map_err(|error| PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: format!(
-                            "reingestor '{}' failed to load branch inputs: {}",
-                            reingestor.as_str(),
-                            error
-                        ),
-                    })?;
-                let execution_now = self
-                    .current_stream_expiration_time(domain)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(current_timestamp);
                 evaluate_output_branch_program(
                     reingestor,
                     branch_program,
                     &batch.batch,
                     &projected,
                     &batch.keys,
-                    &side_inputs,
-                    execution_now,
+                    &scope.side_inputs,
+                    scope.execution_now,
                 )
                 .await
                 .map_err(|reason| PlannedGeneralError {
@@ -10636,54 +10633,21 @@ impl Runtime {
                 acks: batch.acks.clone(),
                 reason,
             })?;
-            return Ok((Vec::new(), pending, Vec::new()));
+            return Ok((pending, Vec::new()));
         };
 
-        let (output_schema, owner_nodes) = {
-            let Some(execution) = self.executions.get(domain) else {
-                return Err(PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!("domain '{}' is not instantiated", domain.as_str()),
-                });
-            };
-            let output_schema = execution
-                .relay_schemas
-                .get(&output.relay)
-                .cloned()
-                .ok_or_else(|| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "stream '{}' schema is not instantiated in domain '{}'",
-                        output.relay.as_str(),
-                        domain.as_str()
-                    ),
-                })?;
-            (
-                output_schema,
-                execution.materialized_stream_owner_nodes.clone(),
-            )
-        };
-        let side_inputs = self
-            .load_materialized_side_inputs(
-                domain,
-                &batch.key,
-                &program.materialized_interest,
-                &owner_nodes,
-            )
-            .await
-            .map_err(|error| PlannedGeneralError {
+        let Some(output_schema) = scope.output_schemas[output_index].clone() else {
+            return Err(PlannedGeneralError {
                 acks: batch.acks.clone(),
                 reason: format!(
-                    "reingestor '{}' failed to load materialized side inputs: {}",
+                    "reingestor '{}' evaluated output route '{}' without preparing its relay \
+                     schema",
                     reingestor.as_str(),
-                    error
+                    output.relay.as_str()
                 ),
-            })?;
-        let execution_now = self
-            .current_stream_expiration_time(domain)
-            .ok()
-            .flatten()
-            .unwrap_or_else(current_timestamp);
+            });
+        };
+        let execution_now = scope.execution_now;
         let executed = execute_filter_map_program_on_batch(
             "reingestor",
             reingestor,
@@ -10692,14 +10656,14 @@ impl Runtime {
                 carrier: &batch.batch,
                 namespace_batches: &[],
                 keys: &batch.keys,
-                side_inputs: &side_inputs,
+                side_inputs: &scope.side_inputs,
                 ingest_metadata: None,
             },
             execution_now,
             batch.acks.clone(),
+            Some(&mut scope.shared),
         )
         .await?;
-        let state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
         let mut success_output_rows = Vec::new();
         let mut success_input_rows = Vec::new();
         let mut errors = Vec::new();
@@ -10733,7 +10697,7 @@ impl Runtime {
                         MessageErrorOperation::Set,
                     ),
                     partial_output,
-                    materialized_state: state_snapshot.clone(),
+                    materialized_state: scope.state_snapshot.clone(),
                 });
                 continue;
             }
@@ -10782,29 +10746,13 @@ impl Runtime {
                 .map(|row| batch.keys[*row].clone())
                 .collect::<Vec<_>>();
             let keys = if let Some(branch_program) = output.compiled_branch_program.as_ref() {
-                let branch_side_inputs = self
-                    .load_materialized_side_inputs(
-                        domain,
-                        &batch.key,
-                        &branch_program.program.materialized_interest,
-                        &owner_nodes,
-                    )
-                    .await
-                    .map_err(|error| PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: format!(
-                            "reingestor '{}' failed to load branch inputs: {}",
-                            reingestor.as_str(),
-                            error
-                        ),
-                    })?;
                 evaluate_output_branch_program(
                     reingestor,
                     branch_program,
                     &input_batch,
                     &output_batch,
                     &input_keys,
-                    &branch_side_inputs,
+                    &scope.side_inputs,
                     execution_now,
                 )
                 .await
@@ -10852,9 +10800,14 @@ impl Runtime {
             })?
         };
 
-        Ok((Vec::new(), output_batches, errors))
+        Ok((output_batches, errors))
     }
 
+    /// Dispatches one admitted batch through every reingestor output route.
+    ///
+    /// `materialized_values` is the snapshot resolved when the batch was admitted; `FROM WHERE`,
+    /// the FILTER-MAP program and each route's branch program read it instead of re-reading the
+    /// state store, so the whole batch observes one consistent view of its dependencies.
     async fn dispatch_reingestor_outputs(
         &self,
         context: ReingestorDispatchContext<'_>,
@@ -10862,21 +10815,20 @@ impl Runtime {
         output_routes: &mut RelayProcessorOutputsNode,
         output_quiesce_gauge: &mut ReingestorOutputQuiesceGauge,
         batch: RelayRecordBatch,
+        materialized_values: &HashMap<String, RuntimeValue>,
     ) {
         let ReingestorDispatchContext {
             domain,
             reingestor,
-            from_relay,
-            from_where: _,
-            mode: _,
             error_policies,
             branched_senders,
+            ..
         } = context;
         if batch.message_count() == 0 {
             return;
         }
         let Some(batch) = self
-            .filter_reingestor_from_batch(context, compiled_from_where, batch)
+            .filter_reingestor_from_batch(context, compiled_from_where, batch, materialized_values)
             .await
         else {
             return;
@@ -10891,18 +10843,46 @@ impl Runtime {
             .map(|output| output.relay.clone())
             .collect::<Vec<_>>();
 
-        let mut pending_messages = Vec::new();
+        let mut output_schemas = Vec::with_capacity(output_relays.len());
+        for relay in &output_relays {
+            match relay_schema_for_runtime(self, domain, relay) {
+                Ok(schema) => output_schemas.push(Some(schema)),
+                Err(error) => {
+                    self.handle_internal_processor_error_for_acks(
+                        domain,
+                        "reingestor",
+                        reingestor,
+                        error_policies,
+                        batch.acks.iter(),
+                        error.to_string(),
+                    );
+                    return;
+                }
+            }
+        }
+        let mut scope = ProcessorOutputBatchScope {
+            state_snapshot: relay_state_snapshot_from_side_inputs(materialized_values),
+            side_inputs: materialized_values.clone(),
+            execution_now: self
+                .current_stream_expiration_time(domain)
+                .ok()
+                .flatten()
+                .unwrap_or_else(current_timestamp),
+            output_schemas,
+            shared: SharedBatchColumns::default(),
+        };
+
         let mut pending_batches = Vec::new();
         let mut pending_errors = Vec::new();
         for (output_index, output) in output_routes.routes.iter_mut().enumerate() {
-            let (messages, batches, errors) = match self
+            tokio::task::consume_budget().await;
+            let (batches, errors) = match self
                 .evaluate_reingestor_output_events(
-                    domain,
-                    reingestor,
-                    from_relay,
+                    context,
                     output,
                     output_index,
                     &batch,
+                    &mut scope,
                 )
                 .await
             {
@@ -10919,15 +10899,11 @@ impl Runtime {
                     return;
                 }
             };
-            pending_messages.extend(messages);
             pending_batches.extend(batches);
             pending_errors.extend(errors.into_iter().map(|error| (output_index, error)));
         }
 
         let mut delivery_counts = vec![0usize; batch.acks.len()];
-        for message in &pending_messages {
-            delivery_counts[message.row] += 1;
-        }
         for pending_batch in &pending_batches {
             for row in &pending_batch.input_rows {
                 delivery_counts[*row] += 1;
@@ -10954,18 +10930,7 @@ impl Runtime {
             ack_queues.push(queue);
         }
 
-        let mut messages_by_output = vec![Vec::new(); output_relays.len()];
         let mut batches_by_output = vec![Vec::new(); output_relays.len()];
-        for message in pending_messages {
-            let Some(acks) = ack_queues[message.row].pop_front() else {
-                continue;
-            };
-            messages_by_output[message.output_index].push(RelayMessage {
-                key: message.key,
-                record: message.record,
-                acks,
-            });
-        }
         for pending_batch in pending_batches {
             let mut batch_acks = Vec::with_capacity(pending_batch.input_rows.len());
             for row in &pending_batch.input_rows {
@@ -11027,36 +10992,11 @@ impl Runtime {
             .await;
         }
 
-        let execution_now = self
-            .current_stream_expiration_time(domain)
-            .ok()
-            .flatten()
-            .unwrap_or_else(current_timestamp);
-        for (output_index, (messages, mut batches)) in messages_by_output
-            .into_iter()
-            .zip(batches_by_output)
-            .enumerate()
-        {
+        let execution_now = scope.execution_now;
+        for (output_index, mut batches) in batches_by_output.into_iter().enumerate() {
             tokio::task::consume_budget().await;
             let relay = &output_relays[output_index];
             if !branched_senders.contains_key(relay) {
-                for message in messages {
-                    self.handle_message_error(
-                        domain,
-                        "reingestor",
-                        reingestor,
-                        error_policies,
-                        message,
-                        MessageErrorFailure::publish(
-                            Some(relay),
-                            format!(
-                                "missing reingestor branched entrypoint for relay '{}'",
-                                relay.as_str()
-                            ),
-                        ),
-                    )
-                    .await;
-                }
                 for batch in batches {
                     self.handle_internal_processor_error_for_acks(
                         domain,
@@ -11072,44 +11012,6 @@ impl Runtime {
                 }
                 continue;
             }
-            if !messages.is_empty() {
-                let output_schema = match relay_schema_for_runtime(self, domain, relay) {
-                    Ok(schema) => schema,
-                    Err(error) => {
-                        for message in messages {
-                            self.handle_message_error(
-                                domain,
-                                "reingestor",
-                                reingestor,
-                                error_policies,
-                                message,
-                                MessageErrorFailure::publish(Some(relay), error.to_string()),
-                            )
-                            .await;
-                        }
-                        continue;
-                    }
-                };
-                match build_stream_record_batch_preserving_acks(output_schema, messages) {
-                    Ok(batch) => batches.push(batch),
-                    Err((error, acks)) => {
-                        self.handle_internal_processor_error_for_acks(
-                            domain,
-                            "reingestor",
-                            reingestor,
-                            error_policies,
-                            acks.iter(),
-                            format!(
-                                "reingestor '{}' failed to build output batch for relay '{}': {}",
-                                reingestor.as_str(),
-                                relay.as_str(),
-                                error
-                            ),
-                        );
-                        continue;
-                    }
-                }
-            };
             if batches.is_empty() {
                 continue;
             }
@@ -11238,6 +11140,7 @@ impl Runtime {
         context: ReingestorDispatchContext<'_>,
         compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
         batch: RelayRecordBatch,
+        materialized_values: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
         let ReingestorDispatchContext {
             domain,
@@ -11345,37 +11248,6 @@ impl Runtime {
         let Some(program) = compiled_from_where.clone() else {
             return Some(batch);
         };
-        let owner_nodes = self
-            .executions
-            .get(domain)
-            .map(|execution| execution.materialized_stream_owner_nodes.clone())
-            .unwrap_or_default();
-        let side_inputs = match self
-            .load_materialized_side_inputs(
-                domain,
-                &batch.key,
-                &program.materialized_interest,
-                &owner_nodes,
-            )
-            .await
-        {
-            Ok(values) => values,
-            Err(error) => {
-                self.handle_internal_processor_error_for_acks(
-                    domain,
-                    "reingestor",
-                    reingestor,
-                    error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "reingestor '{}' failed to load FROM WHERE side inputs: {}",
-                        reingestor.as_str(),
-                        error
-                    ),
-                );
-                return None;
-            }
-        };
         let execution_now = self
             .current_stream_expiration_time(domain)
             .ok()
@@ -11388,7 +11260,7 @@ impl Runtime {
             &program,
             batch,
             execution_now,
-            &side_inputs,
+            materialized_values,
         )
         .await
         {
@@ -11663,7 +11535,7 @@ impl Runtime {
                             )
                             .await
                         {
-                            Ok(Some(batch)) => batch,
+                            Ok(Some(resolved)) => resolved,
                             Ok(None) => continue,
                             Err(error) => {
                                 runtime.handle_internal_processor_error_for_acks(
@@ -11681,6 +11553,7 @@ impl Runtime {
                                 continue;
                             }
                         };
+                        let (batch, materialized_values) = batch;
                         runtime
                             .dispatch_reingestor_outputs(
                                 ReingestorDispatchContext {
@@ -11696,6 +11569,7 @@ impl Runtime {
                                 &mut task_output_routes,
                                 &mut output_quiesce_gauge,
                                 batch,
+                                &materialized_values,
                             )
                             .await;
                     }
@@ -12108,6 +11982,7 @@ impl Runtime {
             IngestSource::ZeroMq { client, .. } => client,
             IngestSource::Sqs { client, .. } => client,
             IngestSource::Websockets { client, .. } => client,
+            IngestSource::Syslog { client, .. } => client,
             IngestSource::Endpoint { endpoint, .. } => endpoint,
         };
         let source_kind = match &ingestor.source {
@@ -12452,6 +12327,7 @@ impl Runtime {
             | IngestSource::Nats { .. }
             | IngestSource::ZeroMq { .. }
             | IngestSource::Websockets { .. }
+            | IngestSource::Syslog { .. }
             | IngestSource::Endpoint { .. } => {}
         }
         Ok(())

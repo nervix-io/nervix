@@ -4,8 +4,8 @@ use nervix_models::{
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
     CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
-    CreateClientZeroMq, CreateStatement, KafkaConfigEntry,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateStatement, KafkaConfigEntry,
 };
 
 use crate::{
@@ -338,6 +338,18 @@ pub fn create_client_websockets_parser<'src>() -> impl Parser<
         )
 }
 
+pub fn create_client_syslog_parser<'src>()
+-> impl Parser<'src, &'src [Token], CreateStatement<CreateClientSyslog>, extra::Err<ParseError<'src>>>
++ Clone {
+    create_client_parser(Identifier::Syslog, |name, mount, config| {
+        CreateClientSyslog {
+            name,
+            mount,
+            config,
+        }
+    })
+}
+
 fn transport_config<'src>()
 -> impl Parser<'src, &'src [Token], Vec<KafkaConfigEntry>, extra::Err<ParseError<'src>>> + Clone {
     config_entry()
@@ -431,6 +443,26 @@ mod tests {
             Some("dev_tls")
         );
         assert_eq!(parsed.config[0].value, "{{dev_tls}}/ca.pem");
+    }
+
+    #[test]
+    fn parses_syslog_client_with_resource_mount() {
+        let tokens = to_tokens(
+            "CREATE CLIENT syslog_tls TYPE SYSLOG MOUNT tls_bundle CONFIG { 'protocol' = 'tls', \
+             'addr' = 'logs.example.com:6514', 'tls_ca_file' = '{{tls_bundle}}/ca.pem' };",
+        );
+        let parsed = create_client_syslog_parser()
+            .then_ignore(end())
+            .parse(tokens.as_slice())
+            .into_result()
+            .expect("parse should succeed");
+
+        assert_eq!(parsed.name.as_str(), "syslog_tls");
+        assert_eq!(
+            parsed.mount.as_ref().map(nervix_models::Identifier::as_str),
+            Some("tls_bundle")
+        );
+        assert_eq!(parsed.config.len(), 3);
     }
 
     #[test]
