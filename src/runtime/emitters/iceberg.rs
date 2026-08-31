@@ -213,7 +213,7 @@ struct IcebergCommitPolicy {
 }
 
 struct IcebergPendingBatch {
-    batch: Arc<RuntimeRecordBatch>,
+    batch: RuntimeRecordBatch,
     metadata: Vec<RuntimeRecordMetadata>,
     keys: Vec<Option<BranchKey>>,
     acks: Vec<AckSet>,
@@ -747,7 +747,7 @@ impl IcebergEmitter {
         let pending_batches = self
             .pending_batches
             .iter()
-            .map(|batch| batch.batch.as_ref())
+            .map(|batch| &batch.batch)
             .collect::<Vec<_>>();
         let input_batch = RuntimeRecordBatch::concat(&pending_batches).map_err(|error| {
             Report::new(IcebergEmitterError::FlushToDisk).attach_printable(error)
@@ -1810,7 +1810,7 @@ mod tests {
         let (pending_acks, pending_completion) = AckSet::root();
         let (staged_acks, staged_completion) = AckSet::root();
         let pending = IcebergPendingBatch {
-            batch: Arc::new(batch),
+            batch,
             metadata: vec![RuntimeRecordMetadata::test()],
             keys: vec![None],
             acks: vec![pending_acks],
