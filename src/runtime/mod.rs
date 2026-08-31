@@ -166,7 +166,8 @@ use branch_instance_registry::BranchInstanceRegistry;
 use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
 use client_config::{client_tls_paths, read_tls_file, render_client_config_template};
 use deduplicator::{
-    CompiledDeduplicatorKeyProgram, ReplicatedDeduplicatorState, compile_deduplicator_key_program,
+    CompiledDeduplicatorKeyProgram, DeduplicatorKey, ReplicatedDeduplicatorState,
+    compile_deduplicator_key_program,
 };
 use force_flush::{DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant};
 use http_client::HttpClientConfig;
@@ -4779,25 +4780,6 @@ impl RelayProcessorNode {
                         .ok()
                         .flatten()
                         .unwrap_or_else(current_timestamp);
-                    let messages = match batch.try_into_messages() {
-                        Ok(messages) => messages,
-                        Err(error_and_batch) => {
-                            let (error, batch) = *error_and_batch;
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                batch.acks.iter(),
-                                format!(
-                                    "deduplicator '{}' failed to decode arrow batch: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
-                            );
-                            return;
-                        }
-                    };
 
                     if compiled_key_program.is_none() {
                         let udfs = branch.runtime.udf_executor(&branch.domain);
@@ -4815,7 +4797,7 @@ impl RelayProcessorNode {
                                     self.kind.as_str(),
                                     &self.processor,
                                     &self.error_policies,
-                                    messages.iter().map(|message| &message.acks),
+                                    batch.acks.iter(),
                                     error,
                                 );
                                 return;
@@ -4847,7 +4829,7 @@ impl RelayProcessorNode {
                                 self.kind.as_str(),
                                 &self.processor,
                                 &self.error_policies,
-                                messages.iter().map(|message| &message.acks),
+                                batch.acks.iter(),
                                 format!(
                                     "deduplicator '{}' failed to build DEDUPLICATE ON input \
                                      batch: {}",
@@ -4875,7 +4857,7 @@ impl RelayProcessorNode {
                                 self.kind.as_str(),
                                 &self.processor,
                                 &self.error_policies,
-                                messages.iter().map(|message| &message.acks),
+                                batch.acks.iter(),
                                 format!(
                                     "deduplicator '{}' failed to evaluate DEDUPLICATE ON \
                                      expressions: {}",
@@ -4887,28 +4869,30 @@ impl RelayProcessorNode {
                         }
                     };
 
-                    let mut forwarded_entries = Vec::new();
-                    for (row, message) in messages.into_iter().enumerate() {
+                    let mut dedup_keys = Vec::new();
+                    let mut forwarded_rows = Vec::new();
+                    for (row, acks) in batch.acks.iter().enumerate() {
                         trace!(
                             processor = self.processor.as_str(),
                             operator = "deduplicator",
                             "branched relay operator received message"
                         );
 
-                        let dedup_key = (0..key_program.key_count)
-                            .map(|index| {
-                                reorder_key_part(
-                                    key_result
-                                        .batch
-                                        .column(key_program.key_column_offset + index),
-                                    row,
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let dedup_key = format!("{dedup_key:?}");
-                        let RelayMessage { key, record, acks } = message;
+                        let dedup_key = DeduplicatorKey::new(
+                            (0..key_program.key_count)
+                                .map(|index| {
+                                    reorder_key_part(
+                                        key_result
+                                            .batch
+                                            .column(key_program.key_column_offset + index),
+                                        row,
+                                    )
+                                })
+                                .collect(),
+                        );
                         if state.reserve_new_key(dedup_key.clone(), execution_now, *max_time) {
-                            forwarded_entries.push((dedup_key, RelayMessage { key, record, acks }));
+                            dedup_keys.push(dedup_key);
+                            forwarded_rows.push(row);
                         } else {
                             debug!(
                                 deduplicator = self.processor.as_str(),
@@ -4918,34 +4902,11 @@ impl RelayProcessorNode {
                         }
                     }
 
-                    if forwarded_entries.is_empty() {
+                    if forwarded_rows.is_empty() {
                         return;
                     }
 
-                    let (dedup_keys, forwarded_messages): (Vec<_>, Vec<_>) =
-                        forwarded_entries.into_iter().unzip();
-                    let source_schema = match relay_schema_for_runtime(
-                        &branch.runtime,
-                        &branch.domain,
-                        incoming_relay,
-                    ) {
-                        Ok(schema) => schema,
-                        Err(error) => {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                forwarded_messages.iter().map(|message| &message.acks),
-                                error,
-                            );
-                            return;
-                        }
-                    };
-                    let forwarded = match build_stream_record_batch_preserving_acks(
-                        source_schema,
-                        forwarded_messages,
-                    ) {
+                    let forwarded = match batch.take(&forwarded_rows) {
                         Ok(batch) => batch,
                         Err((error, acks)) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
@@ -11178,7 +11139,7 @@ async fn evaluate_constant_expression_vm(
     )
     .await
     .map_err(|error| format!("constant expression execution failed: {error}"))?;
-    if result.selected_rows.as_slice() != [0] {
+    if !result.selected_rows.is_single(0) {
         return Err("constant expression did not produce exactly one row".to_string());
     }
     vm_output_value(&result.batch, 0, OUTPUT_FIELD)?
@@ -11678,26 +11639,36 @@ async fn evaluate_correlator_where_matches(
         CorrelatorSide::Left => (&incoming_rows, &candidate_rows),
         CorrelatorSide::Right => (&candidate_rows, &incoming_rows),
     };
-    let left = RuntimeRecordBatch::from_rows(left_rows).map_err(|error| {
-        (
-            format!(
-                "correlator '{}' failed to build batched LEFT CORRELATE WHERE input: {}",
-                processor.as_str(),
-                error
-            ),
-            error_acks(),
-        )
-    })?;
-    let right = RuntimeRecordBatch::from_rows(right_rows).map_err(|error| {
-        (
-            format!(
-                "correlator '{}' failed to build batched RIGHT CORRELATE WHERE input: {}",
-                processor.as_str(),
-                error
-            ),
-            error_acks(),
-        )
-    })?;
+    let Some(first_left) = left_rows.first() else {
+        return Ok(Vec::new());
+    };
+    let left =
+        RuntimeRecordBatch::from_rows(first_left.batch().schema(), left_rows.iter().copied())
+            .map_err(|error| {
+                (
+                    format!(
+                        "correlator '{}' failed to build batched LEFT CORRELATE WHERE input: {}",
+                        processor.as_str(),
+                        error
+                    ),
+                    error_acks(),
+                )
+            })?;
+    let Some(first_right) = right_rows.first() else {
+        return Ok(Vec::new());
+    };
+    let right =
+        RuntimeRecordBatch::from_rows(first_right.batch().schema(), right_rows.iter().copied())
+            .map_err(|error| {
+                (
+                    format!(
+                        "correlator '{}' failed to build batched RIGHT CORRELATE WHERE input: {}",
+                        processor.as_str(),
+                        error
+                    ),
+                    error_acks(),
+                )
+            })?;
     let keys = match incoming_side {
         CorrelatorSide::Left => vec![incoming.message.key.clone(); candidates.len()],
         CorrelatorSide::Right => candidates
@@ -11753,7 +11724,7 @@ async fn evaluate_correlator_where_matches(
         )
     })?;
     let mut matching = vec![false; candidates.len()];
-    for row in result.selected_rows {
+    for row in result.selected_rows.iter() {
         let Some(matched) = matching.get_mut(row) else {
             return Err((
                 format!(
@@ -11954,7 +11925,7 @@ async fn evaluate_correlator_output_message(
             HashMap::default(),
         )));
     }
-    if let Some(side_error) = result.batch.errors().iter().flatten().next() {
+    if let Some(side_error) = result.batch.errors().first() {
         let partial_output = vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok();
         let materialized_state = materialized_state.clone();
         return Err(Box::new(planned_structured_message_error(
@@ -12575,7 +12546,7 @@ async fn evaluate_filter_map_on_batch(
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
     let mut successful_output_rows = Vec::new();
     let mut successful_input_rows = Vec::new();
-    for (output_row, input_row) in executed.selected_rows.iter().copied().enumerate() {
+    for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         let (Some(slot), Some(metadata)) = (
             outcomes.get_mut(input_row),
             record_metadata.get(input_row).cloned(),
@@ -13052,7 +13023,7 @@ async fn evaluate_processor_output_events(
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
-    for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
+    for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output =
                 vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();
@@ -13654,7 +13625,7 @@ async fn plan_filter_map_messages(
     };
 
     let mut selected_rows = vec![false; acks.len()];
-    for &row in &result.selected_rows {
+    for row in result.selected_rows.iter() {
         if row < selected_rows.len() {
             selected_rows[row] = true;
         }
@@ -13668,7 +13639,7 @@ async fn plan_filter_map_messages(
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
-    for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
+    for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         if let Some(side_error) = result.batch.errors().row(output_row).first() {
             let partial_output = if program.captures_partial_output() {
                 Some(vm_partial_output_row_to_runtime_batch(
@@ -13846,7 +13817,7 @@ async fn plan_emitter_filter_map_batch(
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
 
     let mut selected_rows = vec![false; acks.len()];
-    for &row in &body_result.selected_rows {
+    for row in body_result.selected_rows.iter() {
         if row < selected_rows.len() {
             selected_rows[row] = true;
         }
@@ -13861,7 +13832,7 @@ async fn plan_emitter_filter_map_batch(
     let mut successful_input_rows = Vec::new();
     let mut headers = (!body_result.invocations.is_empty()).then(Vec::new);
     let mut message_errors = Vec::new();
-    for (output_row, &input_row) in body_result.selected_rows.iter().enumerate() {
+    for (output_row, input_row) in body_result.selected_rows.iter().enumerate() {
         let source_record = |context: &str| {
             input
                 .runtime_row(input_row)
@@ -14059,7 +14030,7 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
     let mut groups = (0..row_count)
         .map(|_| Err("SQS FIFO GROUP expression omitted its input row".to_string()))
         .collect::<Vec<_>>();
-    for (output_row, input_row) in result.selected_rows.into_iter().enumerate() {
+    for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         if input_row >= row_count {
             return Err(PlannedGeneralError {
                 acks: batch.acks.clone(),
@@ -14098,7 +14069,7 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
 
 struct ExecutedFilterMap {
     batch: VmTypedBatch,
-    selected_rows: Vec<usize>,
+    selected_rows: nervix_vm::RowSelection,
     invocations: Vec<nervix_vm::FunctionInvocation>,
     acks: Vec<AckSet>,
 }
@@ -14326,7 +14297,7 @@ async fn evaluate_output_branch_program(
     let mut outcomes = (0..row_count)
         .map(|_| Err("branch construction VM did not preserve the input row".to_string()))
         .collect::<Vec<_>>();
-    for (output_row, input_row) in result.selected_rows.iter().copied().enumerate() {
+    for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         if input_row >= outcomes.len() {
             return Err(format!(
                 "branch construction VM for '{}' selected unknown row {}",
@@ -15309,9 +15280,7 @@ async fn evaluate_window_aggregate_inputs(
             result.batch.row_count()
         ));
     }
-    if result.selected_rows.len() != row_count
-        || !result.selected_rows.iter().copied().eq(0..row_count)
-    {
+    if result.selected_rows.len() != row_count || !result.selected_rows.iter().eq(0..row_count) {
         return Err(format!(
             "window aggregate input VM did not preserve all {row_count} input rows"
         ));
@@ -16438,7 +16407,7 @@ async fn compute_lookup_hash_map_columns(
             })
             .transpose()?;
         let mut row_keys: Vec<Option<String>> = vec![None; row_count];
-        for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
+        for (output_row, input_row) in result.selected_rows.iter().enumerate() {
             if let Some(side_error) = result.batch.errors().row(output_row).first() {
                 return Err(format!(
                     "LOOKUP_HASH_MAP key side error {}: {} at {}",
@@ -18540,7 +18509,7 @@ async fn dispatch_wasm_output_route(
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
-    for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
+    for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output =
                 vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();
@@ -19161,7 +19130,7 @@ async fn execute_generator_program_on_context(
             result.batch.row_count()
         ));
     }
-    if let Some(side_error) = result.batch.errors().iter().flatten().next() {
+    if let Some(side_error) = result.batch.errors().first() {
         return Ok(SingleRecordFilterMapOutcome::MessageError {
             error: program.structured_side_error(
                 format!(

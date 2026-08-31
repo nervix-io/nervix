@@ -1021,7 +1021,7 @@ impl IcebergEmitter {
                 .selected_rows
                 .iter()
                 .enumerate()
-                .any(|(output_row, input_row)| output_row != *input_row)
+                .any(|(output_row, input_row)| output_row != input_row)
         {
             return Err(
                 Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(

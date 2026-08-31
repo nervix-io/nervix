@@ -20,8 +20,8 @@ use arrow_array::{
     },
     new_null_array,
     types::{
-        Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type,
-        UInt32Type, UInt64Type,
+        ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
+        UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
 use arrow_buffer::{NullBuffer, NullBufferBuilder, OffsetBuffer};
@@ -49,7 +49,7 @@ use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
     batch::{TypedArray, TypedBatch},
-    error::{ErrorCode, RowErrors, RuntimeError, SideError},
+    error::{ErrorCode, RowErrorMask, RowErrors, RuntimeError, SideError},
     ir::{
         CompiledProgram, InputBinding, Instruction, InstructionKind, RegisterLayout,
         RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
@@ -597,8 +597,44 @@ pub async fn execute_program(
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionResult {
     pub batch: TypedBatch,
-    pub selected_rows: Vec<usize>,
+    pub selected_rows: RowSelection,
     pub invocations: Vec<FunctionInvocation>,
+}
+
+/// Maps output rows back to input rows without allocating for the identity case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowSelection {
+    All(usize),
+    Selected(Vec<usize>),
+}
+
+impl RowSelection {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::All(row_count) => *row_count,
+            Self::Selected(rows) => rows.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn is_single(&self, row: usize) -> bool {
+        match self {
+            Self::All(1) => row == 0,
+            Self::Selected(rows) => rows.as_slice() == [row],
+            Self::All(_) => false,
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        let (all, selected) = match self {
+            Self::All(row_count) => (0..*row_count, &[][..]),
+            Self::Selected(rows) => (0..0, rows.as_slice()),
+        };
+        all.chain(selected.iter().copied())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -645,7 +681,7 @@ pub trait FunctionInjector: Send + Sync + fmt::Debug {
         row_count: usize,
         span: Span,
         _now: Timestamp,
-        _prior_error_rows: &[bool],
+        _prior_error_rows: RowErrorMask<'_>,
     ) -> Result<InjectedResult, RuntimeError> {
         self.inject_with_errors(function, arguments, row_count, span)
     }
@@ -814,18 +850,19 @@ fn execute_program_with_selection_in_context_sync(
     };
 
     let (columns, row_errors, selected_rows) = if let Some(predicate) = global_predicate.as_ref() {
-        for invocation in &mut invocations {
-            invocation.arguments = filter_columns(&invocation.arguments, predicate)?;
-        }
         let selected = selected_rows(predicate);
+        for invocation in &mut invocations {
+            invocation.arguments =
+                filter_columns(&invocation.arguments, predicate, selected.len())?;
+        }
         let filtered_errors = row_errors.select_rows(&selected);
         (
-            filter_columns(&columns, predicate)?,
+            filter_columns(&columns, predicate, selected.len())?,
             filtered_errors,
-            selected,
+            RowSelection::Selected(selected),
         )
     } else {
-        (columns, row_errors, (0..batch.row_count()).collect())
+        (columns, row_errors, RowSelection::All(batch.row_count()))
     };
 
     Ok(ExecutionResult {
@@ -855,6 +892,15 @@ impl Instruction {
                 fallback,
             } => {
                 let input = registers.read_array(*input)?;
+                if row_errors.is_error_free() {
+                    return registers.set_array(*dst, input);
+                }
+                let has_assignment_error = row_errors.iter().flatten().any(|error| {
+                    error.span.start >= self.span.start && error.span.end <= self.span.end
+                });
+                if !has_assignment_error {
+                    return registers.set_array(*dst, input);
+                }
                 let failed = row_errors
                     .iter()
                     .map(|errors| {
@@ -931,10 +977,7 @@ impl Instruction {
                     .iter()
                     .map(|input| registers.read_array(*input))
                     .collect::<Result<Vec<_>, _>>()?;
-                let prior_error_rows = row_errors
-                    .iter()
-                    .map(|errors| !errors.is_empty())
-                    .collect::<Vec<_>>();
+                let prior_error_rows = row_errors.mask();
                 let inject = |injector: &triomphe::Arc<Box<dyn FunctionInjector>>| {
                     injector.inject_with_context(
                         function,
@@ -942,7 +985,7 @@ impl Instruction {
                         row_count,
                         self.span,
                         context.now,
-                        &prior_error_rows,
+                        prior_error_rows,
                     )
                 };
                 let injected = if let Some(injector) = context.injector.as_ref() {
@@ -2380,10 +2423,6 @@ fn execute_length(input: &StringArray) -> Int64Array {
     Int64Array::new(lengths.into(), input.nulls().cloned())
 }
 
-fn execute_is_null<A: Array + ?Sized>(input: &A) -> BooleanArray {
-    BooleanArray::from_iter((0..input.len()).map(|row| Some(input.is_null(row))))
-}
-
 macro_rules! define_identity_abs {
     ($(($fn_name:ident, $array:ty, $builder:ty));+ $(;)?) => {
         $(
@@ -2561,13 +2600,14 @@ fn execute_rtrim(input: &StringArray) -> StringArray {
 }
 
 fn execute_initcap(input: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
+    let mut result = String::new();
     for row in 0..input.len() {
         if input.is_null(row) {
             builder.append_null();
             continue;
         }
-        let mut result = String::new();
+        result.clear();
         let mut start_word = true;
         for ch in input.value(row).chars() {
             if ch.is_alphanumeric() {
@@ -2586,28 +2626,16 @@ fn execute_initcap(input: &StringArray) -> StringArray {
                 start_word = true;
             }
         }
-        builder.append_value(result);
+        builder.append_value(&result);
     }
     builder.finish()
 }
 
 fn execute_is_null_typed(input: &TypedArray) -> BooleanArray {
     match input {
-        TypedArray::UInt8(array) => execute_is_null(array),
-        TypedArray::Int8(array) => execute_is_null(array),
-        TypedArray::UInt16(array) => execute_is_null(array),
-        TypedArray::Int16(array) => execute_is_null(array),
-        TypedArray::UInt32(array) => execute_is_null(array),
-        TypedArray::Int32(array) => execute_is_null(array),
-        TypedArray::UInt64(array) => execute_is_null(array),
-        TypedArray::Int64(array) => execute_is_null(array),
-        TypedArray::Float32(array) => execute_is_null(array),
-        TypedArray::Float64(array) => execute_is_null(array),
-        TypedArray::Boolean(array) => execute_is_null(array),
-        TypedArray::Utf8(array) => execute_is_null(array),
-        TypedArray::Datetime(array) => execute_is_null(array),
-        TypedArray::Generic(array) => execute_is_null(array.as_ref()),
         TypedArray::Uninitialized { len, .. } => BooleanArray::from(vec![true; *len]),
+        _ => is_null(typed_array_as_array(input))
+            .expect("is_null kernel supports every materialized Arrow array"),
     }
 }
 
@@ -2648,12 +2676,51 @@ fn execute_unary_math_f64(
     function: &str,
     op: impl Fn(f64) -> f64,
 ) -> Result<TypedArray, RuntimeError> {
-    let mut builder = Float64Builder::new();
+    let error_message = format!("{function} produced a non-finite result");
+    macro_rules! execute {
+        ($array:expr, $convert:expr) => {
+            execute_unary_math_primitive($array, row_errors, span, &error_message, $convert, &op)
+        };
+    }
+    match input {
+        TypedArray::UInt8(array) => execute!(array, |value| value as f64),
+        TypedArray::Int8(array) => execute!(array, |value| value as f64),
+        TypedArray::UInt16(array) => execute!(array, |value| value as f64),
+        TypedArray::Int16(array) => execute!(array, |value| value as f64),
+        TypedArray::UInt32(array) => execute!(array, |value| value as f64),
+        TypedArray::Int32(array) => execute!(array, |value| value as f64),
+        TypedArray::UInt64(array) => execute!(array, |value| value as f64),
+        TypedArray::Int64(array) => execute!(array, |value| value as f64),
+        TypedArray::Float32(array) => execute!(array, |value| value as f64),
+        TypedArray::Float64(array) => execute!(array, |value| value),
+        TypedArray::Boolean(_)
+        | TypedArray::Utf8(_)
+        | TypedArray::Datetime(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
+            message: format!(
+                "numeric builtin requires numeric input, found {:?}",
+                input.data_type()
+            ),
+        }),
+    }
+}
+
+fn execute_unary_math_primitive<T: ArrowPrimitiveType>(
+    input: &PrimitiveArray<T>,
+    row_errors: &mut RowErrors,
+    span: Span,
+    error_message: &str,
+    value_as_f64: impl Fn(T::Native) -> f64,
+    op: &impl Fn(f64) -> f64,
+) -> Result<TypedArray, RuntimeError> {
+    let mut builder = Float64Builder::with_capacity(input.len());
     for row in 0..input.len() {
-        let Some(value) = numeric_value_as_f64(input, row)? else {
+        if input.is_null(row) {
             builder.append_null();
             continue;
-        };
+        }
+        let value = value_as_f64(input.value(row));
         let output = op(value);
         if output.is_finite() {
             builder.append_value(output);
@@ -2663,7 +2730,7 @@ fn execute_unary_math_f64(
                 row_errors,
                 row,
                 ErrorCode::InvalidArgument,
-                &format!("{function} produced a non-finite result"),
+                error_message,
                 span,
             );
         }
@@ -2892,22 +2959,27 @@ fn execute_concat(values: &[TypedArray]) -> Result<StringArray, RuntimeError> {
         return Ok(StringArray::from(Vec::<Option<String>>::new()));
     };
     let row_count = first.len();
-    let mut builder = StringBuilder::new();
+    let values = values.iter().map(as_utf8).collect::<Result<Vec<_>, _>>()?;
+    let value_capacity = values
+        .iter()
+        .map(|value| value.values().len())
+        .fold(0_usize, usize::saturating_add);
+    let mut builder = StringBuilder::with_capacity(row_count, value_capacity);
+    let mut result = String::new();
     for row in 0..row_count {
-        let mut result = String::new();
-        for value in values {
-            let value = as_utf8(value)?;
+        result.clear();
+        for value in &values {
             if !value.is_null(row) {
                 result.push_str(value.value(row));
             }
         }
-        builder.append_value(result);
+        builder.append_value(&result);
     }
     Ok(builder.finish())
 }
 
 fn execute_left(input: &StringArray, count: &TypedArray) -> Result<StringArray, RuntimeError> {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
     for row in 0..input.len() {
         if input.is_null(row) || typed_array_is_null(count, row) {
             builder.append_null();
@@ -2920,7 +2992,7 @@ fn execute_left(input: &StringArray, count: &TypedArray) -> Result<StringArray, 
 }
 
 fn execute_right(input: &StringArray, count: &TypedArray) -> Result<StringArray, RuntimeError> {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
     for row in 0..input.len() {
         if input.is_null(row) || typed_array_is_null(count, row) {
             builder.append_null();
@@ -2968,7 +3040,8 @@ fn execute_pad(
     fill: &StringArray,
     pad_left: bool,
 ) -> Result<StringArray, RuntimeError> {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
+    let mut result = String::new();
     for row in 0..input.len() {
         if input.is_null(row) || typed_array_is_null(length, row) || fill.is_null(row) {
             builder.append_null();
@@ -2983,35 +3056,46 @@ fn execute_pad(
             continue;
         }
         if source_len >= target_len {
-            builder.append_value(source.chars().take(target_len).collect::<String>());
+            builder.append_value(string_prefix(source, target_len));
             continue;
         }
         if fill.is_empty() {
             builder.append_value(source);
             continue;
         }
-        let mut padding = String::new();
-        while padding.chars().count() + source_len < target_len {
-            padding.push_str(fill);
-        }
         let missing = target_len - source_len;
-        let padding = padding.chars().take(missing).collect::<String>();
+        result.clear();
+        result.reserve(
+            source
+                .len()
+                .saturating_add(missing.saturating_mul(fill.len())),
+        );
         if pad_left {
-            builder.append_value(format!("{padding}{source}"));
+            result.extend(fill.chars().cycle().take(missing));
+            result.push_str(source);
         } else {
-            builder.append_value(format!("{source}{padding}"));
+            result.push_str(source);
+            result.extend(fill.chars().cycle().take(missing));
         }
+        builder.append_value(&result);
     }
     Ok(builder.finish())
 }
 
 fn execute_md5(input: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut builder = StringBuilder::with_capacity(input.len(), input.len().saturating_mul(32));
+    let mut digest_text = String::with_capacity(32);
     for row in 0..input.len() {
         if input.is_null(row) {
             builder.append_null();
         } else {
-            builder.append_value(format!("{:x}", md5::compute(input.value(row))));
+            digest_text.clear();
+            for byte in md5::compute(input.value(row)).0 {
+                digest_text.push(char::from(HEX[usize::from(byte >> 4)]));
+                digest_text.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            }
+            builder.append_value(&digest_text);
         }
     }
     builder.finish()
@@ -3239,12 +3323,15 @@ fn execute_replace(input: &StringArray, from: &StringArray, to: &StringArray) ->
 }
 
 fn execute_reverse(input: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
+    let mut reversed = String::new();
     for row in 0..input.len() {
         if input.is_null(row) {
             builder.append_null();
         } else {
-            builder.append_value(input.value(row).chars().rev().collect::<String>());
+            reversed.clear();
+            reversed.extend(input.value(row).chars().rev());
+            builder.append_value(&reversed);
         }
     }
     builder.finish()
@@ -3255,7 +3342,7 @@ fn execute_split_part(
     delimiter: &StringArray,
     index: &TypedArray,
 ) -> Result<StringArray, RuntimeError> {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
     for row in 0..input.len() {
         if input.is_null(row) || delimiter.is_null(row) || typed_array_is_null(index, row) {
             builder.append_null();
@@ -3282,7 +3369,7 @@ fn execute_split_part(
 }
 
 fn execute_strpos(input: &StringArray, needle: &StringArray) -> Int64Array {
-    let mut builder = Int64Builder::new();
+    let mut builder = Int64Builder::with_capacity(input.len());
     for row in 0..input.len() {
         if input.is_null(row) || needle.is_null(row) {
             builder.append_null();
@@ -3303,7 +3390,7 @@ fn execute_substr(
     start: &TypedArray,
     length: Option<&TypedArray>,
 ) -> Result<StringArray, RuntimeError> {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
     for row in 0..input.len() {
         if input.is_null(row)
             || typed_array_is_null(start, row)
@@ -3317,105 +3404,124 @@ fn execute_substr(
             Some(value) => Some(integral_value_at(value, row)?.unwrap_or(0)),
             None => None,
         };
-        let source = input.value(row).chars().collect::<Vec<_>>();
         let begin = usize::try_from(start.saturating_sub(1).max(0)).unwrap_or(usize::MAX);
-        if begin >= source.len() {
-            builder.append_value("");
-            continue;
-        }
-        let end = match length {
-            Some(value) if value <= 0 => begin,
-            Some(value) => begin.saturating_add(value as usize).min(source.len()),
-            None => source.len(),
-        };
-        builder.append_value(source[begin..end].iter().collect::<String>());
+        let length = length.map(|value| usize::try_from(value.max(0)).unwrap_or(usize::MAX));
+        builder.append_value(string_substr(input.value(row), begin, length));
     }
     Ok(builder.finish())
 }
 
 fn execute_to_hex(input: &TypedArray) -> Result<StringArray, RuntimeError> {
-    let mut builder = StringBuilder::new();
-    for row in 0..input.len() {
-        match input {
-            TypedArray::UInt8(array) => {
-                append_hex(&mut builder, array.is_null(row), array.value(row) as u64)
-            }
-            TypedArray::Int8(array) => append_hex(
-                &mut builder,
-                array.is_null(row),
-                array.value(row) as u8 as u64,
-            ),
-            TypedArray::UInt16(array) => {
-                append_hex(&mut builder, array.is_null(row), array.value(row) as u64)
-            }
-            TypedArray::Int16(array) => append_hex(
-                &mut builder,
-                array.is_null(row),
-                array.value(row) as u16 as u64,
-            ),
-            TypedArray::UInt32(array) => {
-                append_hex(&mut builder, array.is_null(row), array.value(row) as u64)
-            }
-            TypedArray::Int32(array) => append_hex(
-                &mut builder,
-                array.is_null(row),
-                array.value(row) as u32 as u64,
-            ),
-            TypedArray::UInt64(array) => {
-                append_hex(&mut builder, array.is_null(row), array.value(row))
-            }
-            TypedArray::Int64(array) => {
-                append_hex(&mut builder, array.is_null(row), array.value(row) as u64)
-            }
-            TypedArray::Float32(_)
-            | TypedArray::Float64(_)
-            | TypedArray::Boolean(_)
-            | TypedArray::Utf8(_)
-            | TypedArray::Datetime(_)
-            | TypedArray::Generic(_)
-            | TypedArray::Uninitialized { .. } => {
-                return Err(RuntimeError::InvalidBatch {
-                    message: format!(
-                        "to_hex requires integer input, found {:?}",
-                        input.data_type()
-                    ),
-                });
-            }
+    let output = match input {
+        TypedArray::UInt8(array) => execute_to_hex_values(array.len(), |row| {
+            (!array.is_null(row)).then(|| u64::from(array.value(row)))
+        }),
+        TypedArray::Int8(array) => execute_to_hex_values(array.len(), |row| {
+            (!array.is_null(row)).then(|| u64::from(array.value(row) as u8))
+        }),
+        TypedArray::UInt16(array) => execute_to_hex_values(array.len(), |row| {
+            (!array.is_null(row)).then(|| u64::from(array.value(row)))
+        }),
+        TypedArray::Int16(array) => execute_to_hex_values(array.len(), |row| {
+            (!array.is_null(row)).then(|| u64::from(array.value(row) as u16))
+        }),
+        TypedArray::UInt32(array) => execute_to_hex_values(array.len(), |row| {
+            (!array.is_null(row)).then(|| u64::from(array.value(row)))
+        }),
+        TypedArray::Int32(array) => execute_to_hex_values(array.len(), |row| {
+            (!array.is_null(row)).then(|| u64::from(array.value(row) as u32))
+        }),
+        TypedArray::UInt64(array) => execute_to_hex_values(array.len(), |row| {
+            (!array.is_null(row)).then(|| array.value(row))
+        }),
+        TypedArray::Int64(array) => execute_to_hex_values(array.len(), |row| {
+            (!array.is_null(row)).then(|| array.value(row) as u64)
+        }),
+        TypedArray::Float32(_)
+        | TypedArray::Float64(_)
+        | TypedArray::Boolean(_)
+        | TypedArray::Utf8(_)
+        | TypedArray::Datetime(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => {
+            return Err(RuntimeError::InvalidBatch {
+                message: format!(
+                    "to_hex requires integer input, found {:?}",
+                    input.data_type()
+                ),
+            });
         }
+    };
+    Ok(output)
+}
+
+fn execute_to_hex_values(
+    row_count: usize,
+    mut value_at: impl FnMut(usize) -> Option<u64>,
+) -> StringArray {
+    let mut builder = StringBuilder::with_capacity(row_count, row_count.saturating_mul(16));
+    let mut formatted = String::with_capacity(16);
+    for row in 0..row_count {
+        let Some(value) = value_at(row) else {
+            builder.append_null();
+            continue;
+        };
+        formatted.clear();
+        fmt::write(&mut formatted, format_args!("{value:x}"))
+            .expect("formatting hexadecimal into a String cannot fail");
+        builder.append_value(&formatted);
     }
-    Ok(builder.finish())
+    builder.finish()
 }
 
 fn execute_translate(input: &StringArray, from: &StringArray, to: &StringArray) -> StringArray {
-    let mut builder = StringBuilder::new();
+    let mut builder = string_builder_like(input);
+    let mut table = TranslateTable::default();
+    let mut translated = String::new();
     for row in 0..input.len() {
         if input.is_null(row) || from.is_null(row) || to.is_null(row) {
             builder.append_null();
             continue;
         }
         let source = input.value(row);
-        let from_chars = from.value(row).chars().collect::<Vec<_>>();
-        let to_chars = to.value(row).chars().collect::<Vec<_>>();
-        let mut translated = String::new();
+        let replacements = table.replacements(from.value(row), to.value(row));
+        translated.clear();
         for ch in source.chars() {
-            if let Some(index) = from_chars.iter().position(|candidate| *candidate == ch) {
-                if let Some(replacement) = to_chars.get(index) {
+            if let Some(replacement) = replacements.get(&ch) {
+                if let Some(replacement) = replacement {
                     translated.push(*replacement);
                 }
             } else {
                 translated.push(ch);
             }
         }
-        builder.append_value(translated);
+        builder.append_value(&translated);
     }
     builder.finish()
 }
 
-fn append_hex(builder: &mut StringBuilder, is_null: bool, value: u64) {
-    if is_null {
-        builder.append_null();
-    } else {
-        builder.append_value(format!("{value:x}"));
+#[derive(Default)]
+struct TranslateTable {
+    from: String,
+    to: String,
+    replacements: HashMap<char, Option<char>>,
+}
+
+impl TranslateTable {
+    fn replacements(&mut self, from: &str, to: &str) -> &HashMap<char, Option<char>> {
+        if self.from != from || self.to != to {
+            self.from.clear();
+            self.from.push_str(from);
+            self.to.clear();
+            self.to.push_str(to);
+            self.replacements.clear();
+            let mut to_chars = to.chars();
+            for from_char in from.chars() {
+                let replacement = to_chars.next();
+                self.replacements.entry(from_char).or_insert(replacement);
+            }
+        }
+        &self.replacements
     }
 }
 
@@ -3471,27 +3577,59 @@ fn integral_value_at(input: &TypedArray, row: usize) -> Result<Option<i64>, Runt
     }
 }
 
-fn string_left(value: &str, count: i64) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
+fn string_prefix(value: &str, count: usize) -> &str {
+    let end = value
+        .char_indices()
+        .nth(count)
+        .map_or(value.len(), |(index, _)| index);
+    &value[..end]
+}
+
+fn string_substr(value: &str, start: usize, length: Option<usize>) -> &str {
+    let start = value
+        .char_indices()
+        .nth(start)
+        .map_or(value.len(), |(index, _)| index);
+    let remaining = &value[start..];
+    length.map_or(remaining, |length| string_prefix(remaining, length))
+}
+
+fn string_left(value: &str, count: i64) -> &str {
     if count >= 0 {
-        chars.into_iter().take(count as usize).collect()
+        string_prefix(value, usize::try_from(count).unwrap_or(usize::MAX))
     } else {
-        let keep = chars.len().saturating_sub(count.unsigned_abs() as usize);
-        chars.into_iter().take(keep).collect()
+        let remove = usize::try_from(count.unsigned_abs()).unwrap_or(usize::MAX);
+        if remove == 0 {
+            return value;
+        }
+        let end = value
+            .char_indices()
+            .rev()
+            .nth(remove - 1)
+            .map_or(0, |(index, _)| index);
+        &value[..end]
     }
 }
 
-fn string_right(value: &str, count: i64) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
+fn string_right(value: &str, count: i64) -> &str {
     if count >= 0 {
-        let keep = count as usize;
-        let start = chars.len().saturating_sub(keep);
-        chars.into_iter().skip(start).collect()
+        let keep = usize::try_from(count).unwrap_or(usize::MAX);
+        if keep == 0 {
+            return &value[value.len()..];
+        }
+        let start = value
+            .char_indices()
+            .rev()
+            .nth(keep - 1)
+            .map_or(0, |(index, _)| index);
+        &value[start..]
     } else {
-        chars
-            .into_iter()
-            .skip(count.unsigned_abs() as usize)
-            .collect()
+        let skip = usize::try_from(count.unsigned_abs()).unwrap_or(usize::MAX);
+        let start = value
+            .char_indices()
+            .nth(skip)
+            .map_or(value.len(), |(index, _)| index);
+        &value[start..]
     }
 }
 
@@ -3597,16 +3735,14 @@ fn annotate_cast_failures(
 fn filter_columns(
     columns: &[TypedArray],
     predicate: &BooleanArray,
+    selected_count: usize,
 ) -> Result<Vec<TypedArray>, RuntimeError> {
     let filter = FilterBuilder::new(predicate).optimize().build();
     columns
         .iter()
         .map(|column| {
             if let TypedArray::Uninitialized { data_type, .. } = column {
-                return Ok(TypedArray::uninitialized(
-                    data_type.clone(),
-                    selected_rows(predicate).len(),
-                ));
+                return Ok(TypedArray::uninitialized(data_type.clone(), selected_count));
             }
             let filtered = filter
                 .filter(typed_array_as_array(column))
@@ -4046,9 +4182,50 @@ mod tests {
         };
 
         assert_eq!(output.batch.row_count(), 2);
-        assert_eq!(output.selected_rows, vec![0, 2]);
+        assert_eq!(output.selected_rows, RowSelection::Selected(vec![0, 2]));
         assert_eq!(lowered.value(0), "error");
         assert_eq!(lowered.value(1), "error");
+    }
+
+    #[test]
+    fn unfiltered_execution_uses_identity_row_selection() {
+        let parsed = parse_program("SET input.copy = input.value;").expect("must parse");
+        let input_schema = schema(vec![Field::new("value", DataType::Int64, false)]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            input_schema.clone(),
+            vec![Field::new("copy", DataType::Int64, false)],
+        );
+        let batch = TypedBatch::try_new(
+            input_schema,
+            vec![TypedArray::Int64(Int64Array::from(vec![10, 20, 30]))],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_with_selection_sync(&compiled, &batch).expect("must execute");
+
+        assert_eq!(output.selected_rows, RowSelection::All(3));
+        assert_eq!(output.selected_rows.iter().collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn optimized_string_slices_and_translation_preserve_unicode_semantics() {
+        let value = "aé🙂z";
+
+        assert_eq!(string_left(value, 2), "aé");
+        assert_eq!(string_left(value, -1), "aé🙂");
+        assert_eq!(string_right(value, 2), "🙂z");
+        assert_eq!(string_right(value, -1), "é🙂z");
+        assert_eq!(string_substr(value, 1, Some(2)), "é🙂");
+
+        let translated = execute_translate(
+            &StringArray::from(vec!["aé🙂z", "aba", "xyz"]),
+            &StringArray::from(vec!["é🙂", "aab", "xy"]),
+            &StringArray::from(vec!["EO", "XYZ", "Q"]),
+        );
+        assert_eq!(translated.value(0), "aEOz");
+        assert_eq!(translated.value(1), "XZX");
+        assert_eq!(translated.value(2), "Qz");
     }
 
     #[test]
@@ -5638,7 +5815,7 @@ mod tests {
         )
         .expect("program must execute");
 
-        assert_eq!(result.selected_rows, vec![0]);
+        assert_eq!(result.selected_rows, RowSelection::Selected(vec![0]));
         let TypedArray::Utf8(route) = output_column(&result.batch, "route") else {
             panic!("route must be Utf8");
         };

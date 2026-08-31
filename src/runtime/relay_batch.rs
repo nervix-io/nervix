@@ -110,18 +110,17 @@ impl RelayRecordBatch {
             .iter()
             .map(|message| message.record.metadata().clone())
             .collect::<Vec<_>>();
-        let (batches, acks): (Vec<_>, Vec<_>) = messages
+        let (records, acks): (Vec<_>, Vec<_>) = messages
             .into_iter()
-            .map(|message| (message.record.one_row_batch(), message.acks))
+            .map(|message| (message.record, message.acks))
             .unzip();
-        if batches
+        if records
             .iter()
-            .any(|batch| batch.schema().as_ref() != schema.arrow_schema().as_ref())
+            .any(|record| record.batch().schema().as_ref() != schema.arrow_schema().as_ref())
         {
             return Err("stream message row schema does not match relay schema".to_string());
         }
-        let batch_refs = batches.iter().collect::<Vec<_>>();
-        let batch = RuntimeRecordBatch::concat(&batch_refs)?;
+        let batch = RuntimeRecordBatch::from_rows(schema.arrow_schema(), records.iter())?;
         Ok(Self {
             key,
             keys,
@@ -194,6 +193,73 @@ impl RelayRecordBatch {
             batch,
             metadata,
             acks,
+        })
+    }
+
+    pub(super) fn take(self, rows: &[usize]) -> Result<Self, (String, Vec<AckSet>)> {
+        let row_count = self.batch.batch().num_rows();
+        if self.metadata.len() != row_count
+            || self.keys.len() != row_count
+            || self.acks.len() != row_count
+        {
+            return Err((
+                format!(
+                    "stream batch sidecar lengths ({}, {}, {}) do not match row count {row_count}",
+                    self.metadata.len(),
+                    self.keys.len(),
+                    self.acks.len()
+                ),
+                self.acks,
+            ));
+        }
+        if rows.len() == row_count && rows.iter().copied().eq(0..row_count) {
+            return Ok(self);
+        }
+        if let Some(row) = rows.iter().find(|row| **row >= row_count) {
+            return Err((
+                format!("stream batch row {row} is outside batch with {row_count} rows"),
+                self.acks,
+            ));
+        }
+        if rows.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err((
+                "stream batch selected rows must be strictly increasing".to_string(),
+                self.acks,
+            ));
+        }
+        let Self {
+            key,
+            keys,
+            batch,
+            metadata,
+            acks,
+        } = self;
+        let batch = match batch.take(rows) {
+            Ok(batch) => batch,
+            Err(error) => return Err((error, acks)),
+        };
+        fn select<T>(values: Vec<T>, rows: &[usize]) -> Vec<T> {
+            let mut selected = Vec::with_capacity(rows.len());
+            let mut rows = rows.iter().copied();
+            let mut next = rows.next();
+            for (row, value) in values.into_iter().enumerate() {
+                if next == Some(row) {
+                    selected.push(value);
+                    next = rows.next();
+                }
+            }
+            debug_assert!(
+                next.is_none(),
+                "selected rows were validated against the batch"
+            );
+            selected
+        }
+        Ok(Self {
+            key,
+            keys: select(keys, rows),
+            batch,
+            metadata: select(metadata, rows),
+            acks: select(acks, rows),
         })
     }
 
@@ -434,19 +500,7 @@ impl RelayRecordBatch {
     }
 
     pub(super) fn estimated_bytes(&self) -> u64 {
-        self.batch
-            .batch()
-            .columns()
-            .iter()
-            .map(|column| {
-                column
-                    .to_data()
-                    .get_slice_memory_size()
-                    .ok()
-                    .and_then(|bytes| u64::try_from(bytes).ok())
-                    .unwrap_or(u64::MAX)
-            })
-            .fold(0_u64, u64::saturating_add)
+        self.batch.estimated_bytes()
     }
 
     pub(super) fn ack_success(&self) {
@@ -522,7 +576,7 @@ pub(super) fn build_stream_record_batch_preserving_acks(
         ));
     };
     let key = first.key.clone();
-    let mut batches = Vec::with_capacity(messages.len());
+    let mut records = Vec::with_capacity(messages.len());
     let mut metadata = Vec::with_capacity(messages.len());
     let mut acks = Vec::with_capacity(messages.len());
     for message in messages {
@@ -540,24 +594,23 @@ pub(super) fn build_stream_record_batch_preserving_acks(
             ));
         }
         metadata.push(record.metadata().clone());
-        batches.push(record.one_row_batch());
+        records.push(record);
         acks.push(message_acks);
     }
-    if batches
+    if records
         .iter()
-        .any(|batch| batch.schema().as_ref() != schema.arrow_schema().as_ref())
+        .any(|record| record.batch().schema().as_ref() != schema.arrow_schema().as_ref())
     {
         return Err((
             "stream message row schema does not match relay schema".to_string(),
             acks,
         ));
     }
-    let batch_refs = batches.iter().collect::<Vec<_>>();
-    let batch = match RuntimeRecordBatch::concat(&batch_refs) {
+    let batch = match RuntimeRecordBatch::from_rows(schema.arrow_schema(), records.iter()) {
         Ok(batch) => batch,
         Err(error) => return Err((error, acks)),
     };
-    let keys = vec![key.clone(); batches.len()];
+    let keys = vec![key.clone(); records.len()];
     Ok(RelayRecordBatch {
         key,
         keys,
@@ -569,11 +622,122 @@ pub(super) fn build_stream_record_batch_preserving_acks(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::{cell::Cell, sync::Arc as StdArc};
 
-    use nervix_models::Timestamp;
+    use nervix_models::{CreateSchema, Identifier, ParseAsType, SchemaField, Timestamp};
+    use triomphe::Arc;
 
-    use super::delivery_observation_from_timestamps;
+    use super::{RelayMessage, RelayRecordBatch, delivery_observation_from_timestamps};
+    use crate::{
+        runtime_ack::AckSet,
+        runtime_schema::{
+            CompiledSchema, RuntimeRecordMetadata, RuntimeRow, RuntimeValue, compile_schema,
+        },
+    };
+
+    fn test_schema() -> Arc<CompiledSchema> {
+        Arc::new(compile_schema(&CreateSchema {
+            name: Identifier::parse("relay_batch_test").expect("valid schema name"),
+            fields: vec![SchemaField {
+                name: Identifier::parse("value").expect("valid field name"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }))
+    }
+
+    fn test_rows(schema: &Arc<CompiledSchema>, values: &[i64]) -> Vec<RuntimeRow> {
+        let mut builder = schema.batch_builder(values.len());
+        for value in values {
+            builder
+                .append(Some(&RuntimeValue::I64(*value)))
+                .expect("value must match schema");
+            builder.finish_row().expect("row must be complete");
+        }
+        let batch = Arc::new(builder.finish().expect("batch must build"));
+        values
+            .iter()
+            .enumerate()
+            .map(|(row, _)| {
+                RuntimeRow::new(
+                    batch.clone(),
+                    row,
+                    RuntimeRecordMetadata::from_ingested_at_watermarks(
+                        Timestamp::from_unix_nanos(
+                            i64::try_from(row).expect("test row must fit i64"),
+                        ),
+                        Timestamp::from_unix_nanos(
+                            i64::try_from(row).expect("test row must fit i64"),
+                        ),
+                    ),
+                )
+                .expect("row must exist")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn message_batching_reuses_an_identity_arrow_batch() {
+        let schema = test_schema();
+        let rows = test_rows(&schema, &[10, 20, 30]);
+        let input_column = rows[0].batch().batch().column(0).clone();
+        let messages = rows
+            .into_iter()
+            .map(|record| RelayMessage {
+                key: None,
+                record,
+                acks: AckSet::empty(),
+            })
+            .collect();
+
+        let batch = RelayRecordBatch::from_messages(schema, messages)
+            .expect("relay batch must build from shared rows");
+
+        assert!(StdArc::ptr_eq(&input_column, batch.batch.batch().column(0)));
+        assert_eq!(
+            batch.batch.value(0, "value"),
+            Ok(Some(RuntimeValue::I64(10)))
+        );
+        assert_eq!(
+            batch.batch.value(2, "value"),
+            Ok(Some(RuntimeValue::I64(30)))
+        );
+    }
+
+    #[test]
+    fn relay_batch_take_has_identity_and_sparse_paths() {
+        let schema = test_schema();
+        let rows = test_rows(&schema, &[10, 20, 30]);
+        let messages = rows
+            .into_iter()
+            .map(|record| RelayMessage {
+                key: None,
+                record,
+                acks: AckSet::empty(),
+            })
+            .collect();
+        let batch = RelayRecordBatch::from_messages(schema, messages)
+            .expect("relay batch must build from shared rows");
+        let input_column = batch.batch.batch().column(0).clone();
+
+        let identity = batch.clone().take(&[0, 1, 2]).expect("identity take");
+        assert!(StdArc::ptr_eq(
+            &input_column,
+            identity.batch.batch().column(0)
+        ));
+
+        let sparse = batch.take(&[0, 2]).expect("sparse take");
+        assert_eq!(sparse.message_count(), 2);
+        assert_eq!(
+            sparse.batch.value(0, "value"),
+            Ok(Some(RuntimeValue::I64(10)))
+        );
+        assert_eq!(
+            sparse.batch.value(1, "value"),
+            Ok(Some(RuntimeValue::I64(30)))
+        );
+    }
 
     #[test]
     fn delivery_observation_visits_each_timestamp_once() {

@@ -1,6 +1,6 @@
 Feature: Deduplicator metrics
 
-  Scenario Outline: DESCRIBE DEDUPLICATOR and Prometheus report processor traffic metrics
+  Scenario Outline: Batched deduplication preserves sparse output rows and processor traffic metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -11,11 +11,13 @@ Feature: Deduplicator metrics
       """
       CREATE SCHEMA transaction (
         tenant STRING,
-        transaction_id STRING
+        transaction_id STRING,
+        amount I64
       );
         CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         tenant string,
-        transaction_id string
+        transaction_id string,
+        amount integer
       );
         CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
@@ -49,14 +51,14 @@ Feature: Deduplicator metrics
       """
     And http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/dedup-metrics"
       """
-      {"tenant":"acme","transaction_id":"txn-1"}
-      {"tenant":"acme","transaction_id":"txn-1"}
-      {"tenant":"acme","transaction_id":"txn-2"}
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      {"tenant":"acme","transaction_id":"txn-2","amount":30}
       """
     Then within "5s" the relay subscription receives payloads
       """
-      {"tenant":"acme","transaction_id":"txn-1"}
-      {"tenant":"acme","transaction_id":"txn-2"}
+      {"amount":10,"tenant":"acme","transaction_id":"txn-1"}
+      {"amount":30,"tenant":"acme","transaction_id":"txn-2"}
       """
     When these NSPL commands are executed
       """
