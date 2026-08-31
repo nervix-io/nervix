@@ -11,7 +11,8 @@ use std::{
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array,
+    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, ListArray, RecordBatch,
+    RecordBatchOptions, StringArray, UInt64Array,
     builder::{
         ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
         Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
@@ -408,19 +409,31 @@ struct IngestorQuiesceModes {
 #[derive(Debug, Clone)]
 pub(crate) struct BufferedIngestPayload {
     payloads: Vec<Vec<u8>>,
-    metadata: Vec<IngestFilterMapMetadata>,
+    metadata: IngestFilterMapMetadata,
 }
 
 impl BufferedIngestPayload {
     pub(crate) fn new(payload: &[u8], metadata: IngestFilterMapMetadata) -> Self {
+        assert_eq!(
+            metadata.len(),
+            1,
+            "a buffered single payload must carry one metadata row"
+        );
         Self {
             payloads: vec![payload.to_vec()],
-            metadata: vec![metadata],
+            metadata,
         }
     }
 
     pub(crate) fn batch(entries: Vec<(Vec<u8>, IngestFilterMapMetadata)>) -> Self {
-        let (payloads, metadata) = entries.into_iter().unzip();
+        let (payloads, metadata): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        let metadata = IngestFilterMapMetadata::concat(&metadata)
+            .expect("one buffered source batch must use one ingest metadata schema");
+        assert_eq!(
+            payloads.len(),
+            metadata.len(),
+            "buffered payloads and ingest metadata must have the same row count"
+        );
         Self { payloads, metadata }
     }
 
@@ -431,16 +444,11 @@ impl BufferedIngestPayload {
     }
 
     pub(crate) fn metadata(&self) -> &IngestFilterMapMetadata {
-        self.metadata
-            .first()
-            .expect("buffered ingest payload must contain matching ingest metadata")
+        &self.metadata
     }
 
-    fn entries(&self) -> impl Iterator<Item = (&[u8], &IngestFilterMapMetadata)> {
-        self.payloads
-            .iter()
-            .zip(&self.metadata)
-            .map(|(payload, metadata)| (payload.as_slice(), metadata))
+    fn payloads(&self) -> impl Iterator<Item = &[u8]> {
+        self.payloads.iter().map(Vec::as_slice)
     }
 
     fn byte_len(&self) -> usize {
@@ -1375,8 +1383,8 @@ struct IngestGroupDispatch<'a> {
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     records: Vec<RuntimeRecordBatch>,
-    /// Row-aligned with `records`, or empty when the source carries no ingest metadata.
-    metadata: Vec<IngestFilterMapMetadata>,
+    /// One columnar metadata batch for `records`, or absent when the source exposes none.
+    metadata: Option<IngestFilterMapMetadata>,
     /// Row-aligned with `records`. An empty set is replaced by a tracked ack root.
     acks: Vec<AckSet>,
     ingested_at: Timestamp,
@@ -1392,7 +1400,7 @@ struct IngestGroupContribution<'a> {
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     records: Vec<RuntimeRecordBatch>,
-    metadata: Vec<IngestFilterMapMetadata>,
+    metadata: Option<IngestFilterMapMetadata>,
     acks: Vec<AckSet>,
     ingested_at: Timestamp,
 }
@@ -1410,24 +1418,47 @@ struct RawIngestDispatch<'a> {
     flush: bool,
 }
 
-/// Row-aligned ingest group state.
+/// Columnar ingest group state.
 ///
-/// Records, ingest metadata and acks are only ever selected or dropped together, which
-/// is what keeps a message error attributable to the record that produced it and keeps
-/// each record's ack identity its own once the group has been filtered.
+/// Record columns and the shared ingest-metadata view are selected together. ACKs remain
+/// row-indexed hot-path state so a message error and its ACK identity stay attributable
+/// to the record that produced them after filtering.
 struct IngestGroupRows {
     batch: RuntimeRecordBatch,
     record_metadata: Vec<RuntimeRecordMetadata>,
-    /// Empty when the source carries no ingest metadata, otherwise row-aligned.
-    ingest_metadata: Vec<IngestFilterMapMetadata>,
+    ingest_metadata: Option<IngestFilterMapMetadata>,
     acks: Vec<AckSet>,
+}
+
+#[derive(Default)]
+struct PendingIngestFilterMapMetadata {
+    batches: Vec<IngestFilterMapMetadata>,
+    row_count: usize,
+}
+
+impl PendingIngestFilterMapMetadata {
+    fn push(&mut self, metadata: IngestFilterMapMetadata) {
+        self.row_count += metadata.len();
+        self.batches.push(metadata);
+    }
+
+    fn finish(self) -> Result<IngestFilterMapMetadata, String> {
+        let metadata = IngestFilterMapMetadata::concat(&self.batches)?;
+        if metadata.len() != self.row_count {
+            return Err(format!(
+                "combined ingest metadata has {} rows, expected {}",
+                metadata.len(),
+                self.row_count
+            ));
+        }
+        Ok(metadata)
+    }
 }
 
 #[derive(Default)]
 struct PendingIngestGroup {
     records: Vec<RuntimeRecordBatch>,
-    /// Empty when the source carries no ingest metadata, otherwise row-aligned.
-    metadata: Vec<IngestFilterMapMetadata>,
+    metadata: Option<PendingIngestFilterMapMetadata>,
     acks: Vec<AckSet>,
     ingested_at: Vec<Timestamp>,
 }
@@ -1436,12 +1467,14 @@ impl PendingIngestGroup {
     fn append(
         &mut self,
         records: Vec<RuntimeRecordBatch>,
-        metadata: Vec<IngestFilterMapMetadata>,
+        metadata: Option<IngestFilterMapMetadata>,
         acks: Vec<AckSet>,
         ingested_at: Timestamp,
     ) -> Result<(), String> {
         let row_count = records.len();
-        if !metadata.is_empty() && metadata.len() != row_count {
+        if let Some(metadata) = metadata.as_ref()
+            && metadata.len() != row_count
+        {
             return Err(format!(
                 "received {} ingest metadata rows for {row_count} records",
                 metadata.len()
@@ -1453,7 +1486,7 @@ impl PendingIngestGroup {
                 acks.len()
             ));
         }
-        if !self.records.is_empty() && self.metadata.is_empty() != metadata.is_empty() {
+        if !self.records.is_empty() && self.metadata.is_some() != metadata.is_some() {
             return Err("cannot mix ingest rows with and without source metadata".to_string());
         }
         if records.iter().any(|record| record.batch().num_rows() != 1) {
@@ -1463,7 +1496,9 @@ impl PendingIngestGroup {
         }
 
         self.records.extend(records);
-        self.metadata.extend(metadata);
+        if let Some(metadata) = metadata {
+            self.metadata.get_or_insert_default().push(metadata);
+        }
         self.acks.extend(acks);
         self.ingested_at
             .extend(std::iter::repeat_n(ingested_at, row_count));
@@ -1481,7 +1516,6 @@ impl PendingIngestGroup {
     fn into_rows(self) -> Result<IngestGroupRows, String> {
         debug_assert_eq!(self.records.len(), self.ingested_at.len());
         debug_assert_eq!(self.records.len(), self.acks.len());
-        debug_assert!(self.metadata.is_empty() || self.metadata.len() == self.records.len());
         let batch_refs = self.records.iter().collect::<Vec<_>>();
         Ok(IngestGroupRows {
             batch: RuntimeRecordBatch::concat(&batch_refs)?,
@@ -1492,7 +1526,10 @@ impl PendingIngestGroup {
                     RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at)
                 })
                 .collect(),
-            ingest_metadata: self.metadata,
+            ingest_metadata: self
+                .metadata
+                .map(PendingIngestFilterMapMetadata::finish)
+                .transpose()?,
             acks: self.acks,
         })
     }
@@ -1507,12 +1544,14 @@ impl IngestGroupRows {
         self.batch.batch().num_rows() == 0
     }
 
-    fn metadata_row(&self, row: usize) -> Option<&IngestFilterMapMetadata> {
-        self.ingest_metadata.get(row)
+    fn metadata_row(&self, row: usize) -> Option<IngestFilterMapMetadata> {
+        self.ingest_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.row(row))
     }
 
-    fn metadata_rows(&self) -> Option<&[IngestFilterMapMetadata]> {
-        (!self.ingest_metadata.is_empty()).then_some(self.ingest_metadata.as_slice())
+    fn metadata_rows(&self) -> Option<&IngestFilterMapMetadata> {
+        self.ingest_metadata.as_ref()
     }
 
     fn row(&self, row: usize) -> Result<RuntimeRow, String> {
@@ -1540,10 +1579,8 @@ impl IngestGroupRows {
                 .collect(),
             ingest_metadata: self
                 .ingest_metadata
-                .into_iter()
-                .enumerate()
-                .filter_map(|(row, metadata)| selected(row).then_some(metadata))
-                .collect(),
+                .map(|metadata| metadata.select(keep))
+                .transpose()?,
             acks: self
                 .acks
                 .into_iter()
@@ -1560,7 +1597,7 @@ struct IngestorFilterWhereError<'a> {
     ingestor: &'a Identifier,
     output_routes: &'a RelayProcessorOutputsNode,
     record: &'a RuntimeRow,
-    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
+    ingest_metadata: Option<IngestFilterMapMetadata>,
     acks: AckSet,
     error: StructuredMessageError,
     materialized_state: HashMap<String, RuntimeValue>,
@@ -1847,7 +1884,7 @@ struct MessageErrorHandling<'a> {
     error: StructuredMessageError,
     partial_output: Option<RuntimeRecordBatch>,
     materialized_state: HashMap<String, RuntimeValue>,
-    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
+    ingest_metadata: Option<IngestFilterMapMetadata>,
 }
 
 struct MessageErrorFailure {
@@ -1895,19 +1932,63 @@ enum SingleRecordFilterMapOutcome {
     },
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
+struct IngestFilterMapMetadataColumns {
+    integration_fields: RecordBatch,
+    header_names: ArrayRef,
+    header_values: ArrayRef,
+}
+
+struct IngestHeaderRow<'a> {
+    names: &'a StringArray,
+    values: &'a StringArray,
+    start: usize,
+    end: usize,
+}
+
+impl<'a> IngestHeaderRow<'a> {
+    fn first(&self, name: &str) -> Option<&'a str> {
+        (self.start..self.end)
+            .find(|index| self.names.value(*index) == name)
+            .map(|index| self.values.value(index))
+    }
+
+    fn visit(&self, name: &str, mut visit: impl FnMut(&'a str)) {
+        for index in self.start..self.end {
+            if self.names.value(index) == name {
+                visit(self.values.value(index));
+            }
+        }
+    }
+}
+
+/// Columnar metadata for one ingest group.
+///
+/// The Arrow columns are shared by every filtered or single-row view. `rows` is the
+/// logical-to-physical row projection, so filtering and message-error attribution do
+/// not copy transport headers or rebuild integration fields from scalar values.
+#[derive(Debug, Clone)]
 pub(crate) struct IngestFilterMapMetadata {
-    values: HashMap<String, RuntimeValue>,
-    headers: HashMap<String, Vec<String>>,
+    columns: Arc<IngestFilterMapMetadataColumns>,
+    rows: Arc<Vec<usize>>,
+}
+
+impl Default for IngestFilterMapMetadata {
+    fn default() -> Self {
+        Self::from_headers(Vec::new())
+    }
 }
 
 impl IngestFilterMapMetadata {
     pub(crate) fn from_headers(headers: IngestHeaders) -> Self {
-        let mut metadata = Self::default();
-        for (name, value) in headers {
-            metadata.insert_header(name, value);
-        }
-        metadata
+        let integration_fields = RecordBatch::try_new_with_options(
+            StdArc::new(arrow_schema::Schema::empty()),
+            Vec::new(),
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .expect("one-row header metadata must form a valid Arrow batch");
+        Self::from_columns(integration_fields, std::iter::once(headers))
+            .expect("one-row header metadata must have aligned Arrow columns")
     }
 
     fn kafka(
@@ -1917,47 +1998,237 @@ impl IngestFilterMapMetadata {
         _key: Option<String>,
         headers: IngestHeaders,
     ) -> Self {
-        let mut metadata = Self::from_headers(headers);
-        metadata
-            .values
-            .insert("topic".to_string(), RuntimeValue::String(topic));
-        metadata
-            .values
-            .insert("partition".to_string(), RuntimeValue::I32(partition));
-        metadata
-            .values
-            .insert("offset".to_string(), RuntimeValue::I64(offset));
-        metadata
+        let integration_fields = RecordBatch::try_new(
+            Self::kafka_arrow_schema(),
+            vec![
+                StdArc::new(StringArray::from(vec![topic])),
+                StdArc::new(Int32Array::from(vec![partition])),
+                StdArc::new(Int64Array::from(vec![offset])),
+            ],
+        )
+        .expect("one-row Kafka metadata must form a valid Arrow batch");
+        Self::from_columns(integration_fields, std::iter::once(headers))
+            .expect("one-row Kafka metadata must have aligned Arrow columns")
     }
 
-    fn insert_header(&mut self, name: String, value: String) {
-        self.headers.entry(name).or_default().push(value);
+    fn kafka_arrow_schema() -> StdArc<arrow_schema::Schema> {
+        StdArc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
+            arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
+            arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
+        ]))
     }
 
-    fn metadata_value(&self, name: &str) -> Option<&RuntimeValue> {
-        self.values.get(name)
+    fn from_columns(
+        integration_fields: RecordBatch,
+        headers: impl IntoIterator<Item = IngestHeaders>,
+    ) -> Result<Self, String> {
+        let item_field =
+            || StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
+        let mut header_names = ListBuilder::new(StringBuilder::new()).with_field(item_field());
+        let mut header_values = ListBuilder::new(StringBuilder::new()).with_field(item_field());
+        let mut header_row_count = 0;
+        for headers in headers {
+            for (name, value) in headers {
+                header_names.values().append_value(name);
+                header_values.values().append_value(value);
+            }
+            header_names.append(true);
+            header_values.append(true);
+            header_row_count += 1;
+        }
+        if integration_fields.num_rows() != header_row_count {
+            return Err(format!(
+                "ingest integration metadata has {} rows but headers have {header_row_count}",
+                integration_fields.num_rows()
+            ));
+        }
+        let header_names: ArrayRef = StdArc::new(header_names.finish());
+        let header_values: ArrayRef = StdArc::new(header_values.finish());
+        let rows = Arc::new((0..header_row_count).collect());
+        Ok(Self {
+            columns: Arc::new(IngestFilterMapMetadataColumns {
+                integration_fields,
+                header_names,
+                header_values,
+            }),
+            rows,
+        })
+    }
+
+    fn concat(metadata: &[Self]) -> Result<Self, String> {
+        let Some(first) = metadata.first() else {
+            return Err("cannot concatenate zero ingest metadata batches".to_string());
+        };
+        if metadata.len() == 1 {
+            return Ok(first.clone());
+        }
+        let schema = first.columns.integration_fields.schema();
+        for batch in &metadata[1..] {
+            if batch.columns.integration_fields.schema() != schema {
+                return Err(
+                    "cannot combine ingest metadata with different field schemas".to_string(),
+                );
+            }
+        }
+        let row_count = metadata.iter().map(Self::len).sum();
+        let integration_columns = (0..schema.fields().len())
+            .map(|column| {
+                let arrays = metadata
+                    .iter()
+                    .map(|metadata| {
+                        metadata.selected_array(metadata.columns.integration_fields.column(column))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let arrays = arrays
+                    .iter()
+                    .map(|array| array.as_ref())
+                    .collect::<Vec<_>>();
+                concat_arrow_arrays(&arrays).map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let integration_fields = RecordBatch::try_new_with_options(
+            schema,
+            integration_columns,
+            &RecordBatchOptions::new().with_row_count(Some(row_count)),
+        )
+        .map_err(|error| error.to_string())?;
+        let header_names =
+            Self::concat_selected_arrays(metadata, |metadata| &metadata.columns.header_names)?;
+        let header_values =
+            Self::concat_selected_arrays(metadata, |metadata| &metadata.columns.header_values)?;
+        Ok(Self {
+            columns: Arc::new(IngestFilterMapMetadataColumns {
+                integration_fields,
+                header_names,
+                header_values,
+            }),
+            rows: Arc::new((0..row_count).collect()),
+        })
+    }
+
+    fn concat_selected_arrays(
+        metadata: &[Self],
+        array: impl Fn(&Self) -> &ArrayRef,
+    ) -> Result<ArrayRef, String> {
+        let arrays = metadata
+            .iter()
+            .map(|metadata| metadata.selected_array(array(metadata)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let arrays = arrays
+            .iter()
+            .map(|array| array.as_ref())
+            .collect::<Vec<_>>();
+        concat_arrow_arrays(&arrays).map_err(|error| error.to_string())
+    }
+
+    fn selected_array(&self, array: &ArrayRef) -> Result<ArrayRef, String> {
+        if self.rows.iter().copied().eq(0..self.rows.len()) && self.rows.len() == array.len() {
+            return Ok(array.clone());
+        }
+        let indices = self
+            .rows
+            .iter()
+            .map(|row| {
+                if *row >= array.len() {
+                    return Err(format!(
+                        "ingest metadata row {row} is outside column with {} rows",
+                        array.len()
+                    ));
+                }
+                u64::try_from(*row).map_err(|_| {
+                    format!("ingest metadata row {row} cannot be represented as an Arrow index")
+                })
+            })
+            .collect::<Result<UInt64Array, _>>()?;
+        take_arrow_array(array.as_ref(), &indices, None).map_err(|error| error.to_string())
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn row(&self, row: usize) -> Option<Self> {
+        self.rows.get(row).copied().map(|physical_row| Self {
+            columns: self.columns.clone(),
+            rows: Arc::new(vec![physical_row]),
+        })
+    }
+
+    fn select(&self, keep: &[bool]) -> Result<Self, String> {
+        if keep.len() != self.len() {
+            return Err(format!(
+                "ingest metadata selection has {} rows for {} metadata rows",
+                keep.len(),
+                self.len()
+            ));
+        }
+        Ok(Self {
+            columns: self.columns.clone(),
+            rows: Arc::new(
+                self.rows
+                    .iter()
+                    .zip(keep)
+                    .filter_map(|(row, keep)| keep.then_some(*row))
+                    .collect(),
+            ),
+        })
+    }
+
+    fn field_column(&self, name: &str) -> Result<Option<ArrayRef>, String> {
+        let Ok(index) = self.columns.integration_fields.schema().index_of(name) else {
+            return Ok(None);
+        };
+        self.selected_array(self.columns.integration_fields.column(index))
+            .map(Some)
+    }
+
+    fn first_header(&self, row: usize, name: &str) -> Option<&str> {
+        self.header_row(row)?.first(name)
+    }
+
+    fn visit_header_values(&self, row: usize, name: &str, visit: impl FnMut(&str)) {
+        if let Some(headers) = self.header_row(row) {
+            headers.visit(name, visit);
+        }
+    }
+
+    fn header_row(&self, row: usize) -> Option<IngestHeaderRow<'_>> {
+        let physical_row = *self.rows.get(row)?;
+        let names = self
+            .columns
+            .header_names
+            .as_any()
+            .downcast_ref::<ListArray>()?;
+        let values = self
+            .columns
+            .header_values
+            .as_any()
+            .downcast_ref::<ListArray>()?;
+        Some(IngestHeaderRow {
+            names: names.values().as_any().downcast_ref::<StringArray>()?,
+            values: values.values().as_any().downcast_ref::<StringArray>()?,
+            start: usize::try_from(*names.value_offsets().get(physical_row)?).ok()?,
+            end: usize::try_from(*names.value_offsets().get(physical_row + 1)?).ok()?,
+        })
     }
 }
 
 #[derive(Debug)]
 struct IngestHeaderFunctionInjector {
-    rows: Vec<HashMap<String, Vec<String>>>,
+    metadata: Option<IngestFilterMapMetadata>,
+    row_count: usize,
 }
 
 impl IngestHeaderFunctionInjector {
     fn from_metadata(
-        metadata: Option<&[IngestFilterMapMetadata]>,
+        metadata: Option<&IngestFilterMapMetadata>,
         row_count: usize,
     ) -> Arc<Box<dyn VmFunctionInjector>> {
-        let rows = metadata
-            .map(|metadata| {
-                metadata
-                    .iter()
-                    .map(|row| row.headers.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| vec![HashMap::new(); row_count]);
-        Arc::new(Box::new(Self { rows }))
+        Arc::new(Box::new(Self {
+            metadata: metadata.cloned(),
+            row_count,
+        }))
     }
 }
 
@@ -1977,23 +2248,29 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                 ),
             });
         };
-        if self.rows.len() != row_count || names.len() != row_count {
+        let metadata_row_count = self
+            .metadata
+            .as_ref()
+            .map_or(self.row_count, IngestFilterMapMetadata::len);
+        if metadata_row_count != row_count || names.len() != row_count {
             return Err(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "function '{}' header context has {} rows for a {row_count}-row batch",
                     function.as_str(),
-                    self.rows.len()
+                    metadata_row_count
                 ),
             });
         }
         if let FunctionName::ReadHeader = function {
             let values = names
                 .iter()
-                .zip(&self.rows)
-                .map(|(name, headers)| {
-                    name.and_then(|name| headers.get(name))
-                        .and_then(|values| values.first())
-                        .map(String::as_str)
+                .enumerate()
+                .map(|(row, name)| {
+                    name.and_then(|name| {
+                        self.metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.first_header(row, name))
+                    })
                 })
                 .collect::<Vec<_>>();
             return Ok(VmTypedArray::Utf8(arrow_array::StringArray::from(values)));
@@ -2001,11 +2278,13 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
         if let FunctionName::ReadHeaders = function {
             let field = StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
             let mut builder = ListBuilder::new(StringBuilder::new()).with_field(field);
-            for (name, headers) in names.iter().zip(&self.rows) {
-                if let Some(values) = name.and_then(|name| headers.get(name)) {
-                    for value in values {
+            for (row, name) in names.iter().enumerate() {
+                if let Some(name) = name
+                    && let Some(metadata) = self.metadata.as_ref()
+                {
+                    metadata.visit_header_values(row, name, |value| {
                         builder.values().append_value(value);
-                    }
+                    });
                 }
                 builder.append(true);
             }
@@ -12242,11 +12521,7 @@ fn ingestor_filter_map_metadata_arrow_schema(
     source: &IngestSource,
 ) -> Option<StdArc<arrow_schema::Schema>> {
     match source {
-        IngestSource::Kafka { .. } => Some(StdArc::new(arrow_schema::Schema::new(vec![
-            arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
-            arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
-            arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
-        ]))),
+        IngestSource::Kafka { .. } => Some(IngestFilterMapMetadata::kafka_arrow_schema()),
         _ => None,
     }
 }
@@ -12271,7 +12546,7 @@ pub(crate) async fn execute_filter_map_on_record(
             carrier: &carrier,
             record_metadata: &metadata,
             keys: &keys,
-            filter_map_metadata: filter_map_metadata.map(std::slice::from_ref),
+            filter_map_metadata,
             side_inputs,
         },
         execution_now,
@@ -12300,7 +12575,7 @@ struct FilterMapOutcomeInputs<'a> {
     carrier: &'a RuntimeRecordBatch,
     record_metadata: &'a [RuntimeRecordMetadata],
     keys: &'a [Option<BranchKey>],
-    filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
+    filter_map_metadata: Option<&'a IngestFilterMapMetadata>,
     side_inputs: &'a HashMap<String, RuntimeValue>,
 }
 
@@ -13926,7 +14201,7 @@ struct FilterMapBatchInputs<'a> {
     namespace_batches: &'a [(&'a str, &'a RuntimeRecordBatch)],
     keys: &'a [Option<BranchKey>],
     side_inputs: &'a HashMap<String, RuntimeValue>,
-    ingest_metadata: Option<&'a [IngestFilterMapMetadata]>,
+    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
 }
 
 async fn execute_filter_map_program_on_batch(
@@ -15794,7 +16069,7 @@ struct VmInputProjectionSources<'a> {
     strict_namespaces: &'a [&'a str],
     keys: &'a [Option<BranchKey>],
     side_inputs: &'a HashMap<String, RuntimeValue>,
-    ingest_metadata: Option<&'a [IngestFilterMapMetadata]>,
+    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
     lookup_columns: &'a HashMap<String, VmTypedArray>,
     uninitialized: Option<&'a VmUninitializedInput>,
 }
@@ -15855,13 +16130,25 @@ fn project_vm_input_batch(
             }
             if let Some((namespace, field_name)) = field.name().split_once('.') {
                 if namespace == INGEST_METADATA_NAMESPACE {
+                    if let Some(column) = sources
+                        .ingest_metadata
+                        .map(|metadata| metadata.field_column(field_name))
+                        .transpose()?
+                        .flatten()
+                    {
+                        if column.data_type() != field.data_type() {
+                            return Err(format!(
+                                "ingest metadata field '{}' expected {:?}, found {:?}",
+                                field.name(),
+                                field.data_type(),
+                                column.data_type()
+                            ));
+                        }
+                        return VmTypedArray::try_from_array_ref(column)
+                            .map_err(|error| error.to_string());
+                    }
                     return runtime_values_input_column(
-                        (0..row_count).map(|row| {
-                            sources
-                                .ingest_metadata
-                                .and_then(|metadata| metadata.get(row))
-                                .and_then(|metadata| metadata.metadata_value(field_name))
-                        }),
+                        std::iter::repeat_n(None, row_count),
                         row_count,
                         field,
                     );
@@ -16019,7 +16306,7 @@ async fn compute_lookup_hash_map_columns(
     namespace_batches: &[(&str, &RuntimeRecordBatch)],
     keys: &[Option<BranchKey>],
     side_inputs: &HashMap<String, RuntimeValue>,
-    ingest_metadata: Option<&[IngestFilterMapMetadata]>,
+    ingest_metadata: Option<&IngestFilterMapMetadata>,
     execution_now: Timestamp,
 ) -> Result<HashMap<String, VmTypedArray>, String> {
     let mut lookup_columns = HashMap::new();

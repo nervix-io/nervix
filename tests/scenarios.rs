@@ -1095,7 +1095,11 @@ impl IngestorLogicTransportFixture {
     }
 
     async fn deliver_with_headers(self, world: &mut ScenarioWorld, payload: &str) {
-        let headers = [("tenant", "acme"), ("route", "header-route")];
+        let headers = [
+            ("tenant", "acme"),
+            ("route", "header-route"),
+            ("route", "fallback-route"),
+        ];
         match self {
             Self::HttpEndpoint => {
                 let host = expand_placeholders(world, "http-{{test_id}}.example.com");
@@ -1445,8 +1449,8 @@ impl IngestorLogicExpectationFixture {
                     .as_deref()
                     .expect("header rewrite payload must be captured");
                 assert!(
-                    payload.contains("\"amount\":8"),
-                    "expected header-routed payload to contain incremented amount, got: {payload}"
+                    payload.contains("\"amount\":9"),
+                    "expected header-routed payload to count ordered route headers, got: {payload}"
                 );
                 assert!(
                     payload.contains(r#"key={"tenant":"acme"}"#),
