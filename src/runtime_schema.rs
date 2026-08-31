@@ -1077,7 +1077,6 @@ impl RuntimeRow {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn batch(&self) -> &Arc<RuntimeRecordBatch> {
         &self.batch
     }
