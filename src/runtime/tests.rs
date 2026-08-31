@@ -899,7 +899,7 @@ async fn window_aggregate_inputs_evaluate_one_batch_in_one_vm_execution() {
         .into_iter()
         .map(|latency| test_runtime_row([("latency".to_string(), RuntimeValue::I64(latency))]))
         .collect::<Vec<_>>();
-    let carrier = RuntimeRecordBatch::from_rows(&rows.iter().collect::<Vec<_>>())
+    let carrier = RuntimeRecordBatch::from_rows(rows[0].batch().schema(), rows.iter())
         .expect("window input rows should form one Arrow batch");
     super::WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
 
@@ -4737,7 +4737,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .replicated_deduplicator_state(placement.clone(), Vec::new(), 0)
         .expect("deduplicator state should initialize");
     assert!(state.reserve_new_key(
-        "txn-1".to_string(),
+        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
@@ -4772,8 +4772,9 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
     let seen_at = Timestamp::from_unix_nanos(1);
     let max_time = Duration::from_secs(600);
 
-    assert!(state.reserve_new_key("txn-1".to_string(), seen_at, max_time));
-    assert!(!state.reserve_new_key("txn-1".to_string(), seen_at, max_time));
+    let key = super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]);
+    assert!(state.reserve_new_key(key.clone(), seen_at, max_time));
+    assert!(!state.reserve_new_key(key, seen_at, max_time));
     assert_eq!(state.current_lsm.load(Ordering::SeqCst), 1);
 }
 
@@ -4916,7 +4917,7 @@ async fn replica_quorum_waits_for_replication_ack() {
             .expect("replicated state should initialize"),
     );
     assert!(state.reserve_new_key(
-        "txn-1".to_string(),
+        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));

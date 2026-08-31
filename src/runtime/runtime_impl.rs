@@ -4441,8 +4441,11 @@ impl Runtime {
             })
             .collect();
         let physical_node_id = self.local_node_id.read().clone();
+        let estimated_bytes = rows.batch.estimated_bytes();
+        let row_count = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let bytes_per_row = estimated_bytes.checked_div(row_count).unwrap_or_default();
+        let extra_bytes = estimated_bytes.checked_rem(row_count).unwrap_or_default();
         for (row, event_timestamp) in event_timestamps.iter().enumerate() {
-            let record = rows.row(row)?;
             self.metrics
                 .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
                     domain,
@@ -4450,7 +4453,9 @@ impl Runtime {
                     node: ingestor,
                     physical_node_id: physical_node_id.as_deref(),
                     messages: 1,
-                    bytes: record.estimated_bytes()?,
+                    bytes: bytes_per_row.saturating_add(u64::from(
+                        u64::try_from(row).unwrap_or(u64::MAX) < extra_bytes,
+                    )),
                     domain_timestamp: Some(*event_timestamp),
                 });
         }
@@ -10670,7 +10675,7 @@ impl Runtime {
         let mut success_output_rows = Vec::new();
         let mut success_input_rows = Vec::new();
         let mut errors = Vec::new();
-        for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
+        for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
             if let Some(side_error) = executed.batch.errors().row(output_row).first() {
                 let partial_output =
                     vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();
