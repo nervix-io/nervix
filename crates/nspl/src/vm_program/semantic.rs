@@ -725,7 +725,6 @@ pub fn lower_route_construction(
     Ok(spanned(
         Program {
             filter,
-            branch_filters: Vec::new(),
             set,
             invoke,
         },

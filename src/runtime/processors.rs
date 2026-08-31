@@ -603,7 +603,6 @@ impl CompiledWindowAggregateProgram {
         let program = SpannedNode {
             inner: VmProgram {
                 filter: None,
-                branch_filters: Vec::new(),
                 set,
                 invoke: Vec::new(),
             },
@@ -693,7 +692,6 @@ impl CompiledWindowAggregateProgram {
                 let program = SpannedNode {
                     inner: VmProgram {
                         filter: None,
-                        branch_filters: Vec::new(),
                         set: vec![(target.clone(), expr.clone())],
                         invoke: Vec::new(),
                     },

@@ -582,7 +582,6 @@ pub async fn execute_program(
 pub struct ExecutionResult {
     pub batch: TypedBatch,
     pub selected_rows: Vec<usize>,
-    pub branch_selected_rows: Vec<Vec<usize>>,
     pub invocations: Vec<FunctionInvocation>,
 }
 
@@ -798,20 +797,6 @@ fn execute_program_with_selection_in_context_sync(
         None
     };
 
-    let branch_selected_rows = program
-        .branch_filters
-        .iter()
-        .map(|filter_reg| {
-            let predicate = registers.boolean(*filter_reg)?;
-            let predicate = if let Some(global_predicate) = &global_predicate {
-                filter_boolean(predicate, global_predicate)
-            } else {
-                predicate.clone()
-            };
-            Ok(selected_rows(&predicate))
-        })
-        .collect::<Result<Vec<_>, RuntimeError>>()?;
-
     let (columns, row_errors, selected_rows) = if let Some(predicate) = global_predicate.as_ref() {
         for invocation in &mut invocations {
             invocation.arguments = filter_columns(&invocation.arguments, predicate)?;
@@ -830,7 +815,6 @@ fn execute_program_with_selection_in_context_sync(
     Ok(ExecutionResult {
         batch: TypedBatch::with_errors(program.output_schema.clone(), columns, row_errors)?,
         selected_rows,
-        branch_selected_rows,
         invocations,
     })
 }
@@ -3868,20 +3852,6 @@ fn filter_columns(
         .collect()
 }
 
-fn filter_boolean(values: &BooleanArray, predicate: &BooleanArray) -> BooleanArray {
-    let mut builder = BooleanBuilder::with_capacity(values.len());
-    for row in 0..values.len() {
-        if row_selected(predicate, row) {
-            if values.is_null(row) {
-                builder.append_null();
-            } else {
-                builder.append_value(values.value(row));
-            }
-        }
-    }
-    builder.finish()
-}
-
 fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
     predicate
         .iter()
@@ -4313,7 +4283,6 @@ mod tests {
 
         assert_eq!(output.batch.row_count(), 2);
         assert_eq!(output.selected_rows, vec![0, 2]);
-        assert!(output.branch_selected_rows.is_empty());
         assert_eq!(lowered.value(0), "error");
         assert_eq!(lowered.value(1), "error");
     }
@@ -5712,7 +5681,6 @@ mod tests {
                 error_mask: None,
             }],
             filter: None,
-            branch_filters: Vec::new(),
             invocations: Vec::new(),
             outputs: vec![OutputBinding {
                 output_index: 0,
@@ -5783,7 +5751,6 @@ mod tests {
                 error_mask: None,
             }],
             filter: None,
-            branch_filters: Vec::new(),
             invocations: Vec::new(),
             outputs: vec![OutputBinding {
                 output_index: 0,

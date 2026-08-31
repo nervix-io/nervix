@@ -28,7 +28,6 @@ pub struct InternalFieldRef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub filter: Option<SpannedExpr>,
-    pub branch_filters: Vec<SpannedExpr>,
     pub set: Vec<(FieldRef, SpannedExpr)>,
     pub invoke: Vec<SpannedInvocation>,
 }
