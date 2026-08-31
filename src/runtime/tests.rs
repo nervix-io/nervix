@@ -899,7 +899,7 @@ async fn window_aggregate_inputs_evaluate_one_batch_in_one_vm_execution() {
         .into_iter()
         .map(|latency| test_runtime_row([("latency".to_string(), RuntimeValue::I64(latency))]))
         .collect::<Vec<_>>();
-    let carrier = RuntimeRecordBatch::from_rows(&rows.iter().collect::<Vec<_>>())
+    let carrier = RuntimeRecordBatch::from_rows(rows[0].batch().schema(), rows.iter())
         .expect("window input rows should form one Arrow batch");
     super::WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
 
@@ -4737,7 +4737,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .replicated_deduplicator_state(placement.clone(), Vec::new(), 0)
         .expect("deduplicator state should initialize");
     assert!(state.reserve_new_key(
-        "txn-1".to_string(),
+        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
@@ -4772,8 +4772,9 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
     let seen_at = Timestamp::from_unix_nanos(1);
     let max_time = Duration::from_secs(600);
 
-    assert!(state.reserve_new_key("txn-1".to_string(), seen_at, max_time));
-    assert!(!state.reserve_new_key("txn-1".to_string(), seen_at, max_time));
+    let key = super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]);
+    assert!(state.reserve_new_key(key.clone(), seen_at, max_time));
+    assert!(!state.reserve_new_key(key, seen_at, max_time));
     assert_eq!(state.current_lsm.load(Ordering::SeqCst), 1);
 }
 
@@ -4916,7 +4917,7 @@ async fn replica_quorum_waits_for_replication_ack() {
             .expect("replicated state should initialize"),
     );
     assert!(state.reserve_new_key(
-        "txn-1".to_string(),
+        super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]),
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
@@ -6240,8 +6241,10 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
         ),
     ]);
     let right = test_runtime_row([("id".to_string(), RuntimeValue::U32(2))]);
-    let left = RuntimeRecordBatch::from_rows(&[&left]).expect("left batch should build");
-    let right = RuntimeRecordBatch::from_rows(&[&right]).expect("right batch should build");
+    let left = RuntimeRecordBatch::from_rows(left.batch().schema(), std::iter::once(&left))
+        .expect("left batch should build");
+    let right = RuntimeRecordBatch::from_rows(right.batch().schema(), std::iter::once(&right))
+        .expect("right batch should build");
     let materialized_state = [super::CorrelatorMaterializedState {
         left: Arc::new(HashMap::default()),
         right: Arc::new(HashMap::default()),
@@ -6264,12 +6267,13 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
 fn ingest_group_rows_share_the_group_batch_allocation() {
     let first = test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]);
     let second = test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]);
-    let batch = RuntimeRecordBatch::from_rows(&[&first, &second])
-        .expect("test rows should form one ingest group");
+    let batch =
+        RuntimeRecordBatch::from_rows(first.batch().schema(), [&first, &second].into_iter())
+            .expect("test rows should form one ingest group");
     let rows = super::IngestGroupRows {
         batch: Arc::new(batch),
         record_metadata: vec![RuntimeRecordMetadata::test(); 2],
-        ingest_metadata: Vec::new(),
+        ingest_metadata: None,
         acks: vec![AckSet::empty(), AckSet::empty()],
     };
 
@@ -10807,6 +10811,39 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     assert!(row_value(&output, "active").is_none());
     assert!(row_value(&output, "amount").is_none());
     assert!(row_value(&output, "raw").is_none());
+
+    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
+        metadata,
+        super::IngestFilterMapMetadata::kafka(
+            "logic_notifications_t123".to_string(),
+            3,
+            43,
+            None,
+            Vec::new(),
+        ),
+    ])
+    .expect("Kafka metadata must concatenate column-wise");
+    let offsets = grouped_metadata
+        .field_column("offset")
+        .expect("metadata projection must succeed")
+        .expect("Kafka offset column must exist");
+    let offsets = offsets
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .expect("Kafka offsets must remain INT64");
+    assert_eq!(offsets.values(), &[42, 43]);
+    let selected = grouped_metadata
+        .select(&[false, true])
+        .expect("metadata row selection must succeed");
+    let selected_offset = selected
+        .field_column("offset")
+        .expect("selected metadata projection must succeed")
+        .expect("selected Kafka offset column must exist");
+    let selected_offset = selected_offset
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .expect("selected Kafka offset must remain INT64");
+    assert_eq!(selected_offset.values(), &[43]);
 }
 
 #[tokio::test]
@@ -10912,6 +10949,78 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         Some(RuntimeValue::String("primary".to_string()))
     );
     assert_eq!(row_value(&output, "total"), Some(RuntimeValue::I64(2)));
+
+    let second_record = test_runtime_row([
+        (
+            "tenant".to_string(),
+            RuntimeValue::String("acme".to_string()),
+        ),
+        (
+            "header_name".to_string(),
+            RuntimeValue::String("route".to_string()),
+        ),
+        (
+            "raw".to_string(),
+            RuntimeValue::String("second".to_string()),
+        ),
+    ]);
+    let grouped_carrier =
+        RuntimeRecordBatch::concat(&[&record.one_row_batch(), &second_record.one_row_batch()])
+            .expect("grouped carrier must concatenate");
+    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
+        metadata.clone(),
+        super::IngestFilterMapMetadata::from_headers(vec![
+            ("tenant".to_string(), "acme".to_string()),
+            ("route".to_string(), "backup".to_string()),
+        ]),
+    ])
+    .expect("grouped metadata must concatenate");
+    let grouped_runtime_metadata =
+        vec![record.metadata().clone(), second_record.metadata().clone()];
+    let grouped_keys = vec![None, None];
+    let grouped_outcomes = super::evaluate_filter_map_on_batch(
+        ModelKind::Ingestor.as_str(),
+        &identifier("header_ingestor"),
+        &program,
+        super::FilterMapOutcomeInputs {
+            carrier: &grouped_carrier,
+            record_metadata: &grouped_runtime_metadata,
+            keys: &grouped_keys,
+            filter_map_metadata: Some(&grouped_metadata),
+            side_inputs: &HashMap::default(),
+        },
+        Timestamp::from_unix_nanos(1),
+    )
+    .await
+    .expect("grouped header filter-map must execute");
+    let grouped_outputs = grouped_outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            super::SingleRecordFilterMapOutcome::Output(record) => record,
+            super::SingleRecordFilterMapOutcome::Filtered => {
+                panic!("grouped header row must be selected")
+            }
+            super::SingleRecordFilterMapOutcome::MessageError { error, .. } => {
+                panic!("grouped header row failed: {}", error.message)
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        row_value(&grouped_outputs[0], "first"),
+        Some(RuntimeValue::String("primary".to_string()))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[0], "total"),
+        Some(RuntimeValue::I64(2))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[1], "first"),
+        Some(RuntimeValue::String("backup".to_string()))
+    );
+    assert_eq!(
+        row_value(&grouped_outputs[1], "total"),
+        Some(RuntimeValue::I64(1))
+    );
 
     let top_filter = super::compile_expression_filter_program(
         super::RuntimeCompileTarget {

@@ -3488,7 +3488,7 @@ impl Runtime {
                     error: &error,
                     partial_output: partial_output.as_ref(),
                     materialized_state: &materialized_state,
-                    ingest_metadata,
+                    ingest_metadata: ingest_metadata.as_ref(),
                 };
                 if let Err(dispatch_error) = self
                     .dispatch_message_error_to_dlq(context, relay, assignments)
@@ -4071,7 +4071,6 @@ impl Runtime {
             "error.occurred_at".to_string(),
             RuntimeValue::Datetime(error.occurred_at.as_datetime().fixed_offset()),
         );
-        let ingest_metadata = ingest_metadata.map(std::slice::from_ref);
         let lookup_columns = compute_lookup_hash_map_columns(
             program,
             &FilterMapBatchInputs {
@@ -4305,9 +4304,9 @@ impl Runtime {
     /// Executes one collected ingest group.
     ///
     /// The ingestor `FILTER WHERE` runs once over the group and each route's filter-map
-    /// runs once over the rows that survived it. Records, ingest metadata and acks stay
-    /// row-aligned throughout so message errors and acknowledgements remain attributable
-    /// to their original records.
+    /// runs once over the rows that survived it. Record and ingest-metadata columns use
+    /// the same row projection while ACKs retain their corresponding hot-path indices,
+    /// keeping errors and acknowledgements attributable to their original records.
     async fn execute_ingest_group(
         &self,
         context: &IngestGroupContext,
@@ -4441,8 +4440,11 @@ impl Runtime {
             })
             .collect();
         let physical_node_id = self.local_node_id.read().clone();
+        let estimated_bytes = rows.batch.estimated_bytes();
+        let row_count = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let bytes_per_row = estimated_bytes.checked_div(row_count).unwrap_or_default();
+        let extra_bytes = estimated_bytes.checked_rem(row_count).unwrap_or_default();
         for (row, event_timestamp) in event_timestamps.iter().enumerate() {
-            let record = rows.row(row)?;
             self.metrics
                 .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
                     domain,
@@ -4450,7 +4452,9 @@ impl Runtime {
                     node: ingestor,
                     physical_node_id: physical_node_id.as_deref(),
                     messages: 1,
-                    bytes: record.estimated_bytes()?,
+                    bytes: bytes_per_row.saturating_add(u64::from(
+                        u64::try_from(row).unwrap_or(u64::MAX) < extra_bytes,
+                    )),
                     domain_timestamp: Some(*event_timestamp),
                 });
         }
@@ -4723,7 +4727,7 @@ impl Runtime {
                 error: error.clone(),
                 partial_output: None,
                 materialized_state: materialized_state.clone(),
-                ingest_metadata,
+                ingest_metadata: ingest_metadata.clone(),
             })
             .await;
         }
@@ -7723,7 +7727,7 @@ impl Runtime {
                         output_routes: &binding.output_routes,
                         filter_where: binding.filter_where.as_ref(),
                         records: vec![record],
-                        metadata: vec![payload.metadata().clone()],
+                        metadata: Some(payload.metadata().clone()),
                         ingested_at: current_timestamp(),
                         acks: vec![AckSet::empty()],
                     })
@@ -7788,15 +7792,13 @@ impl Runtime {
             flush,
         } = dispatch;
         let mut records = Vec::new();
-        let mut metadata = Vec::new();
-        for (source_payload, source_metadata) in payload.entries() {
+        for source_payload in payload.payloads() {
             tokio::task::consume_budget().await;
             records.push(
                 decode_ingested_payload(codec.clone(), source_payload)
                     .await
                     .map_err(|error| error.to_string())?,
             );
-            metadata.push(source_metadata.clone());
         }
         let row_count = records.len();
         self.dispatch_ingested_records(IngestGroupDispatch {
@@ -7807,7 +7809,7 @@ impl Runtime {
             output_routes,
             filter_where,
             records,
-            metadata,
+            metadata: Some(payload.metadata().clone()),
             ingested_at: current_timestamp(),
             acks: vec![AckSet::empty(); row_count],
         })
@@ -10670,7 +10672,7 @@ impl Runtime {
         let mut success_output_rows = Vec::new();
         let mut success_input_rows = Vec::new();
         let mut errors = Vec::new();
-        for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
+        for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
             if let Some(side_error) = executed.batch.errors().row(output_row).first() {
                 let partial_output =
                     vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();

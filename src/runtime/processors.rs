@@ -1177,7 +1177,7 @@ impl InferencerOutputBuffer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum ReorderKeyPart {
     Null,
     Boolean(bool),
