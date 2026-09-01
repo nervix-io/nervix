@@ -892,10 +892,6 @@ impl BranchKey {
     pub(crate) fn as_str(&self) -> &str {
         self.json.as_str()
     }
-
-    fn fields(&self) -> impl Iterator<Item = (&Identifier, &RuntimeValue)> {
-        self.fields.iter()
-    }
 }
 
 fn branch_key_display(key: &Option<BranchKey>) -> &str {
@@ -3102,16 +3098,197 @@ struct MaterializerTaskSpec {
 struct GeneratorTaskSpec {
     generator: CreateGenerator,
     source_relay: Identifier,
+    source_schema: Arc<CompiledSchema>,
     source_branching: Vec<Identifier>,
+    context_projection: GeneratorContextProjection,
     routes: Vec<GeneratorTaskRouteSpec>,
+}
+
+impl GeneratorTaskSpec {
+    fn new(
+        generator: CreateGenerator,
+        source_schema: Arc<CompiledSchema>,
+        source_branching: Vec<Identifier>,
+        source_branch_schema: Option<StdArc<arrow_schema::Schema>>,
+        routes: Vec<GeneratorTaskRouteSpec>,
+    ) -> Self {
+        let source_relay = generator.materialized_relay.clone();
+        let context_projection = GeneratorContextProjection::new(
+            &source_relay,
+            source_schema.arrow_schema().as_ref(),
+            source_branch_schema.as_deref(),
+        );
+        Self {
+            generator,
+            source_relay,
+            source_schema,
+            source_branching,
+            context_projection,
+            routes,
+        }
+    }
+}
+
+struct GeneratorContextProjection {
+    source_namespace: String,
+    schema: StdArc<arrow_schema::Schema>,
+}
+
+impl GeneratorContextProjection {
+    fn new(
+        source_relay: &Identifier,
+        source_schema: &arrow_schema::Schema,
+        branch_schema: Option<&arrow_schema::Schema>,
+    ) -> Self {
+        let source_namespace = format!("relay_state.{}", source_relay.as_str());
+        let mut fields = source_schema
+            .fields()
+            .iter()
+            .map(|field| {
+                StdArc::new(
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_name(format!("{source_namespace}.{}", field.name())),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(branch_schema) = branch_schema {
+            fields.extend(branch_schema.fields().iter().map(|field| {
+                StdArc::new(
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_name(format!("branch.{}", field.name())),
+                )
+            }));
+        }
+        Self {
+            source_namespace,
+            schema: StdArc::new(arrow_schema::Schema::new(fields)),
+        }
+    }
+
+    fn project(
+        &self,
+        source: &RuntimeRecordBatch,
+        branch_key: &Option<BranchKey>,
+    ) -> Result<RuntimeRecordBatch, String> {
+        let namespace_batches = [(self.source_namespace.as_str(), source)];
+        let strict_namespaces = [self.source_namespace.as_str()];
+        let side_inputs = HashMap::default();
+        let lookup_columns = HashMap::default();
+        let input = project_vm_input_batch(
+            &self.schema,
+            &VmInputProjectionSources {
+                carrier: source,
+                namespace_batches: &namespace_batches,
+                strict_namespaces: &strict_namespaces,
+                keys: std::slice::from_ref(branch_key),
+                side_inputs: &side_inputs,
+                ingest_metadata: None,
+                lookup_columns: &lookup_columns,
+                uninitialized: None,
+            },
+            None,
+        )?;
+        vm_typed_batch_to_runtime_batch(&input)
+    }
+
+    fn materialized_state_snapshot(
+        &self,
+        source: &RuntimeRecordBatch,
+    ) -> Result<HashMap<String, RuntimeValue>, String> {
+        let schema = source.schema();
+        let mut snapshot = HashMap::with_capacity(schema.fields().len());
+        for field in schema.fields() {
+            if let Some(value) = source.value(0, field.name())? {
+                snapshot.insert(format!("{}.{}", self.source_namespace, field.name()), value);
+            }
+        }
+        Ok(snapshot)
+    }
 }
 
 struct GeneratorTaskRouteSpec {
     output: ProcessorOutput,
     program: CompiledProgramWithMaterializedInterest,
+    input_projection: GeneratorRouteInputProjection,
     output_schema: Arc<CompiledSchema>,
     output_registry: RelayRegistry,
     output_services: Arc<RelayBoundaryServices>,
+}
+
+impl GeneratorTaskRouteSpec {
+    fn new(
+        output: ProcessorOutput,
+        program: CompiledProgramWithMaterializedInterest,
+        output_schema: Arc<CompiledSchema>,
+        output_registry: RelayRegistry,
+        output_services: Arc<RelayBoundaryServices>,
+    ) -> Self {
+        let input_projection = GeneratorRouteInputProjection::new(&program.compiled.input_schema);
+        Self {
+            output,
+            program,
+            input_projection,
+            output_schema,
+            output_registry,
+            output_services,
+        }
+    }
+
+    fn project_input(
+        &self,
+        context: &RuntimeRecordBatch,
+        branch_key: &Option<BranchKey>,
+    ) -> Result<VmTypedBatch, String> {
+        self.input_projection
+            .project(&self.program.compiled.input_schema, context, branch_key)
+    }
+}
+
+struct GeneratorRouteInputProjection {
+    uninitialized: VmUninitializedInput,
+}
+
+impl GeneratorRouteInputProjection {
+    fn new(schema: &arrow_schema::Schema) -> Self {
+        Self {
+            uninitialized: VmUninitializedInput {
+                fields: schema
+                    .fields()
+                    .iter()
+                    .filter(|field| field.name().starts_with("output."))
+                    .map(|field| field.name().clone())
+                    .collect(),
+            },
+        }
+    }
+
+    fn project(
+        &self,
+        schema: &StdArc<arrow_schema::Schema>,
+        context: &RuntimeRecordBatch,
+        branch_key: &Option<BranchKey>,
+    ) -> Result<VmTypedBatch, String> {
+        let side_inputs = HashMap::default();
+        let lookup_columns = HashMap::default();
+        project_vm_input_batch(
+            schema,
+            &VmInputProjectionSources {
+                carrier: context,
+                namespace_batches: &[],
+                strict_namespaces: &[],
+                keys: std::slice::from_ref(branch_key),
+                side_inputs: &side_inputs,
+                ingest_metadata: None,
+                lookup_columns: &lookup_columns,
+                uninitialized: Some(&self.uninitialized),
+            },
+            None,
+        )
+    }
 }
 
 #[derive(Default)]
@@ -16196,6 +16373,32 @@ struct VmInputProjectionSources<'a> {
     uninitialized: Option<&'a VmUninitializedInput>,
 }
 
+impl<'a> VmInputProjectionSources<'a> {
+    fn namespace_batch_field<'name>(
+        &self,
+        qualified_name: &'name str,
+    ) -> Option<(&'a RuntimeRecordBatch, &'name str)> {
+        self.namespace_batches
+            .iter()
+            .filter_map(|&(namespace, batch)| {
+                qualified_name
+                    .strip_prefix(namespace)
+                    .and_then(|suffix| suffix.strip_prefix('.'))
+                    .map(|field_name| (namespace.len(), batch, field_name))
+            })
+            .max_by_key(|(namespace_len, _, _)| *namespace_len)
+            .map(|(_, batch, field_name)| (batch, field_name))
+    }
+
+    fn has_strict_namespace(&self, qualified_name: &str) -> bool {
+        self.strict_namespaces.iter().any(|namespace| {
+            qualified_name
+                .strip_prefix(namespace)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+        })
+    }
+}
+
 /// Input columns of one dispatched batch that every output route projects identically.
 ///
 /// Branch columns, broadcast materialized values, and selected ingest-metadata columns are
@@ -16348,15 +16551,12 @@ fn project_vm_input_column(
                 None => build(),
             };
         }
-        if let Some((_, batch)) = sources
-            .namespace_batches
-            .iter()
-            .find(|(candidate, _)| *candidate == namespace)
-            && let Ok(index) = batch.schema().index_of(field_name)
+        if let Some((batch, namespaced_field)) = sources.namespace_batch_field(field.name())
+            && let Ok(index) = batch.schema().index_of(namespaced_field)
         {
             return carrier_input_column(batch, index, field);
         }
-        if sources.strict_namespaces.contains(&namespace) {
+        if sources.has_strict_namespace(field.name()) {
             if field.is_nullable() {
                 return runtime_values_input_column(
                     std::iter::repeat_n(None, row_count),
@@ -19080,200 +19280,20 @@ fn relay_batch_from_wasm_output(
     })
 }
 
-fn generator_context_batch(
-    schema: &StdArc<arrow_schema::Schema>,
-    values: &HashMap<String, RuntimeValue>,
-) -> Result<VmTypedBatch, String> {
-    let columns = schema
-        .fields()
-        .iter()
-        .map(|field| match field.data_type() {
-            ArrowDataType::UInt8 => Ok(VmTypedArray::UInt8(arrow_array::UInt8Array::from(vec![
-                match values.get(field.name()) {
-                    Some(RuntimeValue::U8(value)) => Some(*value),
-                    Some(_) => {
-                        return Err(format!(
-                            "generator input field '{}' has incompatible type",
-                            field.name()
-                        ));
-                    }
-                    None => None,
-                },
-            ]))),
-            ArrowDataType::Int8 => Ok(VmTypedArray::Int8(arrow_array::Int8Array::from(vec![
-                match values.get(field.name()) {
-                    Some(RuntimeValue::I8(value)) => Some(*value),
-                    Some(_) => {
-                        return Err(format!(
-                            "generator input field '{}' has incompatible type",
-                            field.name()
-                        ));
-                    }
-                    None => None,
-                },
-            ]))),
-            ArrowDataType::UInt16 => {
-                Ok(VmTypedArray::UInt16(arrow_array::UInt16Array::from(vec![
-                    match values.get(field.name()) {
-                        Some(RuntimeValue::U16(value)) => Some(*value),
-                        Some(_) => {
-                            return Err(format!(
-                                "generator input field '{}' has incompatible type",
-                                field.name()
-                            ));
-                        }
-                        None => None,
-                    },
-                ])))
-            }
-            ArrowDataType::Int16 => Ok(VmTypedArray::Int16(arrow_array::Int16Array::from(vec![
-                match values.get(field.name()) {
-                    Some(RuntimeValue::I16(value)) => Some(*value),
-                    Some(_) => {
-                        return Err(format!(
-                            "generator input field '{}' has incompatible type",
-                            field.name()
-                        ));
-                    }
-                    None => None,
-                },
-            ]))),
-            ArrowDataType::UInt32 => {
-                Ok(VmTypedArray::UInt32(arrow_array::UInt32Array::from(vec![
-                    match values.get(field.name()) {
-                        Some(RuntimeValue::U32(value)) => Some(*value),
-                        Some(_) => {
-                            return Err(format!(
-                                "generator input field '{}' has incompatible type",
-                                field.name()
-                            ));
-                        }
-                        None => None,
-                    },
-                ])))
-            }
-            ArrowDataType::Int32 => Ok(VmTypedArray::Int32(arrow_array::Int32Array::from(vec![
-                match values.get(field.name()) {
-                    Some(RuntimeValue::I32(value)) => Some(*value),
-                    Some(_) => {
-                        return Err(format!(
-                            "generator input field '{}' has incompatible type",
-                            field.name()
-                        ));
-                    }
-                    None => None,
-                },
-            ]))),
-            ArrowDataType::UInt64 => {
-                Ok(VmTypedArray::UInt64(arrow_array::UInt64Array::from(vec![
-                    match values.get(field.name()) {
-                        Some(RuntimeValue::U64(value)) => Some(*value),
-                        Some(_) => {
-                            return Err(format!(
-                                "generator input field '{}' has incompatible type",
-                                field.name()
-                            ));
-                        }
-                        None => None,
-                    },
-                ])))
-            }
-            ArrowDataType::Int64 => Ok(VmTypedArray::Int64(arrow_array::Int64Array::from(vec![
-                match values.get(field.name()) {
-                    Some(RuntimeValue::I64(value)) => Some(*value),
-                    Some(_) => {
-                        return Err(format!(
-                            "generator input field '{}' has incompatible type",
-                            field.name()
-                        ));
-                    }
-                    None => None,
-                },
-            ]))),
-            ArrowDataType::Float32 => Ok(VmTypedArray::Float32(arrow_array::Float32Array::from(
-                vec![match values.get(field.name()) {
-                    Some(RuntimeValue::F32(value)) => Some(value.into_inner()),
-                    Some(_) => {
-                        return Err(format!(
-                            "generator input field '{}' has incompatible type",
-                            field.name()
-                        ));
-                    }
-                    None => None,
-                }],
-            ))),
-            ArrowDataType::Float64 => Ok(VmTypedArray::Float64(arrow_array::Float64Array::from(
-                vec![match values.get(field.name()) {
-                    Some(RuntimeValue::F64(value)) => Some(value.into_inner()),
-                    Some(_) => {
-                        return Err(format!(
-                            "generator input field '{}' has incompatible type",
-                            field.name()
-                        ));
-                    }
-                    None => None,
-                }],
-            ))),
-            ArrowDataType::Boolean => Ok(VmTypedArray::Boolean(arrow_array::BooleanArray::from(
-                vec![match values.get(field.name()) {
-                    Some(RuntimeValue::Bool(value)) => Some(*value),
-                    Some(_) => {
-                        return Err(format!(
-                            "generator input field '{}' has incompatible type",
-                            field.name()
-                        ));
-                    }
-                    None => None,
-                }],
-            ))),
-            ArrowDataType::Utf8 => Ok(VmTypedArray::Utf8(arrow_array::StringArray::from(vec![
-                match values.get(field.name()) {
-                    Some(RuntimeValue::String(value)) => Some(value.as_str()),
-                    Some(_) => {
-                        return Err(format!(
-                            "generator input field '{}' has incompatible type",
-                            field.name()
-                        ));
-                    }
-                    None => None,
-                },
-            ]))),
-            ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
-                if tz.as_ref() == "+00:00" =>
-            {
-                Ok(VmTypedArray::Datetime(
-                    arrow_array::TimestampNanosecondArray::from(vec![
-                        match values.get(field.name()) {
-                            Some(RuntimeValue::Datetime(value)) => value.timestamp_nanos_opt(),
-                            Some(_) => {
-                                return Err(format!(
-                                    "generator input field '{}' has incompatible type",
-                                    field.name()
-                                ));
-                            }
-                            None => None,
-                        },
-                    ])
-                    .with_timezone_utc(),
-                ))
-            }
-            other => Err(format!(
-                "generator input field '{}' uses unsupported type {:?}",
-                field.name(),
-                other
-            )),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    VmTypedBatch::try_new(schema.clone(), columns).map_err(|error| error.to_string())
+enum GeneratorProgramOutcome {
+    Filtered,
+    Output(RuntimeRow),
+    MessageError {
+        error: StructuredMessageError,
+        partial_output: Option<RuntimeRecordBatch>,
+    },
 }
 
 async fn execute_generator_program_on_context(
     program: &CompiledProgramWithMaterializedInterest,
     input: &VmTypedBatch,
     execution_now: Timestamp,
-    materialized_state: &HashMap<String, RuntimeValue>,
-) -> Result<SingleRecordFilterMapOutcome, String> {
+) -> Result<GeneratorProgramOutcome, String> {
     let result = execute_program_with_selection_in_context(
         &program.compiled,
         input,
@@ -19285,7 +19305,7 @@ async fn execute_generator_program_on_context(
     .await
     .map_err(|error| format!("GENERATOR execution failed: {error}"))?;
     if result.batch.row_count() == 0 {
-        return Ok(SingleRecordFilterMapOutcome::Filtered);
+        return Ok(GeneratorProgramOutcome::Filtered);
     }
     if result.batch.row_count() != 1 {
         return Err(format!(
@@ -19294,7 +19314,7 @@ async fn execute_generator_program_on_context(
         ));
     }
     if let Some(side_error) = result.batch.errors().first() {
-        return Ok(SingleRecordFilterMapOutcome::MessageError {
+        return Ok(GeneratorProgramOutcome::MessageError {
             error: program.structured_side_error(
                 format!(
                     "GENERATOR side error {}: {} at {}",
@@ -19306,7 +19326,6 @@ async fn execute_generator_program_on_context(
                 MessageErrorOperation::Set,
             ),
             partial_output: vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok(),
-            materialized_state: materialized_state.clone(),
         });
     }
     let batch = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])?;
@@ -19315,7 +19334,7 @@ async fn execute_generator_program_on_context(
         0,
         RuntimeRecordMetadata::from_ingested_at_watermarks(execution_now, execution_now),
     )
-    .map(SingleRecordFilterMapOutcome::Output)
+    .map(GeneratorProgramOutcome::Output)
 }
 
 fn checked_add_duration_to_timestamp(base: Timestamp, duration: Duration) -> Timestamp {
