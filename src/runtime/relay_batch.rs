@@ -20,7 +20,7 @@ pub struct RelayMessage {
 pub(crate) struct RelayRecordBatch {
     pub(super) key: Option<BranchKey>,
     pub(super) keys: Vec<Option<BranchKey>>,
-    pub(super) batch: RuntimeRecordBatch,
+    pub(super) batch: Arc<RuntimeRecordBatch>,
     pub(super) metadata: Vec<RuntimeRecordMetadata>,
     pub(super) acks: Vec<AckSet>,
 }
@@ -64,7 +64,7 @@ pub(super) struct RelayRecordBatchReorderFailure {
 }
 
 type UnkeyedRelayBatchParts = (
-    RuntimeRecordBatch,
+    Arc<RuntimeRecordBatch>,
     Vec<RuntimeRecordMetadata>,
     Vec<Option<BranchKey>>,
     Vec<AckSet>,
@@ -78,11 +78,7 @@ impl RelayRecordBatch {
                 self.metadata.len()
             ));
         }
-        RuntimeRow::new(
-            Arc::new(self.batch.clone()),
-            row,
-            self.metadata[row].clone(),
-        )
+        RuntimeRow::new(self.batch.clone(), row, self.metadata[row].clone())
     }
 
     pub(super) fn single(
@@ -120,7 +116,7 @@ impl RelayRecordBatch {
         {
             return Err("stream message row schema does not match relay schema".to_string());
         }
-        let batch = RuntimeRecordBatch::from_rows(schema.arrow_schema(), records.iter())?;
+        let batch = RuntimeRecordBatch::shared_from_rows(schema.arrow_schema(), &records)?;
         Ok(Self {
             key,
             keys,
@@ -159,7 +155,7 @@ impl RelayRecordBatch {
         Ok(Self {
             key,
             keys,
-            batch,
+            batch: Arc::new(batch),
             metadata,
             acks,
         })
@@ -190,7 +186,7 @@ impl RelayRecordBatch {
         Ok(Self {
             key,
             keys,
-            batch,
+            batch: Arc::new(batch),
             metadata,
             acks,
         })
@@ -257,7 +253,7 @@ impl RelayRecordBatch {
         Ok(Self {
             key,
             keys: select(keys, rows),
-            batch,
+            batch: Arc::new(batch),
             metadata: select(metadata, rows),
             acks: select(acks, rows),
         })
@@ -336,7 +332,7 @@ impl RelayRecordBatch {
         Ok(Self {
             key,
             keys: reorder_owned_values(keys, row_order),
-            batch: reordered_batch,
+            batch: Arc::new(reordered_batch),
             metadata: reorder_owned_values(metadata, row_order),
             acks: reorder_owned_values(acks, row_order),
         })
@@ -374,10 +370,9 @@ impl RelayRecordBatch {
                 self,
             )));
         }
-        let batch = Arc::new(self.batch.clone());
         let rows = match (0..row_count)
             .zip(self.metadata.iter().cloned())
-            .map(|(row, metadata)| RuntimeRow::new(batch.clone(), row, metadata))
+            .map(|(row, metadata)| RuntimeRow::new(self.batch.clone(), row, metadata))
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(rows) => rows,
@@ -412,7 +407,10 @@ impl RelayRecordBatch {
         }
 
         let concatenated = {
-            let runtime_batches = batches.iter().map(|batch| &batch.batch).collect::<Vec<_>>();
+            let runtime_batches = batches
+                .iter()
+                .map(|batch| batch.batch.as_ref())
+                .collect::<Vec<_>>();
             match RuntimeRecordBatch::concat(&runtime_batches) {
                 Ok(batch) => batch,
                 Err(error) => return Err(Box::new((error, batches))),
@@ -437,7 +435,7 @@ impl RelayRecordBatch {
         Ok(Self {
             key,
             keys,
-            batch: concatenated,
+            batch: Arc::new(concatenated),
             metadata,
             acks,
         })
@@ -606,7 +604,7 @@ pub(super) fn build_stream_record_batch_preserving_acks(
             acks,
         ));
     }
-    let batch = match RuntimeRecordBatch::from_rows(schema.arrow_schema(), records.iter()) {
+    let batch = match RuntimeRecordBatch::shared_from_rows(schema.arrow_schema(), &records) {
         Ok(batch) => batch,
         Err(error) => return Err((error, acks)),
     };
@@ -675,6 +673,29 @@ mod tests {
                 .expect("row must exist")
             })
             .collect()
+    }
+
+    #[test]
+    fn runtime_rows_share_the_relay_batch_allocation() {
+        let schema = test_schema();
+        let messages = test_rows(&schema, &[10, 20])
+            .into_iter()
+            .map(|record| RelayMessage {
+                key: None,
+                record,
+                acks: AckSet::empty(),
+            })
+            .collect();
+        let batch = RelayRecordBatch::from_messages(schema, messages)
+            .expect("relay batch must build from shared rows");
+
+        let first = batch.runtime_row(0).expect("first row should exist");
+        let second = batch.runtime_row(1).expect("second row should exist");
+
+        assert!(
+            Arc::ptr_eq(first.batch(), second.batch()),
+            "row views from one relay batch must retain the same batch allocation"
+        );
     }
 
     #[test]
