@@ -24,6 +24,7 @@ pub enum BenchmarkDependency {
 #[serde(deny_unknown_fields)]
 pub struct LoadConfiguration {
     pub duration: LoadDuration,
+    pub warmup_seconds: u64,
     pub partitions: u32,
     pub value_bytes: u64,
     pub max_backlog_messages: u64,
@@ -201,6 +202,9 @@ impl BenchmarkDefinition {
         }
         if self.load.partitions == 0 {
             return Err("load.partitions must be positive".to_string());
+        }
+        if self.load.warmup_seconds == 0 {
+            return Err("load.warmup_seconds must be positive".to_string());
         }
         if self.load.partitions > i32::MAX as u32 {
             return Err("load.partitions exceeds Kafka's supported range".to_string());

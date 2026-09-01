@@ -1,0 +1,13 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-expiry-map"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+intrusive-collections = { workspace = true }
+triomphe = { workspace = true }

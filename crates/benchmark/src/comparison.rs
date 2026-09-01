@@ -7,9 +7,24 @@ use std::{
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::{MetricsReportError, NERVIX_METRICS_REPORT_FILE, NervixMetricsReport};
+
 #[derive(Debug)]
 pub struct BenchmarkComparison {
     benchmarks: Vec<BenchmarkRuns>,
+}
+
+#[derive(Debug)]
+pub struct BenchmarkSuiteReport {
+    comparison: Option<BenchmarkComparison>,
+    failures: Vec<BenchmarkRunFailure>,
+}
+
+#[derive(Debug)]
+pub struct BenchmarkRunFailure {
+    benchmark: String,
+    implementation: String,
+    message: String,
 }
 
 #[derive(Debug)]
@@ -24,6 +39,7 @@ pub(crate) struct RunArtifact {
     pub(crate) directory: PathBuf,
     pub(crate) manifest: RunManifest,
     pub(crate) report: LoadReport,
+    metrics: Option<NervixMetricsReport>,
     image_identity: Option<ImageIdentity>,
 }
 
@@ -32,6 +48,7 @@ pub(crate) struct RunManifest {
     pub(crate) benchmark: String,
     pub(crate) description: String,
     pub(crate) duration_seconds: u64,
+    pub(crate) warmup_seconds: u64,
     pub(crate) git_dirty: Option<bool>,
     pub(crate) git_revision: Option<String>,
     image: Option<String>,
@@ -46,11 +63,15 @@ pub(crate) struct RunManifest {
 #[derive(Debug, Deserialize)]
 pub(crate) struct LoadReport {
     target_duration_seconds: f64,
+    warmup_target_seconds: f64,
+    warmup_generation_seconds: f64,
+    warmup_parity_stability_seconds: f64,
     generation_seconds: f64,
     drain_seconds: f64,
     end_to_end_seconds: f64,
     pub(crate) wire_bytes_per_message: u64,
     partitions: u32,
+    warmup_messages: u64,
     pub(crate) max_backlog_messages: u64,
     pub(crate) peak_backlog_messages: u64,
     input_messages: u64,
@@ -107,6 +128,16 @@ pub enum ComparisonError {
 
     #[error("benchmark run {path} has an invalid load report: {reason}")]
     InvalidReport { path: PathBuf, reason: String },
+
+    #[error("successful Nervix benchmark run {path} has no scraped metrics report")]
+    MissingMetricsReport { path: PathBuf },
+
+    #[error("failed to load Nervix metrics report {path}")]
+    MetricsReport {
+        path: PathBuf,
+        #[source]
+        source: Box<MetricsReportError>,
+    },
 
     #[error(
         "benchmark '{benchmark}' has duplicate artifacts for implementation '{implementation}'"
@@ -173,8 +204,133 @@ impl BenchmarkComparison {
     #[must_use]
     pub fn render_markdown(&self) -> String {
         let mut markdown = String::from("## Benchmark comparison\n");
+        self.render_benchmarks(&mut markdown);
+        markdown
+    }
+
+    fn render_benchmarks(&self, markdown: &mut String) {
         for benchmark in &self.benchmarks {
             markdown.push_str(&benchmark.render_markdown());
+        }
+    }
+
+    pub fn write_markdown(&self, path: impl AsRef<Path>) -> Result<(), ComparisonError> {
+        let path = path.as_ref();
+        fs::write(path, self.render_markdown()).map_err(|source| ComparisonError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+}
+
+impl BenchmarkRunFailure {
+    #[must_use]
+    pub fn new(
+        benchmark: impl Into<String>,
+        implementation: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            benchmark: benchmark.into(),
+            implementation: implementation.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl BenchmarkSuiteReport {
+    pub fn from_run_directories(
+        run_directories: &[PathBuf],
+        failures: Vec<BenchmarkRunFailure>,
+    ) -> Result<Self, ComparisonError> {
+        if run_directories.is_empty() && failures.is_empty() {
+            return Err(ComparisonError::Empty);
+        }
+        let comparison = if run_directories.is_empty() {
+            None
+        } else {
+            Some(BenchmarkComparison::from_run_directories(run_directories)?)
+        };
+        Ok(Self {
+            comparison,
+            failures,
+        })
+    }
+
+    #[must_use]
+    pub fn failed_runs(&self) -> usize {
+        self.failures.len()
+    }
+
+    #[must_use]
+    pub fn total_runs(&self) -> usize {
+        self.successful_runs() + self.failed_runs()
+    }
+
+    #[must_use]
+    pub fn render_markdown(&self) -> String {
+        let successful = self.successful_runs();
+        let total = self.total_runs();
+        let benchmark_count = self.benchmark_count();
+        let mut markdown = format!(
+            "## Benchmark comparison\n\n**Execution:** {successful} of {total} catalog executions \
+             succeeded; all {total} were attempted across {benchmark_count} workloads.\n"
+        );
+        let mut statuses = Vec::with_capacity(total);
+        if let Some(comparison) = &self.comparison {
+            for benchmark in &comparison.benchmarks {
+                for run in &benchmark.runs {
+                    statuses.push((
+                        benchmark.slug.as_str(),
+                        run.manifest.implementation.as_str(),
+                        true,
+                    ));
+                }
+            }
+        }
+        for failure in &self.failures {
+            statuses.push((
+                failure.benchmark.as_str(),
+                failure.implementation.as_str(),
+                false,
+            ));
+        }
+        statuses.sort_by(|left, right| {
+            left.0.cmp(right.0).then_with(|| {
+                implementation_sort_key(left.1).cmp(&implementation_sort_key(right.1))
+            })
+        });
+        markdown.push_str("\n### Execution status\n\n| Workload | Implementation | Status |\n");
+        markdown.push_str("|:--|:--|:--|\n");
+        for (benchmark, implementation, succeeded) in statuses {
+            markdown.push_str(&format!(
+                "| {} | {} | {} |\n",
+                display_name(benchmark),
+                display_name(implementation),
+                if succeeded {
+                    "✅ Passed"
+                } else {
+                    "❌ Failed"
+                }
+            ));
+        }
+        if let Some(comparison) = &self.comparison {
+            comparison.render_benchmarks(&mut markdown);
+        }
+        if !self.failures.is_empty() {
+            markdown.push_str(
+                "\n> [!WARNING]\n> One or more benchmark implementations failed. Successful \
+                 measurements are retained below, and CI remains failed.\n\n### Failed benchmark \
+                 implementations\n\n| Benchmark | Implementation | Failure |\n|:--|:--|:--|\n",
+            );
+            for failure in &self.failures {
+                markdown.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    display_name(&failure.benchmark),
+                    display_name(&failure.implementation),
+                    escape_markdown(&single_line(&failure.message)),
+                ));
+            }
         }
         markdown
     }
@@ -185,6 +341,37 @@ impl BenchmarkComparison {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    fn successful_runs(&self) -> usize {
+        self.comparison
+            .as_ref()
+            .map(|comparison| {
+                comparison
+                    .benchmarks
+                    .iter()
+                    .map(|benchmark| benchmark.runs.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    fn benchmark_count(&self) -> usize {
+        let mut benchmarks = BTreeSet::new();
+        if let Some(comparison) = &self.comparison {
+            benchmarks.extend(
+                comparison
+                    .benchmarks
+                    .iter()
+                    .map(|benchmark| benchmark.slug.as_str()),
+            );
+        }
+        benchmarks.extend(
+            self.failures
+                .iter()
+                .map(|failure| failure.benchmark.as_str()),
+        );
+        benchmarks.len()
     }
 }
 
@@ -220,11 +407,12 @@ impl BenchmarkRuns {
         let first = &self.runs[0];
 
         let mut markdown = format!(
-            "\n### {}\n\n{}\n\n**Configuration:** {} s · {} partitions · {} B values ({} B wire) \
-             · backlog cap {}\n\n",
+            "\n### {}\n\n{}\n\n**Configuration:** {} s + {} s warm-up · {} partitions · {} B \
+             values ({} B wire) · backlog cap {}\n\n",
             display_name(&self.slug),
             single_line(&self.description),
             first.manifest.duration_seconds,
+            first.manifest.warmup_seconds,
             first.manifest.partitions,
             format_count(first.manifest.value_bytes),
             format_count(first.report.wire_bytes_per_message),
@@ -309,6 +497,11 @@ impl BenchmarkRuns {
                 human_list(&saturated)
             ));
         }
+        for run in &self.runs {
+            if let Some(metrics) = &run.metrics {
+                markdown.push_str(&metrics.render_markdown());
+            }
+        }
         markdown.push_str(
             "\n> [!NOTE]\n> Single-host end-to-end rates include Kafka and the load driver. \
              Implementations retain their native delivery and batch-size semantics.\n",
@@ -379,6 +572,22 @@ impl RunArtifact {
             }
         })?;
         validate_report(directory, &manifest, &report)?;
+        let metrics_path = directory.join(NERVIX_METRICS_REPORT_FILE);
+        let metrics = if manifest.implementation == "nervix" {
+            if !metrics_path.is_file() {
+                return Err(ComparisonError::MissingMetricsReport {
+                    path: directory.to_path_buf(),
+                });
+            }
+            Some(NervixMetricsReport::read(&metrics_path).map_err(|source| {
+                ComparisonError::MetricsReport {
+                    path: metrics_path,
+                    source: Box::new(source),
+                }
+            })?)
+        } else {
+            None
+        };
         let image_path = directory.join("image.txt");
         let image_identity = if image_path.exists() {
             Some(ImageIdentity::parse(&image_path, &read(&image_path)?)?)
@@ -389,8 +598,53 @@ impl RunArtifact {
             directory: directory.to_path_buf(),
             manifest,
             report,
+            metrics,
             image_identity,
         })
+    }
+}
+
+impl NervixMetricsReport {
+    fn render_markdown(&self) -> String {
+        let mut markdown = String::from(
+            "\n<details>\n<summary>Nervix runtime observations</summary>\n\nMeans use \
+             `messages_total / batches_total`; percentiles are upper bounds from the scraped \
+             Prometheus histogram buckets.\n\n#### Messages per batch\n\n| Target | Direction | \
+             Relay | Mean | p50 | p90 | p99 | Messages / batches \
+             |\n|:--|:--|:--|--:|--:|--:|--:|--:|\n",
+        );
+        for target in &self.batch_targets {
+            markdown.push_str(&format!(
+                "| {} `{}` | {} | `{}` | {} | ≤{} | ≤{} | ≤{} | {} / {} |\n",
+                escape_markdown(&target.target_kind),
+                escape_code(&target.target),
+                escape_markdown(&target.direction),
+                escape_code(&target.relay),
+                format_metric_decimal(target.mean_messages_per_batch(), 2),
+                format_metric_value(target.p50),
+                format_metric_value(target.p90),
+                format_metric_value(target.p99),
+                format_count(target.messages_total),
+                format_count(target.batches_total),
+            ));
+        }
+        markdown.push_str(
+            "\n#### Relay buffer length\n\n| Relay | Direction | p50 | p90 | p99 | Observations \
+             |\n|:--|:--|--:|--:|--:|--:|\n",
+        );
+        for relay in &self.relay_buffers {
+            markdown.push_str(&format!(
+                "| `{}` | {} | ≤{} | ≤{} | ≤{} | {} |\n",
+                escape_code(&relay.relay),
+                escape_markdown(&relay.direction),
+                format_metric_value(relay.p50),
+                format_metric_value(relay.p90),
+                format_metric_value(relay.p99),
+                format_count(relay.observations),
+            ));
+        }
+        markdown.push_str("\n</details>\n");
+        markdown
     }
 }
 
@@ -439,6 +693,15 @@ fn validate_report(
     };
     for (name, value) in [
         ("target_duration_seconds", report.target_duration_seconds),
+        ("warmup_target_seconds", report.warmup_target_seconds),
+        (
+            "warmup_generation_seconds",
+            report.warmup_generation_seconds,
+        ),
+        (
+            "warmup_parity_stability_seconds",
+            report.warmup_parity_stability_seconds,
+        ),
         ("generation_seconds", report.generation_seconds),
         ("drain_seconds", report.drain_seconds),
         ("end_to_end_seconds", report.end_to_end_seconds),
@@ -467,6 +730,21 @@ fn validate_report(
     if (report.target_duration_seconds - manifest.duration_seconds as f64).abs() > 0.000_001 {
         return Err(invalid(
             "target duration does not match run.toml".to_string(),
+        ));
+    }
+    if (report.warmup_target_seconds - manifest.warmup_seconds as f64).abs() > 0.000_001 {
+        return Err(invalid(
+            "warm-up target does not match run.toml".to_string(),
+        ));
+    }
+    if report.warmup_generation_seconds < report.warmup_target_seconds {
+        return Err(invalid(
+            "warm-up generation ended before its target duration".to_string(),
+        ));
+    }
+    if report.warmup_messages == 0 {
+        return Err(invalid(
+            "a successful benchmark must warm up with at least one message".to_string(),
         ));
     }
     if report.partitions != manifest.partitions {
@@ -535,6 +813,9 @@ pub(crate) fn ensure_matching_run_configuration(
     }
     if run.manifest.duration_seconds != baseline.manifest.duration_seconds {
         return Err(mismatch("duration_seconds"));
+    }
+    if run.manifest.warmup_seconds != baseline.manifest.warmup_seconds {
+        return Err(mismatch("warmup_seconds"));
     }
     if run.manifest.partitions != baseline.manifest.partitions {
         return Err(mismatch("partitions"));
@@ -617,6 +898,37 @@ pub(crate) fn format_count(value: u64) -> String {
         formatted.push_str(std::str::from_utf8(chunk).expect("decimal digits are valid UTF-8"));
     }
     formatted
+}
+
+fn format_metric_value(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format_count(value as u64)
+    } else {
+        format_metric_decimal(value, 3)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
+fn format_metric_decimal(value: f64, precision: usize) -> String {
+    let rendered = format!("{value:.precision$}");
+    let Some((whole, fraction)) = rendered.split_once('.') else {
+        return rendered;
+    };
+    let whole = whole
+        .parse::<u64>()
+        .map(format_count)
+        .unwrap_or_else(|_| whole.to_string());
+    format!("{whole}.{fraction}")
+}
+
+fn escape_markdown(value: &str) -> String {
+    value.replace('|', "\\|")
+}
+
+fn escape_code(value: &str) -> String {
+    escape_markdown(value).replace('`', "\\`")
 }
 
 pub(crate) fn format_percentage(value: f64) -> String {

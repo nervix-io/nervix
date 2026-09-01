@@ -19,18 +19,25 @@ CREATE CODEC benchmark_record_codec
 CREATE CODEC benchmark_summary_codec
   FROM WIRE JSON SCHEMA benchmark_summary_wire
   TO SCHEMA benchmark_summary;
-CREATE CLIENT kafka_local
+CREATE CLIENT kafka_input
   TYPE KAFKA
   CONFIG {
     'bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
     'auto.offset.reset' = 'earliest'
+  };
+CREATE CLIENT kafka_output
+  TYPE KAFKA
+  CONFIG {
+    'bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
+    'enable.idempotence' = 'true',
+    'acks' = 'all'
   };
 {% for lane in lanes %}
 CREATE RELAY benchmark_ingested_{{ lane }} SCHEMA benchmark_record UNBRANCHED;
 CREATE RELAY benchmark_unique_{{ lane }} SCHEMA benchmark_record UNBRANCHED;
 CREATE RELAY benchmark_summaries_{{ lane }} SCHEMA benchmark_summary UNBRANCHED;
 CREATE INGESTOR kafka_in_{{ lane }}
-  FROM KAFKA kafka_local
+  FROM KAFKA kafka_input
   TOPIC {{ input_topic }}
   OFFSET BY CONSUMER GROUP {{ consumer_group }}
   INSTANCES 1
@@ -62,7 +69,7 @@ CREATE WINDOW PROCESSOR benchmark_window_{{ lane }}
     ON MESSAGE ERROR LOG;
 CREATE EMITTER kafka_out_{{ lane }}
   FROM benchmark_summaries_{{ lane }}
-  TO KAFKA kafka_local TOPIC {{ output_topic }}
+  TO KAFKA kafka_output TOPIC {{ output_topic }}
     MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING benchmark_summary_codec
   INHERIT ALL

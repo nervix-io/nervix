@@ -86,6 +86,7 @@ mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-client-core = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
+nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
@@ -211,6 +212,7 @@ members = [
   "crates/client-core",
   "crates/consensus",
   "crates/dataflow-graph",
+  "crates/expiry-map",
   "crates/interconnect",
   "crates/nervix-wasm",
   "crates/nervix-wasm-protocol",
@@ -316,6 +318,7 @@ iceberg-storage-opendal = { version = "0.10", features = [
 ] }
 ignore = "0.4.33"
 indexmap = "2"
+intrusive-collections = "0.10.3"
 jaq-core = "3"
 jaq-fmts = "0.1"
 jaq-json = "2"
@@ -337,6 +340,7 @@ mysql_async = "0.36.2"
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
+nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
 nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [

@@ -100,11 +100,12 @@ impl AbSummary {
         let reference = &self.baseline.runs[0];
         let manifest = &reference.manifest;
         let mut markdown = format!(
-            "## A/B benchmark comparison — {}\n\n{}\n\n**Configuration:** {} s · {} partitions · \
-             {} B values ({} B wire) · backlog cap {}\n\n",
+            "## A/B benchmark comparison — {}\n\n{}\n\n**Configuration:** {} s + {} s warm-up · \
+             {} partitions · {} B values ({} B wire) · backlog cap {}\n\n",
             display_name(&manifest.benchmark),
             single_line(&manifest.description),
             manifest.duration_seconds,
+            manifest.warmup_seconds,
             manifest.partitions,
             format_count(manifest.value_bytes),
             format_count(reference.report.wire_bytes_per_message),

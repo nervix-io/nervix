@@ -61,6 +61,16 @@ test-lib *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
+# Validate the small unsafe boundary used by deduplicator expiration tracking.
+test-expiry-map:
+    cargo test --package nervix-expiry-map
+
+test-expiry-map-miri:
+    cargo +nightly miri test --package nervix-expiry-map
+
+test-expiry-map-mutants:
+    cargo mutants --package nervix-expiry-map --timeout 120
+
 # Walk the NSPL completion graph and fail on any branch that cannot be completed by accepting the
 # suggestions the parser itself offers. Kept out of `just test` because it saturates every core for
 # tens of seconds; CI runs it once the main tests have passed.

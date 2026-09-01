@@ -1,7 +1,8 @@
 use std::{
+    collections::{BTreeMap, VecDeque},
     fs,
     io::Write as _,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     thread,
     time::{Duration, Instant},
@@ -18,6 +19,7 @@ use rdkafka::{
     error::{KafkaError, RDKafkaErrorCode},
     producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, ThreadedProducer},
 };
+use serde::Serialize;
 use triomphe::Arc;
 
 const SEND_CLOCK_MESSAGES: u64 = 65_536;
@@ -26,6 +28,7 @@ const KAFKA_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const GENERATION_QUERY_DEADLINE_TOLERANCE: Duration = Duration::from_secs(1);
 const PARITY_STABILITY_INTERVAL: Duration = Duration::from_millis(500);
 const SUMMARY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const RECENT_SUMMARY_LIMIT: usize = 32;
 const KEY_CYCLE_DIGITS: usize = 14;
 const KEY_INDEX_DIGITS: usize = 6;
 const KEY_DIGITS: usize = KEY_CYCLE_DIGITS + KEY_INDEX_DIGITS;
@@ -55,6 +58,8 @@ struct CommonArgs {
     minimum_consumers: usize,
     #[arg(long, default_value_t = 30)]
     duration_seconds: u64,
+    #[arg(long)]
+    warmup_seconds: u64,
     #[arg(long, default_value_t = 128)]
     value_bytes: usize,
     #[arg(long, default_value_t = 16_384)]
@@ -65,6 +70,8 @@ struct CommonArgs {
     ready_file: PathBuf,
     #[arg(long)]
     go_file: PathBuf,
+    #[arg(long)]
+    output_diagnostics_file: PathBuf,
 }
 
 /// The load shape the workload declares, with the arguments each shape requires.
@@ -264,7 +271,7 @@ impl PayloadWriter {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 struct OutputCounts {
     messages: u64,
     records: u64,
@@ -296,11 +303,42 @@ enum OutputMeter {
     Summaries(SummaryDrain),
 }
 
+#[derive(Default)]
 struct DrainState {
     messages: AtomicU64,
     records: AtomicU64,
     stop: AtomicBool,
     failure: Mutex<Option<String>>,
+    observations: Mutex<SummaryObservations>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SummaryObservations {
+    partitions: BTreeMap<i32, OutputCounts>,
+    recent: VecDeque<SummaryObservation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SummaryObservation {
+    partition: i32,
+    offset: i64,
+    record_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct OutputPartitionDiagnostics {
+    partition: i32,
+    messages: u64,
+    records: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct OutputDiagnostics {
+    topic: String,
+    total: OutputCounts,
+    partitions: Vec<OutputPartitionDiagnostics>,
+    recent_summaries: Vec<SummaryObservation>,
+    consumer_failure: Option<String>,
 }
 
 /// Consumes window summaries from the output topic and accumulates the record count they report.
@@ -336,12 +374,7 @@ impl SummaryDrain {
             .assign(&assignment)
             .with_context(|| format!("failed to assign the summary topic '{topic}'"))?;
 
-        let state = Arc::new(DrainState {
-            messages: AtomicU64::new(0),
-            records: AtomicU64::new(0),
-            stop: AtomicBool::new(false),
-            failure: Mutex::new(None),
-        });
+        let state = Arc::new(DrainState::default());
         let worker_state = Arc::clone(&state);
         let count_field = count_field.to_string();
         let worker = thread::Builder::new()
@@ -366,6 +399,23 @@ impl SummaryDrain {
 }
 
 impl DrainState {
+    fn record_summary(&self, observation: SummaryObservation) {
+        self.messages.fetch_add(1, AtomicOrdering::Relaxed);
+        self.records
+            .fetch_add(observation.record_count, AtomicOrdering::Relaxed);
+        let mut observations = self.observations.lock();
+        let partition = observations
+            .partitions
+            .entry(observation.partition)
+            .or_default();
+        partition.messages += 1;
+        partition.records += observation.record_count;
+        if observations.recent.len() == RECENT_SUMMARY_LIMIT {
+            observations.recent.pop_front();
+        }
+        observations.recent.push_back(observation);
+    }
+
     fn consume(&self, consumer: &BaseConsumer, count_field: &str) {
         while !self.stop.load(AtomicOrdering::Relaxed) {
             let Some(result) = consumer.poll(SUMMARY_POLL_INTERVAL) else {
@@ -377,18 +427,20 @@ impl DrainState {
                     let payload = message
                         .payload()
                         .ok_or_else(|| "output summary has no payload".to_string())?;
-                    serde_json::from_slice::<serde_json::Value>(payload)
+                    let record_count = serde_json::from_slice::<serde_json::Value>(payload)
                         .map_err(|error| format!("output summary is not JSON: {error}"))?
                         .get(count_field)
                         .and_then(serde_json::Value::as_u64)
                         .ok_or_else(|| {
                             format!("output summary has no unsigned '{count_field}' field")
-                        })
+                        })?;
+                    Ok(SummaryObservation {
+                        partition: message.partition(),
+                        offset: message.offset(),
+                        record_count,
+                    })
                 }) {
-                Ok(records) => {
-                    self.messages.fetch_add(1, AtomicOrdering::Relaxed);
-                    self.records.fetch_add(records, AtomicOrdering::Relaxed);
-                }
+                Ok(observation) => self.record_summary(observation),
                 Err(failure) => {
                     self.failure.lock().get_or_insert(failure);
                     return;
@@ -415,8 +467,35 @@ struct BenchmarkRunner {
     wait_timeout: Duration,
 }
 
+struct LoadGeneration {
+    started: Instant,
+    first_cycle: u64,
+    next_cycle: u64,
+    accepted_messages: u64,
+    elapsed: Duration,
+    peak_backlog_messages: u64,
+}
+
+struct LoadGenerationPlan<'a> {
+    input_partitions: &'a [i32],
+    output_partitions: &'a [i32],
+    baseline: OutputCounts,
+    first_cycle: u64,
+    minimum_cycles: u64,
+    target_duration: Duration,
+}
+
+impl LoadGeneration {
+    fn cycles(&self) -> u64 {
+        self.next_cycle - self.first_cycle
+    }
+}
+
 struct BenchmarkReport {
     target_duration: Duration,
+    warmup_target_duration: Duration,
+    warmup_generation_elapsed: Duration,
+    warmup_parity_stability_elapsed: Duration,
     generation_elapsed: Duration,
     producer_flush_elapsed: Duration,
     drain_elapsed: Duration,
@@ -451,6 +530,18 @@ impl BenchmarkReport {
         println!(
             "target_duration_seconds={:.6}",
             self.target_duration.as_secs_f64()
+        );
+        println!(
+            "warmup_target_seconds={:.6}",
+            self.warmup_target_duration.as_secs_f64()
+        );
+        println!(
+            "warmup_generation_seconds={:.6}",
+            self.warmup_generation_elapsed.as_secs_f64()
+        );
+        println!(
+            "warmup_parity_stability_seconds={:.6}",
+            self.warmup_parity_stability_elapsed.as_secs_f64()
         );
         println!("generation_seconds={generation_seconds:.6}");
         println!(
@@ -502,6 +593,7 @@ impl BenchmarkReport {
 impl BenchmarkRunner {
     fn new(args: CommonArgs, shape: LoadShape) -> Result<Self> {
         ensure!(args.duration_seconds > 0, "duration must be positive");
+        ensure!(args.warmup_seconds > 0, "warm-up duration must be positive");
         ensure!(
             args.minimum_consumers > 0,
             "minimum consumer count must be positive"
@@ -569,227 +661,205 @@ impl BenchmarkRunner {
             "output topic is not empty"
         );
         let meter = self.start_output_meter(&output_partitions)?;
-        self.wait_for_consumer_group()?;
+        let benchmark_result = (|| -> Result<BenchmarkReport> {
+            self.wait_for_consumer_group()?;
 
-        let partition_count =
-            u64::try_from(input_partitions.len()).context("Kafka partition count does not fit")?;
-        let messages_per_cycle = self.shape.messages_per_cycle();
-        let warmup_messages = partition_count
-            .checked_mul(messages_per_cycle)
-            .context("warm-up message count overflowed")?;
-        let warmup_records = self.shape.expected_output_records(partition_count);
-        let warmup_deadline = Instant::now() + self.wait_timeout;
+            let partition_count = u64::try_from(input_partitions.len())
+                .context("Kafka partition count does not fit")?;
+            let messages_per_cycle = self.shape.messages_per_cycle();
+            let minimum_warmup_messages = partition_count
+                .checked_mul(messages_per_cycle)
+                .context("minimum warm-up message count overflowed")?;
+            ensure!(
+                self.args.max_backlog_messages >= minimum_warmup_messages,
+                "maximum backlog must admit one warm-up cycle per partition \
+                 ({minimum_warmup_messages} messages)"
+            );
 
-        // Warm-up produces one complete cycle per partition, so every stateful node observes a
-        // full cycle and every window it fills is closed before measurement starts.
-        let mut cycle = 0_u64;
-        for partition in &input_partitions {
-            self.send_cycle(
+            let warmup_target_duration = Duration::from_secs(self.args.warmup_seconds);
+            let warmup = self.generate_load(
                 &mut payload,
-                cycle,
-                *partition,
-                messages_per_cycle,
-                warmup_deadline,
+                &meter,
+                LoadGenerationPlan {
+                    input_partitions: &input_partitions,
+                    output_partitions: &output_partitions,
+                    baseline: OutputCounts::default(),
+                    first_cycle: 0,
+                    minimum_cycles: partition_count,
+                    target_duration: warmup_target_duration,
+                },
             )?;
-            cycle += 1;
-        }
-        self.producer
-            .flush(self.wait_timeout)
-            .context("failed to flush the warm-up Kafka records")?;
-        self.wait_for_delivery_total(warmup_messages)?;
-        ensure!(
-            self.deliveries.failed() == 0,
-            "warm-up Kafka delivery failed: {}",
-            self.deliveries
-                .first_error()
-                .unwrap_or_else(|| "unknown delivery error".to_string())
-        );
-        ensure!(
-            self.topic_message_count(&self.args.input_topic, &input_partitions)? == warmup_messages,
-            "warm-up input topic count did not equal one cycle per partition"
-        );
-        // Warm-up parity means every warm-up record already left a closed window, so this is both
-        // the baseline the measured phase subtracts and the proof that no window still holds one.
-        let baseline = self.wait_for_output_records(
-            &meter,
-            &output_partitions,
-            warmup_records,
-            "warm-up output",
-        )?;
+            self.producer
+                .flush(self.wait_timeout)
+                .context("failed to flush the warm-up Kafka records")?;
+            self.wait_for_delivery_total(warmup.accepted_messages)?;
+            ensure!(
+                self.deliveries.failed() == 0,
+                "warm-up Kafka delivery failed: {}",
+                self.deliveries
+                    .first_error()
+                    .unwrap_or_else(|| "unknown delivery error".to_string())
+            );
+            self.wait_for_topic_count(
+                &self.args.input_topic,
+                &input_partitions,
+                warmup.accepted_messages,
+                "warm-up input",
+            )?;
 
-        fs::write(&self.args.ready_file, b"ready\n").with_context(|| {
-            format!(
-                "failed to write ready marker {}",
-                self.args.ready_file.display()
-            )
-        })?;
-        self.wait_for_go()?;
-
-        let succeeded_before = self.deliveries.succeeded();
-        let failed_before = self.deliveries.failed();
-        let target_duration = Duration::from_secs(self.args.duration_seconds);
-        let generation_started = Instant::now();
-        let generation_deadline = generation_started + target_duration;
-        let first_measured_cycle = cycle;
-        let mut accepted = 0_u64;
-        let mut peak_backlog_messages = 0_u64;
-        let cycles_per_clock_batch = (SEND_CLOCK_MESSAGES / messages_per_cycle).max(1);
-
-        while Instant::now() < generation_deadline {
-            let observed = match self.output_counts(&meter, &output_partitions, generation_deadline)
-            {
-                Ok(observed) => observed,
-                Err(_)
-                    if generation_deadline.saturating_duration_since(Instant::now())
-                        <= GENERATION_QUERY_DEADLINE_TOLERANCE =>
-                {
-                    thread::sleep(generation_deadline.saturating_duration_since(Instant::now()));
-                    break;
-                }
-                Err(error) => return Err(error),
-            };
-            let backlog_messages = self.backlog_messages(observed.since(baseline)?, accepted)?;
-            peak_backlog_messages = peak_backlog_messages.max(backlog_messages);
-            let available_cycles = self
-                .args
-                .max_backlog_messages
-                .saturating_sub(backlog_messages)
-                / messages_per_cycle;
-            if available_cycles == 0 {
-                let remaining = generation_deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                thread::sleep(OFFSET_POLL_INTERVAL.min(remaining));
-                continue;
-            }
-
-            // A cycle is indivisible: parity is exact only for whole cycles, so the deadline is
-            // observed between cycles and overshoots by at most one.
-            for _ in 0..cycles_per_clock_batch.min(available_cycles) {
-                let partition_index = usize::try_from(cycle % partition_count)
-                    .context("Kafka partition index does not fit in usize")?;
-                let send_deadline = Instant::now() + self.wait_timeout;
-                self.send_cycle(
-                    &mut payload,
-                    cycle,
-                    input_partitions[partition_index],
-                    messages_per_cycle,
-                    send_deadline,
-                )?;
-                cycle += 1;
-                accepted = accepted
-                    .checked_add(messages_per_cycle)
-                    .context("accepted Kafka message count overflowed")?;
-                if Instant::now() >= generation_deadline {
-                    break;
-                }
-            }
-        }
-        let generation_elapsed = generation_started.elapsed();
-        let measured_cycles = cycle - first_measured_cycle;
-        let expected_output_records = self.shape.expected_output_records(measured_cycles);
-
-        let at_generation_end = self
-            .output_counts(
+            let warmup_records = self.shape.expected_output_records(warmup.cycles());
+            let baseline = self.wait_for_output_records(
                 &meter,
                 &output_partitions,
-                Instant::now() + self.wait_timeout,
-            )?
-            .since(baseline)?;
-        let backlog_messages_at_generation_end =
-            self.backlog_messages(at_generation_end, accepted)?;
-        peak_backlog_messages = peak_backlog_messages.max(backlog_messages_at_generation_end);
+                warmup_records,
+                "warm-up output",
+            )?;
+            let warmup_parity_stability_elapsed =
+                self.ensure_output_stable(&meter, &output_partitions, baseline, "warm-up output")?;
 
-        let flush_started = Instant::now();
-        self.producer
-            .flush(self.wait_timeout)
-            .context("failed to flush benchmark Kafka records")?;
-        let producer_flush_elapsed = flush_started.elapsed();
-        self.wait_for_delivery_total(
-            succeeded_before
-                .checked_add(failed_before)
-                .and_then(|baseline| baseline.checked_add(accepted))
-                .context("Kafka delivery total overflowed")?,
-        )?;
+            fs::write(&self.args.ready_file, b"ready\n").with_context(|| {
+                format!(
+                    "failed to write ready marker {}",
+                    self.args.ready_file.display()
+                )
+            })?;
+            self.wait_for_go()?;
 
-        let delivered = self.deliveries.succeeded() - succeeded_before;
-        let failed = self.deliveries.failed() - failed_before;
-        ensure!(
-            failed == 0,
-            "{failed} benchmark Kafka deliveries failed: {}",
-            self.deliveries
-                .first_error()
-                .unwrap_or_else(|| "unknown delivery error".to_string())
-        );
-        ensure!(
-            delivered == accepted,
-            "producer accepted {accepted} records but Kafka acknowledged {delivered}"
-        );
+            let succeeded_before = self.deliveries.succeeded();
+            let failed_before = self.deliveries.failed();
+            let target_duration = Duration::from_secs(self.args.duration_seconds);
+            let measured = self.generate_load(
+                &mut payload,
+                &meter,
+                LoadGenerationPlan {
+                    input_partitions: &input_partitions,
+                    output_partitions: &output_partitions,
+                    baseline,
+                    first_cycle: warmup.next_cycle,
+                    minimum_cycles: 0,
+                    target_duration,
+                },
+            )?;
+            let expected_output_records = self.shape.expected_output_records(measured.cycles());
 
-        let expected_input_total = delivered
-            .checked_add(warmup_messages)
-            .context("expected topic count overflowed")?;
-        self.wait_for_topic_count(
-            &self.args.input_topic,
-            &input_partitions,
-            expected_input_total,
-            "benchmark input",
-        )?;
+            let at_generation_end = self
+                .output_counts(
+                    &meter,
+                    &output_partitions,
+                    Instant::now() + self.wait_timeout,
+                )?
+                .since(baseline)?;
+            let backlog_messages_at_generation_end =
+                self.backlog_messages(at_generation_end, measured.accepted_messages)?;
+            let peak_backlog_messages = measured
+                .peak_backlog_messages
+                .max(backlog_messages_at_generation_end);
 
-        let at_flush = self
-            .output_counts(
+            let flush_started = Instant::now();
+            self.producer
+                .flush(self.wait_timeout)
+                .context("failed to flush benchmark Kafka records")?;
+            let producer_flush_elapsed = flush_started.elapsed();
+            self.wait_for_delivery_total(
+                succeeded_before
+                    .checked_add(failed_before)
+                    .and_then(|baseline| baseline.checked_add(measured.accepted_messages))
+                    .context("Kafka delivery total overflowed")?,
+            )?;
+
+            let delivered = self.deliveries.succeeded() - succeeded_before;
+            let failed = self.deliveries.failed() - failed_before;
+            ensure!(
+                failed == 0,
+                "{failed} benchmark Kafka deliveries failed: {}",
+                self.deliveries
+                    .first_error()
+                    .unwrap_or_else(|| "unknown delivery error".to_string())
+            );
+            ensure!(
+                delivered == measured.accepted_messages,
+                "producer accepted {} records but Kafka acknowledged {delivered}",
+                measured.accepted_messages
+            );
+
+            let expected_input_total = delivered
+                .checked_add(warmup.accepted_messages)
+                .context("expected topic count overflowed")?;
+            self.wait_for_topic_count(
+                &self.args.input_topic,
+                &input_partitions,
+                expected_input_total,
+                "benchmark input",
+            )?;
+
+            let at_flush = self
+                .output_counts(
+                    &meter,
+                    &output_partitions,
+                    Instant::now() + self.wait_timeout,
+                )?
+                .since(baseline)?;
+            ensure!(
+                at_flush.records <= expected_output_records,
+                "output topic exceeded the expected record count before the drain wait: {} > {}",
+                at_flush.records,
+                expected_output_records
+            );
+            let backlog_messages_at_flush =
+                self.backlog_messages(at_flush, measured.accepted_messages)?;
+            let drain_started = Instant::now();
+            let drained = self.wait_for_output_records(
                 &meter,
                 &output_partitions,
-                Instant::now() + self.wait_timeout,
-            )?
-            .since(baseline)?;
-        ensure!(
-            at_flush.records <= expected_output_records,
-            "output topic exceeded the expected record count before the drain wait: {} > {}",
-            at_flush.records,
-            expected_output_records
-        );
-        let backlog_messages_at_flush = self.backlog_messages(at_flush, accepted)?;
-        let drain_started = Instant::now();
-        let drained = self.wait_for_output_records(
-            &meter,
-            &output_partitions,
-            expected_output_records
-                .checked_add(baseline.records)
-                .context("expected output record count overflowed")?,
-            "benchmark output",
-        )?;
-        let drain_elapsed = drain_started.elapsed();
-        let end_to_end_elapsed = generation_started.elapsed();
-        let parity_stability_elapsed = self.ensure_output_records_stable(
-            &meter,
-            &output_partitions,
-            expected_output_records + baseline.records,
-        )?;
-        let measured = drained.since(baseline)?;
+                expected_output_records
+                    .checked_add(baseline.records)
+                    .context("expected output record count overflowed")?,
+                "benchmark output",
+            )?;
+            let drain_elapsed = drain_started.elapsed();
+            let end_to_end_elapsed = measured.started.elapsed();
+            let parity_stability_elapsed =
+                self.ensure_output_stable(&meter, &output_partitions, drained, "benchmark output")?;
+            let output = drained.since(baseline)?;
 
-        Ok(BenchmarkReport {
-            target_duration,
-            generation_elapsed,
-            producer_flush_elapsed,
-            drain_elapsed,
-            end_to_end_elapsed,
-            parity_stability_elapsed,
-            wire_bytes_per_message,
-            partitions: input_partitions.len(),
-            warmup_messages,
-            max_backlog_messages: self.args.max_backlog_messages,
-            peak_backlog_messages,
-            input_messages: delivered,
-            expected_output_records,
-            output_messages: measured.messages,
-            output_records: measured.records,
-            output_records_at_generation_end: at_generation_end.records,
-            output_records_at_flush: at_flush.records,
-            backlog_messages_at_generation_end,
-            backlog_messages_at_flush,
-        })
+            Ok(BenchmarkReport {
+                target_duration,
+                warmup_target_duration,
+                warmup_generation_elapsed: warmup.elapsed,
+                warmup_parity_stability_elapsed,
+                generation_elapsed: measured.elapsed,
+                producer_flush_elapsed,
+                drain_elapsed,
+                end_to_end_elapsed,
+                parity_stability_elapsed,
+                wire_bytes_per_message,
+                partitions: input_partitions.len(),
+                warmup_messages: warmup.accepted_messages,
+                max_backlog_messages: self.args.max_backlog_messages,
+                peak_backlog_messages,
+                input_messages: delivered,
+                expected_output_records,
+                output_messages: output.messages,
+                output_records: output.records,
+                output_records_at_generation_end: at_generation_end.records,
+                output_records_at_flush: at_flush.records,
+                backlog_messages_at_generation_end,
+                backlog_messages_at_flush,
+            })
+        })();
+        let diagnostics_result = self.write_output_diagnostics(
+            &meter,
+            &output_partitions,
+            &self.args.output_diagnostics_file,
+        );
+        match (benchmark_result, diagnostics_result) {
+            (Ok(report), Ok(())) => Ok(report),
+            (Ok(_), Err(error)) => Err(error.context("failed to retain output diagnostics")),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(diagnostics_error)) => Err(error.context(format!(
+                "output diagnostics also failed: {diagnostics_error:#}"
+            ))),
+        }
     }
 
     fn start_output_meter(&self, partitions: &[i32]) -> Result<OutputMeter> {
@@ -822,6 +892,172 @@ impl BenchmarkRunner {
             }
             OutputMeter::Summaries(drain) => drain.counts(),
         }
+    }
+
+    fn generate_load(
+        &self,
+        payload: &mut PayloadWriter,
+        meter: &OutputMeter,
+        plan: LoadGenerationPlan<'_>,
+    ) -> Result<LoadGeneration> {
+        let partition_count = u64::try_from(plan.input_partitions.len())
+            .context("Kafka partition count does not fit")?;
+        let messages_per_cycle = self.shape.messages_per_cycle();
+        let cycles_per_clock_batch = (SEND_CLOCK_MESSAGES / messages_per_cycle).max(1);
+        let started = Instant::now();
+        let generation_deadline = started + plan.target_duration;
+        let mut cycle = plan.first_cycle;
+        let mut accepted_messages = 0_u64;
+        let mut peak_backlog_messages = 0_u64;
+
+        // Every warm-up sends at least one complete cycle to every partition before relying on
+        // the target duration. Subsequent cycles use the same bounded-pressure loop as the
+        // measured phase.
+        for _ in 0..plan.minimum_cycles {
+            let partition_index = usize::try_from(cycle % partition_count)
+                .context("Kafka partition index does not fit in usize")?;
+            self.send_cycle(
+                payload,
+                cycle,
+                plan.input_partitions[partition_index],
+                messages_per_cycle,
+                Instant::now() + self.wait_timeout,
+            )?;
+            cycle += 1;
+            accepted_messages = accepted_messages
+                .checked_add(messages_per_cycle)
+                .context("accepted Kafka message count overflowed")?;
+        }
+
+        while Instant::now() < generation_deadline {
+            let observed =
+                match self.output_counts(meter, plan.output_partitions, generation_deadline) {
+                    Ok(observed) => observed,
+                    Err(_)
+                        if generation_deadline.saturating_duration_since(Instant::now())
+                            <= GENERATION_QUERY_DEADLINE_TOLERANCE =>
+                    {
+                        thread::sleep(
+                            generation_deadline.saturating_duration_since(Instant::now()),
+                        );
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                };
+            let backlog_messages =
+                self.backlog_messages(observed.since(plan.baseline)?, accepted_messages)?;
+            peak_backlog_messages = peak_backlog_messages.max(backlog_messages);
+            let available_cycles = self
+                .args
+                .max_backlog_messages
+                .saturating_sub(backlog_messages)
+                / messages_per_cycle;
+            if available_cycles == 0 {
+                let remaining = generation_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                thread::sleep(OFFSET_POLL_INTERVAL.min(remaining));
+                continue;
+            }
+
+            // A cycle is indivisible: parity is exact only for whole cycles, so the deadline is
+            // observed between cycles and overshoots by at most one.
+            for _ in 0..cycles_per_clock_batch.min(available_cycles) {
+                let partition_index = usize::try_from(cycle % partition_count)
+                    .context("Kafka partition index does not fit in usize")?;
+                self.send_cycle(
+                    payload,
+                    cycle,
+                    plan.input_partitions[partition_index],
+                    messages_per_cycle,
+                    Instant::now() + self.wait_timeout,
+                )?;
+                cycle += 1;
+                accepted_messages = accepted_messages
+                    .checked_add(messages_per_cycle)
+                    .context("accepted Kafka message count overflowed")?;
+                if Instant::now() >= generation_deadline {
+                    break;
+                }
+            }
+        }
+
+        Ok(LoadGeneration {
+            started,
+            first_cycle: plan.first_cycle,
+            next_cycle: cycle,
+            accepted_messages,
+            elapsed: started.elapsed(),
+            peak_backlog_messages,
+        })
+    }
+
+    fn write_output_diagnostics(
+        &self,
+        meter: &OutputMeter,
+        partitions: &[i32],
+        path: &Path,
+    ) -> Result<()> {
+        let diagnostics = match meter {
+            OutputMeter::Watermarks => {
+                let partition_counts = self.topic_partition_message_counts_until(
+                    &self.args.output_topic,
+                    partitions,
+                    Instant::now() + KAFKA_QUERY_TIMEOUT,
+                )?;
+                let mut total = OutputCounts::default();
+                let partitions = partition_counts
+                    .into_iter()
+                    .map(|(partition, messages)| {
+                        total.messages += messages;
+                        total.records += messages;
+                        OutputPartitionDiagnostics {
+                            partition,
+                            messages,
+                            records: messages,
+                        }
+                    })
+                    .collect();
+                OutputDiagnostics {
+                    topic: self.args.output_topic.clone(),
+                    total,
+                    partitions,
+                    recent_summaries: Vec::new(),
+                    consumer_failure: None,
+                }
+            }
+            OutputMeter::Summaries(drain) => {
+                let observations = drain.state.observations.lock().clone();
+                let mut partition_counts = observations.partitions;
+                let mut total = OutputCounts::default();
+                let partitions = partitions
+                    .iter()
+                    .map(|partition| {
+                        let counts = partition_counts.remove(partition).unwrap_or_default();
+                        total.messages += counts.messages;
+                        total.records += counts.records;
+                        OutputPartitionDiagnostics {
+                            partition: *partition,
+                            messages: counts.messages,
+                            records: counts.records,
+                        }
+                    })
+                    .collect();
+                OutputDiagnostics {
+                    topic: self.args.output_topic.clone(),
+                    total,
+                    partitions,
+                    recent_summaries: observations.recent.into_iter().collect(),
+                    consumer_failure: drain.state.failure.lock().clone(),
+                }
+            }
+        };
+        let mut encoded = serde_json::to_vec_pretty(&diagnostics)
+            .context("failed to encode output diagnostics")?;
+        encoded.push(b'\n');
+        fs::write(path, encoded)
+            .with_context(|| format!("failed to write output diagnostics {}", path.display()))
     }
 
     /// Input messages still owed output, derived from the records the measured path has settled.
@@ -990,11 +1226,12 @@ impl BenchmarkRunner {
         }
     }
 
-    fn ensure_output_records_stable(
+    fn ensure_output_stable(
         &self,
         meter: &OutputMeter,
         partitions: &[i32],
-        expected: u64,
+        expected: OutputCounts,
+        label: &str,
     ) -> Result<Duration> {
         let started = Instant::now();
         let deadline = started + PARITY_STABILITY_INTERVAL;
@@ -1003,10 +1240,13 @@ impl BenchmarkRunner {
             thread::sleep(OFFSET_POLL_INTERVAL.min(remaining));
             let observed = self.output_counts(meter, partitions, deadline + KAFKA_QUERY_TIMEOUT)?;
             ensure!(
-                observed.records == expected,
-                "output record count changed during the parity stability interval: {} != \
-                 {expected}",
-                observed.records
+                observed == expected,
+                "{label} changed during the parity stability interval: {} messages / {} records \
+                 != {} messages / {} records",
+                observed.messages,
+                observed.records,
+                expected.messages,
+                expected.records
             );
         }
         Ok(started.elapsed())
@@ -1079,6 +1319,21 @@ impl BenchmarkRunner {
         partitions: &[i32],
         deadline: Instant,
     ) -> Result<u64> {
+        self.topic_partition_message_counts_until(topic, partitions, deadline)?
+            .into_iter()
+            .try_fold(0_u64, |total, (_, messages)| {
+                total
+                    .checked_add(messages)
+                    .context("Kafka topic message count overflowed")
+            })
+    }
+
+    fn topic_partition_message_counts_until(
+        &self,
+        topic: &str,
+        partitions: &[i32],
+        deadline: Instant,
+    ) -> Result<Vec<(i32, u64)>> {
         let request_timeout = || -> Result<Duration> {
             let remaining = deadline.saturating_duration_since(Instant::now());
             ensure!(
@@ -1108,7 +1363,7 @@ impl BenchmarkRunner {
                 .collect::<Vec<_>>()
         });
 
-        let mut total = 0_u64;
+        let mut counts = Vec::with_capacity(watermark_results.len());
         for (partition, query) in watermark_results {
             let (low, high) = query
                 .map_err(|_| {
@@ -1133,11 +1388,9 @@ impl BenchmarkRunner {
                      {high}"
                 )
             })?;
-            total = total
-                .checked_add(high)
-                .context("Kafka topic message count overflowed")?;
+            counts.push((partition, high));
         }
-        Ok(total)
+        Ok(counts)
     }
 }
 
@@ -1147,4 +1400,42 @@ fn main() -> Result<()> {
     let report = runner.run()?;
     report.print();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_diagnostics_keep_partition_totals_and_the_most_recent_counts() {
+        let state = DrainState::default();
+        for offset in 0_i64..40 {
+            state.record_summary(SummaryObservation {
+                partition: i32::try_from(offset % 2).expect("partition should fit"),
+                offset,
+                record_count: u64::try_from(offset + 1).expect("record count should fit"),
+            });
+        }
+
+        assert_eq!(state.messages.load(AtomicOrdering::Relaxed), 40);
+        assert_eq!(state.records.load(AtomicOrdering::Relaxed), 820);
+        let observations = state.observations.lock();
+        assert_eq!(
+            observations.partitions[&0],
+            OutputCounts {
+                messages: 20,
+                records: 400,
+            }
+        );
+        assert_eq!(
+            observations.partitions[&1],
+            OutputCounts {
+                messages: 20,
+                records: 420,
+            }
+        );
+        assert_eq!(observations.recent.len(), RECENT_SUMMARY_LIMIT);
+        assert_eq!(observations.recent.front().map(|item| item.offset), Some(8));
+        assert_eq!(observations.recent.back().map(|item| item.offset), Some(39));
+    }
 }
