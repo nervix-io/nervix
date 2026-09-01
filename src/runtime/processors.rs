@@ -1198,7 +1198,7 @@ pub(super) struct CorrelatorBranchState {
 pub(super) struct CorrelatorPendingMessage {
     pub(super) received_at: Timestamp,
     pub(super) message: RelayMessage,
-    pub(super) materialized_state: HashMap<String, RuntimeValue>,
+    pub(super) materialized_state: Arc<HashMap<String, RuntimeValue>>,
 }
 
 #[derive(Debug, Clone, Copy)]
