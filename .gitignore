@@ -1,6 +1,6 @@
 /target
 /lcov.info
-mutants.out
+mutants.out*
 .nervix-db
 .nervix-deps
 .nervix_client_history
