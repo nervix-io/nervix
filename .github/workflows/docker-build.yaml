@@ -289,12 +289,12 @@ jobs:
             let body;
             let missingSuccessfulComparison = false;
 
-            if (
-              process.env.BENCHMARK_RESULT === 'success' &&
-              fs.existsSync(comparisonPath)
-            ) {
+            if (fs.existsSync(comparisonPath)) {
               const comparison = fs.readFileSync(comparisonPath, 'utf8').trim();
-              body = `${marker}\n${comparison}\n\n${runLink} · commit \`${context.sha}\``;
+              const resultNote = process.env.BENCHMARK_RESULT === 'success'
+                ? ''
+                : `\n\n> [!WARNING]\n> The benchmark job finished with status \`${process.env.BENCHMARK_RESULT}\`; the report retains every completed measurement and lists each failed catalog entry.`;
+              body = `${marker}\n${comparison}${resultNote}\n\n${runLink} · commit \`${context.sha}\``;
             } else {
               let reason;
               if (process.env.BUILD_RESULT !== 'success') {

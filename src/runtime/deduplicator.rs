@@ -6,8 +6,7 @@ use std::{
     time::Duration,
 };
 
-use ahash::RandomState;
-use indexmap::IndexMap;
+use nervix_expiry_map::ExpiryMap;
 use nervix_models::{Expression, Identifier, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
 use ordered_float::OrderedFloat;
@@ -38,7 +37,7 @@ pub(super) struct CompiledDeduplicatorKeyProgram {
 #[derive(Debug)]
 pub(super) struct ReplicatedDeduplicatorState {
     pub(super) placement: RuntimeStatePlacement,
-    recent_keys: parking_lot::Mutex<IndexMap<DeduplicatorKey, Timestamp, RandomState>>,
+    recent_keys: parking_lot::Mutex<ExpiryMap<DeduplicatorKey, Timestamp>>,
     pub(super) current_lsm: AtomicU64,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
@@ -144,16 +143,16 @@ pub(super) fn compile_deduplicator_key_program(
 
 impl ReplicatedDeduplicatorState {
     fn prune_expired_recent_keys(
-        recent_keys: &mut IndexMap<DeduplicatorKey, Timestamp, RandomState>,
+        recent_keys: &mut ExpiryMap<DeduplicatorKey, Timestamp>,
         now: Timestamp,
         max_time: Duration,
     ) {
         while recent_keys
-            .get_index(0)
+            .oldest()
             .map(|(_, seen_at)| checked_add_duration_to_timestamp(*seen_at, max_time) <= now)
             .unwrap_or(false)
         {
-            recent_keys.shift_remove_index(0);
+            recent_keys.remove_oldest();
         }
     }
 
@@ -161,7 +160,7 @@ impl ReplicatedDeduplicatorState {
         placement: RuntimeStatePlacement,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
-        let mut recent_keys = IndexMap::with_hasher(RandomState::default());
+        let mut recent_keys = ExpiryMap::new();
         let mut current_lsm = 0;
         let mut last_persisted_lsm = 0;
         if let Some(initial) = initial {
@@ -186,10 +185,9 @@ impl ReplicatedDeduplicatorState {
     ) -> bool {
         let mut recent_keys = self.recent_keys.lock();
         Self::prune_expired_recent_keys(&mut recent_keys, seen_at, max_time);
-        if recent_keys.contains_key(&key) {
+        if !recent_keys.insert(key, seen_at) {
             return false;
         }
-        recent_keys.insert(key, seen_at);
         self.current_lsm.fetch_add(1, Ordering::SeqCst);
         self.dirty.store(true, Ordering::SeqCst);
         true
@@ -201,7 +199,7 @@ impl ReplicatedDeduplicatorState {
         }
         let mut recent_keys = self.recent_keys.lock();
         for key in keys {
-            recent_keys.shift_remove(key);
+            recent_keys.remove(key);
         }
         self.current_lsm.fetch_add(1, Ordering::SeqCst);
         self.dirty.store(true, Ordering::SeqCst);
@@ -220,7 +218,7 @@ impl ReplicatedDeduplicatorState {
 }
 
 fn encode_deduplicator_snapshot(
-    recent_keys: &IndexMap<DeduplicatorKey, Timestamp, RandomState>,
+    recent_keys: &ExpiryMap<DeduplicatorKey, Timestamp>,
 ) -> Result<Vec<u8>, RuntimePersistenceError> {
     rkyv::to_bytes::<rkyv::rancor::Error>(&DeduplicatorSnapshot {
         entries: recent_keys
@@ -237,25 +235,31 @@ fn encode_deduplicator_snapshot(
 
 fn decode_deduplicator_snapshot(
     payload: &[u8],
-) -> Result<IndexMap<DeduplicatorKey, Timestamp, RandomState>, RuntimePersistenceError> {
+) -> Result<ExpiryMap<DeduplicatorKey, Timestamp>, RuntimePersistenceError> {
     let snapshot = rkyv::from_bytes::<DeduplicatorSnapshot, rkyv::rancor::Error>(payload)
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
-    let mut recent_keys = IndexMap::with_hasher(RandomState::default());
+    let mut recent_keys = ExpiryMap::new();
     for entry in snapshot.entries {
-        recent_keys.insert(entry.key.into(), entry.seen_at);
+        if !recent_keys.insert(entry.key.into(), entry.seen_at) {
+            return Err(RuntimePersistenceError::DecodeState(
+                "deduplicator snapshot contains a duplicate key".to_string(),
+            ));
+        }
     }
     Ok(recent_keys)
 }
 
 #[cfg(test)]
 mod tests {
-    use ahash::RandomState;
-    use indexmap::IndexMap;
+    use std::time::Duration;
+
+    use nervix_expiry_map::ExpiryMap;
     use nervix_models::Timestamp;
     use ordered_float::OrderedFloat;
 
     use super::{
-        DeduplicatorKey, ReorderKeyPart, decode_deduplicator_snapshot, encode_deduplicator_snapshot,
+        DeduplicatorKey, ReorderKeyPart, ReplicatedDeduplicatorState, decode_deduplicator_snapshot,
+        encode_deduplicator_snapshot,
     };
 
     #[test]
@@ -272,7 +276,7 @@ mod tests {
         ]);
         assert_ne!(numeric, text);
 
-        let mut keys = IndexMap::with_hasher(RandomState::default());
+        let mut keys = ExpiryMap::new();
         keys.insert(numeric.clone(), Timestamp::from_unix_nanos(10));
         keys.insert(text.clone(), Timestamp::from_unix_nanos(20));
 
@@ -281,5 +285,30 @@ mod tests {
 
         assert_eq!(decoded.get(&numeric), Some(&Timestamp::from_unix_nanos(10)));
         assert_eq!(decoded.get(&text), Some(&Timestamp::from_unix_nanos(20)));
+    }
+
+    #[test]
+    fn pruning_removes_the_expired_prefix_without_disturbing_newer_keys() {
+        let first = DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("first".to_string())]);
+        let second = DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("second".to_string())]);
+        let third = DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("third".to_string())]);
+        let mut keys = ExpiryMap::new();
+        assert!(keys.insert(first.clone(), Timestamp::from_unix_nanos(10)));
+        assert!(keys.insert(second.clone(), Timestamp::from_unix_nanos(20)));
+        assert!(keys.insert(third.clone(), Timestamp::from_unix_nanos(30)));
+
+        ReplicatedDeduplicatorState::prune_expired_recent_keys(
+            &mut keys,
+            Timestamp::from_unix_nanos(25),
+            Duration::from_nanos(10),
+        );
+
+        assert!(!keys.contains_key(&first));
+        assert!(keys.contains_key(&second));
+        assert!(keys.contains_key(&third));
+        assert_eq!(
+            keys.oldest(),
+            Some((&second, &Timestamp::from_unix_nanos(20)))
+        );
     }
 }

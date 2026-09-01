@@ -269,6 +269,12 @@ jobs:
         run: |
             just test-coverage
 
+      - name: Expiry map Miri
+        run: just test-expiry-map-miri
+
+      - name: Expiry map mutation tests
+        run: just test-expiry-map-mutants
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
