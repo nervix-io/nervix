@@ -1,6 +1,7 @@
 use std::{
     fs, io,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -9,8 +10,9 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use nervix_benchmark::{
-    BenchmarkCatalog, BenchmarkComparison, BenchmarkDependency, ContainerImplementation,
-    Implementation, KafkaRenderInputs, LoadShape, LoadedBenchmark, RunSettings, provision_topics,
+    AbArm, AbSummary, BenchmarkCatalog, BenchmarkComparison, BenchmarkDependency,
+    ContainerImplementation, Implementation, KafkaRenderInputs, LoadShape, LoadedBenchmark,
+    RunSettings, provision_topics,
 };
 use nervix_client_core::{Client, ConnectOptions};
 use nervix_nspl::client_statement::parse_client_statement_sources;
@@ -54,6 +56,9 @@ enum BenchmarkCommand {
     Run(Box<RunArgs>),
     /// Execute every declared implementation of every benchmark in catalog order.
     RunAll(Box<RunOptions>),
+    /// Execute the local nervix implementation of one benchmark for two server binaries,
+    /// interleaved, and summarize per-arm statistics.
+    RunAb(Box<RunAbArgs>),
 }
 
 #[derive(Debug, clap::Args)]
@@ -73,6 +78,12 @@ struct RunOptions {
     nervix_image: Option<String>,
     #[arg(long)]
     server_binary: Option<PathBuf>,
+    #[command(flatten)]
+    workload: WorkloadOptions,
+}
+
+#[derive(Clone, Debug, clap::Args)]
+struct WorkloadOptions {
     #[arg(long)]
     load_driver: Option<PathBuf>,
     #[arg(long)]
@@ -89,6 +100,39 @@ struct RunOptions {
     wait_timeout_seconds: Option<u64>,
     #[arg(long = "parameter", value_name = "NAME=VALUE")]
     parameter_overrides: Vec<String>,
+}
+
+impl WorkloadOptions {
+    fn resolve_artifacts_root(&self, repository_root: &Path) -> PathBuf {
+        self.artifacts_root
+            .as_deref()
+            .map(|path| absolute_or_repository_path(repository_root, path))
+            .unwrap_or_else(|| repository_root.join(DEFAULT_ARTIFACTS_ROOT))
+    }
+}
+
+const DEFAULT_AB_RUNS: NonZeroUsize = NonZeroUsize::new(3).unwrap();
+
+#[derive(Debug, clap::Args)]
+struct RunAbArgs {
+    benchmark: String,
+    /// Server binary measured as the baseline arm.
+    #[arg(long)]
+    baseline_binary: PathBuf,
+    /// Server binary measured as the candidate arm.
+    #[arg(long)]
+    candidate_binary: PathBuf,
+    /// Interleaved measurement runs per arm.
+    #[arg(long, default_value_t = DEFAULT_AB_RUNS)]
+    runs: NonZeroUsize,
+    /// Display label for the baseline arm; defaults to its binary path.
+    #[arg(long)]
+    baseline_label: Option<String>,
+    /// Display label for the candidate arm; defaults to its binary path.
+    #[arg(long)]
+    candidate_label: Option<String>,
+    #[command(flatten)]
+    workload: WorkloadOptions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -155,6 +199,9 @@ async fn run() -> Result<()> {
         BenchmarkCommand::RunAll(options) => {
             run_all_benchmarks(&repository_root, &catalog, *options).await
         }
+        BenchmarkCommand::RunAb(ab_args) => {
+            run_ab_benchmark(&repository_root, &catalog, *ab_args).await
+        }
     }
 }
 
@@ -184,11 +231,7 @@ async fn run_all_benchmarks(
 ) -> Result<()> {
     let benchmarks = catalog.discover()?;
     ensure!(!benchmarks.is_empty(), "benchmark catalog is empty");
-    let artifacts_root = options
-        .artifacts_root
-        .as_deref()
-        .map(|path| absolute_or_repository_path(repository_root, path))
-        .unwrap_or_else(|| repository_root.join(DEFAULT_ARTIFACTS_ROOT));
+    let artifacts_root = options.workload.resolve_artifacts_root(repository_root);
     let mut run_directories = Vec::new();
     for benchmark in benchmarks {
         for implementation in benchmark.definition().implementations.keys() {
@@ -278,6 +321,122 @@ async fn run_benchmark(
     fs::write(resolved.run_directory.join("status.txt"), status)?;
     outcome?;
     Ok(resolved.run_directory)
+}
+
+struct AbRunArm {
+    name: &'static str,
+    label: String,
+    server_binary: PathBuf,
+    artifacts_root: PathBuf,
+    run_directories: Vec<PathBuf>,
+}
+
+impl AbRunArm {
+    fn new(
+        repository_root: &Path,
+        ab_root: &Path,
+        name: &'static str,
+        binary: &Path,
+        label: Option<String>,
+    ) -> Result<Self> {
+        let server_binary = absolute_or_repository_path(repository_root, binary);
+        ensure!(
+            server_binary.is_file(),
+            "{name} server binary does not exist at {}",
+            server_binary.display()
+        );
+        Ok(Self {
+            name,
+            label: label.unwrap_or_else(|| server_binary.display().to_string()),
+            server_binary,
+            artifacts_root: ab_root.join(name),
+            run_directories: Vec::new(),
+        })
+    }
+
+    fn into_ab_arm(self) -> AbArm {
+        AbArm {
+            label: self.label,
+            server_binary: self.server_binary,
+            run_directories: self.run_directories,
+        }
+    }
+}
+
+async fn run_ab_benchmark(
+    repository_root: &Path,
+    catalog: &BenchmarkCatalog,
+    args: RunAbArgs,
+) -> Result<()> {
+    let ab_root = args
+        .workload
+        .resolve_artifacts_root(repository_root)
+        .join("ab");
+    let mut arms = [
+        AbRunArm::new(
+            repository_root,
+            &ab_root,
+            "baseline",
+            &args.baseline_binary,
+            args.baseline_label,
+        )?,
+        AbRunArm::new(
+            repository_root,
+            &ab_root,
+            "candidate",
+            &args.candidate_binary,
+            args.candidate_label,
+        )?,
+    ];
+
+    let runs = args.runs.get();
+    for index in 0..runs {
+        for arm in &mut arms {
+            tokio::task::consume_budget().await;
+            println!(
+                "A/B run {}/{runs} for the {} arm ({})",
+                index + 1,
+                arm.name,
+                arm.label
+            );
+            let options = RunOptions {
+                nervix_mode: NervixMode::Local,
+                nervix_image: None,
+                server_binary: Some(arm.server_binary.clone()),
+                workload: WorkloadOptions {
+                    artifacts_root: Some(arm.artifacts_root.clone()),
+                    ..args.workload.clone()
+                },
+            };
+            let run_directory = run_benchmark(
+                repository_root,
+                catalog,
+                RunArgs {
+                    benchmark: args.benchmark.clone(),
+                    implementation: "nervix".to_string(),
+                    options,
+                },
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "A/B {} arm ({}) failed on run {}/{runs}",
+                    arm.name,
+                    arm.label,
+                    index + 1
+                )
+            })?;
+            arm.run_directories.push(run_directory);
+        }
+    }
+
+    let [baseline, candidate] = arms;
+    let summary = AbSummary::from_arms(baseline.into_ab_arm(), candidate.into_ab_arm())?;
+    println!("{}", summary.render_markdown());
+    let summary_path = ab_root.join("ab-comparison.md");
+    summary.write_markdown(&summary_path)?;
+    println!("ab-comparison={}", summary_path.display());
+    Ok(())
 }
 
 async fn execute_run(
@@ -407,23 +566,27 @@ impl ResolvedRun {
     fn new(repository_root: &Path, benchmark: &LoadedBenchmark, args: &RunArgs) -> Result<Self> {
         let settings = RunSettings::resolve(
             benchmark.definition(),
-            &args.options.parameter_overrides,
-            args.options.duration_seconds,
+            &args.options.workload.parameter_overrides,
+            args.options.workload.duration_seconds,
         )?;
         let partitions = args
             .options
+            .workload
             .partitions
             .unwrap_or(benchmark.definition().load.partitions);
         let value_bytes = args
             .options
+            .workload
             .value_bytes
             .unwrap_or(benchmark.definition().load.value_bytes);
         let max_backlog_messages = args
             .options
+            .workload
             .max_backlog_messages
             .unwrap_or(benchmark.definition().load.max_backlog_messages);
         let wait_timeout_seconds = args
             .options
+            .workload
             .wait_timeout_seconds
             .unwrap_or(benchmark.definition().load.wait_timeout_seconds);
         ensure!(partitions > 0, "partition count must be positive");
@@ -452,10 +615,8 @@ impl ResolvedRun {
         );
         let artifacts_root = args
             .options
-            .artifacts_root
-            .as_deref()
-            .map(|path| absolute_or_repository_path(repository_root, path))
-            .unwrap_or_else(|| repository_root.join(DEFAULT_ARTIFACTS_ROOT));
+            .workload
+            .resolve_artifacts_root(repository_root);
         let run_directory = artifacts_root
             .join(benchmark.slug())
             .join(&args.implementation)
@@ -846,7 +1007,7 @@ async fn run_load_driver(
     bootstrap_servers: &str,
     subject: &mut Subject,
 ) -> Result<()> {
-    let load_driver = match &args.options.load_driver {
+    let load_driver = match &args.options.workload.load_driver {
         Some(path) => absolute_or_repository_path(repository_root, path),
         None => sibling_binary("nervix-benchmark-load")?,
     };

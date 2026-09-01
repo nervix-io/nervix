@@ -148,6 +148,47 @@ hands the decision back to the 50 ms interval and the batches grow:
 | ingestor → deduplicator | 786 rows | 1,741 rows |
 | deduplicator → window | 576 rows | 699 rows |
 
+## Comparing two local builds (A/B)
+
+Performance claims are established locally on identical hardware. CI benchmark comments compare
+Nervix and Vector within one run on whatever worker the job landed on, so they are a smoke signal
+only, never a perf claim. Before merging a performance change, A/B it on an otherwise idle
+machine:
+
+```bash
+just benchmark-ab main       # 3 interleaved runs per arm of kafka-filter-map
+just benchmark-ab HEAD~1 5   # 5 runs per arm against the previous commit
+```
+
+`benchmark-ab <baseline-ref> [runs] [benchmark]` builds `nervix-server` twice — once from a clean
+temporary worktree at `<baseline-ref>` and once from the current working tree — and caches the
+binaries under `target/ab/`:
+
+- `target/ab/<commit>/nervix-server` — the baseline binary, keyed by the resolved commit hash so a
+  moving ref such as `main` re-keys correctly and a re-run skips the whole baseline build;
+- `target/ab/candidate/nervix-server` — a snapshot of the current tree's binary, so a concurrent
+  `cargo build` cannot swap it mid-comparison;
+- `target/ab/build/` and `target/ab/worktree/` — the baseline build's dedicated target directory
+  and temporary worktree. The worktree runs its own `just build-web-console`, so the baseline ref
+  must already contain that recipe.
+
+The harness `run-ab` subcommand then alternates the arms (baseline, candidate, baseline, …) so
+slow machine drift cancels out instead of accumulating in one arm; the candidate always runs
+second within a pair, which the per-run table keeps visible. Extra arguments are forwarded to
+`run-ab`, so `--duration-seconds`, `--partitions`, and `--parameter` overrides work here too. With
+the default 30-second auto duration, a 3+3 comparison takes several minutes after the builds.
+
+Each run keeps the standard artifact layout under `target/benchmarks/ab/<arm>/`, and the summary —
+per-arm mean/min/max of `end_to_end_messages_per_second`, the candidate-vs-baseline mean delta,
+and a per-run table — is printed and written to `target/benchmarks/ab/ab-comparison.md`. A run
+whose `peak_backlog_messages` reaches the configured cap is flagged; treat such rates as
+bounded-pressure results, not maximum throughput.
+
+Both arms are configured and measured by the current tree's harness and load driver, and
+`run.toml`'s `git_revision` records that harness provenance for both arms; arm identity lives in
+the summary labels and binary paths. Do not run concurrent builds or a second `benchmark-ab` from
+the same checkout while a comparison is in flight.
+
 ## Adding a workload
 
 Create one directory under `benches/benchmarks/<slug>/` containing `benchmark.toml` and one Upon
