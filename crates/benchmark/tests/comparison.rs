@@ -1,6 +1,8 @@
 use std::{fs, path::Path};
 
-use nervix_benchmark::{BenchmarkComparison, ComparisonError};
+use nervix_benchmark::{
+    BenchmarkComparison, BenchmarkRunFailure, BenchmarkSuiteReport, ComparisonError,
+};
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -108,6 +110,34 @@ end_to_end_payload_mib_per_second={:.3}
             fixture.image, fixture.implementation
         ),
     );
+    if fixture.implementation == "nervix" {
+        write(
+            &directory.join("nervix-metrics.toml"),
+            r#"[[batch_targets]]
+domain = "benchmark_run"
+target_kind = "INGESTOR"
+target = "kafka_in_0"
+physical_node_id = "node-1"
+direction = "sent"
+relay = "benchmark_ingested_0"
+messages_total = 36000
+batches_total = 36
+p50 = 500.0
+p90 = 1000.0
+p99 = 2048.0
+
+[[relay_buffers]]
+domain = "benchmark_run"
+relay = "benchmark_ingested_0"
+physical_node_id = "node-1"
+direction = "concrete"
+observations = 100
+p50 = 1.0
+p90 = 8.0
+p99 = 32.0
+"#,
+        );
+    }
     directory
 }
 
@@ -162,9 +192,139 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
          rec | 512 (12.5%) | −16.7% |"
     ));
     assert!(markdown.contains("Nervix reached the configured backlog cap"));
+    assert!(markdown.contains("<summary>Nervix runtime observations</summary>"));
+    assert!(markdown.contains(
+        "| INGESTOR `kafka_in_0` | sent | `benchmark_ingested_0` | 1,000.00 | ≤500 | ≤1,000 | \
+         ≤2,048 | 36,000 / 36 |"
+    ));
+    assert!(markdown.contains("| `benchmark_ingested_0` | concrete | ≤1 | ≤8 | ≤32 | 100 |"));
+    assert!(markdown.contains(
+        "Means use `messages_total / batches_total`; percentiles are upper bounds from the \
+         scraped Prometheus histogram buckets."
+    ));
     assert!(markdown.contains("`ghcr.io/nervix-io/nervix:pr-109`"));
     assert!(markdown.contains("`timberio/vector:0.57.0-debian`"));
     assert_eq!(markdown, comparison.render_markdown());
+}
+
+#[test]
+fn reports_every_benchmark_group_in_one_comparison() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let filter_map = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
+            generation_rate: 1_250.0,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            drain_seconds: 4.5,
+            peak_backlog: 4_096,
+        },
+    );
+    let second_root = artifacts.path().join("second-benchmark");
+    let dedup_window = write_run(
+        &second_root,
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
+            generation_rate: 1_250.0,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            drain_seconds: 4.5,
+            peak_backlog: 4_096,
+        },
+    );
+    let manifest_path = dedup_window.join("run.toml");
+    let manifest = fs::read_to_string(&manifest_path)
+        .expect("fixture manifest should exist")
+        .replace("kafka-filter-map", "kafka-dedup-window")
+        .replace(
+            "Kafka JSON ingestion, contains filter, uppercase map, and Kafka emission",
+            "Kafka deduplication and window aggregation",
+        );
+    write(&manifest_path, &manifest);
+
+    let markdown = BenchmarkComparison::from_run_directories(&[dedup_window, filter_map])
+        .expect("all benchmark groups should compare")
+        .render_markdown();
+
+    assert!(markdown.contains("### Kafka Dedup Window"));
+    assert!(markdown.contains("### Kafka Filter Map"));
+}
+
+#[test]
+fn rejects_a_successful_nervix_run_without_observed_metrics() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let nervix = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
+            generation_rate: 1_250.0,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            drain_seconds: 4.5,
+            peak_backlog: 4_096,
+        },
+    );
+    fs::remove_file(nervix.join("nervix-metrics.toml"))
+        .expect("metrics fixture should be removable");
+
+    let error = BenchmarkComparison::from_run_directories(&[nervix])
+        .expect_err("a successful Nervix run must include scraped metrics");
+    assert!(matches!(
+        error,
+        ComparisonError::MissingMetricsReport { .. }
+    ));
+}
+
+#[test]
+fn suite_report_keeps_successes_and_failed_catalog_entries_together() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let successful = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
+            generation_rate: 1_250.0,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            drain_seconds: 4.5,
+            peak_backlog: 4_096,
+        },
+    );
+    let report = BenchmarkSuiteReport::from_run_directories(
+        &[successful],
+        vec![BenchmarkRunFailure::new(
+            "kafka-dedup-window",
+            "vector",
+            "subject exited before parity",
+        )],
+    )
+    .expect("partial benchmark results should remain reportable");
+    let markdown = report.render_markdown();
+
+    assert!(markdown.starts_with("## Benchmark comparison\n"));
+    assert!(markdown.contains(
+        "**Execution:** 1 of 2 catalog implementations succeeded; all 2 were attempted across 2 \
+         benchmarks."
+    ));
+    assert!(markdown.contains("### Kafka Filter Map"));
+    assert!(markdown.contains("### Failed benchmark implementations"));
+    assert!(markdown.contains("| Kafka Dedup Window | Vector | subject exited before parity |"));
 }
 
 #[test]

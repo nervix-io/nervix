@@ -6410,6 +6410,7 @@ dependencies = [
  "nervix-client-core",
  "nervix-nspl",
  "nervix-test-environment",
+ "ordered-float 4.6.0",
  "parking_lot",
  "rdkafka",
  "reqwest 0.13.4",

@@ -56,9 +56,10 @@ runs the benchmark catalog against it. The downstream job builds only the benchm
 server startup and control-plane configuration target the completed image, with no CLI subprocess.
 Adding the label starts a Docker build and benchmark run; subsequent commits rerun the complete
 catalog. A least-privilege reporter job downloads the resulting artifact and updates one stable PR
-comment with the comparison table; failed reruns replace stale results with the failure state.
-Fork PRs remain excluded because their untrusted workflow tokens cannot push the image that this job
-consumes.
+comment with every workload and implementation. The runner attempts the rest of the catalog after
+an individual implementation fails, retains successful measurements, and lists failed entries in
+the same PR report while keeping CI failed. Fork PRs remain excluded because their untrusted
+workflow tokens cannot push the image that this job consumes.
 
 The underlying image-only entry point is available for reproducing that CI path:
 
@@ -252,10 +253,18 @@ target/benchmarks/<workload>/<implementation>/<run-id>/
 ```
 
 Artifacts include the resolved parameters, rendered configuration, subject log, image identity for
-container runs, load-driver log, and the count/rate report. `run-all` also writes
-`benchmark-comparison.md` from the exact run directories produced by that invocation; it never
-selects unrelated runs by timestamp. A run passes only after the output records the workload's
-shape expects have arrived and remained stable for a confirmation interval.
+container runs, load-driver log, and the count/rate report. A Nervix run also writes the raw
+end-of-run `/metrics` response to `nervix-metrics.prom` and its validated benchmark projection to
+`nervix-metrics.toml`. The comparison reports `messages_per_batch` p50, p90, and p99 bucket upper
+bounds for every runtime target, the exact mean from `messages_total / batches_total`, and
+`relay_buffer_len` p50, p90, and p99 bucket upper bounds.
+
+`run-all` writes `benchmark-comparison.md` from the exact run directories produced by that
+invocation; it never selects unrelated runs by timestamp. It attempts every declared workload and
+implementation even when an earlier entry fails, and records both completed measurements and
+failures in that report. A run passes only after the output records the workload's shape expects
+have arrived and remained stable for a confirmation interval and, for Nervix, the metrics scrape
+has been parsed successfully.
 
 This is a single-host end-to-end benchmark. Its rate includes Kafka, the load driver, the selected
 product, and the output drain. Compare products only with identical workload inputs, and do not use

@@ -85,6 +85,32 @@ end_to_end_payload_mib_per_second=0.160
         ),
     );
     write(&directory.join("status.txt"), "pass\n");
+    write(
+        &directory.join("nervix-metrics.toml"),
+        r#"[[batch_targets]]
+domain = "benchmark_run"
+target_kind = "INGESTOR"
+target = "kafka_in_0"
+physical_node_id = "node-1"
+direction = "sent"
+relay = "benchmark_ingested_0"
+messages_total = 36000
+batches_total = 36
+p50 = 500.0
+p90 = 1000.0
+p99 = 2048.0
+
+[[relay_buffers]]
+domain = "benchmark_run"
+relay = "benchmark_ingested_0"
+physical_node_id = "node-1"
+direction = "concrete"
+observations = 100
+p50 = 1.0
+p90 = 8.0
+p99 = 32.0
+"#,
+    );
     directory
 }
 
