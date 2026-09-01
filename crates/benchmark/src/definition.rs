@@ -20,7 +20,7 @@ pub enum BenchmarkDependency {
     Kafka,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoadConfiguration {
     pub duration: LoadDuration,
@@ -28,6 +28,31 @@ pub struct LoadConfiguration {
     pub value_bytes: u64,
     pub max_backlog_messages: u64,
     pub wait_timeout_seconds: u64,
+    pub shape: LoadShape,
+}
+
+/// The payload the load driver generates and the output the measured path owes it in return.
+///
+/// The driver produces indivisible *cycles* of input messages, each cycle written to one Kafka
+/// partition, and every shape declares how many output records one complete cycle must yield.
+/// Parity is exact against that contract, so a shape whose graph drops records has to state the
+/// drop rate here rather than assume one output for every input.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum LoadShape {
+    /// Identical payloads, one output message for every accepted input message.
+    UniformPassthrough,
+
+    /// Cycles of distinct keys, each key produced `copies_per_key` times, with `retained_keys` of
+    /// every `keys_per_cycle` keys carrying the retain marker in their padded value. A cycle
+    /// therefore survives filtering and deduplication as exactly `retained_keys` records, which a
+    /// window processor aggregates into summaries carrying `count_field`.
+    KeyedWindowed {
+        keys_per_cycle: u64,
+        retained_keys: u64,
+        copies_per_key: u64,
+        count_field: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +211,15 @@ impl BenchmarkDefinition {
         if self.load.max_backlog_messages == 0 {
             return Err("load.max_backlog_messages must be positive".to_string());
         }
+        self.load.shape.validate()?;
+        let partition_cycle = u64::from(self.load.partitions)
+            .checked_mul(self.load.shape.messages_per_cycle())
+            .ok_or_else(|| "load.shape cycle exceeds the supported message count".to_string())?;
+        if self.load.max_backlog_messages < partition_cycle {
+            return Err(format!(
+                "load.max_backlog_messages must admit one cycle per partition ({partition_cycle})"
+            ));
+        }
         if self.load.wait_timeout_seconds == 0 {
             return Err("load.wait_timeout_seconds must be positive".to_string());
         }
@@ -248,6 +282,83 @@ impl BenchmarkDefinition {
             }
         }
         debug_assert!(is_slug(slug), "catalog validates benchmark slugs first");
+        Ok(())
+    }
+}
+
+impl LoadShape {
+    /// Input messages the driver writes to one partition as one indivisible unit.
+    #[must_use]
+    pub fn messages_per_cycle(&self) -> u64 {
+        match self {
+            Self::UniformPassthrough => 1,
+            Self::KeyedWindowed {
+                keys_per_cycle,
+                copies_per_key,
+                ..
+            } => keys_per_cycle.saturating_mul(*copies_per_key),
+        }
+    }
+
+    /// Records one complete cycle must produce on the output topic.
+    #[must_use]
+    pub fn output_records_per_cycle(&self) -> u64 {
+        match self {
+            Self::UniformPassthrough => 1,
+            Self::KeyedWindowed { retained_keys, .. } => *retained_keys,
+        }
+    }
+
+    /// Records the measured path owes for `cycles` complete cycles.
+    #[must_use]
+    pub fn expected_output_records(&self, cycles: u64) -> u64 {
+        cycles.saturating_mul(self.output_records_per_cycle())
+    }
+
+    /// Input messages `records` output records account for, used as the live backlog signal while
+    /// load is being generated.
+    #[must_use]
+    pub fn input_messages_for_output_records(&self, records: u64) -> u64 {
+        (records / self.output_records_per_cycle()).saturating_mul(self.messages_per_cycle())
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let Self::KeyedWindowed {
+            keys_per_cycle,
+            retained_keys,
+            copies_per_key,
+            count_field,
+        } = self
+        else {
+            return Ok(());
+        };
+        if *keys_per_cycle == 0 {
+            return Err("load.shape.keys_per_cycle must be positive".to_string());
+        }
+        if *copies_per_key == 0 {
+            return Err("load.shape.copies_per_key must be positive".to_string());
+        }
+        if *retained_keys == 0 {
+            return Err("load.shape.retained_keys must be positive".to_string());
+        }
+        if retained_keys > keys_per_cycle {
+            return Err(
+                "load.shape.retained_keys must not exceed load.shape.keys_per_cycle".to_string(),
+            );
+        }
+        if keys_per_cycle.checked_mul(*copies_per_key).is_none() {
+            return Err("load.shape cycle exceeds the supported message count".to_string());
+        }
+        if count_field.is_empty()
+            || !count_field
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(
+                "load.shape.count_field must be a lowercase underscore-separated field name"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 }

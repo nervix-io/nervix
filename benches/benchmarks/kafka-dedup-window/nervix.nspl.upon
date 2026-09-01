@@ -1,0 +1,73 @@
+BEGIN;
+CREATE SCHEMA benchmark_record (
+  key STRING,
+  value STRING
+);
+CREATE SCHEMA benchmark_summary (
+  record_count I64
+);
+CREATE WIRE JSON SCHEMA benchmark_record_wire MODE STRICT (
+  key string,
+  value string
+);
+CREATE WIRE JSON SCHEMA benchmark_summary_wire MODE STRICT (
+  record_count integer
+);
+CREATE CODEC benchmark_record_codec
+  FROM WIRE JSON SCHEMA benchmark_record_wire
+  TO SCHEMA benchmark_record;
+CREATE CODEC benchmark_summary_codec
+  FROM WIRE JSON SCHEMA benchmark_summary_wire
+  TO SCHEMA benchmark_summary;
+CREATE CLIENT kafka_local
+  TYPE KAFKA
+  CONFIG {
+    'bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
+    'auto.offset.reset' = 'earliest'
+  };
+{% for lane in lanes %}
+CREATE RELAY benchmark_ingested_{{ lane }} SCHEMA benchmark_record UNBRANCHED;
+CREATE RELAY benchmark_unique_{{ lane }} SCHEMA benchmark_record UNBRANCHED;
+CREATE RELAY benchmark_summaries_{{ lane }} SCHEMA benchmark_summary UNBRANCHED;
+CREATE INGESTOR kafka_in_{{ lane }}
+  FROM KAFKA kafka_local
+  TOPIC {{ input_topic }}
+  OFFSET BY CONSUMER GROUP {{ consumer_group }}
+  INSTANCES 1
+  MODE NO_ACK PARALLEL
+  ON QUIESCE SUSPEND DECODE USING benchmark_record_codec
+  TO benchmark_ingested_{{ lane }}
+    INHERIT ALL
+    UNBRANCHED
+    FLUSH EACH {{ parameters.ingestor_flush_each }} MAX BATCH SIZE {{ parameters.ingestor_max_batch_size }}
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+CREATE DEDUPLICATOR benchmark_dedup_{{ lane }}
+  FROM benchmark_ingested_{{ lane }}
+  FILTER WHERE contains(input.value, "x")
+  DEDUPLICATE ON input.key
+  MAX TIME {{ parameters.dedup_max_time }}
+  UNBRANCHED
+  TO benchmark_unique_{{ lane }}
+    INHERIT ALL
+    FLUSH EACH {{ parameters.dedup_flush_each }} MAX BATCH SIZE {{ parameters.dedup_max_batch_size }}
+    ON MESSAGE ERROR LOG;
+CREATE WINDOW PROCESSOR benchmark_window_{{ lane }}
+  FROM benchmark_unique_{{ lane }}
+  WIDTH {{ parameters.window_messages }} MESSAGES {{ parameters.window_max_delay }} DURATION
+  STEP {{ parameters.window_messages }} MESSAGES {{ parameters.window_max_delay }} DURATION
+  UNBRANCHED
+  TO benchmark_summaries_{{ lane }}
+    SET record_count = COUNT(input.key)
+    ON MESSAGE ERROR LOG;
+CREATE EMITTER kafka_out_{{ lane }}
+  FROM benchmark_summaries_{{ lane }}
+  TO KAFKA kafka_local TOPIC {{ output_topic }}
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING benchmark_summary_codec
+  INHERIT ALL
+  FLUSH EACH {{ parameters.emitter_flush_each }} MAX BATCH SIZE {{ parameters.emitter_max_batch_size }}
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+{% endfor %}
+COMMIT;

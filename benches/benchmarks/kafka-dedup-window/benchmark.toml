@@ -1,0 +1,41 @@
+dependencies = ["kafka"]
+description = "Kafka JSON ingestion, selective filter, keyed deduplication, tumbling window aggregation, and Kafka emission"
+name = "kafka-dedup-window"
+
+[load]
+duration = "auto"
+max_backlog_messages = 131072
+partitions = 16
+value_bytes = 128
+wait_timeout_seconds = 120
+
+[load.shape]
+copies_per_key = 2
+count_field = "record_count"
+keys_per_cycle = 768
+kind = "keyed-windowed"
+retained_keys = 576
+
+[parameters]
+dedup_flush_each = "50ms"
+dedup_max_batch_size = "64KiB"
+dedup_max_time = "10s"
+emitter_flush_each = "50ms"
+emitter_max_batch_size = "8MiB"
+ingestor_flush_each = "50ms"
+ingestor_max_batch_size = "64KiB"
+window_max_delay = "1s"
+window_messages = 500
+
+[implementations.nervix]
+kind = "nervix"
+template = "nervix.nspl.upon"
+
+[implementations.vector]
+command = ["--config", "/etc/vector/vector.yaml"]
+config_path = "/etc/vector/vector.yaml"
+image = "timberio/vector:0.57.0-debian"
+kind = "container"
+readiness_path = "/health"
+readiness_port = 8686
+template = "vector.yaml"

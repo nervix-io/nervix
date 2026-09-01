@@ -1,31 +1,48 @@
 use std::{
     fs,
+    io::Write as _,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use nervix_benchmark::LoadShape;
 use parking_lot::Mutex;
 use rdkafka::{
-    ClientContext,
+    ClientContext, Message, Offset, TopicPartitionList,
     config::ClientConfig,
+    consumer::{BaseConsumer, Consumer},
     error::{KafkaError, RDKafkaErrorCode},
     producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, ThreadedProducer},
 };
 use triomphe::Arc;
 
-const SEND_CLOCK_BATCH: u64 = 65_536;
+const SEND_CLOCK_MESSAGES: u64 = 65_536;
 const OFFSET_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const KAFKA_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const GENERATION_QUERY_DEADLINE_TOLERANCE: Duration = Duration::from_secs(1);
 const PARITY_STABILITY_INTERVAL: Duration = Duration::from_millis(500);
+const SUMMARY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const KEY_CYCLE_DIGITS: usize = 14;
+const KEY_INDEX_DIGITS: usize = 6;
+const KEY_DIGITS: usize = KEY_CYCLE_DIGITS + KEY_INDEX_DIGITS;
+const RETAIN_MARKER: u8 = b'x';
+const PADDING: u8 = b'y';
 
 #[derive(Debug, Parser)]
 #[command(about = "Drive a Kafka-to-Kafka end-to-end streaming benchmark")]
 struct Args {
+    #[command(flatten)]
+    common: CommonArgs,
+    #[command(subcommand)]
+    shape: ShapeArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct CommonArgs {
     #[arg(long)]
     bootstrap_servers: String,
     #[arg(long)]
@@ -48,6 +65,44 @@ struct Args {
     ready_file: PathBuf,
     #[arg(long)]
     go_file: PathBuf,
+}
+
+/// The load shape the workload declares, with the arguments each shape requires.
+#[derive(Debug, Subcommand)]
+enum ShapeArgs {
+    /// Identical payloads and one output message for every accepted input message.
+    UniformPassthrough,
+    /// Cycles of distinct keys whose duplicates and filtered-out payloads are dropped by the
+    /// measured path, aggregated into window summaries carrying a record count.
+    KeyedWindowed {
+        #[arg(long)]
+        keys_per_cycle: u64,
+        #[arg(long)]
+        retained_keys: u64,
+        #[arg(long)]
+        copies_per_key: u64,
+        #[arg(long)]
+        count_field: String,
+    },
+}
+
+impl ShapeArgs {
+    fn into_shape(self) -> LoadShape {
+        match self {
+            Self::UniformPassthrough => LoadShape::UniformPassthrough,
+            Self::KeyedWindowed {
+                keys_per_cycle,
+                retained_keys,
+                copies_per_key,
+                count_field,
+            } => LoadShape::KeyedWindowed {
+                keys_per_cycle,
+                retained_keys,
+                copies_per_key,
+                count_field,
+            },
+        }
+    }
 }
 
 struct DeliveryState {
@@ -108,11 +163,255 @@ impl ProducerContext for DeliveryContext {
     }
 }
 
+/// Builds one shape's wire payloads, reusing prepared buffers so the send loop never allocates.
+enum PayloadWriter {
+    Uniform {
+        payload: Vec<u8>,
+    },
+    Keyed {
+        retained: Vec<u8>,
+        dropped: Vec<u8>,
+        key_offset: usize,
+        keys_per_cycle: u64,
+        retained_keys: u64,
+    },
+}
+
+impl PayloadWriter {
+    fn new(shape: &LoadShape, value_bytes: usize) -> Result<Self> {
+        match shape {
+            LoadShape::UniformPassthrough => Ok(Self::Uniform {
+                payload: format!(r#"{{"value":"{}"}}"#, "x".repeat(value_bytes)).into_bytes(),
+            }),
+            LoadShape::KeyedWindowed {
+                keys_per_cycle,
+                retained_keys,
+                ..
+            } => {
+                ensure!(
+                    *keys_per_cycle <= 16_u64.pow(KEY_INDEX_DIGITS as u32),
+                    "keys_per_cycle exceeds the {KEY_INDEX_DIGITS} hexadecimal digits reserved \
+                     for the key index"
+                );
+                let prefix = br#"{"key":""#;
+                let infix = br#"","value":""#;
+                let suffix = br#""}"#;
+                let build = |marker: Option<u8>| {
+                    let mut payload = Vec::with_capacity(
+                        prefix.len() + KEY_DIGITS + infix.len() + value_bytes + suffix.len(),
+                    );
+                    payload.extend_from_slice(prefix);
+                    payload.extend(std::iter::repeat_n(b'0', KEY_DIGITS));
+                    payload.extend_from_slice(infix);
+                    payload.extend(std::iter::repeat_n(PADDING, value_bytes));
+                    if let Some(marker) = marker {
+                        let value_offset = prefix.len() + KEY_DIGITS + infix.len();
+                        payload[value_offset] = marker;
+                    }
+                    payload.extend_from_slice(suffix);
+                    payload
+                };
+                Ok(Self::Keyed {
+                    retained: build(Some(RETAIN_MARKER)),
+                    dropped: build(None),
+                    key_offset: prefix.len(),
+                    keys_per_cycle: *keys_per_cycle,
+                    retained_keys: *retained_keys,
+                })
+            }
+        }
+    }
+
+    fn wire_bytes(&self) -> usize {
+        match self {
+            Self::Uniform { payload } => payload.len(),
+            Self::Keyed { retained, .. } => retained.len(),
+        }
+    }
+
+    /// The payload for message `index` of cycle `cycle`.
+    ///
+    /// Keyed cycles emit one pass over the whole key list per copy, so a key's duplicates are
+    /// `keys_per_cycle` messages apart on one partition: far enough to exercise a live keyspace,
+    /// close enough that deduplication expiry can never split them.
+    fn payload(&mut self, cycle: u64, index: u64) -> &[u8] {
+        match self {
+            Self::Uniform { payload } => payload,
+            Self::Keyed {
+                retained,
+                dropped,
+                key_offset,
+                keys_per_cycle,
+                retained_keys,
+            } => {
+                let key_index = index % *keys_per_cycle;
+                let payload = if key_index < *retained_keys {
+                    retained
+                } else {
+                    dropped
+                };
+                let mut slot = &mut payload[*key_offset..*key_offset + KEY_DIGITS];
+                write!(
+                    slot,
+                    "{cycle:0cycle_digits$x}{key_index:0index_digits$x}",
+                    cycle_digits = KEY_CYCLE_DIGITS,
+                    index_digits = KEY_INDEX_DIGITS,
+                )
+                .expect("the key slot is exactly as wide as the formatted key");
+                payload
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OutputCounts {
+    messages: u64,
+    records: u64,
+}
+
+impl OutputCounts {
+    fn since(self, baseline: Self) -> Result<Self> {
+        Ok(Self {
+            messages: self
+                .messages
+                .checked_sub(baseline.messages)
+                .context("output topic message count fell below its warm-up baseline")?,
+            records: self
+                .records
+                .checked_sub(baseline.records)
+                .context("output record count fell below its warm-up baseline")?,
+        })
+    }
+}
+
+/// How the driver learns what the measured path produced.
+///
+/// A pass-through shape emits one message per input, so Kafka's high watermarks are the record
+/// count. A windowed shape emits one summary per closed window, a cardinality that is not a
+/// function of the input count, so the driver has to read the summaries and sum the record count
+/// they carry.
+enum OutputMeter {
+    Watermarks,
+    Summaries(SummaryDrain),
+}
+
+struct DrainState {
+    messages: AtomicU64,
+    records: AtomicU64,
+    stop: AtomicBool,
+    failure: Mutex<Option<String>>,
+}
+
+/// Consumes window summaries from the output topic and accumulates the record count they report.
+struct SummaryDrain {
+    state: Arc<DrainState>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl SummaryDrain {
+    fn start(
+        bootstrap_servers: &str,
+        topic: &str,
+        partitions: &[i32],
+        count_field: &str,
+    ) -> Result<Self> {
+        let consumer: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", bootstrap_servers)
+            .set("group.id", format!("{topic}_drain"))
+            .set("enable.auto.commit", "false")
+            .set("enable.partition.eof", "false")
+            .set("auto.offset.reset", "earliest")
+            .create()
+            .context("failed to create the benchmark summary consumer")?;
+        let mut assignment = TopicPartitionList::new();
+        for partition in partitions {
+            assignment
+                .add_partition_offset(topic, *partition, Offset::Beginning)
+                .with_context(|| {
+                    format!("failed to assign summary topic '{topic}' partition {partition}")
+                })?;
+        }
+        consumer
+            .assign(&assignment)
+            .with_context(|| format!("failed to assign the summary topic '{topic}'"))?;
+
+        let state = Arc::new(DrainState {
+            messages: AtomicU64::new(0),
+            records: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+            failure: Mutex::new(None),
+        });
+        let worker_state = Arc::clone(&state);
+        let count_field = count_field.to_string();
+        let worker = thread::Builder::new()
+            .name("benchmark-summary-drain".to_string())
+            .spawn(move || worker_state.consume(&consumer, &count_field))
+            .context("failed to start the benchmark summary consumer thread")?;
+        Ok(Self {
+            state,
+            worker: Some(worker),
+        })
+    }
+
+    fn counts(&self) -> Result<OutputCounts> {
+        if let Some(failure) = self.state.failure.lock().clone() {
+            bail!("benchmark summary consumer failed: {failure}");
+        }
+        Ok(OutputCounts {
+            messages: self.state.messages.load(AtomicOrdering::Relaxed),
+            records: self.state.records.load(AtomicOrdering::Relaxed),
+        })
+    }
+}
+
+impl DrainState {
+    fn consume(&self, consumer: &BaseConsumer, count_field: &str) {
+        while !self.stop.load(AtomicOrdering::Relaxed) {
+            let Some(result) = consumer.poll(SUMMARY_POLL_INTERVAL) else {
+                continue;
+            };
+            match result
+                .map_err(|error| error.to_string())
+                .and_then(|message| {
+                    let payload = message
+                        .payload()
+                        .ok_or_else(|| "output summary has no payload".to_string())?;
+                    serde_json::from_slice::<serde_json::Value>(payload)
+                        .map_err(|error| format!("output summary is not JSON: {error}"))?
+                        .get(count_field)
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| {
+                            format!("output summary has no unsigned '{count_field}' field")
+                        })
+                }) {
+                Ok(records) => {
+                    self.messages.fetch_add(1, AtomicOrdering::Relaxed);
+                    self.records.fetch_add(records, AtomicOrdering::Relaxed);
+                }
+                Err(failure) => {
+                    self.failure.lock().get_or_insert(failure);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for SummaryDrain {
+    fn drop(&mut self) {
+        self.state.stop.store(true, AtomicOrdering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 struct BenchmarkRunner {
-    args: Args,
+    args: CommonArgs,
+    shape: LoadShape,
     producer: ThreadedProducer<DeliveryContext>,
     deliveries: DeliveryContext,
-    payload: Vec<u8>,
     wait_timeout: Duration,
 }
 
@@ -129,9 +428,13 @@ struct BenchmarkReport {
     max_backlog_messages: u64,
     peak_backlog_messages: u64,
     input_messages: u64,
+    expected_output_records: u64,
     output_messages: u64,
-    output_messages_at_generation_end: u64,
-    output_messages_at_flush: u64,
+    output_records: u64,
+    output_records_at_generation_end: u64,
+    output_records_at_flush: u64,
+    backlog_messages_at_generation_end: u64,
+    backlog_messages_at_flush: u64,
 }
 
 impl BenchmarkReport {
@@ -141,7 +444,7 @@ impl BenchmarkReport {
         let input_rate = self.input_messages as f64 / generation_seconds;
         let end_to_end_rate = self.input_messages as f64 / end_to_end_seconds;
         let output_rate_during_generation =
-            self.output_messages_at_generation_end as f64 / generation_seconds;
+            self.output_records_at_generation_end as f64 / generation_seconds;
         let input_mib =
             self.input_messages as f64 * self.wire_bytes_per_message as f64 / (1024.0 * 1024.0);
 
@@ -166,24 +469,24 @@ impl BenchmarkReport {
         println!("max_backlog_messages={}", self.max_backlog_messages);
         println!("peak_backlog_messages={}", self.peak_backlog_messages);
         println!("input_messages={}", self.input_messages);
+        println!("expected_output_records={}", self.expected_output_records);
         println!("output_messages={}", self.output_messages);
+        println!("output_records={}", self.output_records);
         println!(
-            "output_messages_at_generation_end={}",
-            self.output_messages_at_generation_end
+            "output_records_at_generation_end={}",
+            self.output_records_at_generation_end
         );
         println!(
             "backlog_messages_at_generation_end={}",
-            self.input_messages
-                .saturating_sub(self.output_messages_at_generation_end)
+            self.backlog_messages_at_generation_end
         );
-        println!("output_messages_at_flush={}", self.output_messages_at_flush);
+        println!("output_records_at_flush={}", self.output_records_at_flush);
         println!(
             "backlog_messages_at_flush={}",
-            self.input_messages
-                .saturating_sub(self.output_messages_at_flush)
+            self.backlog_messages_at_flush
         );
         println!("input_messages_per_second={input_rate:.3}");
-        println!("output_messages_per_second_during_generation={output_rate_during_generation:.3}");
+        println!("output_records_per_second_during_generation={output_rate_during_generation:.3}");
         println!("end_to_end_messages_per_second={end_to_end_rate:.3}");
         println!(
             "input_payload_mib_per_second={:.3}",
@@ -197,7 +500,7 @@ impl BenchmarkReport {
 }
 
 impl BenchmarkRunner {
-    fn new(args: Args) -> Result<Self> {
+    fn new(args: CommonArgs, shape: LoadShape) -> Result<Self> {
         ensure!(args.duration_seconds > 0, "duration must be positive");
         ensure!(
             args.minimum_consumers > 0,
@@ -236,19 +539,20 @@ impl BenchmarkRunner {
             .set("compression.type", "none")
             .create_with_context(deliveries.clone())
             .context("failed to create the benchmark Kafka producer")?;
-        let payload = format!(r#"{{"value":"{}"}}"#, "x".repeat(args.value_bytes)).into_bytes();
         let wait_timeout = Duration::from_secs(args.wait_timeout_seconds);
 
         Ok(Self {
             args,
+            shape,
             producer,
             deliveries,
-            payload,
             wait_timeout,
         })
     }
 
     fn run(&self) -> Result<BenchmarkReport> {
+        let mut payload = PayloadWriter::new(&self.shape, self.args.value_bytes)?;
+        let wire_bytes_per_message = payload.wire_bytes();
         let input_partitions = self.topic_partitions(&self.args.input_topic)?;
         let output_partitions = self.topic_partitions(&self.args.output_topic)?;
         ensure!(
@@ -264,16 +568,30 @@ impl BenchmarkRunner {
             self.topic_message_count(&self.args.output_topic, &output_partitions)? == 0,
             "output topic is not empty"
         );
+        let meter = self.start_output_meter(&output_partitions)?;
         self.wait_for_consumer_group()?;
-        let warmup_messages = u64::try_from(input_partitions.len())
-            .context("Kafka partition count does not fit in u64")?;
+
+        let partition_count =
+            u64::try_from(input_partitions.len()).context("Kafka partition count does not fit")?;
+        let messages_per_cycle = self.shape.messages_per_cycle();
+        let warmup_messages = partition_count
+            .checked_mul(messages_per_cycle)
+            .context("warm-up message count overflowed")?;
+        let warmup_records = self.shape.expected_output_records(partition_count);
         let warmup_deadline = Instant::now() + self.wait_timeout;
 
+        // Warm-up produces one complete cycle per partition, so every stateful node observes a
+        // full cycle and every window it fills is closed before measurement starts.
+        let mut cycle = 0_u64;
         for partition in &input_partitions {
-            ensure!(
-                self.send_before(warmup_deadline, *partition)?,
-                "timed out enqueueing the warm-up Kafka record for partition {partition}"
-            );
+            self.send_cycle(
+                &mut payload,
+                cycle,
+                *partition,
+                messages_per_cycle,
+                warmup_deadline,
+            )?;
+            cycle += 1;
         }
         self.producer
             .flush(self.wait_timeout)
@@ -288,12 +606,14 @@ impl BenchmarkRunner {
         );
         ensure!(
             self.topic_message_count(&self.args.input_topic, &input_partitions)? == warmup_messages,
-            "warm-up input topic count did not equal the partition count"
+            "warm-up input topic count did not equal one cycle per partition"
         );
-        self.wait_for_topic_count(
-            &self.args.output_topic,
+        // Warm-up parity means every warm-up record already left a closed window, so this is both
+        // the baseline the measured phase subtracts and the proof that no window still holds one.
+        let baseline = self.wait_for_output_records(
+            &meter,
             &output_partitions,
-            warmup_messages,
+            warmup_records,
             "warm-up output",
         )?;
 
@@ -310,16 +630,15 @@ impl BenchmarkRunner {
         let target_duration = Duration::from_secs(self.args.duration_seconds);
         let generation_started = Instant::now();
         let generation_deadline = generation_started + target_duration;
+        let first_measured_cycle = cycle;
         let mut accepted = 0_u64;
         let mut peak_backlog_messages = 0_u64;
+        let cycles_per_clock_batch = (SEND_CLOCK_MESSAGES / messages_per_cycle).max(1);
 
         while Instant::now() < generation_deadline {
-            let output_total = match self.topic_message_count_until(
-                &self.args.output_topic,
-                &output_partitions,
-                generation_deadline,
-            ) {
-                Ok(output_total) => output_total,
+            let observed = match self.output_counts(&meter, &output_partitions, generation_deadline)
+            {
+                Ok(observed) => observed,
                 Err(_)
                     if generation_deadline.saturating_duration_since(Instant::now())
                         <= GENERATION_QUERY_DEADLINE_TOLERANCE =>
@@ -329,18 +648,14 @@ impl BenchmarkRunner {
                 }
                 Err(error) => return Err(error),
             };
-            ensure!(
-                output_total >= warmup_messages,
-                "warm-up output records disappeared during load generation"
-            );
-            let output_messages = output_total - warmup_messages;
-            ensure!(
-                output_messages <= accepted,
-                "output topic exceeded the accepted benchmark input count during generation"
-            );
-            let backlog_messages = accepted - output_messages;
+            let backlog_messages = self.backlog_messages(observed.since(baseline)?, accepted)?;
             peak_backlog_messages = peak_backlog_messages.max(backlog_messages);
-            if backlog_messages >= self.args.max_backlog_messages {
+            let available_cycles = self
+                .args
+                .max_backlog_messages
+                .saturating_sub(backlog_messages)
+                / messages_per_cycle;
+            if available_cycles == 0 {
                 let remaining = generation_deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     break;
@@ -349,26 +664,42 @@ impl BenchmarkRunner {
                 continue;
             }
 
-            let available = self.args.max_backlog_messages - backlog_messages;
-            for _ in 0..SEND_CLOCK_BATCH.min(available) {
-                let partition_index = usize::try_from(accepted % warmup_messages)
+            // A cycle is indivisible: parity is exact only for whole cycles, so the deadline is
+            // observed between cycles and overshoots by at most one.
+            for _ in 0..cycles_per_clock_batch.min(available_cycles) {
+                let partition_index = usize::try_from(cycle % partition_count)
                     .context("Kafka partition index does not fit in usize")?;
-                if !self.send_before(generation_deadline, input_partitions[partition_index])? {
+                let send_deadline = Instant::now() + self.wait_timeout;
+                self.send_cycle(
+                    &mut payload,
+                    cycle,
+                    input_partitions[partition_index],
+                    messages_per_cycle,
+                    send_deadline,
+                )?;
+                cycle += 1;
+                accepted = accepted
+                    .checked_add(messages_per_cycle)
+                    .context("accepted Kafka message count overflowed")?;
+                if Instant::now() >= generation_deadline {
                     break;
                 }
-                accepted = accepted
-                    .checked_add(1)
-                    .context("accepted Kafka message count overflowed")?;
             }
         }
         let generation_elapsed = generation_started.elapsed();
-        let output_total_at_generation_end =
-            self.topic_message_count(&self.args.output_topic, &output_partitions)?;
-        peak_backlog_messages =
-            peak_backlog_messages
-                .max(accepted.saturating_sub(
-                    output_total_at_generation_end.saturating_sub(warmup_messages),
-                ));
+        let measured_cycles = cycle - first_measured_cycle;
+        let expected_output_records = self.shape.expected_output_records(measured_cycles);
+
+        let at_generation_end = self
+            .output_counts(
+                &meter,
+                &output_partitions,
+                Instant::now() + self.wait_timeout,
+            )?
+            .since(baseline)?;
+        let backlog_messages_at_generation_end =
+            self.backlog_messages(at_generation_end, accepted)?;
+        peak_backlog_messages = peak_backlog_messages.max(backlog_messages_at_generation_end);
 
         let flush_started = Instant::now();
         self.producer
@@ -396,36 +727,47 @@ impl BenchmarkRunner {
             "producer accepted {accepted} records but Kafka acknowledged {delivered}"
         );
 
-        let expected_total = delivered
+        let expected_input_total = delivered
             .checked_add(warmup_messages)
             .context("expected topic count overflowed")?;
         self.wait_for_topic_count(
             &self.args.input_topic,
             &input_partitions,
-            expected_total,
+            expected_input_total,
             "benchmark input",
         )?;
 
-        let output_total_at_flush =
-            self.topic_message_count(&self.args.output_topic, &output_partitions)?;
+        let at_flush = self
+            .output_counts(
+                &meter,
+                &output_partitions,
+                Instant::now() + self.wait_timeout,
+            )?
+            .since(baseline)?;
         ensure!(
-            output_total_at_flush <= expected_total,
-            "output topic exceeded the input count before the drain wait"
+            at_flush.records <= expected_output_records,
+            "output topic exceeded the expected record count before the drain wait: {} > {}",
+            at_flush.records,
+            expected_output_records
         );
+        let backlog_messages_at_flush = self.backlog_messages(at_flush, accepted)?;
         let drain_started = Instant::now();
-        let output_total = self.wait_for_topic_count(
-            &self.args.output_topic,
+        let drained = self.wait_for_output_records(
+            &meter,
             &output_partitions,
-            expected_total,
+            expected_output_records
+                .checked_add(baseline.records)
+                .context("expected output record count overflowed")?,
             "benchmark output",
         )?;
         let drain_elapsed = drain_started.elapsed();
         let end_to_end_elapsed = generation_started.elapsed();
-        let parity_stability_elapsed = self.ensure_topic_count_stable(
-            &self.args.output_topic,
+        let parity_stability_elapsed = self.ensure_output_records_stable(
+            &meter,
             &output_partitions,
-            expected_total,
+            expected_output_records + baseline.records,
         )?;
+        let measured = drained.since(baseline)?;
 
         Ok(BenchmarkReport {
             target_duration,
@@ -434,33 +776,94 @@ impl BenchmarkRunner {
             drain_elapsed,
             end_to_end_elapsed,
             parity_stability_elapsed,
-            wire_bytes_per_message: self.payload.len(),
+            wire_bytes_per_message,
             partitions: input_partitions.len(),
             warmup_messages,
             max_backlog_messages: self.args.max_backlog_messages,
             peak_backlog_messages,
             input_messages: delivered,
-            output_messages: output_total - warmup_messages,
-            output_messages_at_generation_end: output_total_at_generation_end
-                .saturating_sub(warmup_messages),
-            output_messages_at_flush: output_total_at_flush.saturating_sub(warmup_messages),
+            expected_output_records,
+            output_messages: measured.messages,
+            output_records: measured.records,
+            output_records_at_generation_end: at_generation_end.records,
+            output_records_at_flush: at_flush.records,
+            backlog_messages_at_generation_end,
+            backlog_messages_at_flush,
         })
     }
 
-    fn send_before(&self, deadline: Instant, partition: i32) -> Result<bool> {
-        if Instant::now() >= deadline {
-            return Ok(false);
+    fn start_output_meter(&self, partitions: &[i32]) -> Result<OutputMeter> {
+        match &self.shape {
+            LoadShape::UniformPassthrough => Ok(OutputMeter::Watermarks),
+            LoadShape::KeyedWindowed { count_field, .. } => SummaryDrain::start(
+                &self.args.bootstrap_servers,
+                &self.args.output_topic,
+                partitions,
+                count_field,
+            )
+            .map(OutputMeter::Summaries),
         }
+    }
+
+    fn output_counts(
+        &self,
+        meter: &OutputMeter,
+        partitions: &[i32],
+        deadline: Instant,
+    ) -> Result<OutputCounts> {
+        match meter {
+            OutputMeter::Watermarks => {
+                let messages =
+                    self.topic_message_count_until(&self.args.output_topic, partitions, deadline)?;
+                Ok(OutputCounts {
+                    messages,
+                    records: messages,
+                })
+            }
+            OutputMeter::Summaries(drain) => drain.counts(),
+        }
+    }
+
+    /// Input messages still owed output, derived from the records the measured path has settled.
+    fn backlog_messages(&self, settled: OutputCounts, accepted: u64) -> Result<u64> {
+        let settled_messages = self
+            .shape
+            .input_messages_for_output_records(settled.records);
+        ensure!(
+            settled_messages <= accepted,
+            "output topic settled {settled_messages} input messages while only {accepted} were \
+             accepted"
+        );
+        Ok(accepted - settled_messages)
+    }
+
+    /// Writes one indivisible cycle to one partition.
+    fn send_cycle(
+        &self,
+        payload: &mut PayloadWriter,
+        cycle: u64,
+        partition: i32,
+        messages_per_cycle: u64,
+        deadline: Instant,
+    ) -> Result<()> {
+        for index in 0..messages_per_cycle {
+            self.send_before(deadline, partition, payload.payload(cycle, index))?;
+        }
+        Ok(())
+    }
+
+    fn send_before(&self, deadline: Instant, partition: i32, payload: &[u8]) -> Result<()> {
         let mut record: BaseRecord<'_, (), [u8], ()> = BaseRecord::to(&self.args.input_topic)
             .partition(partition)
-            .payload(self.payload.as_slice());
+            .payload(payload);
         loop {
             match self.producer.send(record) {
-                Ok(()) => return Ok(true),
+                Ok(()) => return Ok(()),
                 Err((KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), returned)) => {
-                    if Instant::now() >= deadline {
-                        return Ok(false);
-                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "timed out enqueueing a Kafka record for partition {partition}"
+                    );
                     record = returned;
                     thread::sleep(Duration::from_micros(100));
                 }
@@ -556,6 +959,59 @@ impl BenchmarkRunner {
         Ok(())
     }
 
+    fn wait_for_output_records(
+        &self,
+        meter: &OutputMeter,
+        partitions: &[i32],
+        expected: u64,
+        label: &str,
+    ) -> Result<OutputCounts> {
+        let deadline = Instant::now() + self.wait_timeout;
+        let mut observed = OutputCounts::default();
+        loop {
+            if Instant::now() >= deadline {
+                bail!(
+                    "timed out waiting for the {label} to reach {expected} records; observed {} \
+                     records in {} messages",
+                    observed.records,
+                    observed.messages
+                );
+            }
+            observed = self.output_counts(meter, partitions, deadline)?;
+            if observed.records == expected {
+                return Ok(observed);
+            }
+            ensure!(
+                observed.records < expected,
+                "{label} exceeded the expected record count: {} > {expected}",
+                observed.records
+            );
+            thread::sleep(OFFSET_POLL_INTERVAL);
+        }
+    }
+
+    fn ensure_output_records_stable(
+        &self,
+        meter: &OutputMeter,
+        partitions: &[i32],
+        expected: u64,
+    ) -> Result<Duration> {
+        let started = Instant::now();
+        let deadline = started + PARITY_STABILITY_INTERVAL;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            thread::sleep(OFFSET_POLL_INTERVAL.min(remaining));
+            let observed = self.output_counts(meter, partitions, deadline + KAFKA_QUERY_TIMEOUT)?;
+            ensure!(
+                observed.records == expected,
+                "output record count changed during the parity stability interval: {} != \
+                 {expected}",
+                observed.records
+            );
+        }
+        Ok(started.elapsed())
+    }
+
     fn wait_for_topic_count(
         &self,
         topic: &str,
@@ -564,11 +1020,15 @@ impl BenchmarkRunner {
         label: &str,
     ) -> Result<u64> {
         let deadline = Instant::now() + self.wait_timeout;
+        let mut observed = 0;
         loop {
             if Instant::now() >= deadline {
-                bail!("timed out waiting for {label} topic '{topic}' to reach {expected} records");
+                bail!(
+                    "timed out waiting for {label} topic '{topic}' to reach {expected} records; \
+                     observed {observed}"
+                );
             }
-            let observed = self.topic_message_count_until(topic, partitions, deadline)?;
+            observed = self.topic_message_count_until(topic, partitions, deadline)?;
             if observed == expected {
                 return Ok(observed);
             }
@@ -576,12 +1036,6 @@ impl BenchmarkRunner {
                 observed < expected,
                 "{label} topic '{topic}' exceeded the expected count: {observed} > {expected}"
             );
-            if Instant::now() >= deadline {
-                bail!(
-                    "timed out waiting for {label} topic '{topic}' to reach {expected} records; \
-                     observed {observed}"
-                );
-            }
             thread::sleep(OFFSET_POLL_INTERVAL);
         }
     }
@@ -617,27 +1071,6 @@ impl BenchmarkRunner {
             "Kafka topic '{topic}' has no partitions"
         );
         Ok(partitions)
-    }
-
-    fn ensure_topic_count_stable(
-        &self,
-        topic: &str,
-        partitions: &[i32],
-        expected: u64,
-    ) -> Result<Duration> {
-        let started = Instant::now();
-        let deadline = started + PARITY_STABILITY_INTERVAL;
-        while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            thread::sleep(OFFSET_POLL_INTERVAL.min(remaining));
-            let observed = self.topic_message_count(topic, partitions)?;
-            ensure!(
-                observed == expected,
-                "output topic '{topic}' changed during the parity stability interval: {observed} \
-                 != {expected}"
-            );
-        }
-        Ok(started.elapsed())
     }
 
     fn topic_message_count_until(
@@ -709,7 +1142,8 @@ impl BenchmarkRunner {
 }
 
 fn main() -> Result<()> {
-    let runner = BenchmarkRunner::new(Args::parse())?;
+    let args = Args::parse();
+    let runner = BenchmarkRunner::new(args.common, args.shape.into_shape())?;
     let report = runner.run()?;
     report.print();
     Ok(())

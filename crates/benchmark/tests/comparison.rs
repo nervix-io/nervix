@@ -13,6 +13,8 @@ struct Fixture<'a> {
     implementation: &'a str,
     image: &'a str,
     input_messages: u64,
+    expected_output_records: u64,
+    output_records: u64,
     generation_rate: f64,
     end_to_end_rate: f64,
     payload_rate: f64,
@@ -70,13 +72,15 @@ warmup_messages=16
 max_backlog_messages=4096
 peak_backlog_messages={}
 input_messages={}
+expected_output_records={}
 output_messages={}
-output_messages_at_generation_end={}
+output_records={}
+output_records_at_generation_end={}
 backlog_messages_at_generation_end=0
-output_messages_at_flush={}
+output_records_at_flush={}
 backlog_messages_at_flush=0
 input_messages_per_second={:.3}
-output_messages_per_second_during_generation={:.3}
+output_records_per_second_during_generation={:.3}
 end_to_end_messages_per_second={:.3}
 input_payload_mib_per_second={:.3}
 end_to_end_payload_mib_per_second={:.3}
@@ -84,9 +88,11 @@ end_to_end_payload_mib_per_second={:.3}
             fixture.drain_seconds,
             fixture.peak_backlog,
             fixture.input_messages,
-            fixture.input_messages,
-            fixture.input_messages,
-            fixture.input_messages,
+            fixture.expected_output_records,
+            fixture.output_records,
+            fixture.output_records,
+            fixture.output_records,
+            fixture.output_records,
             fixture.generation_rate,
             fixture.generation_rate,
             fixture.end_to_end_rate,
@@ -114,6 +120,8 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
             implementation: "nervix",
             image: "ghcr.io/nervix-io/nervix:pr-109",
             input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
             generation_rate: 1_250.0,
             end_to_end_rate: 1_200.0,
             payload_rate: 0.16,
@@ -127,6 +135,8 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
             implementation: "vector",
             image: "timberio/vector:0.57.0-debian",
             input_messages: 30_000,
+            expected_output_records: 11_250,
+            output_records: 11_250,
             generation_rate: 1_020.0,
             end_to_end_rate: 1_000.0,
             payload_rate: 0.13,
@@ -144,12 +154,12 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
         "**Configuration:** 30 s · 16 partitions · 128 B values (140 B wire) · backlog cap 4,096"
     ));
     assert!(markdown.contains(
-        "| Nervix | **1,200 msg/s** | **0.16 MiB/s** | **1,250 msg/s** | 4.500 s | ✅ 36,000 | ⚠️ \
-         4,096 (100.0%) | baseline |"
+        "| Nervix | **1,200 msg/s** | **0.16 MiB/s** | **1,250 rec/s** | 4.500 s | ✅ 36,000 in / \
+         13,500 rec | ⚠️ 4,096 (100.0%) | baseline |"
     ));
     assert!(markdown.contains(
-        "| Vector | 1,000 msg/s | 0.13 MiB/s | 1,020 msg/s | **0.100 s** | ✅ 30,000 | 512 \
-         (12.5%) | −16.7% |"
+        "| Vector | 1,000 msg/s | 0.13 MiB/s | 1,020 rec/s | **0.100 s** | ✅ 30,000 in / 11,250 \
+         rec | 512 (12.5%) | −16.7% |"
     ));
     assert!(markdown.contains("Nervix reached the configured backlog cap"));
     assert!(markdown.contains("`ghcr.io/nervix-io/nervix:pr-109`"));
@@ -166,6 +176,8 @@ fn rejects_runs_with_different_workload_configuration() {
             implementation: "nervix",
             image: "nervix:test",
             input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
             generation_rate: 1_250.0,
             end_to_end_rate: 1_200.0,
             payload_rate: 0.16,
@@ -179,6 +191,8 @@ fn rejects_runs_with_different_workload_configuration() {
             implementation: "vector",
             image: "vector:test",
             input_messages: 30_000,
+            expected_output_records: 11_250,
+            output_records: 11_250,
             generation_rate: 1_020.0,
             end_to_end_rate: 1_000.0,
             payload_rate: 0.13,
@@ -217,6 +231,8 @@ fn rejects_a_successful_run_without_messages() {
             implementation: "nervix",
             image: "nervix:test",
             input_messages: 0,
+            expected_output_records: 0,
+            output_records: 0,
             generation_rate: 0.0,
             end_to_end_rate: 0.0,
             payload_rate: 0.0,
@@ -227,5 +243,29 @@ fn rejects_a_successful_run_without_messages() {
 
     let error = BenchmarkComparison::from_run_directories(&[nervix])
         .expect_err("a run without measured messages must not compare");
+    assert!(matches!(error, ComparisonError::InvalidReport { .. }));
+}
+
+#[test]
+fn rejects_a_run_that_missed_the_output_records_its_shape_expects() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let nervix = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_499,
+            generation_rate: 1_250.0,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            drain_seconds: 4.5,
+            peak_backlog: 4_096,
+        },
+    );
+
+    let error = BenchmarkComparison::from_run_directories(&[nervix])
+        .expect_err("a run short of its expected output records must not compare");
     assert!(matches!(error, ComparisonError::InvalidReport { .. }));
 }
