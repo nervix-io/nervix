@@ -1,0 +1,87 @@
+api:
+  enabled: true
+  address: 0.0.0.0:8686
+
+acknowledgements:
+  enabled: false
+
+healthchecks:
+  enabled: true
+  require_healthy: true
+
+sources:
+{% for lane in lanes %}
+  kafka_in_{{ lane }}:
+    type: kafka
+    bootstrap_servers: "{{ kafka_bootstrap_servers }}"
+    group_id: "{{ consumer_group }}"
+    topics:
+      - "{{ input_topic }}"
+    auto_offset_reset: earliest
+    decoding:
+      codec: json
+      json:
+        lossy: false
+{% endfor %}
+
+transforms:
+{% for lane in lanes %}
+  benchmark_filter_{{ lane }}:
+    type: remap
+    inputs:
+      - kafka_in_{{ lane }}
+    drop_on_abort: true
+    drop_on_error: true
+    source: |
+      if !contains(string!(.value), "x") {
+        abort
+      }
+      . = {"key": string!(.key), "value": string!(.value)}
+  benchmark_dedup_{{ lane }}:
+    type: dedupe
+    inputs:
+      - benchmark_filter_{{ lane }}
+    cache:
+      num_events: 65536
+    fields:
+      match:
+        - key
+  benchmark_count_{{ lane }}:
+    type: remap
+    inputs:
+      - benchmark_dedup_{{ lane }}
+    drop_on_abort: true
+    drop_on_error: true
+    source: |
+      .record_count = 1
+  benchmark_window_{{ lane }}:
+    type: reduce
+    inputs:
+      - benchmark_count_{{ lane }}
+    expire_after_ms: 60000
+    end_every_period_ms: {{ parameters.window_max_delay_ms }}
+    merge_strategies:
+      record_count: sum
+{% endfor %}
+
+sinks:
+{% for lane in lanes %}
+  kafka_out_{{ lane }}:
+    type: kafka
+    inputs:
+      - benchmark_window_{{ lane }}
+    bootstrap_servers: "{{ kafka_bootstrap_servers }}"
+    topic: "{{ output_topic }}"
+    compression: none
+    batch:
+      max_bytes: {{ parameters.emitter_max_batch_bytes }}
+      timeout_secs: {{ parameters.emitter_flush_seconds }}
+    encoding:
+      codec: json
+      only_fields:
+        - record_count
+    healthcheck:
+      enabled: true
+    librdkafka_options:
+      enable.idempotence: "true"
+{% endfor %}

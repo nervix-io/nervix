@@ -63,7 +63,7 @@ impl RunSettings {
             parameters.insert(name.to_string(), parsed);
         }
 
-        add_emitter_derivatives(&mut parameters)?;
+        add_derived_parameters(&mut parameters)?;
         let duration_seconds = match duration_override {
             Some(seconds) => seconds,
             None => match definition.load.duration {
@@ -110,17 +110,27 @@ fn parse_like(
     }
 }
 
-fn add_emitter_derivatives(parameters: &mut toml::Table) -> Result<(), SettingsError> {
+/// Restates duration and binary-size parameters in the units a competitive implementation's
+/// configuration takes, so one manifest value drives every implementation.
+fn add_derived_parameters(parameters: &mut toml::Table) -> Result<(), SettingsError> {
     if let Some(value) = string_parameter(parameters, "emitter_flush_each")? {
-        let duration =
-            humantime::parse_duration(value).map_err(|error| SettingsError::InvalidParameter {
-                name: "emitter_flush_each".to_string(),
-                value: value.to_string(),
-                reason: error.to_string(),
-            })?;
+        let duration = parse_duration_parameter("emitter_flush_each", value)?;
         parameters.insert(
             "emitter_flush_seconds".to_string(),
             toml::Value::Float(duration.as_secs_f64()),
+        );
+    }
+    if let Some(value) = string_parameter(parameters, "window_max_delay")? {
+        let duration = parse_duration_parameter("window_max_delay", value)?;
+        let milliseconds =
+            i64::try_from(duration.as_millis()).map_err(|_| SettingsError::InvalidParameter {
+                name: "window_max_delay".to_string(),
+                value: value.to_string(),
+                reason: "duration exceeds the template integer range".to_string(),
+            })?;
+        parameters.insert(
+            "window_max_delay_ms".to_string(),
+            toml::Value::Integer(milliseconds),
         );
     }
     if let Some(value) = string_parameter(parameters, "emitter_max_batch_size")? {
@@ -167,6 +177,14 @@ fn automatic_duration(parameters: &toml::Table) -> Result<u64, SettingsError> {
     Ok(duration.as_secs_f64().ceil() as u64)
 }
 
+fn parse_duration_parameter(name: &str, value: &str) -> Result<Duration, SettingsError> {
+    humantime::parse_duration(value).map_err(|error| SettingsError::InvalidParameter {
+        name: name.to_string(),
+        value: value.to_string(),
+        reason: error.to_string(),
+    })
+}
+
 fn string_parameter<'a>(
     parameters: &'a toml::Table,
     name: &str,
@@ -210,7 +228,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::{LoadConfiguration, NervixImplementation, definition::Implementation};
+    use crate::{LoadConfiguration, LoadShape, NervixImplementation, definition::Implementation};
 
     fn definition(duration: LoadDuration) -> BenchmarkDefinition {
         BenchmarkDefinition {
@@ -223,6 +241,7 @@ mod tests {
                 value_bytes: 1,
                 max_backlog_messages: 1,
                 wait_timeout_seconds: 1,
+                shape: LoadShape::UniformPassthrough,
             },
             parameters: [
                 (
@@ -236,6 +255,10 @@ mod tests {
                 (
                     "emitter_max_batch_size".to_string(),
                     toml::Value::String("1GiB".to_string()),
+                ),
+                (
+                    "window_max_delay".to_string(),
+                    toml::Value::String("1s500ms".to_string()),
                 ),
             ]
             .into_iter()
@@ -262,6 +285,10 @@ mod tests {
             settings.parameters["emitter_flush_seconds"].as_float(),
             Some(20.0)
         );
+        assert_eq!(
+            settings.parameters["window_max_delay_ms"].as_integer(),
+            Some(1_500)
+        );
     }
 
     #[test]
@@ -271,6 +298,7 @@ mod tests {
             &[
                 "emitter_flush_each=250ms".to_string(),
                 "emitter_max_batch_size=64MiB".to_string(),
+                "window_max_delay=250ms".to_string(),
             ],
             Some(7),
         )
@@ -283,6 +311,10 @@ mod tests {
         assert_eq!(
             settings.parameters["emitter_flush_seconds"].as_float(),
             Some(0.25)
+        );
+        assert_eq!(
+            settings.parameters["window_max_delay_ms"].as_integer(),
+            Some(250)
         );
     }
 }

@@ -11,8 +11,8 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use nervix_benchmark::{
     AbArm, AbSummary, BenchmarkCatalog, BenchmarkComparison, BenchmarkDependency,
-    ContainerImplementation, Implementation, KafkaRenderInputs, LoadedBenchmark, RunSettings,
-    provision_topics,
+    ContainerImplementation, Implementation, KafkaRenderInputs, LoadShape, LoadedBenchmark,
+    RunSettings, provision_topics,
 };
 use nervix_client_core::{Client, ConnectOptions};
 use nervix_nspl::client_statement::parse_client_statement_sources;
@@ -150,6 +150,7 @@ struct ResolvedRun {
     max_backlog_messages: u64,
     wait_timeout: Duration,
     duration_seconds: u64,
+    shape: LoadShape,
     parameters: toml::Table,
     input_topic: String,
     output_topic: String,
@@ -628,6 +629,7 @@ impl ResolvedRun {
             max_backlog_messages,
             wait_timeout: Duration::from_secs(wait_timeout_seconds),
             duration_seconds: settings.duration_seconds,
+            shape: benchmark.definition().load.shape.clone(),
             parameters: settings.parameters,
             input_topic: format!("{topic_prefix}_input"),
             output_topic: format!("{topic_prefix}_output"),
@@ -1049,6 +1051,7 @@ async fn run_load_driver(
                 .to_str()
                 .ok_or_else(|| anyhow!("go path is not UTF-8"))?,
         ])
+        .args(shape_arguments(&resolved.shape))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .kill_on_drop(true)
@@ -1309,6 +1312,29 @@ fn absolute_or_repository_path(repository_root: &Path, path: &Path) -> PathBuf {
         path.to_path_buf()
     } else {
         repository_root.join(path)
+    }
+}
+
+/// The load driver's subcommand and arguments for the workload's declared shape.
+fn shape_arguments(shape: &LoadShape) -> Vec<String> {
+    match shape {
+        LoadShape::UniformPassthrough => vec!["uniform-passthrough".to_string()],
+        LoadShape::KeyedWindowed {
+            keys_per_cycle,
+            retained_keys,
+            copies_per_key,
+            count_field,
+        } => vec![
+            "keyed-windowed".to_string(),
+            "--keys-per-cycle".to_string(),
+            keys_per_cycle.to_string(),
+            "--retained-keys".to_string(),
+            retained_keys.to_string(),
+            "--copies-per-key".to_string(),
+            copies_per_key.to_string(),
+            "--count-field".to_string(),
+            count_field.clone(),
+        ],
     }
 }
 

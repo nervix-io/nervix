@@ -9,6 +9,9 @@ partitions = 16
 value_bytes = 128
 wait_timeout_seconds = 120
 
+[load.shape]
+kind = "uniform-passthrough"
+
 [parameters]
 emitter_flush_each = "10ms"
 emitter_max_batch_size = "8MiB"

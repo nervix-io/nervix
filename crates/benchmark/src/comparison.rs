@@ -54,8 +54,9 @@ pub(crate) struct LoadReport {
     pub(crate) max_backlog_messages: u64,
     pub(crate) peak_backlog_messages: u64,
     input_messages: u64,
-    output_messages: u64,
-    output_messages_per_second_during_generation: f64,
+    expected_output_records: u64,
+    output_records: u64,
+    output_records_per_second_during_generation: f64,
     pub(crate) end_to_end_messages_per_second: f64,
     end_to_end_payload_mib_per_second: f64,
 }
@@ -209,7 +210,7 @@ impl BenchmarkRuns {
         let best_generation = self
             .runs
             .iter()
-            .map(|run| run.report.output_messages_per_second_during_generation)
+            .map(|run| run.report.output_records_per_second_during_generation)
             .fold(f64::NEG_INFINITY, f64::max);
         let best_drain = self
             .runs
@@ -241,14 +242,19 @@ impl BenchmarkRuns {
             );
             let payload = format!("{:.2} MiB/s", run.report.end_to_end_payload_mib_per_second);
             let generation = format!(
-                "{} msg/s",
+                "{} rec/s",
                 format_count(
                     run.report
-                        .output_messages_per_second_during_generation
+                        .output_records_per_second_during_generation
                         .round() as u64
                 )
             );
             let drain = format!("{:.3} s", run.report.drain_seconds);
+            let parity = format!(
+                "{} in / {} rec",
+                format_count(run.report.input_messages),
+                format_count(run.report.output_records)
+            );
             let backlog_percentage = run.report.peak_backlog_messages as f64
                 / run.report.max_backlog_messages as f64
                 * 100.0;
@@ -280,11 +286,11 @@ impl BenchmarkRuns {
                 ),
                 emphasize_best(
                     generation,
-                    run.report.output_messages_per_second_during_generation,
+                    run.report.output_records_per_second_during_generation,
                     best_generation,
                 ),
                 emphasize_best(drain, run.report.drain_seconds, best_drain),
-                format_count(run.report.input_messages),
+                parity,
                 cap_marker,
                 format_count(run.report.peak_backlog_messages),
             ));
@@ -437,8 +443,8 @@ fn validate_report(
         ("drain_seconds", report.drain_seconds),
         ("end_to_end_seconds", report.end_to_end_seconds),
         (
-            "output_messages_per_second_during_generation",
-            report.output_messages_per_second_during_generation,
+            "output_records_per_second_during_generation",
+            report.output_records_per_second_during_generation,
         ),
         (
             "end_to_end_messages_per_second",
@@ -486,10 +492,15 @@ fn validate_report(
             "end-to-end message rate must be positive".to_string(),
         ));
     }
-    if report.input_messages != report.output_messages {
+    if report.expected_output_records == 0 {
+        return Err(invalid(
+            "a successful benchmark must expect at least one output record".to_string(),
+        ));
+    }
+    if report.output_records != report.expected_output_records {
         return Err(invalid(format!(
-            "input/output parity failed: {} input, {} output",
-            report.input_messages, report.output_messages
+            "output parity failed: the workload's shape expects {} records, the run measured {}",
+            report.expected_output_records, report.output_records
         )));
     }
     if report.wire_bytes_per_message == 0 {
@@ -632,6 +643,7 @@ pub(crate) fn render_parameters(parameters: &toml::Table) -> String {
             !(*name == "emitter_flush_seconds" && parameters.contains_key("emitter_flush_each"))
                 && !(*name == "emitter_max_batch_bytes"
                     && parameters.contains_key("emitter_max_batch_size"))
+                && !(*name == "window_max_delay_ms" && parameters.contains_key("window_max_delay"))
         })
         .map(|(name, value)| {
             let value = match value {

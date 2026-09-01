@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 use nervix_benchmark::{
     BenchmarkCatalog, BenchmarkError, ContainerImplementation, Implementation, KafkaRenderInputs,
-    LoadDuration,
+    LoadDuration, LoadShape,
 };
 
 fn write(path: &Path, contents: &str) {
@@ -28,6 +28,9 @@ partitions = 3
 value_bytes = 128
 max_backlog_messages = 4096
 wait_timeout_seconds = 30
+
+[load.shape]
+kind = "uniform-passthrough"
 
 [parameters]
 batch_bytes = 1048576
@@ -181,6 +184,9 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+
+[load.shape]
+kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
@@ -210,6 +216,9 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+
+[load.shape]
+kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
@@ -238,6 +247,9 @@ partitions = 0
 value_bytes = 0
 max_backlog_messages = 0
 wait_timeout_seconds = 0
+
+[load.shape]
+kind = "uniform-passthrough"
 [parameters]
 "#,
     );
@@ -261,6 +273,9 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+
+[load.shape]
+kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
@@ -291,6 +306,9 @@ partitions = 2147483648
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+
+[load.shape]
+kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
@@ -324,6 +342,9 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+
+[load.shape]
+kind = "uniform-passthrough"
 [parameters]
 [implementations.vector]
 kind = "container"
@@ -357,6 +378,9 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+
+[load.shape]
+kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
@@ -374,4 +398,142 @@ template = "../outside.nspl"
         .load("escaping-template")
         .expect_err("escaping template should fail");
     assert!(matches!(error, BenchmarkError::InvalidTemplatePath { .. }));
+}
+
+fn write_keyed_benchmark(repository: &Path, slug: &str, shape: &str) {
+    let directory = repository.join("benches/benchmarks").join(slug);
+    write(
+        &directory.join("benchmark.toml"),
+        &format!(
+            r#"
+name = "Keyed load"
+description = "Deduplicated and windowed records"
+dependencies = ["kafka"]
+
+[load]
+duration = "auto"
+partitions = 2
+value_bytes = 128
+max_backlog_messages = 4096
+wait_timeout_seconds = 30
+
+[load.shape]
+kind = "keyed-windowed"
+{shape}
+
+[parameters]
+
+[implementations.nervix]
+kind = "nervix"
+template = "graph.nspl.upon"
+"#,
+        ),
+    );
+    write(&directory.join("graph.nspl.upon"), "BEGIN; COMMIT;");
+}
+
+#[test]
+fn loads_the_keyed_windowed_shape_and_its_output_contract() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    write_keyed_benchmark(
+        repository.path(),
+        "keyed-load",
+        concat!(
+            "keys_per_cycle = 8\n",
+            "retained_keys = 6\n",
+            "copies_per_key = 2\n",
+            "count_field = \"record_count\"\n",
+        ),
+    );
+
+    let benchmark = BenchmarkCatalog::from_repository_root(repository.path())
+        .load("keyed-load")
+        .expect("keyed benchmark should load");
+    let shape = &benchmark.definition().load.shape;
+
+    assert_eq!(
+        shape,
+        &LoadShape::KeyedWindowed {
+            keys_per_cycle: 8,
+            retained_keys: 6,
+            copies_per_key: 2,
+            count_field: "record_count".to_string(),
+        }
+    );
+    assert_eq!(shape.messages_per_cycle(), 16);
+    assert_eq!(shape.output_records_per_cycle(), 6);
+    assert_eq!(shape.expected_output_records(100), 600);
+    assert_eq!(shape.input_messages_for_output_records(600), 1_600);
+}
+
+#[test]
+fn rejects_keyed_shapes_that_cannot_state_an_exact_drop_rate() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    let catalog = BenchmarkCatalog::from_repository_root(repository.path());
+
+    for (slug, shape) in [
+        (
+            "zero-keys",
+            concat!(
+                "keys_per_cycle = 0\n",
+                "retained_keys = 1\n",
+                "copies_per_key = 1\n",
+                "count_field = \"record_count\"\n",
+            ),
+        ),
+        (
+            "zero-copies",
+            concat!(
+                "keys_per_cycle = 4\n",
+                "retained_keys = 1\n",
+                "copies_per_key = 0\n",
+                "count_field = \"record_count\"\n",
+            ),
+        ),
+        (
+            "zero-retained",
+            concat!(
+                "keys_per_cycle = 4\n",
+                "retained_keys = 0\n",
+                "copies_per_key = 1\n",
+                "count_field = \"record_count\"\n",
+            ),
+        ),
+        (
+            "retains-more-than-it-produces",
+            concat!(
+                "keys_per_cycle = 4\n",
+                "retained_keys = 5\n",
+                "copies_per_key = 1\n",
+                "count_field = \"record_count\"\n",
+            ),
+        ),
+        (
+            "unnamed-count-field",
+            concat!(
+                "keys_per_cycle = 4\n",
+                "retained_keys = 3\n",
+                "copies_per_key = 1\n",
+                "count_field = \"Record Count\"\n",
+            ),
+        ),
+        (
+            "cycle-exceeds-the-backlog-cap",
+            concat!(
+                "keys_per_cycle = 4096\n",
+                "retained_keys = 3072\n",
+                "copies_per_key = 2\n",
+                "count_field = \"record_count\"\n",
+            ),
+        ),
+    ] {
+        write_keyed_benchmark(repository.path(), slug, shape);
+        assert!(
+            matches!(
+                catalog.load(slug),
+                Err(BenchmarkError::InvalidDefinition { .. })
+            ),
+            "benchmark '{slug}' should be rejected"
+        );
+    }
 }

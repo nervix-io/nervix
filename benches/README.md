@@ -2,8 +2,9 @@
 
 The benchmark harness runs the same declared streaming workload against Nervix or a competitive
 implementation. Each run gets fresh Testcontainers dependencies, fresh Kafka topics, a unique
-consumer group, a high-rate idempotent producer, and a bounded wait for stable input/output count
-parity. Nothing depends on the repository's long-lived Docker Compose stack.
+consumer group, a high-rate idempotent producer, and a bounded wait for the stable output the
+workload's declared load shape expects. Nothing depends on the repository's long-lived Docker
+Compose stack.
 
 List the available workloads and implementations:
 
@@ -11,9 +12,16 @@ List the available workloads and implementations:
 just benchmark list
 ```
 
-The first workload is `kafka-filter-map`: decode JSON from Kafka, retain records for which
-`contains(value, "x")` is true, uppercase `value`, and publish JSON to another topic in the same
-Kafka broker. It has `nervix` and `vector` implementations.
+`kafka-filter-map` decodes JSON from Kafka, retains records for which `contains(value, "x")` is
+true, uppercases `value`, and publishes JSON to another topic in the same Kafka broker. Every input
+message produces one output message.
+
+`kafka-dedup-window` is the stateful-processor workload: decode JSON from Kafka, retain the three
+quarters of records whose value carries the retain marker, drop the duplicate of every key,
+aggregate the survivors into tumbling windows, and publish one JSON summary per closed window. Its
+measured path is ingestor → deduplicator → window processor → emitter.
+
+Both workloads have `nervix` and `vector` implementations.
 
 ## Running implementations
 
@@ -75,9 +83,70 @@ name ends in `_flush_each`. The example therefore runs for 240 seconds. `--durat
 overrides that policy for reproduction or smoke testing.
 
 Nervix consumes the flush values directly as NSPL durations and binary sizes. The runner derives
-Vector's `batch.timeout_secs` and `batch.max_bytes` from those same settings. Vector measures its
-native maximum before serialization, while Nervix limits an Arrow batch, so reports retain the
-native values and should not imply byte-for-byte equivalence.
+Vector's `batch.timeout_secs`, `batch.max_bytes`, and `end_every_period_ms` from those same
+settings. Vector measures its native maximum before serialization, while Nervix limits an Arrow
+batch, so reports retain the native values and should not imply byte-for-byte equivalence.
+
+`kafka-dedup-window` matches its two implementations on the same drop rate and the same aggregate,
+not on identical internals. Vector's `dedupe` evicts by cache size where Nervix expires by
+`MAX TIME`, and Vector's `reduce` closes on a period where a Nervix window closes on whichever of
+its message and duration bounds is met first; the Nervix window also retains the records it
+buffered, which Vector's running sum does not. Sizing the Vector cache above the live keyspace and
+matching the period to `window_max_delay` makes both graphs produce the same record total, which is
+what parity checks.
+
+## Load shapes
+
+A workload declares in `[load.shape]` what the driver generates and what the measured path owes it
+in return. The driver produces indivisible *cycles* of input messages, each cycle written to one
+Kafka partition, and every shape states how many output records one complete cycle must yield.
+Parity is exact against that contract, so a graph that drops records has to state its drop rate
+rather than assume one output per input.
+
+`uniform-passthrough` sends identical payloads and expects one output message per input message.
+Its output record count is Kafka's high watermark, so the driver never has to read a payload back.
+
+`keyed-windowed` sends cycles of `keys_per_cycle` distinct keys, each produced `copies_per_key`
+times as one pass over the key list per copy. The first `retained_keys` keys of a cycle carry the
+retain marker `x` at the head of their padded value; the rest are all padding. Every payload is the
+same width, so `wire_bytes_per_message` stays a single number. A cycle therefore produces
+`keys_per_cycle × copies_per_key` messages, of which `retained_keys × copies_per_key` pass the
+filter and exactly `retained_keys` survive deduplication. Because the filter reads only the key's
+own value, that count holds whether the node filter runs before or after deduplication.
+
+Window output cardinality is not a function of the input count, so `keyed-windowed` parity is the
+sum of the `count_field` the summaries carry rather than a count of output messages. The driver
+consumes the output topic from its beginning on a run-scoped assignment and accumulates that sum,
+which also drives the live backlog signal, the warm-up handshake, and the drain wait.
+
+Duplicates of one key are `keys_per_cycle` messages apart on one partition. That is far enough to
+exercise a live keyspace and close enough that the deduplicator's `MAX TIME` can never expire a key
+between its copies and re-emit one. Raising `dedup_max_time` widens the retained keyspace and the
+memory it costs without changing the expected output.
+
+Warm-up sends one complete cycle per partition and waits for the records that cycle owes before it
+signals readiness, so every window a warm-up record entered is closed before measurement begins.
+
+The window that is still filling when generation stops closes on its duration bound, so the
+reported `drain_seconds` for a windowed workload includes up to one `window_max_delay` of waiting
+that is not backlog.
+
+## Making `MAX BATCH SIZE` bind
+
+A byte cap only clamps a batch; it never grows one. Batch size is arrival rate × flush interval, so
+the cap fires only when that product exceeds it. `kafka-dedup-window` carries the binding caps on
+its two high-volume routes — the ingestor route at the full input rate and the deduplicator route
+at three eighths of it — with `FLUSH EACH 50ms MAX BATCH SIZE 64KiB`. The emitter cannot bind,
+because it sees one summary per closed window.
+
+Confirm it from the subject's `messages_per_batch` histogram, scraped from the observability port
+during a run. At the manifest defaults the size boundary decides both routes; raising only the caps
+hands the decision back to the 50 ms interval and the batches grow:
+
+| Route | `64KiB` caps | `--parameter ingestor_max_batch_size=8MiB --parameter dedup_max_batch_size=8MiB` |
+|:--|--:|--:|
+| ingestor → deduplicator | 786 rows | 1,741 rows |
+| deduplicator → window | 576 rows | 699 rows |
 
 ## Comparing two local builds (A/B)
 
@@ -137,6 +206,13 @@ value_bytes = 128
 max_backlog_messages = 4194304
 wait_timeout_seconds = 120
 
+[load.shape]
+kind = "keyed-windowed"
+keys_per_cycle = 1024
+retained_keys = 768
+copies_per_key = 2
+count_field = "record_count"
+
 [parameters]
 emitter_flush_each = "10ms"
 emitter_max_batch_size = "8MiB"
@@ -161,10 +237,11 @@ integer `lanes` list resolved from the run's partition count, the manifest's `pa
 implementations join Kafka's run-scoped Docker network; a local Nervix process receives Kafka's
 random host port instead.
 
-The current typed dependency and load contract is Kafka-to-Kafka with one expected output per
-input. The shared test-environment crate retains the other Cucumber dependency starters, but a
-workload using one of them, filter selectivity, or different output cardinality needs a
-corresponding typed benchmark contract before it is exposed in a manifest.
+The typed dependency contract is Kafka-to-Kafka. The shared test-environment crate retains the
+other Cucumber dependency starters, but a workload using one of them needs a corresponding typed
+benchmark dependency before it is exposed in a manifest, and a workload whose output cardinality
+neither declared shape describes needs a new `[load.shape]` variant with its own exact parity
+arithmetic.
 
 ## Results
 
@@ -177,8 +254,8 @@ target/benchmarks/<workload>/<implementation>/<run-id>/
 Artifacts include the resolved parameters, rendered configuration, subject log, image identity for
 container runs, load-driver log, and the count/rate report. `run-all` also writes
 `benchmark-comparison.md` from the exact run directories produced by that invocation; it never
-selects unrelated runs by timestamp. A run passes only after the output topic equals the
-broker-acknowledged input count and remains stable for a confirmation interval.
+selects unrelated runs by timestamp. A run passes only after the output records the workload's
+shape expects have arrived and remained stable for a confirmation interval.
 
 This is a single-host end-to-end benchmark. Its rate includes Kafka, the load driver, the selected
 product, and the output drain. Compare products only with identical workload inputs, and do not use
