@@ -902,7 +902,7 @@ dependencies = [
 [[package]]
 name = "aws-lc-sys"
 version = "0.43.0"
-source = "git+https://github.com/nervix-io/aws-lc-rs.git?rev=6332c54d1cf0535312a0e5cd73232f5d1e21f958#6332c54d1cf0535312a0e5cd73232f5d1e21f958"
+source = "git+https://github.com/justsmth/aws-lc-rs.git?rev=a06191c2e203b39065dc5ce99ae244adf464cc5f#a06191c2e203b39065dc5ce99ae244adf464cc5f"
 dependencies = [
  "bindgen",
  "cc",
@@ -6066,9 +6066,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memfd"
-version = "0.6.5"
+version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad38eb12aea514a0466ea40a80fd8cc83637065948eb4a426e4aa46261175227"
+checksum = "57804b2c9b69967f1536a56f86297e367a33b19e98852ed624b84551cdbc0d90"
 dependencies = [
  "rustix 1.1.4",
 ]
@@ -8922,7 +8922,7 @@ dependencies = [
 [[package]]
 name = "rdkafka"
 version = "0.39.0"
-source = "git+https://github.com/nervix-io/rust-rdkafka.git?rev=b6d96bd5381691276b1ba8b12ce2c419909f2b20#b6d96bd5381691276b1ba8b12ce2c419909f2b20"
+source = "git+https://github.com/nervix-io/rust-rdkafka.git?rev=9f4d4d21ce805d497bbc679fffb745a6f846acab#9f4d4d21ce805d497bbc679fffb745a6f846acab"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -8939,7 +8939,7 @@ dependencies = [
 [[package]]
 name = "rdkafka-sys"
 version = "4.10.0+2.12.1"
-source = "git+https://github.com/nervix-io/rust-rdkafka.git?rev=b6d96bd5381691276b1ba8b12ce2c419909f2b20#b6d96bd5381691276b1ba8b12ce2c419909f2b20"
+source = "git+https://github.com/nervix-io/rust-rdkafka.git?rev=9f4d4d21ce805d497bbc679fffb745a6f846acab#9f4d4d21ce805d497bbc679fffb745a6f846acab"
 dependencies = [
  "aws-lc-sys 0.43.0",
  "cmake",

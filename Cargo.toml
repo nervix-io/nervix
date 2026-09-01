@@ -394,7 +394,7 @@ rcgen = { version = "0.13", default-features = false, features = [
   "pem",
 ] }
 # PR #850 adds AWS-LC support to librdkafka and pins PR #1184, which exports its native library paths.
-rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", rev = "b6d96bd5381691276b1ba8b12ce2c419909f2b20", default-features = false }
+rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", rev = "9f4d4d21ce805d497bbc679fffb745a6f846acab", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",
   "tokio-comp",
