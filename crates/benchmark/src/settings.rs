@@ -237,6 +237,7 @@ mod tests {
             dependencies: vec![crate::BenchmarkDependency::Kafka],
             load: LoadConfiguration {
                 duration,
+                warmup_seconds: 1,
                 partitions: 1,
                 value_bytes: 1,
                 max_backlog_messages: 1,

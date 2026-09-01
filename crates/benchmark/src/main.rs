@@ -92,6 +92,8 @@ struct WorkloadOptions {
     #[arg(long)]
     duration_seconds: Option<u64>,
     #[arg(long)]
+    warmup_seconds: Option<u64>,
+    #[arg(long)]
     partitions: Option<u32>,
     #[arg(long)]
     value_bytes: Option<u64>,
@@ -151,6 +153,7 @@ struct ResolvedRun {
     max_backlog_messages: u64,
     wait_timeout: Duration,
     duration_seconds: u64,
+    warmup_seconds: u64,
     shape: LoadShape,
     parameters: toml::Table,
     input_topic: String,
@@ -571,29 +574,86 @@ async fn execute_run(
         .await
     }
     .await;
-    let metrics_result = if benchmark_result.is_ok() {
-        subject
-            .capture_nervix_metrics(
-                &resolved.domain,
-                &resolved.run_directory,
-                resolved.wait_timeout,
-            )
-            .await
-    } else {
-        Ok(())
-    };
+    let container_diagnostics_result =
+        capture_container_diagnostics(&environment.container_ids(), &resolved.run_directory).await;
+    // A failed load is the run that most needs the subject's final metrics. Keep the benchmark
+    // failure primary below, but attempt the scrape before logs and shutdown on every path.
+    let metrics_result = subject
+        .capture_nervix_metrics(
+            &resolved.domain,
+            &resolved.run_directory,
+            resolved.wait_timeout,
+        )
+        .await;
     let log_result = subject.capture_logs(&resolved.run_directory).await;
     let stop_result = subject.stop().await;
 
     benchmark_result?;
     metrics_result?;
     log_result?;
+    container_diagnostics_result?;
     stop_result?;
     let report = fs::read_to_string(resolved.run_directory.join("load-report.txt"))
         .context("failed to read the completed load report")?;
     println!("{report}");
     println!("artifacts={}", resolved.run_directory.display());
     Ok(())
+}
+
+async fn capture_container_diagnostics(
+    container_ids: &[String],
+    run_directory: &Path,
+) -> Result<()> {
+    let directory = run_directory.join("container-diagnostics");
+    fs::create_dir_all(&directory).context("failed to create container diagnostics directory")?;
+    for (index, container_id) in container_ids.iter().enumerate() {
+        tokio::task::consume_budget().await;
+        let short_id = container_id.chars().take(12).collect::<String>();
+        ensure!(
+            !short_id.is_empty() && short_id.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "benchmark dependency returned an invalid container id"
+        );
+        let prefix = directory.join(format!("{index:02}-{short_id}"));
+        capture_docker_output(
+            &["inspect", container_id],
+            &prefix.with_extension("inspect.json"),
+        )
+        .await?;
+        capture_docker_output(
+            &[
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{json .}}",
+                container_id,
+            ],
+            &prefix.with_extension("stats.json"),
+        )
+        .await?;
+        capture_docker_output(&["logs", container_id], &prefix.with_extension("log")).await?;
+    }
+    Ok(())
+}
+
+async fn capture_docker_output(arguments: &[&str], path: &Path) -> Result<()> {
+    let output = Command::new("docker")
+        .args(arguments)
+        .output()
+        .await
+        .with_context(|| format!("failed to run docker {}", arguments.join(" ")))?;
+    ensure!(
+        output.status.success(),
+        "docker {} failed with {}: {}",
+        arguments.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut captured = output.stdout;
+    if !output.stderr.is_empty() {
+        captured.extend_from_slice(&output.stderr);
+    }
+    fs::write(path, captured)
+        .with_context(|| format!("failed to write container diagnostics {}", path.display()))
 }
 
 async fn start_declared_dependencies(
@@ -637,6 +697,11 @@ impl ResolvedRun {
             .workload
             .wait_timeout_seconds
             .unwrap_or(benchmark.definition().load.wait_timeout_seconds);
+        let warmup_seconds = args
+            .options
+            .workload
+            .warmup_seconds
+            .unwrap_or(benchmark.definition().load.warmup_seconds);
         ensure!(partitions > 0, "partition count must be positive");
         ensure!(
             partitions <= i32::MAX as u32,
@@ -649,6 +714,7 @@ impl ResolvedRun {
         );
         ensure!(max_backlog_messages > 0, "maximum backlog must be positive");
         ensure!(wait_timeout_seconds > 0, "wait timeout must be positive");
+        ensure!(warmup_seconds > 0, "warm-up duration must be positive");
 
         let run_token = Uuid::now_v7()
             .as_simple()
@@ -677,6 +743,7 @@ impl ResolvedRun {
             max_backlog_messages,
             wait_timeout: Duration::from_secs(wait_timeout_seconds),
             duration_seconds: settings.duration_seconds,
+            warmup_seconds,
             shape: benchmark.definition().load.shape.clone(),
             parameters: settings.parameters,
             input_topic: format!("{topic_prefix}_input"),
@@ -1131,6 +1198,8 @@ async fn run_load_driver(
             &resolved.partitions.to_string(),
             "--duration-seconds",
             &resolved.duration_seconds.to_string(),
+            "--warmup-seconds",
+            &resolved.warmup_seconds.to_string(),
             "--value-bytes",
             &resolved.value_bytes.to_string(),
             "--max-backlog-messages",
@@ -1145,6 +1214,12 @@ async fn run_load_driver(
             go_file
                 .to_str()
                 .ok_or_else(|| anyhow!("go path is not UTF-8"))?,
+            "--output-diagnostics-file",
+            resolved
+                .run_directory
+                .join("output-diagnostics.json")
+                .to_str()
+                .ok_or_else(|| anyhow!("output diagnostics path is not UTF-8"))?,
         ])
         .args(shape_arguments(&resolved.shape))
         .stdout(Stdio::from(stdout))
@@ -1299,6 +1374,10 @@ fn write_run_manifest(
     table.insert(
         "duration_seconds".to_string(),
         i64::try_from(resolved.duration_seconds)?.into(),
+    );
+    table.insert(
+        "warmup_seconds".to_string(),
+        i64::try_from(resolved.warmup_seconds)?.into(),
     );
     table.insert(
         "partitions".to_string(),

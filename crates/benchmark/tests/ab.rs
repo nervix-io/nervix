@@ -44,6 +44,7 @@ partitions = 16
 subject = "nervix-local"
 value_bytes = 128
 wait_timeout_seconds = 120
+warmup_seconds = 10
 
 [parameters]
 emitter_flush_each = "10ms"
@@ -54,6 +55,9 @@ emitter_max_batch_size = "8MiB"
         &directory.join("load-report.txt"),
         &format!(
             r#"target_duration_seconds=30.000000
+warmup_target_seconds=10.000000
+warmup_generation_seconds=10.000001
+warmup_parity_stability_seconds=0.500000
 generation_seconds=30.000000
 producer_flush_seconds=0.100000
 drain_seconds=1.500000
@@ -157,7 +161,8 @@ fn summarizes_per_arm_statistics_and_the_mean_delta() {
 
     assert!(markdown.starts_with("## A/B benchmark comparison — Kafka Filter Map\n"));
     assert!(markdown.contains(
-        "**Configuration:** 30 s · 16 partitions · 128 B values (140 B wire) · backlog cap 4,096"
+        "**Configuration:** 30 s + 10 s warm-up · 16 partitions · 128 B values (140 B wire) · \
+         backlog cap 4,096"
     ));
     assert!(
         markdown.contains("| main @ 0123abc | 3 | 1,050 msg/s | 1,000 msg/s | 1,100 msg/s | 0/3 |")

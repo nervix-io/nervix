@@ -48,6 +48,7 @@ pub(crate) struct RunManifest {
     pub(crate) benchmark: String,
     pub(crate) description: String,
     pub(crate) duration_seconds: u64,
+    pub(crate) warmup_seconds: u64,
     pub(crate) git_dirty: Option<bool>,
     pub(crate) git_revision: Option<String>,
     image: Option<String>,
@@ -62,11 +63,15 @@ pub(crate) struct RunManifest {
 #[derive(Debug, Deserialize)]
 pub(crate) struct LoadReport {
     target_duration_seconds: f64,
+    warmup_target_seconds: f64,
+    warmup_generation_seconds: f64,
+    warmup_parity_stability_seconds: f64,
     generation_seconds: f64,
     drain_seconds: f64,
     end_to_end_seconds: f64,
     pub(crate) wire_bytes_per_message: u64,
     partitions: u32,
+    warmup_messages: u64,
     pub(crate) max_backlog_messages: u64,
     pub(crate) peak_backlog_messages: u64,
     input_messages: u64,
@@ -268,10 +273,47 @@ impl BenchmarkSuiteReport {
         let total = self.total_runs();
         let benchmark_count = self.benchmark_count();
         let mut markdown = format!(
-            "## Benchmark comparison\n\n**Execution:** {successful} of {total} catalog \
-             implementations succeeded; all {total} were attempted across {benchmark_count} \
-             benchmarks.\n"
+            "## Benchmark comparison\n\n**Execution:** {successful} of {total} catalog executions \
+             succeeded; all {total} were attempted across {benchmark_count} workloads.\n"
         );
+        let mut statuses = Vec::with_capacity(total);
+        if let Some(comparison) = &self.comparison {
+            for benchmark in &comparison.benchmarks {
+                for run in &benchmark.runs {
+                    statuses.push((
+                        benchmark.slug.as_str(),
+                        run.manifest.implementation.as_str(),
+                        true,
+                    ));
+                }
+            }
+        }
+        for failure in &self.failures {
+            statuses.push((
+                failure.benchmark.as_str(),
+                failure.implementation.as_str(),
+                false,
+            ));
+        }
+        statuses.sort_by(|left, right| {
+            left.0.cmp(right.0).then_with(|| {
+                implementation_sort_key(left.1).cmp(&implementation_sort_key(right.1))
+            })
+        });
+        markdown.push_str("\n### Execution status\n\n| Workload | Implementation | Status |\n");
+        markdown.push_str("|:--|:--|:--|\n");
+        for (benchmark, implementation, succeeded) in statuses {
+            markdown.push_str(&format!(
+                "| {} | {} | {} |\n",
+                display_name(benchmark),
+                display_name(implementation),
+                if succeeded {
+                    "✅ Passed"
+                } else {
+                    "❌ Failed"
+                }
+            ));
+        }
         if let Some(comparison) = &self.comparison {
             comparison.render_benchmarks(&mut markdown);
         }
@@ -365,11 +407,12 @@ impl BenchmarkRuns {
         let first = &self.runs[0];
 
         let mut markdown = format!(
-            "\n### {}\n\n{}\n\n**Configuration:** {} s · {} partitions · {} B values ({} B wire) \
-             · backlog cap {}\n\n",
+            "\n### {}\n\n{}\n\n**Configuration:** {} s + {} s warm-up · {} partitions · {} B \
+             values ({} B wire) · backlog cap {}\n\n",
             display_name(&self.slug),
             single_line(&self.description),
             first.manifest.duration_seconds,
+            first.manifest.warmup_seconds,
             first.manifest.partitions,
             format_count(first.manifest.value_bytes),
             format_count(first.report.wire_bytes_per_message),
@@ -650,6 +693,15 @@ fn validate_report(
     };
     for (name, value) in [
         ("target_duration_seconds", report.target_duration_seconds),
+        ("warmup_target_seconds", report.warmup_target_seconds),
+        (
+            "warmup_generation_seconds",
+            report.warmup_generation_seconds,
+        ),
+        (
+            "warmup_parity_stability_seconds",
+            report.warmup_parity_stability_seconds,
+        ),
         ("generation_seconds", report.generation_seconds),
         ("drain_seconds", report.drain_seconds),
         ("end_to_end_seconds", report.end_to_end_seconds),
@@ -678,6 +730,21 @@ fn validate_report(
     if (report.target_duration_seconds - manifest.duration_seconds as f64).abs() > 0.000_001 {
         return Err(invalid(
             "target duration does not match run.toml".to_string(),
+        ));
+    }
+    if (report.warmup_target_seconds - manifest.warmup_seconds as f64).abs() > 0.000_001 {
+        return Err(invalid(
+            "warm-up target does not match run.toml".to_string(),
+        ));
+    }
+    if report.warmup_generation_seconds < report.warmup_target_seconds {
+        return Err(invalid(
+            "warm-up generation ended before its target duration".to_string(),
+        ));
+    }
+    if report.warmup_messages == 0 {
+        return Err(invalid(
+            "a successful benchmark must warm up with at least one message".to_string(),
         ));
     }
     if report.partitions != manifest.partitions {
@@ -746,6 +813,9 @@ pub(crate) fn ensure_matching_run_configuration(
     }
     if run.manifest.duration_seconds != baseline.manifest.duration_seconds {
         return Err(mismatch("duration_seconds"));
+    }
+    if run.manifest.warmup_seconds != baseline.manifest.warmup_seconds {
+        return Err(mismatch("warmup_seconds"));
     }
     if run.manifest.partitions != baseline.manifest.partitions {
         return Err(mismatch("partitions"));

@@ -8,6 +8,7 @@ max_backlog_messages = 4194304
 partitions = 16
 value_bytes = 128
 wait_timeout_seconds = 120
+warmup_seconds = 10
 
 [load.shape]
 kind = "uniform-passthrough"

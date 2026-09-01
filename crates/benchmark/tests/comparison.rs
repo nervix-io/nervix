@@ -47,6 +47,7 @@ partitions = 16
 subject = "container"
 value_bytes = 128
 wait_timeout_seconds = 120
+warmup_seconds = 10
 
 [parameters]
 emitter_flush_each = "10ms"
@@ -63,6 +64,9 @@ ingestor_max_batch_size = "8MiB"
         &directory.join("load-report.txt"),
         &format!(
             r#"target_duration_seconds=30.000000
+warmup_target_seconds=10.000000
+warmup_generation_seconds=10.000001
+warmup_parity_stability_seconds=0.500000
 generation_seconds=30.000000
 producer_flush_seconds=0.100000
 drain_seconds={:.6}
@@ -181,7 +185,8 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
 
     assert!(markdown.starts_with("## Benchmark comparison\n"));
     assert!(markdown.contains(
-        "**Configuration:** 30 s · 16 partitions · 128 B values (140 B wire) · backlog cap 4,096"
+        "**Configuration:** 30 s + 10 s warm-up · 16 partitions · 128 B values (140 B wire) · \
+         backlog cap 4,096"
     ));
     assert!(markdown.contains(
         "| Nervix | **1,200 msg/s** | **0.16 MiB/s** | **1,250 rec/s** | 4.500 s | ✅ 36,000 in / \
@@ -291,7 +296,7 @@ fn rejects_a_successful_nervix_run_without_observed_metrics() {
 #[test]
 fn suite_report_keeps_successes_and_failed_catalog_entries_together() {
     let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
-    let successful = write_run(
+    let nervix = write_run(
         artifacts.path(),
         Fixture {
             implementation: "nervix",
@@ -306,23 +311,46 @@ fn suite_report_keeps_successes_and_failed_catalog_entries_together() {
             peak_backlog: 4_096,
         },
     );
+    let vector = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "vector",
+            image: "vector:test",
+            input_messages: 30_000,
+            expected_output_records: 11_250,
+            output_records: 11_250,
+            generation_rate: 1_020.0,
+            end_to_end_rate: 1_000.0,
+            payload_rate: 0.13,
+            drain_seconds: 0.1,
+            peak_backlog: 512,
+        },
+    );
     let report = BenchmarkSuiteReport::from_run_directories(
-        &[successful],
-        vec![BenchmarkRunFailure::new(
-            "kafka-dedup-window",
-            "vector",
-            "subject exited before parity",
-        )],
+        &[nervix, vector],
+        vec![
+            BenchmarkRunFailure::new("kafka-dedup-window", "nervix", "output parity exceeded"),
+            BenchmarkRunFailure::new(
+                "kafka-dedup-window",
+                "vector",
+                "subject exited before parity",
+            ),
+        ],
     )
     .expect("partial benchmark results should remain reportable");
     let markdown = report.render_markdown();
 
     assert!(markdown.starts_with("## Benchmark comparison\n"));
     assert!(markdown.contains(
-        "**Execution:** 1 of 2 catalog implementations succeeded; all 2 were attempted across 2 \
-         benchmarks."
+        "**Execution:** 2 of 4 catalog executions succeeded; all 4 were attempted across 2 \
+         workloads."
     ));
     assert!(markdown.contains("### Kafka Filter Map"));
+    assert!(markdown.contains("### Execution status"));
+    assert!(markdown.contains("| Kafka Filter Map | Nervix | ✅ Passed |"));
+    assert!(markdown.contains("| Kafka Filter Map | Vector | ✅ Passed |"));
+    assert!(markdown.contains("| Kafka Dedup Window | Nervix | ❌ Failed |"));
+    assert!(markdown.contains("| Kafka Dedup Window | Vector | ❌ Failed |"));
     assert!(markdown.contains("### Failed benchmark implementations"));
     assert!(markdown.contains("| Kafka Dedup Window | Vector | subject exited before parity |"));
 }
