@@ -10,9 +10,10 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use nervix_benchmark::{
-    AbArm, AbSummary, BenchmarkCatalog, BenchmarkComparison, BenchmarkDependency,
-    ContainerImplementation, Implementation, KafkaRenderInputs, LoadShape, LoadedBenchmark,
-    RunSettings, provision_topics,
+    AbArm, AbSummary, BenchmarkCatalog, BenchmarkDependency, BenchmarkRunFailure,
+    BenchmarkSuiteReport, ContainerImplementation, Implementation, KafkaRenderInputs, LoadShape,
+    LoadedBenchmark, NERVIX_METRICS_PROMETHEUS_FILE, NERVIX_METRICS_REPORT_FILE,
+    NervixMetricsReport, RunSettings, provision_topics,
 };
 use nervix_client_core::{Client, ConnectOptions};
 use nervix_nspl::client_statement::parse_client_statement_sources;
@@ -91,6 +92,8 @@ struct WorkloadOptions {
     #[arg(long)]
     duration_seconds: Option<u64>,
     #[arg(long)]
+    warmup_seconds: Option<u64>,
+    #[arg(long)]
     partitions: Option<u32>,
     #[arg(long)]
     value_bytes: Option<u64>,
@@ -150,6 +153,7 @@ struct ResolvedRun {
     max_backlog_messages: u64,
     wait_timeout: Duration,
     duration_seconds: u64,
+    warmup_seconds: u64,
     shape: LoadShape,
     parameters: toml::Table,
     input_topic: String,
@@ -168,6 +172,7 @@ enum SubjectRuntime {
 struct Subject {
     runtime: SubjectRuntime,
     control_url: Option<String>,
+    metrics_url: Option<reqwest::Url>,
     password: Option<String>,
 }
 
@@ -232,11 +237,24 @@ async fn run_all_benchmarks(
     let benchmarks = catalog.discover()?;
     ensure!(!benchmarks.is_empty(), "benchmark catalog is empty");
     let artifacts_root = options.workload.resolve_artifacts_root(repository_root);
+    fs::create_dir_all(&artifacts_root).with_context(|| {
+        format!(
+            "failed to create benchmark artifact root {}",
+            artifacts_root.display()
+        )
+    })?;
     let mut run_directories = Vec::new();
+    let mut failures = Vec::new();
     for benchmark in benchmarks {
-        for implementation in benchmark.definition().implementations.keys() {
+        let implementations = benchmark
+            .definition()
+            .implementations
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for implementation in implementations {
             tokio::task::consume_budget().await;
-            let run_directory = run_benchmark(
+            let result = run_benchmark(
                 repository_root,
                 catalog,
                 RunArgs {
@@ -245,14 +263,35 @@ async fn run_all_benchmarks(
                     options: options.clone(),
                 },
             )
-            .await?;
-            run_directories.push(run_directory);
+            .await;
+            match result {
+                Ok(run_directory) => run_directories.push(run_directory),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    eprintln!(
+                        "Benchmark '{}' implementation '{}' failed: {message}",
+                        benchmark.slug(),
+                        implementation
+                    );
+                    failures.push(BenchmarkRunFailure::new(
+                        benchmark.slug(),
+                        implementation,
+                        message,
+                    ));
+                }
+            }
         }
     }
-    let comparison = BenchmarkComparison::from_run_directories(&run_directories)?;
+    let report = BenchmarkSuiteReport::from_run_directories(&run_directories, failures)?;
     let comparison_path = artifacts_root.join("benchmark-comparison.md");
-    comparison.write_markdown(&comparison_path)?;
+    report.write_markdown(&comparison_path)?;
     println!("comparison={}", comparison_path.display());
+    let failed = report.failed_runs();
+    ensure!(
+        failed == 0,
+        "{failed} of {} benchmark implementations failed; all catalog entries were attempted",
+        report.total_runs()
+    );
     Ok(())
 }
 
@@ -535,17 +574,86 @@ async fn execute_run(
         .await
     }
     .await;
+    let container_diagnostics_result =
+        capture_container_diagnostics(&environment.container_ids(), &resolved.run_directory).await;
+    // A failed load is the run that most needs the subject's final metrics. Keep the benchmark
+    // failure primary below, but attempt the scrape before logs and shutdown on every path.
+    let metrics_result = subject
+        .capture_nervix_metrics(
+            &resolved.domain,
+            &resolved.run_directory,
+            resolved.wait_timeout,
+        )
+        .await;
     let log_result = subject.capture_logs(&resolved.run_directory).await;
     let stop_result = subject.stop().await;
 
     benchmark_result?;
+    metrics_result?;
     log_result?;
+    container_diagnostics_result?;
     stop_result?;
     let report = fs::read_to_string(resolved.run_directory.join("load-report.txt"))
         .context("failed to read the completed load report")?;
     println!("{report}");
     println!("artifacts={}", resolved.run_directory.display());
     Ok(())
+}
+
+async fn capture_container_diagnostics(
+    container_ids: &[String],
+    run_directory: &Path,
+) -> Result<()> {
+    let directory = run_directory.join("container-diagnostics");
+    fs::create_dir_all(&directory).context("failed to create container diagnostics directory")?;
+    for (index, container_id) in container_ids.iter().enumerate() {
+        tokio::task::consume_budget().await;
+        let short_id = container_id.chars().take(12).collect::<String>();
+        ensure!(
+            !short_id.is_empty() && short_id.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "benchmark dependency returned an invalid container id"
+        );
+        let prefix = directory.join(format!("{index:02}-{short_id}"));
+        capture_docker_output(
+            &["inspect", container_id],
+            &prefix.with_extension("inspect.json"),
+        )
+        .await?;
+        capture_docker_output(
+            &[
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{json .}}",
+                container_id,
+            ],
+            &prefix.with_extension("stats.json"),
+        )
+        .await?;
+        capture_docker_output(&["logs", container_id], &prefix.with_extension("log")).await?;
+    }
+    Ok(())
+}
+
+async fn capture_docker_output(arguments: &[&str], path: &Path) -> Result<()> {
+    let output = Command::new("docker")
+        .args(arguments)
+        .output()
+        .await
+        .with_context(|| format!("failed to run docker {}", arguments.join(" ")))?;
+    ensure!(
+        output.status.success(),
+        "docker {} failed with {}: {}",
+        arguments.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut captured = output.stdout;
+    if !output.stderr.is_empty() {
+        captured.extend_from_slice(&output.stderr);
+    }
+    fs::write(path, captured)
+        .with_context(|| format!("failed to write container diagnostics {}", path.display()))
 }
 
 async fn start_declared_dependencies(
@@ -589,6 +697,11 @@ impl ResolvedRun {
             .workload
             .wait_timeout_seconds
             .unwrap_or(benchmark.definition().load.wait_timeout_seconds);
+        let warmup_seconds = args
+            .options
+            .workload
+            .warmup_seconds
+            .unwrap_or(benchmark.definition().load.warmup_seconds);
         ensure!(partitions > 0, "partition count must be positive");
         ensure!(
             partitions <= i32::MAX as u32,
@@ -601,6 +714,7 @@ impl ResolvedRun {
         );
         ensure!(max_backlog_messages > 0, "maximum backlog must be positive");
         ensure!(wait_timeout_seconds > 0, "wait timeout must be positive");
+        ensure!(warmup_seconds > 0, "warm-up duration must be positive");
 
         let run_token = Uuid::now_v7()
             .as_simple()
@@ -629,6 +743,7 @@ impl ResolvedRun {
             max_backlog_messages,
             wait_timeout: Duration::from_secs(wait_timeout_seconds),
             duration_seconds: settings.duration_seconds,
+            warmup_seconds,
             shape: benchmark.definition().load.shape.clone(),
             parameters: settings.parameters,
             input_topic: format!("{topic_prefix}_input"),
@@ -686,6 +801,10 @@ async fn start_nervix(
             Ok(Subject {
                 runtime: SubjectRuntime::Local { child },
                 control_url: Some(format!("http://127.0.0.1:{}", ports.grpc)),
+                metrics_url: Some(reqwest::Url::parse(&format!(
+                    "http://127.0.0.1:{}/metrics",
+                    ports.observability
+                ))?),
                 password: Some(password),
             })
         }
@@ -751,9 +870,15 @@ async fn start_nervix(
             let grpc_port = info
                 .host_port(NERVIX_GRPC_PORT)
                 .ok_or_else(|| anyhow!("Nervix image did not expose its gRPC port"))?;
+            let observability_port = info
+                .host_port(NERVIX_OBSERVABILITY_PORT)
+                .ok_or_else(|| anyhow!("Nervix image did not expose its observability port"))?;
             Ok(Subject {
                 runtime: SubjectRuntime::Container { info },
                 control_url: Some(format!("http://127.0.0.1:{grpc_port}")),
+                metrics_url: Some(reqwest::Url::parse(&format!(
+                    "http://127.0.0.1:{observability_port}/metrics"
+                ))?),
                 password: Some(password),
             })
         }
@@ -820,6 +945,7 @@ async fn start_container_subject(
     Ok(Subject {
         runtime: SubjectRuntime::Container { info },
         control_url: None,
+        metrics_url: None,
         password: None,
     })
 }
@@ -974,6 +1100,42 @@ impl Subject {
         Ok(())
     }
 
+    async fn capture_nervix_metrics(
+        &self,
+        domain: &str,
+        run_directory: &Path,
+        timeout: Duration,
+    ) -> Result<()> {
+        let Some(metrics_url) = self.metrics_url.clone() else {
+            return Ok(());
+        };
+        let client = reqwest::Client::builder()
+            .timeout(timeout.min(Duration::from_secs(30)))
+            .build()
+            .context("failed to build the benchmark metrics client")?;
+        let response = client
+            .get(metrics_url.clone())
+            .send()
+            .await
+            .with_context(|| format!("failed to scrape Nervix metrics from {metrics_url}"))?
+            .error_for_status()
+            .with_context(|| format!("Nervix metrics scrape at {metrics_url} was unsuccessful"))?;
+        let prometheus = response
+            .text()
+            .await
+            .with_context(|| format!("failed to read Nervix metrics from {metrics_url}"))?;
+        fs::write(
+            run_directory.join(NERVIX_METRICS_PROMETHEUS_FILE),
+            &prometheus,
+        )
+        .context("failed to write the raw Nervix metrics scrape")?;
+        let report = NervixMetricsReport::from_prometheus(&prometheus, domain)
+            .context("failed to derive the Nervix benchmark metrics report")?;
+        report
+            .write(run_directory.join(NERVIX_METRICS_REPORT_FILE))
+            .context("failed to write the Nervix benchmark metrics report")
+    }
+
     async fn capture_logs(&self, run_directory: &Path) -> Result<()> {
         let SubjectRuntime::Container { info } = &self.runtime else {
             return Ok(());
@@ -1036,6 +1198,8 @@ async fn run_load_driver(
             &resolved.partitions.to_string(),
             "--duration-seconds",
             &resolved.duration_seconds.to_string(),
+            "--warmup-seconds",
+            &resolved.warmup_seconds.to_string(),
             "--value-bytes",
             &resolved.value_bytes.to_string(),
             "--max-backlog-messages",
@@ -1050,6 +1214,12 @@ async fn run_load_driver(
             go_file
                 .to_str()
                 .ok_or_else(|| anyhow!("go path is not UTF-8"))?,
+            "--output-diagnostics-file",
+            resolved
+                .run_directory
+                .join("output-diagnostics.json")
+                .to_str()
+                .ok_or_else(|| anyhow!("output diagnostics path is not UTF-8"))?,
         ])
         .args(shape_arguments(&resolved.shape))
         .stdout(Stdio::from(stdout))
@@ -1204,6 +1374,10 @@ fn write_run_manifest(
     table.insert(
         "duration_seconds".to_string(),
         i64::try_from(resolved.duration_seconds)?.into(),
+    );
+    table.insert(
+        "warmup_seconds".to_string(),
+        i64::try_from(resolved.warmup_seconds)?.into(),
     );
     table.insert(
         "partitions".to_string(),

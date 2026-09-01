@@ -28,6 +28,7 @@ partitions = 3
 value_bytes = 128
 max_backlog_messages = 4096
 wait_timeout_seconds = 30
+warmup_seconds = 1
 
 [load.shape]
 kind = "uniform-passthrough"
@@ -158,6 +159,56 @@ fn renders_upon_templates_with_kafka_lanes_and_arbitrary_parameters() {
 }
 
 #[test]
+fn nervix_catalog_workloads_use_a_dedicated_idempotent_kafka_producer() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("benchmark crate should live below the repository root");
+    let catalog = BenchmarkCatalog::from_repository_root(repository);
+    let dependency_endpoints = BTreeMap::new();
+
+    for slug in ["kafka-dedup-window", "kafka-filter-map"] {
+        let benchmark = catalog.load(slug).expect("catalog benchmark should load");
+        let rendered = benchmark
+            .render_implementation(
+                "nervix",
+                KafkaRenderInputs {
+                    kafka_bootstrap_servers: "kafka:9092",
+                    input_topic: "bench-input",
+                    output_topic: "bench-output",
+                    consumer_group: "bench-consumer",
+                    lane_count: 1,
+                    dependency_endpoints: &dependency_endpoints,
+                },
+            )
+            .expect("Nervix benchmark template should render");
+
+        assert!(rendered.contains("CREATE CLIENT kafka_input"));
+        assert!(rendered.contains("CREATE CLIENT kafka_output"));
+        assert!(rendered.contains("'enable.idempotence' = 'true'"));
+        assert!(rendered.contains("'acks' = 'all'"));
+        assert!(rendered.contains("FROM KAFKA kafka_input"));
+        assert!(rendered.contains("TO KAFKA kafka_output"));
+    }
+}
+
+#[test]
+fn catalog_workloads_declare_a_timed_warmup() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("benchmark crate should live below the repository root");
+    let catalog = BenchmarkCatalog::from_repository_root(repository);
+
+    for slug in ["kafka-dedup-window", "kafka-filter-map"] {
+        let benchmark = catalog.load(slug).expect("catalog benchmark should load");
+        let manifest = fs::read_to_string(benchmark.directory().join("benchmark.toml"))
+            .expect("catalog manifest should be readable");
+        assert!(manifest.contains("warmup_seconds = 10"));
+    }
+}
+
+#[test]
 fn rejects_invalid_slugs_bounds_missing_implementations_and_escaping_templates() {
     let repository = tempfile::tempdir().expect("temporary repository should be created");
     let catalog = BenchmarkCatalog::from_repository_root(repository.path());
@@ -184,6 +235,7 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+warmup_seconds = 1
 
 [load.shape]
 kind = "uniform-passthrough"
@@ -216,6 +268,7 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+warmup_seconds = 1
 
 [load.shape]
 kind = "uniform-passthrough"
@@ -247,6 +300,7 @@ partitions = 0
 value_bytes = 0
 max_backlog_messages = 0
 wait_timeout_seconds = 0
+warmup_seconds = 0
 
 [load.shape]
 kind = "uniform-passthrough"
@@ -273,6 +327,7 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+warmup_seconds = 1
 
 [load.shape]
 kind = "uniform-passthrough"
@@ -306,6 +361,7 @@ partitions = 2147483648
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+warmup_seconds = 1
 
 [load.shape]
 kind = "uniform-passthrough"
@@ -342,6 +398,7 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+warmup_seconds = 1
 
 [load.shape]
 kind = "uniform-passthrough"
@@ -378,6 +435,7 @@ partitions = 1
 value_bytes = 1
 max_backlog_messages = 1
 wait_timeout_seconds = 1
+warmup_seconds = 1
 
 [load.shape]
 kind = "uniform-passthrough"
@@ -416,6 +474,7 @@ partitions = 2
 value_bytes = 128
 max_backlog_messages = 4096
 wait_timeout_seconds = 30
+warmup_seconds = 1
 
 [load.shape]
 kind = "keyed-windowed"

@@ -2,9 +2,9 @@
 
 The benchmark harness runs the same declared streaming workload against Nervix or a competitive
 implementation. Each run gets fresh Testcontainers dependencies, fresh Kafka topics, a unique
-consumer group, a high-rate idempotent producer, and a bounded wait for the stable output the
-workload's declared load shape expects. Nothing depends on the repository's long-lived Docker
-Compose stack.
+consumer group, a high-rate idempotent producer, a timed steady-state warm-up, and a bounded wait
+for the stable output the workload's declared load shape expects. Nothing depends on the
+repository's long-lived Docker Compose stack.
 
 List the available workloads and implementations:
 
@@ -56,9 +56,10 @@ runs the benchmark catalog against it. The downstream job builds only the benchm
 server startup and control-plane configuration target the completed image, with no CLI subprocess.
 Adding the label starts a Docker build and benchmark run; subsequent commits rerun the complete
 catalog. A least-privilege reporter job downloads the resulting artifact and updates one stable PR
-comment with the comparison table; failed reruns replace stale results with the failure state.
-Fork PRs remain excluded because their untrusted workflow tokens cannot push the image that this job
-consumes.
+comment with every workload and implementation. The runner attempts the rest of the catalog after
+an individual implementation fails, retains successful measurements, and lists failed entries in
+the same PR report while keeping CI failed. Fork PRs remain excluded because their untrusted
+workflow tokens cannot push the image that this job consumes.
 
 The underlying image-only entry point is available for reproducing that CI path:
 
@@ -74,6 +75,7 @@ Override common load fields or workload parameters on any run:
 ```bash
 just benchmark-nervix-local kafka-filter-map \
   --partitions 16 \
+  --warmup-seconds 10 \
   --parameter emitter_flush_each=20s \
   --parameter emitter_max_batch_size=1GiB
 ```
@@ -124,8 +126,11 @@ exercise a live keyspace and close enough that the deduplicator's `MAX TIME` can
 between its copies and re-emit one. Raising `dedup_max_time` widens the retained keyspace and the
 memory it costs without changing the expected output.
 
-Warm-up sends one complete cycle per partition and waits for the records that cycle owes before it
-signals readiness, so every window a warm-up record entered is closed before measurement begins.
+Warm-up sends at least one complete cycle per partition and continues under the same backlog bound
+for `load.warmup_seconds`. It then waits for the exact records those cycles owe and requires both
+the output message count and output record count to remain unchanged for the parity confirmation
+interval before it establishes the measured-phase baseline. The catalog uses ten seconds so Kafka,
+network, allocator, processor, and output paths reach steady state before measurement begins.
 
 The window that is still filling when generation stops closes on its duration bound, so the
 reported `drain_seconds` for a windowed workload includes up to one `window_max_delay` of waiting
@@ -201,6 +206,7 @@ dependencies = ["kafka"]
 
 [load]
 duration = "auto"
+warmup_seconds = 10
 partitions = 16
 value_bytes = 128
 max_backlog_messages = 4194304
@@ -252,10 +258,21 @@ target/benchmarks/<workload>/<implementation>/<run-id>/
 ```
 
 Artifacts include the resolved parameters, rendered configuration, subject log, image identity for
-container runs, load-driver log, and the count/rate report. `run-all` also writes
-`benchmark-comparison.md` from the exact run directories produced by that invocation; it never
-selects unrelated runs by timestamp. A run passes only after the output records the workload's
-shape expects have arrived and remained stable for a confirmation interval.
+container runs, load-driver log, and the count/rate report. `output-diagnostics.json` retains final
+per-partition counts and, for windowed output, the last 32 summaries with their Kafka partition and
+offset. `container-diagnostics/` retains inspect output, a final resource snapshot, and logs for
+Kafka and container subjects. A Nervix run attempts the end-of-run `/metrics` scrape even after a
+load or parity failure, writing the raw response to `nervix-metrics.prom` and, when valid, its
+benchmark projection to `nervix-metrics.toml`. The comparison reports `messages_per_batch` p50,
+p90, and p99 bucket upper bounds for every runtime target, the exact mean from `messages_total /
+batches_total`, and `relay_buffer_len` p50, p90, and p99 bucket upper bounds.
+
+`run-all` writes `benchmark-comparison.md` from the exact run directories produced by that
+invocation; it never selects unrelated runs by timestamp. It attempts every declared workload and
+implementation even when an earlier entry fails, and records every execution in a status table
+before the completed measurements and failures. A run passes only after the output records the
+workload's shape expects have arrived and remained stable for a confirmation interval and, for
+Nervix, the metrics scrape has been parsed successfully.
 
 This is a single-host end-to-end benchmark. Its rate includes Kafka, the load driver, the selected
 product, and the output drain. Compare products only with identical workload inputs, and do not use

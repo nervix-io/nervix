@@ -16,6 +16,7 @@ humantime = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-nspl = { workspace = true }
 nervix-test-environment = { workspace = true }
+ordered-float = { workspace = true }
 parking_lot = { workspace = true }
 rdkafka = { workspace = true, features = [
   "tokio",
