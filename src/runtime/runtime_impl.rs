@@ -4367,7 +4367,7 @@ impl Runtime {
                     .map(|(_, record)| record.one_row_batch())
                     .collect::<Vec<_>>();
                 let batch_refs = batches.iter().collect::<Vec<_>>();
-                rows.batch = RuntimeRecordBatch::concat(&batch_refs)?;
+                rows.batch = Arc::new(RuntimeRecordBatch::concat(&batch_refs)?);
             }
         }
         if rows.is_empty() {
@@ -5845,22 +5845,23 @@ impl Runtime {
                                 },
                                 Some(&execution.udfs),
                             )?;
-                            routes.push(GeneratorTaskRouteSpec {
-                                output: output.clone(),
+                            routes.push(GeneratorTaskRouteSpec::new(
+                                output.clone(),
                                 program,
                                 output_schema,
                                 output_registry,
                                 output_services,
-                            });
+                            ));
                         }
                         (
                             execution.shutdown.clone(),
-                            GeneratorTaskSpec {
-                                source_relay: desired_generator.materialized_relay.clone(),
-                                generator: desired_generator.clone(),
+                            GeneratorTaskSpec::new(
+                                desired_generator.clone(),
+                                source_schema,
                                 source_branching,
+                                source_branch_schema,
                                 routes,
-                            },
+                            ),
                         )
                     };
                     let task = self.spawn_generator_task(domain, &shutdown, spec)?;
@@ -7199,6 +7200,20 @@ impl Runtime {
         };
 
         for (generator, source_branching, route_specs) in generator_specs {
+            let source_schema = relay_schemas
+                .get(&generator.materialized_relay)
+                .cloned()
+                .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "missing generator materialized relay schema '{}'",
+                        generator.materialized_relay
+                    ),
+                })?;
+            let source_branch_schema = relay_branching_schemas
+                .get(&generator.materialized_relay)
+                .cloned()
+                .flatten();
             let mut routes = Vec::with_capacity(route_specs.len());
             for (output, program, output_schema) in route_specs {
                 let Some(output_registry) = relay_registries.get(&output.relay).cloned() else {
@@ -7216,13 +7231,13 @@ impl Runtime {
                         ),
                     });
                 };
-                routes.push(GeneratorTaskRouteSpec {
+                routes.push(GeneratorTaskRouteSpec::new(
                     output,
                     program,
                     output_schema,
                     output_registry,
                     output_services,
-                });
+                ));
             }
             let entity = RegistryEntity {
                 kind: ModelKind::Generator,
@@ -7233,12 +7248,13 @@ impl Runtime {
                 self.spawn_generator_task(
                     domain,
                     &shutdown_tx,
-                    GeneratorTaskSpec {
-                        source_relay: generator.materialized_relay.clone(),
+                    GeneratorTaskSpec::new(
                         generator,
+                        source_schema,
                         source_branching,
+                        source_branch_schema,
                         routes,
-                    },
+                    ),
                 )?,
             );
         }
@@ -9541,6 +9557,20 @@ impl Runtime {
         };
 
         for (generator, source_branching, route_specs) in generator_specs {
+            let source_schema = relay_schemas
+                .get(&generator.materialized_relay)
+                .cloned()
+                .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "missing generator materialized relay schema '{}'",
+                        generator.materialized_relay
+                    ),
+                })?;
+            let source_branch_schema = relay_branching_schemas
+                .get(&generator.materialized_relay)
+                .cloned()
+                .flatten();
             let mut routes = Vec::with_capacity(route_specs.len());
             for (output, program, output_schema) in route_specs {
                 let Some(output_registry) = relay_registries.get(&output.relay).cloned() else {
@@ -9558,13 +9588,13 @@ impl Runtime {
                         ),
                     });
                 };
-                routes.push(GeneratorTaskRouteSpec {
+                routes.push(GeneratorTaskRouteSpec::new(
                     output,
                     program,
                     output_schema,
                     output_registry,
                     output_services,
-                });
+                ));
             }
             let entity = RegistryEntity {
                 kind: ModelKind::Generator,
@@ -9575,12 +9605,13 @@ impl Runtime {
                 self.spawn_generator_task(
                     domain,
                     &shutdown_tx,
-                    GeneratorTaskSpec {
-                        source_relay: generator.materialized_relay.clone(),
+                    GeneratorTaskSpec::new(
                         generator,
+                        source_schema,
                         source_branching,
+                        source_branch_schema,
                         routes,
-                    },
+                    ),
                 )?,
             );
         }
@@ -9912,7 +9943,9 @@ impl Runtime {
         let GeneratorTaskSpec {
             generator,
             source_relay,
+            source_schema,
             source_branching,
+            context_projection,
             routes,
         } = spec;
         let interval = Self::parse_runtime_node_duration_setting(
@@ -10160,22 +10193,6 @@ impl Runtime {
                         }
                     };
 
-                    let source_schema =
-                        match relay_schema_for_runtime(&runtime, &task_domain, &source_relay) {
-                            Ok(schema) => Some(schema),
-                            Err(error) => {
-                                state_load_failed = true;
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
-                                    "failed to load generator '{}' source relay '{}' schema in \
-                                     domain '{}': {}",
-                                    task_generator.as_str(),
-                                    source_relay.as_str(),
-                                    task_domain.as_str(),
-                                    error
-                                )));
-                                None
-                            }
-                        };
                     let mut source_state_by_branch = HashMap::<
                         Option<BranchKey>,
                         Vec<nervix_models::RemoteRuntimeRecord>,
@@ -10286,57 +10303,45 @@ impl Runtime {
 
                             for source_record in records {
                                 tokio::task::consume_budget().await;
-                                let source_row = match source_schema
-                                    .as_ref()
-                                    .expect("successful generator state load has a source schema")
-                                    .runtime_row_from_remote(source_record.clone())
+                                let (source_batch, source_metadata) =
+                                    match source_schema.runtime_batch_from_remote(source_record) {
+                                        Ok(decoded) => decoded,
+                                        Err(error) => {
+                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                "failed to decode generator '{}' source relay \
+                                                 '{}' state in domain '{}': {}",
+                                                task_generator.as_str(),
+                                                source_relay.as_str(),
+                                                task_domain.as_str(),
+                                                error
+                                            )));
+                                            continue;
+                                        }
+                                    };
+                                let source_batch = Arc::new(source_batch);
+                                let context = match context_projection
+                                    .project(source_batch.as_ref(), &branch_key)
                                 {
-                                    Ok(row) => row,
+                                    Ok(context) => context,
                                     Err(error) => {
                                         let _ = task_events.send(RuntimeEvent::Error(format!(
-                                            "failed to decode generator '{}' source relay '{}' \
-                                             state in domain '{}': {}",
+                                            "failed to prepare generator '{}' context in domain \
+                                             '{}' branch '{}': {}",
                                             task_generator.as_str(),
-                                            source_relay.as_str(),
                                             task_domain.as_str(),
+                                            branch_key_display(&branch_key),
                                             error
                                         )));
                                         continue;
                                     }
                                 };
-                                let mut values = HashMap::default();
-                                for field in &source_record.fields {
-                                    values.insert(
-                                        format!(
-                                            "relay_state.{}.{}",
-                                            source_relay.as_str(),
-                                            field.name
-                                        ),
-                                        RuntimeValue::from_remote(field.value.clone()),
-                                    );
-                                }
-                                if let Some(branch_key) = branch_key.as_ref() {
-                                    for (field, value) in branch_key.fields() {
-                                        values.insert(
-                                            format!("branch.{}", field.as_str()),
-                                            value.clone(),
-                                        );
-                                    }
-                                }
-                                let materialized_state = values
-                                    .iter()
-                                    .filter(|(name, _)| name.starts_with("relay_state."))
-                                    .map(|(name, value)| (name.clone(), value.clone()))
-                                    .collect::<HashMap<_, _>>();
+                                let mut materialized_state_snapshot = None;
 
                                 for (route_index, (route, flush_policy)) in
                                     routes.iter().enumerate()
                                 {
                                     tokio::task::consume_budget().await;
-                                    let input = match generator_context_batch(
-                                        &route.program.compiled.input_schema,
-                                        &values,
-                                    ) {
+                                    let input = match route.project_input(&context, &branch_key) {
                                         Ok(input) => input,
                                         Err(error) => {
                                             let _ = task_events.send(RuntimeEvent::Error(format!(
@@ -10355,12 +10360,11 @@ impl Runtime {
                                         &route.program,
                                         &input,
                                         execution_now,
-                                        &materialized_state,
                                     )
                                     .await
                                     {
-                                        Ok(SingleRecordFilterMapOutcome::Filtered) => {}
-                                        Ok(SingleRecordFilterMapOutcome::Output(record)) => {
+                                        Ok(GeneratorProgramOutcome::Filtered) => {}
+                                        Ok(GeneratorProgramOutcome::Output(record)) => {
                                             let (acks, _completion) =
                                                 runtime.tracked_ack_root(&task_domain);
                                             let route_state = &mut branch_state.routes[route_index];
@@ -10377,11 +10381,37 @@ impl Runtime {
                                                     ));
                                             }
                                         }
-                                        Ok(SingleRecordFilterMapOutcome::MessageError {
+                                        Ok(GeneratorProgramOutcome::MessageError {
                                             error,
                                             partial_output,
-                                            materialized_state,
                                         }) => {
+                                            if materialized_state_snapshot.is_none() {
+                                                materialized_state_snapshot =
+                                                    match context_projection
+                                                        .materialized_state_snapshot(
+                                                            source_batch.as_ref(),
+                                                        ) {
+                                                        Ok(snapshot) => Some(snapshot),
+                                                        Err(error) => {
+                                                            let _ = task_events.send(
+                                                                RuntimeEvent::Error(format!(
+                                                                    "failed to capture generator \
+                                                                     '{}' materialized state in \
+                                                                     domain '{}' branch '{}': {}",
+                                                                    task_generator.as_str(),
+                                                                    task_domain.as_str(),
+                                                                    branch_key_display(&branch_key),
+                                                                    error
+                                                                )),
+                                                            );
+                                                            continue;
+                                                        }
+                                                    };
+                                            }
+                                            let materialized_state = materialized_state_snapshot
+                                                .as_ref()
+                                                .expect("generator state snapshot was set")
+                                                .clone();
                                             let (acks, _completion) =
                                                 runtime.tracked_ack_root(&task_domain);
                                             runtime
@@ -10394,7 +10424,15 @@ impl Runtime {
                                                         policy: &route.output.message_error_policy,
                                                         message: RelayMessage {
                                                             key: branch_key.clone(),
-                                                            record: source_row.clone(),
+                                                            record: RuntimeRow::new(
+                                                                source_batch.clone(),
+                                                                0,
+                                                                source_metadata.clone(),
+                                                            )
+                                                            .expect(
+                                                                "decoded generator source batch \
+                                                                 must contain one row",
+                                                            ),
                                                             acks,
                                                         },
                                                         error,

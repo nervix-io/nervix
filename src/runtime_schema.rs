@@ -423,7 +423,45 @@ impl CompiledSchema {
         &self,
         record: RemoteRuntimeRecord,
     ) -> Result<RuntimeRow, String> {
-        RuntimeRow::from_remote(self.arrow_schema.clone(), record)
+        let (batch, metadata) = self.runtime_batch_from_remote(record)?;
+        batch.runtime_row(0, metadata)
+    }
+
+    pub(crate) fn runtime_batch_from_remote(
+        &self,
+        record: RemoteRuntimeRecord,
+    ) -> Result<(RuntimeRecordBatch, RuntimeRecordMetadata), String> {
+        let metadata = RuntimeRecordMetadata::from_remote(record.metadata);
+        let mut seen = HashSet::default();
+        for field in &record.fields {
+            if !seen.insert(field.name.as_str()) {
+                return Err(format!(
+                    "persisted runtime record contains duplicate field '{}'",
+                    field.name
+                ));
+            }
+            if !self
+                .fields
+                .iter()
+                .any(|expected| expected.name == field.name)
+            {
+                return Err(format!(
+                    "persisted runtime record contains unknown field '{}'",
+                    field.name
+                ));
+            }
+        }
+        let mut builder = self.batch_builder(1);
+        for expected in &self.fields {
+            let value = record
+                .fields
+                .iter()
+                .find(|field| field.name == expected.name)
+                .map(|field| RuntimeValue::from_remote(field.value.clone()));
+            builder.append(value.as_ref())?;
+        }
+        builder.finish_row()?;
+        builder.finish().map(|batch| (batch, metadata))
     }
 
     fn validate_arrow_batch(&self, batch: &RuntimeRecordBatch) -> Result<(), String> {
@@ -809,6 +847,23 @@ impl RuntimeRecordBatch {
         })
     }
 
+    pub(crate) fn shared_from_rows(
+        expected_schema: StdArc<ArrowSchema>,
+        rows: &[RuntimeRow],
+    ) -> Result<Arc<Self>, String> {
+        if let Some(first) = rows.first()
+            && first.batch.schema.as_ref() == expected_schema.as_ref()
+            && rows.len() == first.batch.batch.num_rows()
+            && rows
+                .iter()
+                .enumerate()
+                .all(|(index, row)| Arc::ptr_eq(&first.batch, &row.batch) && row.row == index)
+        {
+            return Ok(first.batch.clone());
+        }
+        Self::from_rows(expected_schema, rows.iter()).map(Arc::new)
+    }
+
     pub(crate) fn value(&self, row: usize, name: &str) -> Result<Option<RuntimeValue>, String> {
         if row >= self.batch.num_rows() {
             return Err(format!(
@@ -1118,10 +1173,6 @@ impl RuntimeRow {
     #[cfg(test)]
     pub(crate) fn arrow_schema(&self) -> StdArc<ArrowSchema> {
         self.batch.schema.clone()
-    }
-
-    pub(crate) fn index(&self) -> usize {
-        self.row
     }
 
     pub(crate) fn metadata(&self) -> &RuntimeRecordMetadata {

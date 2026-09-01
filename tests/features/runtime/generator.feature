@@ -146,6 +146,100 @@ Feature: Generator node
       | 3            | 0             |
       | 3            | 1             |
 
+  Scenario Outline: Generator projects columnar materialized state and branch keys
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA generator_metric (
+        tenant STRING,
+        samples <samples_type>,
+        labels <labels_type> OPTIONAL
+      );
+
+      CREATE WIRE JSON SCHEMA generator_metric_wire MODE STRICT (
+        tenant string,
+        samples array,
+        labels array OPTIONAL
+      );
+
+      CREATE CODEC generator_metric_codec
+        FROM WIRE JSON SCHEMA generator_metric_wire
+        TO SCHEMA generator_metric;
+
+      CREATE SCHEMA generator_tenant_branch_schema (
+        tenant STRING
+      );
+
+      CREATE BRANCH generator_tenant_branch
+        SCHEMA generator_tenant_branch_schema
+        TTL 5m;
+
+      CREATE RELAY generator_metrics
+        SCHEMA generator_metric
+        BRANCHED BY generator_tenant_branch
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+
+      CREATE RELAY projected_generator_metrics
+        SCHEMA generator_metric
+        BRANCHED BY generator_tenant_branch;
+
+      CREATE VHOST edge generator-columnar-{{test_id}}.example.com;
+
+      CREATE ENDPOINT generator_metric_endpoint
+        ON edge
+        PATH '/metrics'
+        TYPE HTTP;
+
+      CREATE INGESTOR generator_metric_ingestor
+        FROM ENDPOINT generator_metric_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_metric_codec
+        TIMESTAMP NOW
+        TO generator_metrics
+          INHERIT ALL
+          BRANCHED BY generator_tenant_branch
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      CREATE GENERATOR project_generator_metrics
+        USING MATERIALIZED STATE generator_metrics
+        EACH 100ms
+        BRANCHED BY generator_tenant_branch
+        TO projected_generator_metrics
+          SET tenant = branch.tenant,
+              samples = relay_state.generator_metrics.samples,
+              labels = relay_state.generator_metrics.labels
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+
+      CREATE SUBSCRIPTION projected_generator_metrics_subscription TO projected_generator_metrics;
+      START;
+      """
+    When http payload is posted to host "generator-columnar-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"acme","samples":[1.0,2.5],"labels":["api","prod"]}
+      """
+    And http payload is posted to host "generator-columnar-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","samples":[3.0,4.5],"labels":["worker"]}
+      """
+    Then within "5s" the relay subscription receives payloads
+      """
+      key={"tenant":"acme"} payload={"labels":["api","prod"],"samples":[1.0,2.5],"tenant":"acme"}
+      key={"tenant":"beta"} payload={"labels":["worker"],"samples":[3.0,4.5],"tenant":"beta"}
+      """
+
+    Examples:
+      | cluster_size | replica_count | samples_type  | labels_type |
+      | 1            | 0             | ARRAY<F32, 2> | VEC<STRING> |
+      | 3            | 0             | ARRAY<F32, 2> | VEC<STRING> |
+
   Scenario Outline: Generator emits records from materialized relay state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

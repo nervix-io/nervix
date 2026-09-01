@@ -6387,8 +6387,16 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
         ),
     ]);
     let right = test_runtime_row([("id".to_string(), RuntimeValue::U32(2))]);
-
-    let combined = super::correlator_input_row(&left, &right)
+    let left = RuntimeRecordBatch::from_rows(left.batch().schema(), std::iter::once(&left))
+        .expect("left batch should build");
+    let right = RuntimeRecordBatch::from_rows(right.batch().schema(), std::iter::once(&right))
+        .expect("right batch should build");
+    let materialized_state = [super::CorrelatorMaterializedState {
+        left: Arc::new(HashMap::default()),
+        right: Arc::new(HashMap::default()),
+    }];
+    let combined = super::correlator_input_batch(&left, &right, &[], &materialized_state)
+        .and_then(|batch| batch.runtime_row(0, RuntimeRecordMetadata::test()))
         .expect("correlator inputs should form one Arrow row");
 
     assert_eq!(row_value(&combined, "left.id"), Some(RuntimeValue::U32(1)));
@@ -6399,6 +6407,29 @@ fn correlator_runtime_rows_use_only_left_and_right_scopes() {
     );
     assert_eq!(row_value(&combined, "relay_state.profiles.status"), None);
     assert_eq!(row_value(&combined, "id"), None);
+}
+
+#[test]
+fn ingest_group_rows_share_the_group_batch_allocation() {
+    let first = test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]);
+    let second = test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]);
+    let batch =
+        RuntimeRecordBatch::from_rows(first.batch().schema(), [&first, &second].into_iter())
+            .expect("test rows should form one ingest group");
+    let rows = super::IngestGroupRows {
+        batch: Arc::new(batch),
+        record_metadata: vec![RuntimeRecordMetadata::test(); 2],
+        ingest_metadata: None,
+        acks: vec![AckSet::empty(), AckSet::empty()],
+    };
+
+    let first = rows.row(0).expect("first row should exist");
+    let second = rows.row(1).expect("second row should exist");
+
+    assert!(
+        Arc::ptr_eq(first.batch(), second.batch()),
+        "row views from one ingest group must retain the same batch allocation"
+    );
 }
 
 #[tokio::test]
@@ -6427,7 +6458,7 @@ async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
             ]),
             acks: AckSet::empty(),
         },
-        materialized_state: HashMap::default(),
+        materialized_state: Arc::new(HashMap::default()),
     };
     let mut state = super::CorrelatorBranchState {
         pending_left: vec![pending(7, 1), pending(8, 2), pending(7, 3)],
@@ -6440,7 +6471,7 @@ async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
             record: test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]),
             acks: AckSet::empty(),
         },
-        materialized_state: HashMap::default(),
+        materialized_state: Arc::new(HashMap::default()),
     };
     super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
 
@@ -6480,7 +6511,7 @@ async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
             record: test_runtime_row([("id".to_string(), RuntimeValue::U32(id))]),
             acks: AckSet::empty(),
         },
-        materialized_state: HashMap::default(),
+        materialized_state: Arc::new(HashMap::default()),
     };
     let right_candidates = vec![right_candidate(7), right_candidate(8), right_candidate(7)];
     super::CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
@@ -6505,7 +6536,7 @@ async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
 }
 
 #[tokio::test]
-async fn correlator_output_reads_branch_and_declared_materialized_state() {
+async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
     let left_schema = test_schema(&[("id", ParseAsType::U32)]);
     let right_schema = test_schema(&[("score", ParseAsType::I64)]);
     let output_schema = test_schema(&[
@@ -6535,7 +6566,7 @@ async fn correlator_output_reads_branch_and_declared_materialized_state() {
         output_sensitivity: super::VmSchemaSensitivity::default(),
         construction: &construction(
             "SET tenant = branch.tenant, status = relay_state.profiles.status, score = \
-             right.score WHERE relay_state.profiles.status = \"active\"",
+             right.score WHERE relay_state.profiles.status != \"blocked\"",
         ),
         runtime: super::RuntimeVmCompileContext {
             available_materialized_streams: &materialized_specs,
@@ -6547,42 +6578,108 @@ async fn correlator_output_reads_branch_and_declared_materialized_state() {
         },
     }
     .compile()
-    .expect("correlator output should compile with branch and materialized state bindings");
-    let left = test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]);
-    let right = test_runtime_row([("score".to_string(), RuntimeValue::I64(42))]);
-    let combined = super::correlator_input_row(&left, &right)
-        .expect("correlator inputs should form one Arrow row");
-    let materialized_state = HashMap::from_iter([(
-        "relay_state.profiles.status".to_string(),
-        RuntimeValue::String("active".to_string()),
-    )]);
-    let message = match super::evaluate_correlator_output_message(
+    .expect("correlator output should compile");
+    let left_batch = Arc::new(
+        left_schema
+            .batch_from_test_rows([
+                [("id".to_string(), RuntimeValue::U32(7))],
+                [("id".to_string(), RuntimeValue::U32(8))],
+            ])
+            .expect("left rows should build"),
+    );
+    let right_batch = Arc::new(
+        right_schema
+            .batch_from_test_rows([
+                [("score".to_string(), RuntimeValue::I64(41))],
+                [("score".to_string(), RuntimeValue::I64(42))],
+            ])
+            .expect("right rows should build"),
+    );
+    let now = super::current_timestamp();
+    let key = string_branch_key("tenant", "acme");
+    let correlation = |row, status: &str| {
+        let state = Arc::new(HashMap::from_iter([(
+            "relay_state.profiles.status".to_string(),
+            RuntimeValue::String(status.to_string()),
+        )]));
+        (
+            super::CorrelatorPendingMessage {
+                received_at: now,
+                message: RelayMessage {
+                    key: key.clone(),
+                    record: RuntimeRow::new(left_batch.clone(), row, RuntimeRecordMetadata::test())
+                        .expect("left row should exist"),
+                    acks: AckSet::empty(),
+                },
+                materialized_state: Arc::new(HashMap::default()),
+            },
+            super::CorrelatorPendingMessage {
+                received_at: now,
+                message: RelayMessage {
+                    key: key.clone(),
+                    record: RuntimeRow::new(
+                        right_batch.clone(),
+                        row,
+                        RuntimeRecordMetadata::test(),
+                    )
+                    .expect("right row should exist"),
+                    acks: AckSet::empty(),
+                },
+                materialized_state: state,
+            },
+        )
+    };
+    let correlations = vec![correlation(0, "active"), correlation(1, "paused")];
+    let matched = super::CorrelatorMatchedBatch::from_correlations(&correlations, &[&program])
+        .expect("matched pairs should form one Arrow batch");
+    super::CORRELATOR_OUTPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+
+    let outcomes = super::evaluate_correlator_output_batch(
         &identifier("join_profiles"),
         &program,
-        string_branch_key("tenant", "acme"),
-        combined,
-        &materialized_state,
-        AckSet::empty(),
-        super::current_timestamp(),
+        &matched,
+        vec![AckSet::empty(), AckSet::empty()],
+        now,
     )
     .await
-    {
-        Ok(Some(message)) => message,
-        Ok(None) => panic!("route predicate should select the output"),
-        Err(error) => panic!("correlator output should evaluate: {}", error.error.message),
-    };
+    .expect("batched correlator output should evaluate");
+    let messages = outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            Ok(Some(message)) => message,
+            Ok(None) => panic!("route WHERE must retain every eligible pair"),
+            Err(error) => panic!("correlator output should succeed: {}", error.error.message),
+        })
+        .collect::<Vec<_>>();
 
     assert_eq!(
-        row_value(&message.record, "tenant"),
-        Some(RuntimeValue::String("acme".to_string()))
+        super::CORRELATOR_OUTPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
+        1,
+        "all matched pairs for one route must share one output VM execution"
     );
+    assert_eq!(messages.len(), 2);
     assert_eq!(
-        row_value(&message.record, "status"),
+        row_value(&messages[0].record, "status"),
         Some(RuntimeValue::String("active".to_string()))
     );
     assert_eq!(
-        row_value(&message.record, "score"),
+        row_value(&messages[1].record, "status"),
+        Some(RuntimeValue::String("paused".to_string()))
+    );
+    assert_eq!(
+        row_value(&messages[0].record, "score"),
+        Some(RuntimeValue::I64(41))
+    );
+    assert_eq!(
+        row_value(&messages[1].record, "score"),
         Some(RuntimeValue::I64(42))
+    );
+    let output_batch = messages[0].record.batch().clone();
+    let relay_batch = super::build_stream_record_batch_preserving_acks(output_schema, messages)
+        .expect("batched correlator output should form one relay batch");
+    assert!(
+        Arc::ptr_eq(&relay_batch.batch, &output_batch),
+        "relay batching must preserve the correlator's shared output allocation"
     );
 }
 
@@ -11172,20 +11269,47 @@ async fn finalized_output_filter_reads_constructed_output_values() {
 }
 
 #[tokio::test]
-async fn generator_set_program_can_project_from_materialized_relay_namespace() {
+async fn generator_set_program_projects_columnar_state_and_branch_context() {
     let source_schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("amount", ParseAsType::I64),
+        (
+            "samples",
+            ParseAsType::Array {
+                element: Box::new(ParseAsType::F32),
+                len: 2,
+            },
+        ),
+        (
+            "labels",
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::String),
+            },
+        ),
     ]);
     let output_schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("amount", ParseAsType::I64),
+        (
+            "samples",
+            ParseAsType::Array {
+                element: Box::new(ParseAsType::F32),
+                len: 2,
+            },
+        ),
+        (
+            "labels",
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::String),
+            },
+        ),
     ]);
+    let branch_schema = test_schema(&[("tenant", ParseAsType::String)]);
     let output = ProcessorOutput {
         relay: identifier("generated_notifications"),
         construction: construction(
-            "SET tenant = relay_state.notifications.tenant, amount = \
-             relay_state.notifications.amount + 1",
+            "SET tenant = branch.tenant, amount = relay_state.notifications.amount + 1, samples = \
+             relay_state.notifications.samples, labels = relay_state.notifications.labels",
         ),
         flush_policy: Some(nervix_models::OutputFlushPolicy {
             flush_each: "100ms".to_string(),
@@ -11210,33 +11334,73 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
             output: output_schema.arrow_schema(),
             output_sensitivity: super::VmSchemaSensitivity::default(),
             source: source_schema.arrow_schema(),
-            branch: None,
+            branch: Some(branch_schema.arrow_schema()),
         },
         None,
     )
     .expect("generator set program must compile");
 
-    let mut values = HashMap::default();
-    values.insert(
-        "relay_state.notifications.tenant".to_string(),
-        RuntimeValue::String("acme".to_string()),
+    let samples = RuntimeValue::Array(vec![
+        RuntimeValue::F32(OrderedFloat(1.0)),
+        RuntimeValue::F32(OrderedFloat(2.5)),
+    ]);
+    let labels = RuntimeValue::Vec(vec![
+        RuntimeValue::String("api".to_string()),
+        RuntimeValue::String("prod".to_string()),
+    ]);
+    let source = source_schema
+        .batch_from_test_rows([[
+            (
+                "tenant".to_string(),
+                RuntimeValue::String("acme".to_string()),
+            ),
+            ("amount".to_string(), RuntimeValue::I64(7)),
+            ("samples".to_string(), samples.clone()),
+            ("labels".to_string(), labels.clone()),
+        ]])
+        .expect("generator source batch must build");
+    let branch_key = string_branch_key("tenant", "acme");
+    let context_projection = super::GeneratorContextProjection::new(
+        &identifier("notifications"),
+        source_schema.arrow_schema().as_ref(),
+        Some(branch_schema.arrow_schema().as_ref()),
     );
-    values.insert(
-        "relay_state.notifications.amount".to_string(),
-        RuntimeValue::I64(7),
-    );
-    let input = super::generator_context_batch(&program.compiled.input_schema, &values)
-        .expect("generator input batch must build");
+    let context = context_projection
+        .project(&source, &branch_key)
+        .expect("generator context must project");
+    let source_samples = source
+        .schema()
+        .index_of("samples")
+        .expect("source samples column must exist");
+    let context_samples = context
+        .schema()
+        .index_of("relay_state.notifications.samples")
+        .expect("context samples column must exist");
+    assert!(StdArc::ptr_eq(
+        source.batch().column(source_samples),
+        context.batch().column(context_samples),
+    ));
+    let input = super::GeneratorRouteInputProjection::new(&program.compiled.input_schema)
+        .project(&program.compiled.input_schema, &context, &branch_key)
+        .expect("generator route input must project");
+    let input_samples = input
+        .schema()
+        .index_of("relay_state.notifications.samples")
+        .expect("route input samples column must exist");
+    let input_samples = input.column(input_samples).to_array_ref();
+    assert!(StdArc::ptr_eq(
+        context.batch().column(context_samples),
+        &input_samples,
+    ));
 
     let output = super::execute_generator_program_on_context(
         &program,
         &input,
         Timestamp::from_unix_nanos(1),
-        &values,
     )
     .await
     .expect("generator program must execute");
-    let super::SingleRecordFilterMapOutcome::Output(output) = output else {
+    let super::GeneratorProgramOutcome::Output(output) = output else {
         panic!("generator program must emit one row");
     };
 
@@ -11245,6 +11409,8 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
         Some(RuntimeValue::String("acme".to_string()))
     );
     assert_eq!(row_value(&output, "amount"), Some(RuntimeValue::I64(8)));
+    assert_eq!(row_value(&output, "samples"), Some(samples));
+    assert_eq!(row_value(&output, "labels"), Some(labels));
 }
 
 #[tokio::test]
