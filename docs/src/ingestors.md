@@ -53,7 +53,9 @@ buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-
 At runtime, the ingestor:
 
 - decodes inbound payloads into runtime records
-- collects decoded records into a bounded source ingest group
+- collects decoded records into a bounded source ingest group of at most 1,024 messages, closing
+  it earlier when the source goes quiet for 5 ms; this bound is independent of every route
+  `FLUSH` policy and caps the size of the first Arrow batch built from external input
 - executes `FILTER WHERE` once against that whole group
 - executes each route's ordered construction and `WHERE` program once against the surviving group
 - resolves the concrete branch group from the referenced `CREATE BRANCH`

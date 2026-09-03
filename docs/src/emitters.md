@@ -73,7 +73,9 @@ For most emitters the collected batch is encoded and published on the flush boun
 additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its sink clause: flush
 writes local Arrow IPC staging files, and commit appends the staged data to object storage. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
-interval or maximum batch-size boundary.
+interval or maximum batch-size boundary. Which sinks gain from larger flush batches, and which
+publish per record regardless of batch size, is covered by the
+[flush tuning guidance](nspl-overview.md).
 
 An emitter may place `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` immediately after the
 complete `FROM <relay> [WHERE ...] [, ...]` list. This input policy runs before emitter filtering,
