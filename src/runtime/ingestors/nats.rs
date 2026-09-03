@@ -77,7 +77,8 @@ impl NatsIngestor {
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 let mut backoff = RuntimeReconnectBackoff::default();
-                let mut collector = IngestRouteCollector::default();
+                let mut collector =
+                    IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
 
                 info!(
                     domain = task_domain.as_str(),
@@ -284,7 +285,7 @@ impl NatsIngestor {
 
                                         let payload = BufferedIngestPayload::new(
                                             payload,
-                                            IngestFilterMapMetadata::from_headers(headers),
+                                            BufferedIngestMetadata::Headers(headers),
                                         );
                                         if let IngestorQuiesceIntake::Dispatch(payload) =
                                             task_quiesce.intake(instance_idx, payload, false)

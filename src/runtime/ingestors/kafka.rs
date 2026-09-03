@@ -11,6 +11,27 @@ use super::super::*;
 
 pub(crate) struct KafkaIngestor;
 
+/// The headers of one borrowed Kafka message.
+///
+/// Appending reads them out of the source message, so a message without headers costs
+/// nothing and a value only allocates when it is not valid UTF-8.
+struct KafkaMessageHeaders<'a>(Option<&'a rdkafka::message::BorrowedHeaders>);
+
+impl IngestMessageHeaders for KafkaMessageHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        let Some(headers) = self.0 else {
+            return;
+        };
+        for header in headers.iter() {
+            let value = header
+                .value
+                .map(String::from_utf8_lossy)
+                .unwrap_or(std::borrow::Cow::Borrowed(""));
+            visit(header.key, value.as_ref());
+        }
+    }
+}
+
 impl KafkaIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
@@ -284,14 +305,47 @@ impl KafkaIngestor {
             let mut rebalance_rx = rebalance_tx.as_ref().map(watch::Sender::subscribe);
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
+                /// One decoded message of an ACK PARALLEL poll group.
+                ///
+                /// The group dispatches after its source messages are gone, so it keeps the
+                /// metadata values it will append rather than a built Arrow batch.
                 #[derive(Clone, Debug)]
                 struct KafkaBatchEntry {
+                    source: KafkaSourceMetadata,
+                    next_offset: i64,
+                    record: RuntimeRecordBatch,
+                }
+
+                #[derive(Clone, Debug)]
+                struct KafkaSourceMetadata {
                     topic: String,
                     partition: i32,
                     offset: i64,
-                    next_offset: i64,
-                    record: RuntimeRecordBatch,
-                    filter_map_metadata: IngestFilterMapMetadata,
+                    headers: IngestHeaders,
+                }
+
+                impl KafkaSourceMetadata {
+                    fn from_message(message: &rdkafka::message::BorrowedMessage<'_>) -> Self {
+                        let mut headers = IngestHeaders::new();
+                        KafkaMessageHeaders(message.headers()).visit(&mut |name, value| {
+                            headers.push((name.to_string(), value.to_string()));
+                        });
+                        Self {
+                            topic: message.topic().to_string(),
+                            partition: message.partition(),
+                            offset: message.offset(),
+                            headers,
+                        }
+                    }
+
+                    fn row(&self) -> IngestMetadataRow<'_> {
+                        IngestMetadataRow::Kafka {
+                            topic: &self.topic,
+                            partition: self.partition,
+                            offset: self.offset,
+                            headers: &self.headers,
+                        }
+                    }
                 }
 
                 info!(
@@ -317,7 +371,8 @@ impl KafkaIngestor {
                 // executes once and becomes one Arrow batch per (relay, branch key)
                 // instead of entering the VM and downstream channel once per record.
                 // Size and idle-time bounds keep partial groups bounded.
-                let mut ingest_collector = IngestRouteCollector::default();
+                let mut ingest_collector =
+                    IngestRouteCollector::new(IngestMetadataKind::Kafka, INGEST_GROUP_MAX_ROWS);
 
                 'ingest: loop {
                     tokio::task::consume_budget().await;
@@ -507,78 +562,43 @@ impl KafkaIngestor {
                                 Ok(message) => {
                                     task_runtime
                                         .clear_ingestor_transient_error(&task_domain, &task_ingestor);
-                                    let build_entry = |message: &rdkafka::message::BorrowedMessage<'_>| {
-                                        let topic = message.topic().to_string();
-                                        let partition = message.partition();
-                                        let offset = message.offset();
-                                        let next_offset = offset + 1;
-                                        let key = message
-                                            .key_view::<str>()
-                                            .and_then(Result::ok)
-                                            .map(ToOwned::to_owned)
-                                            .or_else(|| message.key().map(|bytes| String::from_utf8_lossy(bytes).to_string()))
-                                            .unwrap_or_default();
-                                        let payload = message.payload().unwrap_or_default().to_vec();
-                                        let headers = message
-                                            .headers()
-                                            .map(|headers| {
-                                                headers
-                                                    .iter()
-                                                    .map(|header| {
-                                                        (
-                                                            header.key.to_string(),
-                                                            header
-                                                                .value
-                                                                .map(String::from_utf8_lossy)
-                                                                .map(|value| value.to_string())
-                                                                .unwrap_or_default(),
-                                                        )
-                                                    })
-                                                    .collect::<IngestHeaders>()
-                                            })
-                                            .unwrap_or_default();
-
+                                    // Decoding copies the payload because the codec is
+                                    // async while the source message stays borrowed from
+                                    // the consumer. Every other value a mode needs is read
+                                    // from the borrowed message where it is used.
+                                    let decode_message = |message: &rdkafka::message::BorrowedMessage<'_>| {
                                         trace!(
                                             domain = task_domain.as_str(),
                                             ingestor = task_ingestor.as_str(),
-                                            topic = topic.as_str(),
-                                            partition,
-                                            offset,
-                                            key = key,
-                                            payload = String::from_utf8_lossy(&payload).to_string(),
+                                            topic = message.topic(),
+                                            partition = message.partition(),
+                                            offset = message.offset(),
+                                            key = message
+                                                .key_view::<str>()
+                                                .and_then(Result::ok)
+                                                .map(ToOwned::to_owned)
+                                                .or_else(|| message.key().map(|bytes| String::from_utf8_lossy(bytes).to_string()))
+                                                .unwrap_or_default(),
+                                            payload = String::from_utf8_lossy(message.payload().unwrap_or_default()).to_string(),
                                             "received kafka message"
                                         );
 
+                                        let payload = message.payload().unwrap_or_default().to_vec();
                                         let codec = task_codec.clone();
-                                        async move {
-                                            let filter_map_metadata = IngestFilterMapMetadata::kafka(
-                                                topic.clone(),
-                                                partition,
-                                                offset,
-                                                if key.is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(key.clone())
-                                                },
-                                                headers,
-                                            );
-                                            decode_ingested_payload(codec, &payload)
-                                                .await
-                                                .map(|record| KafkaBatchEntry {
-                                                    topic,
-                                                    partition,
-                                                    offset,
-                                                    next_offset,
-                                                    record,
-                                                    filter_map_metadata,
-                                                })
-                                        }
+                                        async move { decode_ingested_payload(codec, &payload).await }
                                     };
 
                                     match &task_ack_mode {
                                         KafkaIngestMode::NoAckParallel => {
-                                            match build_entry(&message).await {
-                                                Ok(entry) => {
+                                            match decode_message(&message).await {
+                                                Ok(record) => {
+                                                    let headers = KafkaMessageHeaders(message.headers());
+                                                    let metadata = [IngestMetadataRow::Kafka {
+                                                        topic: message.topic(),
+                                                        partition: message.partition(),
+                                                        offset: message.offset(),
+                                                        headers: &headers,
+                                                    }];
                                                     let dispatched = if let Err(error) = task_runtime
                                                         .dispatch_ingested_records(IngestGroupDispatch {
                                                             collector: &mut ingest_collector,
@@ -588,8 +608,8 @@ impl KafkaIngestor {
                                                                 .as_ref(),
                                                             output_routes: &task_output_routes,
                                                             filter_where: task_filter_where.as_ref(),
-                                                            records: vec![entry.record],
-                                                            metadata: Some(entry.filter_map_metadata),
+                                                            records: vec![record],
+                                                            metadata: &metadata,
                                                             ingested_at: current_timestamp(),
                                                             acks: vec![AckSet::empty()],
                                                         })
@@ -637,9 +657,9 @@ impl KafkaIngestor {
                                                         && let Err(error) = task_runtime
                                                             .commit_domain_kafka_offset(
                                                                 state,
-                                                                entry.topic.as_str(),
-                                                                entry.partition,
-                                                                entry.next_offset,
+                                                                message.topic(),
+                                                                message.partition(),
+                                                                message.offset() + 1,
                                                             )
                                                             .await
                                                     {
@@ -651,9 +671,9 @@ impl KafkaIngestor {
                                                         )));
                                                         let _ = Self::seek_offset(
                                                             &consumer,
-                                                            entry.topic.as_str(),
-                                                            entry.partition,
-                                                            entry.offset,
+                                                            message.topic(),
+                                                            message.partition(),
+                                                            message.offset(),
                                                         );
                                                     }
                                                 }
@@ -668,8 +688,8 @@ impl KafkaIngestor {
                                             }
                                         }
                                         KafkaIngestMode::AckSequential { .. } => {
-                                            let entry = match build_entry(&message).await {
-                                                Ok(entry) => entry,
+                                            let record = match decode_message(&message).await {
+                                                Ok(record) => record,
                                                 Err(error) => {
                                                     let _ = task_events.send(RuntimeEvent::Error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
@@ -691,12 +711,21 @@ impl KafkaIngestor {
                                                 }
                                             };
 
+                                            let headers = KafkaMessageHeaders(message.headers());
+                                            let metadata = [IngestMetadataRow::Kafka {
+                                                topic: message.topic(),
+                                                partition: message.partition(),
+                                                offset: message.offset(),
+                                                headers: &headers,
+                                            }];
+
                                             loop {
                                             tokio::task::consume_budget().await;
                                                 let (acks, completion) =
                                                     task_runtime.tracked_ack_root(&task_domain);
+                                                // One acknowledged message is one group.
                                                 let mut collector =
-                                                    IngestRouteCollector::default();
+                                                    IngestRouteCollector::new(IngestMetadataKind::Kafka, 1);
                                                 let dispatch_result = task_runtime
                                                     .dispatch_ingested_records(IngestGroupDispatch {
                                                         collector: &mut collector,
@@ -706,10 +735,8 @@ impl KafkaIngestor {
                                                             .as_ref(),
                                                         output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
-                                                        records: vec![entry.record.clone()],
-                                                        metadata: Some(
-                                                            entry.filter_map_metadata.clone(),
-                                                        ),
+                                                        records: vec![record.clone()],
+                                                        metadata: &metadata,
                                                         ingested_at: current_timestamp(),
                                                         acks: vec![if !task_branched_senders.is_empty() {
                                                             acks.attached()
@@ -752,17 +779,17 @@ impl KafkaIngestor {
                                                                 task_runtime
                                                                     .commit_domain_kafka_offset(
                                                                         state,
-                                                                        entry.topic.as_str(),
-                                                                        entry.partition,
-                                                                        entry.next_offset,
+                                                                        message.topic(),
+                                                                        message.partition(),
+                                                                        message.offset() + 1,
                                                                     )
                                                                     .await
                                                             } else {
                                                                 Self::commit_offset(
                                                                     &consumer,
-                                                                    entry.topic.as_str(),
-                                                                    entry.partition,
-                                                                    entry.next_offset,
+                                                                    message.topic(),
+                                                                    message.partition(),
+                                                                    message.offset() + 1,
                                                                 )
                                                             };
                                                             if let Err(error) = commit_result {
@@ -774,9 +801,9 @@ impl KafkaIngestor {
                                                                 )));
                                                                 if let Err(seek_error) = Self::seek_offset(
                                                                     &consumer,
-                                                                    entry.topic.as_str(),
-                                                                    entry.partition,
-                                                                    entry.offset,
+                                                                    message.topic(),
+                                                                    message.partition(),
+                                                                    message.offset(),
                                                                 ) {
                                                                     let _ = task_events.send(RuntimeEvent::Error(format!(
                                                                         "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
@@ -801,9 +828,9 @@ impl KafkaIngestor {
                                                             )));
                                                             if let Err(seek_error) = Self::seek_offset(
                                                                 &consumer,
-                                                                entry.topic.as_str(),
-                                                                entry.partition,
-                                                                entry.offset,
+                                                                message.topic(),
+                                                                message.partition(),
+                                                                message.offset(),
                                                             ) {
                                                                 let _ = task_events.send(RuntimeEvent::Error(format!(
                                                                     "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
@@ -821,9 +848,9 @@ impl KafkaIngestor {
                                                 } else {
                                                     if let Err(seek_error) = Self::seek_offset(
                                                         &consumer,
-                                                        entry.topic.as_str(),
-                                                        entry.partition,
-                                                        entry.offset,
+                                                        message.topic(),
+                                                        message.partition(),
+                                                        message.offset(),
                                                     ) {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                                             "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
@@ -839,8 +866,12 @@ impl KafkaIngestor {
                                         }
                                         KafkaIngestMode::AckParallel { .. } => {
                                             let mut batch = Vec::with_capacity(ack_parallel_limit);
-                                            let first = match build_entry(&message).await {
-                                                Ok(entry) => entry,
+                                            let first = match decode_message(&message).await {
+                                                Ok(record) => KafkaBatchEntry {
+                                                    source: KafkaSourceMetadata::from_message(&message),
+                                                    next_offset: message.offset() + 1,
+                                                    record,
+                                                },
                                                 Err(error) => {
                                                     let _ = task_events.send(RuntimeEvent::Error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
@@ -880,8 +911,12 @@ impl KafkaIngestor {
                                                     next = consumer.recv() => {
                                                         match next {
                                                             Ok(next_message) => {
-                                                                match build_entry(&next_message).await {
-                                                                    Ok(entry) => batch.push(entry),
+                                                                match decode_message(&next_message).await {
+                                                                    Ok(record) => batch.push(KafkaBatchEntry {
+                                                                        source: KafkaSourceMetadata::from_message(&next_message),
+                                                                        next_offset: next_message.offset() + 1,
+                                                                        record,
+                                                                    }),
                                                                     Err(error) => {
                                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                                                             "failed to decode message for ingestor '{}' in domain '{}': {}",
@@ -928,28 +963,32 @@ impl KafkaIngestor {
                                             for entry in &batch {
                                                 tokio::task::consume_budget().await;
                                                 batch_commit_offsets
-                                                    .entry((entry.topic.clone(), entry.partition))
+                                                    .entry((entry.source.topic.clone(), entry.source.partition))
                                                     .and_modify(|offset| *offset = (*offset).max(entry.next_offset))
                                                     .or_insert(entry.next_offset);
                                                 batch_start_offsets
-                                                    .entry((entry.topic.clone(), entry.partition))
-                                                    .and_modify(|offset| *offset = (*offset).min(entry.offset))
-                                                    .or_insert(entry.offset);
+                                                    .entry((entry.source.topic.clone(), entry.source.partition))
+                                                    .and_modify(|offset| *offset = (*offset).min(entry.source.offset))
+                                                    .or_insert(entry.source.offset);
                                             }
 
                                             tokio::task::consume_budget().await;
                                                 let mut completions = Vec::with_capacity(batch.len());
                                                 let mut batch_failure = None::<String>;
                                                 let ingested_at = current_timestamp();
-                                                let mut collector =
-                                                    IngestRouteCollector::default();
+                                                // The poll group is one ingest group, so its
+                                                // builders are sized for the messages it holds.
+                                                let mut collector = IngestRouteCollector::new(
+                                                    IngestMetadataKind::Kafka,
+                                                    batch.len(),
+                                                );
 
                                                 // Every message keeps its own ack root; the group only
                                                 // shares the dispatch call, so an ack still resolves per
                                                 // message.
                                                 let mut roots = Vec::with_capacity(batch.len());
                                                 let mut records = Vec::with_capacity(batch.len());
-                                                let mut metadata = Vec::with_capacity(batch.len());
+                                                let mut sources = Vec::with_capacity(batch.len());
                                                 let mut dispatch_acks = Vec::with_capacity(batch.len());
                                                 for entry in batch {
                                                     tokio::task::consume_budget().await;
@@ -965,26 +1004,27 @@ impl KafkaIngestor {
                                                     roots.push(acks);
                                                     completions.push(completion);
                                                     records.push(entry.record);
-                                                    metadata.push(entry.filter_map_metadata);
+                                                    sources.push(entry.source);
                                                 }
-                                                let dispatch_result = match IngestFilterMapMetadata::concat(&metadata) {
-                                                    Ok(metadata) => task_runtime
-                                                        .dispatch_ingested_records(IngestGroupDispatch {
-                                                            collector: &mut collector,
-                                                            domain: &task_domain,
-                                                            ingestor: &task_ingestor,
-                                                            timestamp_source: task_timestamp_source
-                                                                .as_ref(),
-                                                            output_routes: &task_output_routes,
-                                                            filter_where: task_filter_where.as_ref(),
-                                                            records,
-                                                            metadata: Some(metadata),
-                                                            acks: dispatch_acks,
-                                                            ingested_at,
-                                                        })
-                                                        .await,
-                                                    Err(error) => Err(error),
-                                                };
+                                                let metadata = sources
+                                                    .iter()
+                                                    .map(KafkaSourceMetadata::row)
+                                                    .collect::<Vec<_>>();
+                                                let dispatch_result = task_runtime
+                                                    .dispatch_ingested_records(IngestGroupDispatch {
+                                                        collector: &mut collector,
+                                                        domain: &task_domain,
+                                                        ingestor: &task_ingestor,
+                                                        timestamp_source: task_timestamp_source
+                                                            .as_ref(),
+                                                        output_routes: &task_output_routes,
+                                                        filter_where: task_filter_where.as_ref(),
+                                                        records,
+                                                        metadata: &metadata,
+                                                        acks: dispatch_acks,
+                                                        ingested_at,
+                                                    })
+                                                    .await;
                                                 let dispatched = dispatch_result
                                                     .map(|()| true)
                                                     .unwrap_or_else(|error| {

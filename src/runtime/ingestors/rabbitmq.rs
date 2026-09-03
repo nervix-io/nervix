@@ -240,8 +240,14 @@ impl RabbitMqIngestor {
                                             Ok(record) => {
                                                 match &task_ack_mode {
                                                     RabbitMqIngestMode::AckSequential { .. } => {
-                                                        let mut collector =
-                                                            IngestRouteCollector::default();
+                                                        // One acknowledged message is one group.
+                                                        let mut collector = IngestRouteCollector::new(
+                                                            IngestMetadataKind::Headers,
+                                                            1,
+                                                        );
+                                                        let metadata = [IngestMetadataRow::Headers {
+                                                            headers: &headers,
+                                                        }];
                                                         let (acks, completion) =
                                                             task_runtime.tracked_ack_root(&task_domain);
                                                         let dispatch_result = task_runtime
@@ -254,11 +260,7 @@ impl RabbitMqIngestor {
                                                                 output_routes: &task_output_routes,
                                                                 filter_where: task_filter_where.as_ref(),
                                                                 records: vec![record],
-                                                                metadata: Some(
-                                                                    IngestFilterMapMetadata::from_headers(
-                                                                        headers.clone(),
-                                                                    ),
-                                                                ),
+                                                                metadata: &metadata,
                                                                 ingested_at: current_timestamp(),
                                                                 acks: vec![if !task_branched_senders.is_empty() {
                                                                     acks.attached()

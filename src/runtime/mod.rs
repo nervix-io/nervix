@@ -11,8 +11,8 @@ use std::{
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, ListArray, RecordBatch,
-    RecordBatchOptions, StringArray, UInt64Array,
+    Array, ArrayRef, BooleanArray, ListArray, RecordBatch, RecordBatchOptions, StringArray,
+    UInt64Array,
     builder::{
         ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
         Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
@@ -409,34 +409,44 @@ struct IngestorQuiesceModes {
     active_supported_by_source: bool,
 }
 
+/// One buffered message's ingest metadata.
+///
+/// A quiesced ingestor replays its payloads after the source messages are gone, so the
+/// buffer owns these values and appends them into the group's builders on replay.
+#[derive(Debug, Clone)]
+pub(crate) enum BufferedIngestMetadata {
+    Syslog { peer_addr: std::net::SocketAddr },
+    Headers(IngestHeaders),
+}
+
+impl BufferedIngestMetadata {
+    fn row(&self) -> IngestMetadataRow<'_> {
+        match self {
+            Self::Syslog { peer_addr } => IngestMetadataRow::Syslog {
+                peer_addr: *peer_addr,
+            },
+            Self::Headers(headers) => IngestMetadataRow::Headers { headers },
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct BufferedIngestPayload {
     payloads: Vec<Vec<u8>>,
-    metadata: IngestFilterMapMetadata,
+    /// Row-aligned with `payloads`.
+    metadata: Vec<BufferedIngestMetadata>,
 }
 
 impl BufferedIngestPayload {
-    pub(crate) fn new(payload: &[u8], metadata: IngestFilterMapMetadata) -> Self {
-        assert_eq!(
-            metadata.len(),
-            1,
-            "a buffered single payload must carry one metadata row"
-        );
+    pub(crate) fn new(payload: &[u8], metadata: BufferedIngestMetadata) -> Self {
         Self {
             payloads: vec![payload.to_vec()],
-            metadata,
+            metadata: vec![metadata],
         }
     }
 
-    pub(crate) fn batch(entries: Vec<(Vec<u8>, IngestFilterMapMetadata)>) -> Self {
-        let (payloads, metadata): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        let metadata = IngestFilterMapMetadata::concat(&metadata)
-            .expect("one buffered source batch must use one ingest metadata schema");
-        assert_eq!(
-            payloads.len(),
-            metadata.len(),
-            "buffered payloads and ingest metadata must have the same row count"
-        );
+    pub(crate) fn batch(entries: Vec<(Vec<u8>, BufferedIngestMetadata)>) -> Self {
+        let (payloads, metadata) = entries.into_iter().unzip();
         Self { payloads, metadata }
     }
 
@@ -446,8 +456,24 @@ impl BufferedIngestPayload {
             .expect("buffered ingest payload must contain at least one source payload")
     }
 
-    pub(crate) fn metadata(&self) -> &IngestFilterMapMetadata {
-        &self.metadata
+    /// The number of source payloads, which is the row count of the group this buffer opens.
+    pub(crate) fn len(&self) -> usize {
+        self.payloads.len()
+    }
+
+    /// The metadata of the first payload, for bindings that ingest one payload per buffer.
+    fn first_metadata_row(&self) -> IngestMetadataRow<'_> {
+        self.metadata
+            .first()
+            .expect("buffered ingest payload must carry metadata for its first payload")
+            .row()
+    }
+
+    fn metadata_rows(&self) -> Vec<IngestMetadataRow<'_>> {
+        self.metadata
+            .iter()
+            .map(BufferedIngestMetadata::row)
+            .collect()
     }
 
     fn payloads(&self) -> impl Iterator<Item = &[u8]> {
@@ -1382,8 +1408,9 @@ struct IngestGroupDispatch<'a> {
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     records: Vec<RuntimeRecordBatch>,
-    /// One columnar metadata batch for `records`, or absent when the source exposes none.
-    metadata: Option<IngestFilterMapMetadata>,
+    /// Row-aligned with `records`, read from the borrowed source messages and appended
+    /// into the group's own metadata builders.
+    metadata: &'a [IngestMetadataRow<'a>],
     /// Row-aligned with `records`. An empty set is replaced by a tracked ack root.
     acks: Vec<AckSet>,
     ingested_at: Timestamp,
@@ -1399,7 +1426,7 @@ struct IngestGroupContribution<'a> {
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     records: Vec<RuntimeRecordBatch>,
-    metadata: Option<IngestFilterMapMetadata>,
+    metadata: &'a [IngestMetadataRow<'a>],
     acks: Vec<AckSet>,
     ingested_at: Timestamp,
 }
@@ -1425,55 +1452,46 @@ struct RawIngestDispatch<'a> {
 struct IngestGroupRows {
     batch: Arc<RuntimeRecordBatch>,
     record_metadata: Vec<RuntimeRecordMetadata>,
-    ingest_metadata: Option<IngestFilterMapMetadata>,
+    ingest_metadata: IngestFilterMapMetadata,
     acks: Vec<AckSet>,
 }
 
-#[derive(Default)]
-struct PendingIngestFilterMapMetadata {
-    batches: Vec<IngestFilterMapMetadata>,
-    row_count: usize,
-}
-
-impl PendingIngestFilterMapMetadata {
-    fn push(&mut self, metadata: IngestFilterMapMetadata) {
-        self.row_count += metadata.len();
-        self.batches.push(metadata);
-    }
-
-    fn finish(self) -> Result<IngestFilterMapMetadata, String> {
-        let metadata = IngestFilterMapMetadata::concat(&self.batches)?;
-        if metadata.len() != self.row_count {
-            return Err(format!(
-                "combined ingest metadata has {} rows, expected {}",
-                metadata.len(),
-                self.row_count
-            ));
-        }
-        Ok(metadata)
-    }
-}
-
-#[derive(Default)]
+/// One ingest group's rows before the group closes.
+///
+/// The group owns exactly one set of metadata builders: it opens them with its first row,
+/// appends one row per decoded message, and finishes them once in `into_rows`. Nothing
+/// here is built per message.
 struct PendingIngestGroup {
+    kind: IngestMetadataKind,
+    /// The number of rows the group is expected to reach, used to size its builders.
+    row_bound: usize,
     records: Vec<RuntimeRecordBatch>,
-    metadata: Option<PendingIngestFilterMapMetadata>,
+    metadata: Option<IngestMetadataBuilders>,
     acks: Vec<AckSet>,
     ingested_at: Vec<Timestamp>,
 }
 
 impl PendingIngestGroup {
+    fn new(kind: IngestMetadataKind, row_bound: usize) -> Self {
+        Self {
+            kind,
+            row_bound,
+            records: Vec::new(),
+            metadata: None,
+            acks: Vec::new(),
+            ingested_at: Vec::new(),
+        }
+    }
+
     fn append(
         &mut self,
         records: Vec<RuntimeRecordBatch>,
-        metadata: Option<IngestFilterMapMetadata>,
+        metadata: &[IngestMetadataRow<'_>],
         acks: Vec<AckSet>,
         ingested_at: Timestamp,
     ) -> Result<(), String> {
         let row_count = records.len();
-        if let Some(metadata) = metadata.as_ref()
-            && metadata.len() != row_count
-        {
+        if metadata.len() != row_count {
             return Err(format!(
                 "received {} ingest metadata rows for {row_count} records",
                 metadata.len()
@@ -1485,19 +1503,20 @@ impl PendingIngestGroup {
                 acks.len()
             ));
         }
-        if !self.records.is_empty() && self.metadata.is_some() != metadata.is_some() {
-            return Err("cannot mix ingest rows with and without source metadata".to_string());
-        }
         if records.iter().any(|record| record.batch().num_rows() != 1) {
             return Err(
                 "decoded a message into a batch that does not contain exactly one row".to_string(),
             );
         }
 
-        self.records.extend(records);
-        if let Some(metadata) = metadata {
-            self.metadata.get_or_insert_default().push(metadata);
+        let (kind, row_bound) = (self.kind, self.row_bound);
+        let builders = self
+            .metadata
+            .get_or_insert_with(|| IngestMetadataBuilders::new(kind, row_bound));
+        for row in metadata {
+            builders.append(row)?;
         }
+        self.records.extend(records);
         self.acks.extend(acks);
         self.ingested_at
             .extend(std::iter::repeat_n(ingested_at, row_count));
@@ -1513,8 +1532,24 @@ impl PendingIngestGroup {
     }
 
     fn into_rows(self) -> Result<IngestGroupRows, String> {
-        debug_assert_eq!(self.records.len(), self.ingested_at.len());
-        debug_assert_eq!(self.records.len(), self.acks.len());
+        let row_count = self.records.len();
+        if self.ingested_at.len() != row_count || self.acks.len() != row_count {
+            return Err(format!(
+                "ingest group has {row_count} records, {} ingest timestamps and {} ack sets",
+                self.ingested_at.len(),
+                self.acks.len()
+            ));
+        }
+        let ingest_metadata = self
+            .metadata
+            .ok_or_else(|| "ingest group closed without opening its metadata builders".to_string())?
+            .finish()?;
+        if ingest_metadata.len() != row_count {
+            return Err(format!(
+                "ingest group has {row_count} records and {} ingest metadata rows",
+                ingest_metadata.len()
+            ));
+        }
         let batch_refs = self.records.iter().collect::<Vec<_>>();
         Ok(IngestGroupRows {
             batch: Arc::new(RuntimeRecordBatch::concat(&batch_refs)?),
@@ -1525,10 +1560,7 @@ impl PendingIngestGroup {
                     RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at)
                 })
                 .collect(),
-            ingest_metadata: self
-                .metadata
-                .map(PendingIngestFilterMapMetadata::finish)
-                .transpose()?,
+            ingest_metadata,
             acks: self.acks,
         })
     }
@@ -1544,13 +1576,11 @@ impl IngestGroupRows {
     }
 
     fn metadata_row(&self, row: usize) -> Option<IngestFilterMapMetadata> {
-        self.ingest_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.row(row))
+        self.ingest_metadata.row(row)
     }
 
     fn metadata_rows(&self) -> Option<&IngestFilterMapMetadata> {
-        self.ingest_metadata.as_ref()
+        Some(&self.ingest_metadata)
     }
 
     fn row(&self, row: usize) -> Result<RuntimeRow, String> {
@@ -1576,10 +1606,7 @@ impl IngestGroupRows {
                 .enumerate()
                 .filter_map(|(row, metadata)| selected(row).then_some(metadata))
                 .collect(),
-            ingest_metadata: self
-                .ingest_metadata
-                .map(|metadata| metadata.select(keep))
-                .transpose()?,
+            ingest_metadata: self.ingest_metadata.select(keep)?,
             acks: self
                 .acks
                 .into_iter()
@@ -1604,8 +1631,13 @@ struct IngestorFilterWhereError<'a> {
 
 /// Accumulates one source ingest group before program execution, then holds its routed
 /// messages long enough to build one Arrow batch per (relay, branch key).
-#[derive(Default)]
+///
+/// The metadata schema is fixed by the source kind when the ingestor starts, so every
+/// group the collector opens builds the same columns.
 struct IngestRouteCollector {
+    kind: IngestMetadataKind,
+    /// The number of rows a group is expected to reach, used to size its metadata builders.
+    row_bound: usize,
     context: Option<IngestGroupContext>,
     pending: PendingIngestGroup,
     routed: Vec<(Identifier, RelayMessage)>,
@@ -1613,6 +1645,21 @@ struct IngestRouteCollector {
 }
 
 impl IngestRouteCollector {
+    /// Opens a collector for a source of `kind` whose groups close at `row_bound` rows.
+    ///
+    /// Sources that flush one group per message or per poll pass their own bound so a
+    /// short group does not size its builders for a streaming one.
+    fn new(kind: IngestMetadataKind, row_bound: usize) -> Self {
+        Self {
+            kind,
+            row_bound,
+            context: None,
+            pending: PendingIngestGroup::new(kind, row_bound),
+            routed: Vec::new(),
+            flush_at: None,
+        }
+    }
+
     fn collect(&mut self, contribution: IngestGroupContribution<'_>) -> Result<(), String> {
         let IngestGroupContribution {
             domain,
@@ -1662,7 +1709,10 @@ impl IngestRouteCollector {
             .context
             .take()
             .expect("a non-empty ingest group must retain its execution context");
-        let pending = std::mem::take(&mut self.pending);
+        let pending = std::mem::replace(
+            &mut self.pending,
+            PendingIngestGroup::new(self.kind, self.row_bound),
+        );
         Ok(Some((context, pending.into_rows()?)))
     }
 
@@ -1972,173 +2022,267 @@ pub(crate) struct IngestFilterMapMetadata {
     rows: Arc<Vec<usize>>,
 }
 
-impl Default for IngestFilterMapMetadata {
-    fn default() -> Self {
-        Self::from_headers(Vec::new())
+/// The ingest-metadata columns a source exposes, fixed when its ingestor starts.
+///
+/// Every source kind maps to exactly one variant, so a builder set is never chosen from
+/// the contents of a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IngestMetadataKind {
+    Kafka,
+    Syslog,
+    Headers,
+}
+
+impl IngestMetadataKind {
+    fn for_source(source: &IngestSource) -> Self {
+        match source {
+            IngestSource::Kafka { .. } => Self::Kafka,
+            IngestSource::Syslog { .. } => Self::Syslog,
+            _ => Self::Headers,
+        }
+    }
+
+    /// The `metadata` namespace this source kind exposes to programs, or `None` when it
+    /// exposes transport headers only.
+    fn integration_arrow_schema(self) -> Option<StdArc<arrow_schema::Schema>> {
+        match self {
+            Self::Kafka => Some(StdArc::new(arrow_schema::Schema::new(vec![
+                arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
+                arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
+                arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
+            ]))),
+            Self::Syslog => Some(StdArc::new(arrow_schema::Schema::new(vec![
+                arrow_schema::Field::new("peer_addr", ArrowDataType::Utf8, true),
+            ]))),
+            Self::Headers => None,
+        }
+    }
+}
+
+/// Transport headers of one source message, visited in arrival order.
+///
+/// Connectors implement this over their own borrowed message so a group's header builders
+/// are appended from the source directly, without an owned header vector per message.
+pub(crate) trait IngestMessageHeaders: Send + Sync {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str));
+}
+
+/// A source message that carries no transport headers.
+pub(crate) struct NoIngestHeaders;
+
+impl IngestMessageHeaders for NoIngestHeaders {
+    fn visit(&self, _visit: &mut dyn FnMut(&str, &str)) {}
+}
+
+impl IngestMessageHeaders for IngestHeaders {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        for (name, value) in self {
+            visit(name, value);
+        }
+    }
+}
+
+/// One message's ingest metadata, read from its source message.
+///
+/// The variant must match the kind the ingestor started with; the fields borrow the source
+/// message so appending a row copies bytes into Arrow buffers and nothing else.
+pub(crate) enum IngestMetadataRow<'a> {
+    Kafka {
+        topic: &'a str,
+        partition: i32,
+        offset: i64,
+        headers: &'a dyn IngestMessageHeaders,
+    },
+    Syslog {
+        peer_addr: std::net::SocketAddr,
+    },
+    Headers {
+        headers: &'a dyn IngestMessageHeaders,
+    },
+}
+
+impl IngestMetadataRow<'_> {
+    fn kind(&self) -> IngestMetadataKind {
+        match self {
+            Self::Kafka { .. } => IngestMetadataKind::Kafka,
+            Self::Syslog { .. } => IngestMetadataKind::Syslog,
+            Self::Headers { .. } => IngestMetadataKind::Headers,
+        }
+    }
+}
+
+/// The `topic`, `partition` and `offset` builders of one Kafka ingest group.
+struct KafkaIntegrationBuilders {
+    topic: StringBuilder,
+    partition: Int32Builder,
+    offset: Int64Builder,
+}
+
+/// The integration-field builders of one ingest group, one variant per source kind.
+///
+/// The Kafka columns live behind one allocation taken when the group opens, so the variants
+/// stay comparable in size.
+enum IngestIntegrationBuilders {
+    Kafka(Box<KafkaIntegrationBuilders>),
+    Syslog { peer_addr: StringBuilder },
+    Headers,
+}
+
+/// Arrow builders for one ingest group's metadata columns.
+///
+/// A group opens one set with its first row, appends one row per decoded message, and
+/// finishes it once when the group closes. No Arrow array, batch or builder is created per
+/// message, and no one-row batch is ever concatenated.
+struct IngestMetadataBuilders {
+    kind: IngestMetadataKind,
+    integration: IngestIntegrationBuilders,
+    header_names: ListBuilder<StringBuilder>,
+    header_values: ListBuilder<StringBuilder>,
+    rows: usize,
+}
+
+// Counted per thread so a test observes only the groups it opened itself, while the rest of
+// the suite exercises the same builders in parallel.
+#[cfg(test)]
+thread_local! {
+    static INGEST_METADATA_BUILDER_SETS_OPENED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static INGEST_METADATA_COLUMN_SETS_BUILT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+impl IngestMetadataBuilders {
+    /// Opens a builder set for `kind`, sizing the integration fields for `row_bound` rows.
+    ///
+    /// Header builders start empty because most sources carry no headers at all.
+    fn new(kind: IngestMetadataKind, row_bound: usize) -> Self {
+        #[cfg(test)]
+        INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(count.get() + 1));
+        let integration = match kind {
+            IngestMetadataKind::Kafka => {
+                IngestIntegrationBuilders::Kafka(Box::new(KafkaIntegrationBuilders {
+                    topic: StringBuilder::with_capacity(row_bound, 0),
+                    partition: Int32Builder::with_capacity(row_bound),
+                    offset: Int64Builder::with_capacity(row_bound),
+                }))
+            }
+            IngestMetadataKind::Syslog => IngestIntegrationBuilders::Syslog {
+                peer_addr: StringBuilder::with_capacity(row_bound, 0),
+            },
+            IngestMetadataKind::Headers => IngestIntegrationBuilders::Headers,
+        };
+        let item_field =
+            || StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
+        Self {
+            kind,
+            integration,
+            header_names: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
+            header_values: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
+            rows: 0,
+        }
+    }
+
+    fn append(&mut self, row: &IngestMetadataRow<'_>) -> Result<(), String> {
+        let headers = match (&mut self.integration, row) {
+            (
+                IngestIntegrationBuilders::Kafka(kafka),
+                IngestMetadataRow::Kafka {
+                    topic,
+                    partition,
+                    offset,
+                    headers,
+                },
+            ) => {
+                kafka.topic.append_value(topic);
+                kafka.partition.append_value(*partition);
+                kafka.offset.append_value(*offset);
+                Some(*headers)
+            }
+            (
+                IngestIntegrationBuilders::Syslog { peer_addr },
+                IngestMetadataRow::Syslog {
+                    peer_addr: source_peer_addr,
+                },
+            ) => {
+                // The address renders straight into the builder's value buffer, so a peer
+                // address does not allocate a string per message.
+                use std::fmt::Write as _;
+                write!(peer_addr, "{source_peer_addr}")
+                    .expect("writing into an Arrow string builder cannot fail");
+                peer_addr.append_value("");
+                None
+            }
+            (IngestIntegrationBuilders::Headers, IngestMetadataRow::Headers { headers }) => {
+                Some(*headers)
+            }
+            (_, row) => {
+                return Err(format!(
+                    "ingest metadata builders for {:?} cannot append a {:?} row",
+                    self.kind,
+                    row.kind()
+                ));
+            }
+        };
+        if let Some(headers) = headers {
+            let (names, values) = (&mut self.header_names, &mut self.header_values);
+            headers.visit(&mut |name, value| {
+                names.values().append_value(name);
+                values.values().append_value(value);
+            });
+        }
+        self.header_names.append(true);
+        self.header_values.append(true);
+        self.rows += 1;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<IngestFilterMapMetadata, String> {
+        #[cfg(test)]
+        INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(count.get() + 1));
+        let rows = self.rows;
+        let integration_columns = match &mut self.integration {
+            IngestIntegrationBuilders::Kafka(kafka) => vec![
+                StdArc::new(kafka.topic.finish()) as ArrayRef,
+                StdArc::new(kafka.partition.finish()) as ArrayRef,
+                StdArc::new(kafka.offset.finish()) as ArrayRef,
+            ],
+            IngestIntegrationBuilders::Syslog { peer_addr } => {
+                vec![StdArc::new(peer_addr.finish()) as ArrayRef]
+            }
+            IngestIntegrationBuilders::Headers => Vec::new(),
+        };
+        let schema = self
+            .kind
+            .integration_arrow_schema()
+            .unwrap_or_else(|| StdArc::new(arrow_schema::Schema::empty()));
+        let integration_fields = RecordBatch::try_new_with_options(
+            schema,
+            integration_columns,
+            &RecordBatchOptions::new().with_row_count(Some(rows)),
+        )
+        .map_err(|error| error.to_string())?;
+        let header_names: ArrayRef = StdArc::new(self.header_names.finish());
+        let header_values: ArrayRef = StdArc::new(self.header_values.finish());
+        if header_names.len() != rows || header_values.len() != rows {
+            return Err(format!(
+                "ingest metadata built {rows} integration rows, {} header-name rows and {} \
+                 header-value rows",
+                header_names.len(),
+                header_values.len()
+            ));
+        }
+        Ok(IngestFilterMapMetadata {
+            columns: Arc::new(IngestFilterMapMetadataColumns {
+                integration_fields,
+                header_names,
+                header_values,
+            }),
+            rows: Arc::new((0..rows).collect()),
+        })
     }
 }
 
 impl IngestFilterMapMetadata {
-    pub(crate) fn from_headers(headers: IngestHeaders) -> Self {
-        let integration_fields = RecordBatch::try_new_with_options(
-            StdArc::new(arrow_schema::Schema::empty()),
-            Vec::new(),
-            &RecordBatchOptions::new().with_row_count(Some(1)),
-        )
-        .expect("one-row header metadata must form a valid Arrow batch");
-        Self::from_columns(integration_fields, std::iter::once(headers))
-            .expect("one-row header metadata must have aligned Arrow columns")
-    }
-
-    fn kafka(
-        topic: String,
-        partition: i32,
-        offset: i64,
-        _key: Option<String>,
-        headers: IngestHeaders,
-    ) -> Self {
-        let integration_fields = RecordBatch::try_new(
-            Self::kafka_arrow_schema(),
-            vec![
-                StdArc::new(StringArray::from(vec![topic])),
-                StdArc::new(Int32Array::from(vec![partition])),
-                StdArc::new(Int64Array::from(vec![offset])),
-            ],
-        )
-        .expect("one-row Kafka metadata must form a valid Arrow batch");
-        Self::from_columns(integration_fields, std::iter::once(headers))
-            .expect("one-row Kafka metadata must have aligned Arrow columns")
-    }
-
-    fn kafka_arrow_schema() -> StdArc<arrow_schema::Schema> {
-        StdArc::new(arrow_schema::Schema::new(vec![
-            arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
-            arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
-            arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
-        ]))
-    }
-
-    fn syslog(peer_addr: std::net::SocketAddr) -> Self {
-        let integration_fields = RecordBatch::try_new(
-            Self::syslog_arrow_schema(),
-            vec![StdArc::new(StringArray::from(vec![peer_addr.to_string()]))],
-        )
-        .expect("one-row Syslog metadata must form a valid Arrow batch");
-        Self::from_columns(integration_fields, std::iter::once(Vec::new()))
-            .expect("one-row Syslog metadata must have aligned Arrow columns")
-    }
-
-    fn syslog_arrow_schema() -> StdArc<arrow_schema::Schema> {
-        StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-            "peer_addr",
-            ArrowDataType::Utf8,
-            true,
-        )]))
-    }
-
-    fn from_columns(
-        integration_fields: RecordBatch,
-        headers: impl IntoIterator<Item = IngestHeaders>,
-    ) -> Result<Self, String> {
-        let item_field =
-            || StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
-        let mut header_names = ListBuilder::new(StringBuilder::new()).with_field(item_field());
-        let mut header_values = ListBuilder::new(StringBuilder::new()).with_field(item_field());
-        let mut header_row_count = 0;
-        for headers in headers {
-            for (name, value) in headers {
-                header_names.values().append_value(name);
-                header_values.values().append_value(value);
-            }
-            header_names.append(true);
-            header_values.append(true);
-            header_row_count += 1;
-        }
-        if integration_fields.num_rows() != header_row_count {
-            return Err(format!(
-                "ingest integration metadata has {} rows but headers have {header_row_count}",
-                integration_fields.num_rows()
-            ));
-        }
-        let header_names: ArrayRef = StdArc::new(header_names.finish());
-        let header_values: ArrayRef = StdArc::new(header_values.finish());
-        let rows = Arc::new((0..header_row_count).collect());
-        Ok(Self {
-            columns: Arc::new(IngestFilterMapMetadataColumns {
-                integration_fields,
-                header_names,
-                header_values,
-            }),
-            rows,
-        })
-    }
-
-    fn concat(metadata: &[Self]) -> Result<Self, String> {
-        let Some(first) = metadata.first() else {
-            return Err("cannot concatenate zero ingest metadata batches".to_string());
-        };
-        if metadata.len() == 1 {
-            return Ok(first.clone());
-        }
-        let schema = first.columns.integration_fields.schema();
-        for batch in &metadata[1..] {
-            if batch.columns.integration_fields.schema() != schema {
-                return Err(
-                    "cannot combine ingest metadata with different field schemas".to_string(),
-                );
-            }
-        }
-        let row_count = metadata.iter().map(Self::len).sum();
-        let integration_columns = (0..schema.fields().len())
-            .map(|column| {
-                let arrays = metadata
-                    .iter()
-                    .map(|metadata| {
-                        metadata.selected_array(metadata.columns.integration_fields.column(column))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let arrays = arrays
-                    .iter()
-                    .map(|array| array.as_ref())
-                    .collect::<Vec<_>>();
-                concat_arrow_arrays(&arrays).map_err(|error| error.to_string())
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let integration_fields = RecordBatch::try_new_with_options(
-            schema,
-            integration_columns,
-            &RecordBatchOptions::new().with_row_count(Some(row_count)),
-        )
-        .map_err(|error| error.to_string())?;
-        let header_names =
-            Self::concat_selected_arrays(metadata, |metadata| &metadata.columns.header_names)?;
-        let header_values =
-            Self::concat_selected_arrays(metadata, |metadata| &metadata.columns.header_values)?;
-        Ok(Self {
-            columns: Arc::new(IngestFilterMapMetadataColumns {
-                integration_fields,
-                header_names,
-                header_values,
-            }),
-            rows: Arc::new((0..row_count).collect()),
-        })
-    }
-
-    fn concat_selected_arrays(
-        metadata: &[Self],
-        array: impl Fn(&Self) -> &ArrayRef,
-    ) -> Result<ArrayRef, String> {
-        let arrays = metadata
-            .iter()
-            .map(|metadata| metadata.selected_array(array(metadata)))
-            .collect::<Result<Vec<_>, _>>()?;
-        let arrays = arrays
-            .iter()
-            .map(|array| array.as_ref())
-            .collect::<Vec<_>>();
-        concat_arrow_arrays(&arrays).map_err(|error| error.to_string())
-    }
-
     fn selected_array(&self, array: &ArrayRef) -> Result<ArrayRef, String> {
         if self.rows.iter().copied().eq(0..self.rows.len()) && self.rows.len() == array.len() {
             return Ok(array.clone());
@@ -12911,7 +13055,8 @@ fn compile_ingestor_filter_map_program(
             .with_sensitivity(schemas.output_sensitivity.clone()),
     ];
     let writable_namespaces = HashSet::from_iter(["input".to_string(), "output".to_string()]);
-    if let Some(metadata_schema) = ingestor_filter_map_metadata_arrow_schema(source) {
+    if let Some(metadata_schema) = IngestMetadataKind::for_source(source).integration_arrow_schema()
+    {
         bindings.push(VmCompileBinding::readonly(
             INGEST_METADATA_NAMESPACE,
             metadata_schema,
@@ -13062,16 +13207,6 @@ fn compile_generator_set_program(
         lookup_hash_maps: Vec::new(),
         error_sites,
     })
-}
-
-fn ingestor_filter_map_metadata_arrow_schema(
-    source: &IngestSource,
-) -> Option<StdArc<arrow_schema::Schema>> {
-    match source {
-        IngestSource::Kafka { .. } => Some(IngestFilterMapMetadata::kafka_arrow_schema()),
-        IngestSource::Syslog { .. } => Some(IngestFilterMapMetadata::syslog_arrow_schema()),
-        _ => None,
-    }
 }
 
 pub(crate) async fn execute_filter_map_on_record(
