@@ -200,7 +200,7 @@ impl ZeroMqIngestor {
 
                                     let payload = BufferedIngestPayload::new(
                                         payload,
-                                        BufferedIngestMetadata::Headers(IngestHeaders::new()),
+                                        BufferedIngestMetadata::without_headers(),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         quiesce.intake(0, payload, false)

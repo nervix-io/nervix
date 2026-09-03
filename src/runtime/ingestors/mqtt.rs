@@ -716,7 +716,7 @@ impl MqttIngestor {
     ) -> Option<Publish> {
         let payload = BufferedIngestPayload::new(
             publish.payload.as_ref(),
-            BufferedIngestMetadata::Headers(IngestHeaders::new()),
+            BufferedIngestMetadata::without_headers(),
         );
         match context.quiesce.intake(instance_idx, payload, false) {
             IngestorQuiesceIntake::Dispatch(_) => Some(publish),

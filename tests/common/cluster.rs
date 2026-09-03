@@ -1099,6 +1099,16 @@ impl Cluster {
         publish_kafka_with_headers(&self.dependencies, topic, payload, headers).await
     }
 
+    pub(crate) async fn publish_kafka_partition_with_headers(
+        &self,
+        topic: &str,
+        partition: i32,
+        payload: &str,
+        headers: &[(&str, &str)],
+    ) -> io::Result<()> {
+        publish_kafka_record(&self.dependencies, topic, Some(partition), payload, headers).await
+    }
+
     pub(crate) async fn publish_kafka_burst(
         &self,
         topic: &str,

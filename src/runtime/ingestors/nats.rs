@@ -4,6 +4,22 @@ use super::super::*;
 
 pub(in crate::runtime) struct NatsIngestor;
 
+/// The headers of one borrowed NATS message, each value visited under its own name.
+struct NatsMessageHeaders<'a>(&'a async_nats::Message);
+
+impl IngestMessageHeaders for NatsMessageHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        let Some(headers) = self.0.headers.as_ref() else {
+            return;
+        };
+        for (name, values) in headers.iter() {
+            for value in values {
+                visit(name.as_ref(), value.as_str());
+            }
+        }
+    }
+}
+
 impl NatsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
@@ -271,7 +287,9 @@ impl NatsIngestor {
                                         backoff.reset();
                                         let key = message.subject.to_string();
                                         let payload = message.payload.as_ref();
-                                        let headers = Self::headers_from_message(&message);
+                                        let headers = RetainedIngestHeaders::capture(
+                                            &NatsMessageHeaders(&message),
+                                        );
 
                                         trace!(
                                             domain = task_domain.as_str(),
@@ -417,22 +435,5 @@ impl NatsIngestor {
             .connect(addr)
             .await
             .map_err(|source| source.to_string())
-    }
-
-    fn headers_from_message(message: &async_nats::Message) -> IngestHeaders {
-        message
-            .headers
-            .as_ref()
-            .map(|headers| {
-                headers
-                    .iter()
-                    .flat_map(|(name, values)| {
-                        values
-                            .iter()
-                            .map(|value| (name.to_string(), value.to_string()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 }

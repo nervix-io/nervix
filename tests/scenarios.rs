@@ -9886,6 +9886,34 @@ async fn when_kafka_message_is_published_to_partition(
         .expect("failed to publish kafka message");
 }
 
+#[when(expr = "Kafka message with headers {string} is published to topic {string} partition {int}")]
+async fn when_kafka_message_with_headers_is_published_to_partition(
+    world: &mut ScenarioWorld,
+    headers: String,
+    topic: String,
+    partition: usize,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let partition = i32::try_from(partition).expect("partition id must fit i32");
+    let payload = expand_placeholders(world, docstring(step));
+    let headers = headers
+        .split(',')
+        .map(str::trim)
+        .filter(|header| !header.is_empty())
+        .map(|header| {
+            header
+                .split_once('=')
+                .expect("kafka header must be written as 'name=value'")
+        })
+        .collect::<Vec<_>>();
+    world
+        .cluster()
+        .publish_kafka_partition_with_headers(&topic, partition, &payload, &headers)
+        .await
+        .expect("failed to publish kafka message with headers");
+}
+
 #[when(expr = "Kafka topic {string} partition count is changed to {int}")]
 async fn when_kafka_topic_partition_count_is_changed_to(
     world: &mut ScenarioWorld,

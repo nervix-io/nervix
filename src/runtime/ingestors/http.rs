@@ -4,6 +4,19 @@ use super::super::*;
 
 pub(in crate::runtime) struct HttpIngestor;
 
+/// The headers of one borrowed HTTP response, skipping values that are not UTF-8.
+struct HttpResponseHeaders<'a>(&'a reqwest::header::HeaderMap);
+
+impl IngestMessageHeaders for HttpResponseHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        for (name, value) in self.0 {
+            if let Ok(value) = value.to_str() {
+                visit(name.as_str(), value);
+            }
+        }
+    }
+}
+
 impl HttpIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
@@ -177,7 +190,9 @@ impl HttpIngestor {
                                     continue;
                                 }
 
-                                let headers = Self::headers_from_response(&response);
+                                let headers = RetainedIngestHeaders::capture(
+                                    &HttpResponseHeaders(response.headers()),
+                                );
                                 match response.bytes().await {
                                     Ok(payload) => {
                                         task_runtime.clear_ingestor_transient_error(
@@ -288,19 +303,6 @@ impl HttpIngestor {
         client: &CreateClientHttp,
     ) -> Result<String, String> {
         Self::endpoint_from_config(&client.config)
-    }
-
-    fn headers_from_response(response: &reqwest::Response) -> IngestHeaders {
-        response
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (name.as_str().to_string(), value.to_string()))
-            })
-            .collect()
     }
 
     fn endpoint_from_config(config: &[nervix_models::ClientConfigEntry]) -> Result<String, String> {

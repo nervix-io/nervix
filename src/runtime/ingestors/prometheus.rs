@@ -286,7 +286,7 @@ impl PrometheusIngestor {
                                         Ok(payload) => {
                                             entries.push((
                                                 payload,
-                                                BufferedIngestMetadata::Headers(IngestHeaders::new()),
+                                                BufferedIngestMetadata::without_headers(),
                                             ));
                                         }
                                         Err(error) => {

@@ -259,8 +259,6 @@ const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
 const INGEST_METADATA_NAMESPACE: &str = "metadata";
 const BRANCH_NAMESPACE: &str = "branch";
 
-pub(crate) type IngestHeaders = Vec<(String, String)>;
-
 type SharedActiveGraph = StdArc<ArcSwapOption<ActiveGraph>>;
 type PendingStateSyncSender = oneshot::Sender<Result<Option<PersistedRuntimeStateEntry>, String>>;
 
@@ -416,10 +414,15 @@ struct IngestorQuiesceModes {
 #[derive(Debug, Clone)]
 pub(crate) enum BufferedIngestMetadata {
     Syslog { peer_addr: std::net::SocketAddr },
-    Headers(IngestHeaders),
+    Headers(RetainedIngestHeaders),
 }
 
 impl BufferedIngestMetadata {
+    /// The metadata of a buffered message whose source carries no transport headers.
+    pub(crate) fn without_headers() -> Self {
+        Self::Headers(RetainedIngestHeaders::none())
+    }
+
     fn row(&self) -> IngestMetadataRow<'_> {
         match self {
             Self::Syslog { peer_addr } => IngestMetadataRow::Syslog {
@@ -2074,9 +2077,32 @@ impl IngestMessageHeaders for NoIngestHeaders {
     fn visit(&self, _visit: &mut dyn FnMut(&str, &str)) {}
 }
 
-impl IngestMessageHeaders for IngestHeaders {
+/// Transport headers copied out of a source message so they outlive it.
+///
+/// Only the paths that append after their source message is gone retain headers: the
+/// quiesce buffer replays payloads long after the message was dropped, and a WebSocket
+/// session carries its handshake headers into every later frame. Every other connector
+/// appends from the borrowed message instead.
+#[derive(Clone, Debug)]
+pub(crate) struct RetainedIngestHeaders(Vec<(String, String)>);
+
+impl RetainedIngestHeaders {
+    /// Copies the headers a source message carries right now.
+    pub(crate) fn capture(headers: &dyn IngestMessageHeaders) -> Self {
+        let mut retained = Vec::new();
+        headers.visit(&mut |name, value| retained.push((name.to_string(), value.to_string())));
+        Self(retained)
+    }
+
+    /// The headers of a source that carries none.
+    pub(crate) fn none() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl IngestMessageHeaders for RetainedIngestHeaders {
     fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
-        for (name, value) in self {
+        for (name, value) in &self.0 {
             visit(name, value);
         }
     }

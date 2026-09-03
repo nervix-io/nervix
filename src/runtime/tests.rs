@@ -115,6 +115,17 @@ fn vm_input_from_test_rows(
     )
 }
 
+/// The headers of one test message, standing in for a connector's borrowed message.
+struct TestIngestHeaders<'a>(&'a [(&'a str, &'a str)]);
+
+impl super::IngestMessageHeaders for TestIngestHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        for (name, value) in self.0 {
+            visit(name, value);
+        }
+    }
+}
+
 /// Builds one group's ingest metadata through the group builders, as the runtime does.
 fn ingest_metadata_for_test(
     kind: super::IngestMetadataKind,
@@ -540,7 +551,7 @@ fn quiesce_buffer_enforces_drop_oldest_per_instance() {
             0,
             super::BufferedIngestPayload::new(
                 b"one",
-                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+                super::BufferedIngestMetadata::without_headers(),
             ),
             false,
         ),
@@ -551,7 +562,7 @@ fn quiesce_buffer_enforces_drop_oldest_per_instance() {
             0,
             super::BufferedIngestPayload::new(
                 b"two",
-                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+                super::BufferedIngestMetadata::without_headers(),
             ),
             false,
         ),
@@ -591,7 +602,7 @@ fn endpoint_quiesce_buffer_rejects_overflow_without_discarding_acknowledged_payl
             0,
             super::BufferedIngestPayload::new(
                 b"kept",
-                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+                super::BufferedIngestMetadata::without_headers(),
             ),
             true,
         ),
@@ -602,7 +613,7 @@ fn endpoint_quiesce_buffer_rejects_overflow_without_discarding_acknowledged_payl
             0,
             super::BufferedIngestPayload::new(
                 b"no",
-                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+                super::BufferedIngestMetadata::without_headers(),
             ),
             true,
         ),
@@ -668,7 +679,7 @@ fn memory_pressure_turns_buffer_into_zero_capacity_without_losing_existing_paylo
             0,
             super::BufferedIngestPayload::new(
                 b"retained",
-                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+                super::BufferedIngestMetadata::without_headers(),
             ),
             false,
         ),
@@ -681,7 +692,7 @@ fn memory_pressure_turns_buffer_into_zero_capacity_without_losing_existing_paylo
             0,
             super::BufferedIngestPayload::new(
                 b"discarded",
-                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+                super::BufferedIngestMetadata::without_headers(),
             ),
             false,
         ),
@@ -6471,7 +6482,7 @@ fn ingest_group_rows_share_the_group_batch_allocation() {
 #[test]
 fn ingest_group_builds_one_metadata_column_set_for_all_of_its_messages() {
     let topic = "metering_events";
-    let headers: super::IngestHeaders = vec![("route".to_string(), "primary".to_string())];
+    let headers = TestIngestHeaders(&[("route", "primary")]);
     let mut group = super::PendingIngestGroup::new(super::IngestMetadataKind::Kafka, 8);
 
     super::INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(0));
@@ -11172,11 +11183,11 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         ),
         ("raw".to_string(), RuntimeValue::String("body".to_string())),
     ]);
-    let first_headers: super::IngestHeaders = vec![
-        ("tenant".to_string(), "acme".to_string()),
-        ("route".to_string(), "primary".to_string()),
-        ("route".to_string(), "secondary".to_string()),
-    ];
+    let first_headers = TestIngestHeaders(&[
+        ("tenant", "acme"),
+        ("route", "primary"),
+        ("route", "secondary"),
+    ]);
     let metadata = ingest_metadata_for_test(
         super::IngestMetadataKind::Headers,
         &[super::IngestMetadataRow::Headers {
@@ -11218,10 +11229,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     let grouped_carrier =
         RuntimeRecordBatch::concat(&[&record.one_row_batch(), &second_record.one_row_batch()])
             .expect("grouped carrier must concatenate");
-    let second_headers: super::IngestHeaders = vec![
-        ("tenant".to_string(), "acme".to_string()),
-        ("route".to_string(), "backup".to_string()),
-    ];
+    let second_headers = TestIngestHeaders(&[("tenant", "acme"), ("route", "backup")]);
     let grouped_metadata = ingest_metadata_for_test(
         super::IngestMetadataKind::Headers,
         &[
