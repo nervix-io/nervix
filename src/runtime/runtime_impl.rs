@@ -7574,12 +7574,12 @@ impl Runtime {
         Ok(())
     }
 
-    pub async fn dispatch_websocket_payload(
+    pub(crate) async fn dispatch_websocket_payload(
         &self,
         host: &str,
         path: &str,
         payload: &[u8],
-        headers: IngestHeaders,
+        headers: &dyn IngestMessageHeaders,
     ) -> EndpointDispatchOutcome {
         self.dispatch_endpoint_payload(host, path, payload, headers, "websocket")
             .await
@@ -7619,12 +7619,12 @@ impl Runtime {
         outcome
     }
 
-    pub async fn dispatch_http_payload(
+    pub(crate) async fn dispatch_http_payload(
         &self,
         host: &str,
         path: &str,
         payload: &[u8],
-        headers: IngestHeaders,
+        headers: &dyn IngestMessageHeaders,
     ) -> EndpointDispatchOutcome {
         self.dispatch_endpoint_payload(host, path, payload, headers, "http")
             .await
@@ -7635,7 +7635,7 @@ impl Runtime {
         host: &str,
         path: &str,
         payload: &[u8],
-        headers: IngestHeaders,
+        headers: &dyn IngestMessageHeaders,
         protocol: &str,
     ) -> EndpointDispatchOutcome {
         let route_key = HttpRouteKey {
@@ -7652,9 +7652,11 @@ impl Runtime {
         let mut outcome = EndpointDispatchOutcome::default();
         let mut retry_after = Vec::new();
         for binding in &bindings {
+            // A binding may buffer this request until it resumes, so its copy of the
+            // request headers is taken here and only here.
             let payload = BufferedIngestPayload::new(
                 payload,
-                BufferedIngestMetadata::Headers(headers.clone()),
+                BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers)),
             );
             match binding.quiesce.intake(0, payload, true) {
                 IngestorQuiesceIntake::Dispatch(payload) => {

@@ -555,11 +555,11 @@ use crate::{
     },
     resource::{ResourceEntryType, ResourceManifestEntry, ResourceStore},
     runtime::{
-        CompiledProgramWithMaterializedInterest, IngestHeaders,
+        CompiledProgramWithMaterializedInterest, IngestMessageHeaders,
         IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, RelayMessage, RelayRecordBatch,
-        RelaySubscriptionReceiver, RelaySubscriptionRecvError, Runtime, RuntimeEvent,
-        RuntimeMaterializedRelaySpec, RuntimeTestHooks, RuntimeVmCompileContext, SignalingDataSink,
-        WebsocketSignalingSession, compile_session_filter_map_program,
+        RelaySubscriptionReceiver, RelaySubscriptionRecvError, RetainedIngestHeaders, Runtime,
+        RuntimeEvent, RuntimeMaterializedRelaySpec, RuntimeTestHooks, RuntimeVmCompileContext,
+        SignalingDataSink, WebsocketSignalingSession, compile_session_filter_map_program,
         execute_filter_map_on_record, scheduled_branched_stream_owner_nodes,
     },
     runtime_schema,
@@ -1293,30 +1293,28 @@ struct EndpointSignalingDataSink<'a> {
     runtime: &'a Arc<Runtime>,
     host: &'a str,
     path: &'a str,
-    headers: &'a IngestHeaders,
+    headers: &'a RetainedIngestHeaders,
 }
 
 impl SignalingDataSink for EndpointSignalingDataSink<'_> {
     async fn accept(&self, payload: Vec<u8>) {
         self.runtime
-            .dispatch_websocket_payload(
-                self.host,
-                self.path,
-                payload.as_slice(),
-                self.headers.clone(),
-            )
+            .dispatch_websocket_payload(self.host, self.path, payload.as_slice(), self.headers)
             .await;
     }
 }
 
-fn ingest_headers_from_hyper(headers: &hyper::HeaderMap) -> IngestHeaders {
-    let mut values = IngestHeaders::new();
-    for (name, value) in headers {
-        if let Ok(value) = value.to_str() {
-            values.push((name.as_str().to_string(), value.to_string()));
+/// The headers of one borrowed request, skipping values that are not UTF-8.
+struct HyperRequestHeaders<'a>(&'a hyper::HeaderMap);
+
+impl IngestMessageHeaders for HyperRequestHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        for (name, value) in self.0 {
+            if let Ok(value) = value.to_str() {
+                visit(name.as_str(), value);
+            }
         }
     }
-    values
 }
 
 async fn handle_http_request(
@@ -1341,7 +1339,9 @@ async fn handle_http_request(
         if !admission.is_accepted() {
             return Ok(endpoint_rejection_response(admission.retry_after));
         }
-        let headers = ingest_headers_from_hyper(request.headers());
+        // The session outlives the upgrade request, so its handshake headers are copied
+        // once here and appended from that copy for every later frame.
+        let headers = RetainedIngestHeaders::capture(&HyperRequestHeaders(request.headers()));
 
         let Some(sec_websocket_key) = request
             .headers()
@@ -1416,7 +1416,7 @@ async fn handle_http_request(
                                         &host,
                                         &path,
                                         payload.as_bytes(),
-                                        headers.clone(),
+                                        &headers,
                                     )
                                     .await;
                                 if !outcome.is_accepted() {
@@ -1435,7 +1435,7 @@ async fn handle_http_request(
                                         &host,
                                         &path,
                                         payload.as_ref(),
-                                        headers.clone(),
+                                        &headers,
                                     )
                                     .await;
                                 if !outcome.is_accepted() {
@@ -1475,8 +1475,6 @@ async fn handle_http_request(
         if request.method() != Method::POST {
             return Ok(response_with_status(StatusCode::METHOD_NOT_ALLOWED));
         }
-        let headers = ingest_headers_from_hyper(request.headers());
-
         let body = match request.body_mut().collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(error) => {
@@ -1486,7 +1484,12 @@ async fn handle_http_request(
         };
 
         let outcome = runtime
-            .dispatch_http_payload(&host, &path, body.as_ref(), headers)
+            .dispatch_http_payload(
+                &host,
+                &path,
+                body.as_ref(),
+                &HyperRequestHeaders(request.headers()),
+            )
             .await;
         return Ok(if outcome.is_accepted() {
             response_with_status(StatusCode::ACCEPTED)

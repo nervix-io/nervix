@@ -340,6 +340,90 @@ Feature: Kafka ingestion
       | 3            | 0             |
       | 3            | 1             |
 
+  Scenario Outline: Kafka ACK PARALLEL reads source metadata and headers for every message of a batch
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "sourced_events_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA sourced_event (
+        user_id I64
+      );
+      CREATE SCHEMA routed_sourced_event (
+        user_id I64,
+        source_topic STRING OPTIONAL,
+        source_partition I32 OPTIONAL,
+        source_offset I64 OPTIONAL,
+        first_route STRING,
+        route_count I64
+      );
+      CREATE WIRE JSON SCHEMA sourced_event_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC sourced_event_codec
+        FROM WIRE JSON SCHEMA sourced_event_wire
+        TO SCHEMA sourced_event;
+      CREATE RELAY sourced_events SCHEMA routed_sourced_event UNBRANCHED;
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE INGESTOR sourced_event_source
+        FROM KAFKA kafka_main TOPIC sourced_events_{{test_id}}
+        OFFSET BY CONSUMER GROUP nervix_cucumber_sourced_{{test_id}}
+        MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING sourced_event_codec
+        TO sourced_events
+        INHERIT ALL
+        SET source_topic = metadata.topic,
+            source_partition = metadata.partition,
+            source_offset = metadata.offset,
+            first_route = coalesce(read_header('route'), 'absent'),
+            route_count = count(read_headers('route'))
+        UNBRANCHED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION sourced_events_subscription TO sourced_events;
+      """
+    And Kafka message with headers "route=primary,route=secondary,tenant=acme" is published to topic "sourced_events_{{test_id}}" partition 0
+      """
+      {"user_id":11}
+      """
+    And Kafka message with headers "" is published to topic "sourced_events_{{test_id}}" partition 0
+      """
+      {"user_id":12}
+      """
+    And Kafka message with headers "route=backup" is published to topic "sourced_events_{{test_id}}" partition 0
+      """
+      {"user_id":13}
+      """
+    # The whole corpus is already on the topic when the consumer joins, so one ACK PARALLEL
+    # poll holds all three messages at once and every metadata row is appended from the
+    # batch of source messages the group still owns.
+    And these NSPL commands are executed
+      """
+      START;
+      """
+    Then within "20s" the relay subscription receives payloads containing all fragments
+      """
+      "user_id":11 | "source_topic":"sourced_events_{{test_id}}" | "source_partition":0 | "source_offset":0 | "first_route":"primary" | "route_count":2
+      "user_id":12 | "source_topic":"sourced_events_{{test_id}}" | "source_partition":0 | "source_offset":1 | "first_route":"absent" | "route_count":0
+      "user_id":13 | "source_topic":"sourced_events_{{test_id}}" | "source_partition":0 | "source_offset":2 | "first_route":"backup" | "route_count":1
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+      | 3            | 1             |
+
   Scenario Outline: Kafka ACK PARALLEL blocks downstream publish after immediate NoAck
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

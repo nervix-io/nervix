@@ -361,10 +361,8 @@ impl WebsocketsIngestor {
     }
 
     async fn accept_payload(context: &WebsocketDispatchContext<'_>, payload: &[u8]) {
-        let payload = BufferedIngestPayload::new(
-            payload,
-            BufferedIngestMetadata::Headers(IngestHeaders::new()),
-        );
+        let payload =
+            BufferedIngestPayload::new(payload, BufferedIngestMetadata::without_headers());
         if let IngestorQuiesceIntake::Dispatch(payload) = context.quiesce.intake(0, payload, false)
         {
             Self::dispatch_payload(context, &payload).await;
