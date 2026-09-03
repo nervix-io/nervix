@@ -630,6 +630,15 @@ Both quiesce modes continue polling the connection so keepalives and reconnect b
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
 
+A WebSocket-client ingestor is a single-owner ingestor. It keeps its existing primary and replica
+assignment through schedule recomputation while every assigned cluster node remains live, just
+like Kafka, MQTT, and the other client sources. Creating or changing another runtime node, a
+cluster node joining or being uncordoned, and a soft placement-policy change do not move its
+outbound session. Failover, draining its owner, or a newly effective `REQUIRE COLOCATION` group can
+move it; a real move closes the former owner's session and opens a new session on the new owner.
+Endpoint and Syslog ingestors are different because their listeners execute on every live cluster
+node.
+
 Outbound WebSocket clients can declare `WITH SIGNALING PROTOCOL <name>` after
 `TYPE WEBSOCKETS`. Server-side WebSocket endpoints can declare the same clause
 after `TYPE WEBSOCKETS`.

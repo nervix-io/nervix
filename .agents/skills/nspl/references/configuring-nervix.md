@@ -126,6 +126,9 @@ relay. Do not use them to scan across branches.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
   schedulable runtime nodes or materialized relays. Treat coverage as path-gated, allow a valid
   zero-effect rule, use lower `RANK` numbers for stronger claims, and never invent hard separation.
+- Endpoint and Syslog ingestors follow live cluster membership because their listeners execute on
+  every cluster node. Every client-source ingestor, including an outbound WebSocket client, keeps
+  its existing live primary and replicas through ordinary schedule recomputation.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
