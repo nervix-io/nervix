@@ -361,7 +361,10 @@ impl WebsocketsIngestor {
     }
 
     async fn accept_payload(context: &WebsocketDispatchContext<'_>, payload: &[u8]) {
-        let payload = BufferedIngestPayload::new(payload, IngestFilterMapMetadata::default());
+        let payload = BufferedIngestPayload::new(
+            payload,
+            BufferedIngestMetadata::Headers(IngestHeaders::new()),
+        );
         if let IngestorQuiesceIntake::Dispatch(payload) = context.quiesce.intake(0, payload, false)
         {
             Self::dispatch_payload(context, &payload).await;
@@ -384,7 +387,7 @@ impl WebsocketsIngestor {
             events,
             quiesce: _,
         } = *context;
-        let mut collector = IngestRouteCollector::default();
+        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, payload.len());
         if let Err(error) = runtime
             .dispatch_raw_ingest_payload(RawIngestDispatch {
                 domain,

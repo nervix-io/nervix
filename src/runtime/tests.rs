@@ -115,6 +115,20 @@ fn vm_input_from_test_rows(
     )
 }
 
+/// Builds one group's ingest metadata through the group builders, as the runtime does.
+fn ingest_metadata_for_test(
+    kind: super::IngestMetadataKind,
+    rows: &[super::IngestMetadataRow<'_>],
+) -> super::IngestFilterMapMetadata {
+    let mut builders = super::IngestMetadataBuilders::new(kind, rows.len());
+    for row in rows {
+        builders
+            .append(row)
+            .expect("test metadata row must match the group's source kind");
+    }
+    builders.finish().expect("test metadata must build")
+}
+
 async fn execute_filter_map_for_test(
     program: &super::CompiledProgramWithMaterializedInterest,
     record: RuntimeRow,
@@ -524,7 +538,10 @@ fn quiesce_buffer_enforces_drop_oldest_per_instance() {
     assert!(matches!(
         control.intake(
             0,
-            super::BufferedIngestPayload::new(b"one", super::IngestFilterMapMetadata::default(),),
+            super::BufferedIngestPayload::new(
+                b"one",
+                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+            ),
             false,
         ),
         super::IngestorQuiesceIntake::Buffered
@@ -532,7 +549,10 @@ fn quiesce_buffer_enforces_drop_oldest_per_instance() {
     assert!(matches!(
         control.intake(
             0,
-            super::BufferedIngestPayload::new(b"two", super::IngestFilterMapMetadata::default(),),
+            super::BufferedIngestPayload::new(
+                b"two",
+                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+            ),
             false,
         ),
         super::IngestorQuiesceIntake::Buffered
@@ -569,7 +589,10 @@ fn endpoint_quiesce_buffer_rejects_overflow_without_discarding_acknowledged_payl
     assert!(matches!(
         control.intake(
             0,
-            super::BufferedIngestPayload::new(b"kept", super::IngestFilterMapMetadata::default(),),
+            super::BufferedIngestPayload::new(
+                b"kept",
+                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+            ),
             true,
         ),
         super::IngestorQuiesceIntake::Buffered
@@ -577,7 +600,10 @@ fn endpoint_quiesce_buffer_rejects_overflow_without_discarding_acknowledged_payl
     assert!(matches!(
         control.intake(
             0,
-            super::BufferedIngestPayload::new(b"no", super::IngestFilterMapMetadata::default(),),
+            super::BufferedIngestPayload::new(
+                b"no",
+                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
+            ),
             true,
         ),
         super::IngestorQuiesceIntake::Rejected { retry_after: None }
@@ -642,7 +668,7 @@ fn memory_pressure_turns_buffer_into_zero_capacity_without_losing_existing_paylo
             0,
             super::BufferedIngestPayload::new(
                 b"retained",
-                super::IngestFilterMapMetadata::default(),
+                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
             ),
             false,
         ),
@@ -655,7 +681,7 @@ fn memory_pressure_turns_buffer_into_zero_capacity_without_losing_existing_paylo
             0,
             super::BufferedIngestPayload::new(
                 b"discarded",
-                super::IngestFilterMapMetadata::default(),
+                super::BufferedIngestMetadata::Headers(super::IngestHeaders::new()),
             ),
             false,
         ),
@@ -6419,7 +6445,17 @@ fn ingest_group_rows_share_the_group_batch_allocation() {
     let rows = super::IngestGroupRows {
         batch: Arc::new(batch),
         record_metadata: vec![RuntimeRecordMetadata::test(); 2],
-        ingest_metadata: None,
+        ingest_metadata: ingest_metadata_for_test(
+            super::IngestMetadataKind::Headers,
+            &[
+                super::IngestMetadataRow::Headers {
+                    headers: &super::NoIngestHeaders,
+                },
+                super::IngestMetadataRow::Headers {
+                    headers: &super::NoIngestHeaders,
+                },
+            ],
+        ),
         acks: vec![AckSet::empty(), AckSet::empty()],
     };
 
@@ -6430,6 +6466,64 @@ fn ingest_group_rows_share_the_group_batch_allocation() {
         Arc::ptr_eq(first.batch(), second.batch()),
         "row views from one ingest group must retain the same batch allocation"
     );
+}
+
+#[test]
+fn ingest_group_builds_one_metadata_column_set_for_all_of_its_messages() {
+    let topic = "metering_events";
+    let headers: super::IngestHeaders = vec![("route".to_string(), "primary".to_string())];
+    let mut group = super::PendingIngestGroup::new(super::IngestMetadataKind::Kafka, 8);
+
+    super::INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(0));
+    super::INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(0));
+
+    for offset in 0..3i64 {
+        let record = test_runtime_row([("value".to_string(), RuntimeValue::I64(offset))]);
+        group
+            .append(
+                vec![record.one_row_batch()],
+                &[super::IngestMetadataRow::Kafka {
+                    topic,
+                    partition: 1,
+                    offset,
+                    headers: &headers,
+                }],
+                vec![AckSet::empty()],
+                Timestamp::from_unix_nanos(1),
+            )
+            .expect("each decoded message must append into the open group");
+    }
+
+    assert_eq!(
+        super::INGEST_METADATA_BUILDER_SETS_OPENED.with(std::cell::Cell::get),
+        1,
+        "a group must open exactly one set of metadata builders, not one per message"
+    );
+    assert_eq!(
+        super::INGEST_METADATA_COLUMN_SETS_BUILT.with(std::cell::Cell::get),
+        0,
+        "an open group must not build metadata columns before it closes"
+    );
+
+    let rows = group.into_rows().expect("the group must close");
+
+    assert_eq!(
+        super::INGEST_METADATA_COLUMN_SETS_BUILT.with(std::cell::Cell::get),
+        1,
+        "closing a group must build exactly one metadata column set"
+    );
+    assert_eq!(rows.len(), 3);
+    let offsets = rows
+        .metadata_rows()
+        .expect("a Kafka group exposes its metadata columns")
+        .field_column("offset")
+        .expect("metadata projection must succeed")
+        .expect("Kafka offset column must exist");
+    let offsets = offsets
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .expect("Kafka offsets must remain INT64");
+    assert_eq!(offsets.values(), &[0, 1, 2]);
 }
 
 #[tokio::test]
@@ -10922,12 +11016,14 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
         ("amount".to_string(), RuntimeValue::I64(7)),
         ("raw".to_string(), RuntimeValue::String("meta".to_string())),
     ]);
-    let metadata = super::IngestFilterMapMetadata::kafka(
-        "logic_notifications_t123".to_string(),
-        2,
-        42,
-        None,
-        Vec::new(),
+    let metadata = ingest_metadata_for_test(
+        super::IngestMetadataKind::Kafka,
+        &[super::IngestMetadataRow::Kafka {
+            topic: "logic_notifications_t123",
+            partition: 2,
+            offset: 42,
+            headers: &super::NoIngestHeaders,
+        }],
     );
 
     let output = execute_filter_map_for_test(
@@ -10955,17 +11051,23 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     assert!(row_value(&output, "amount").is_none());
     assert!(row_value(&output, "raw").is_none());
 
-    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
-        metadata,
-        super::IngestFilterMapMetadata::kafka(
-            "logic_notifications_t123".to_string(),
-            3,
-            43,
-            None,
-            Vec::new(),
-        ),
-    ])
-    .expect("Kafka metadata must concatenate column-wise");
+    let grouped_metadata = ingest_metadata_for_test(
+        super::IngestMetadataKind::Kafka,
+        &[
+            super::IngestMetadataRow::Kafka {
+                topic: "logic_notifications_t123",
+                partition: 2,
+                offset: 42,
+                headers: &super::NoIngestHeaders,
+            },
+            super::IngestMetadataRow::Kafka {
+                topic: "logic_notifications_t123",
+                partition: 3,
+                offset: 43,
+                headers: &super::NoIngestHeaders,
+            },
+        ],
+    );
     let offsets = grouped_metadata
         .field_column("offset")
         .expect("metadata projection must succeed")
@@ -11070,11 +11172,17 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         ),
         ("raw".to_string(), RuntimeValue::String("body".to_string())),
     ]);
-    let metadata = super::IngestFilterMapMetadata::from_headers(vec![
+    let first_headers: super::IngestHeaders = vec![
         ("tenant".to_string(), "acme".to_string()),
         ("route".to_string(), "primary".to_string()),
         ("route".to_string(), "secondary".to_string()),
-    ]);
+    ];
+    let metadata = ingest_metadata_for_test(
+        super::IngestMetadataKind::Headers,
+        &[super::IngestMetadataRow::Headers {
+            headers: &first_headers,
+        }],
+    );
 
     let output = execute_filter_map_for_test(
         &program,
@@ -11110,14 +11218,21 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     let grouped_carrier =
         RuntimeRecordBatch::concat(&[&record.one_row_batch(), &second_record.one_row_batch()])
             .expect("grouped carrier must concatenate");
-    let grouped_metadata = super::IngestFilterMapMetadata::concat(&[
-        metadata.clone(),
-        super::IngestFilterMapMetadata::from_headers(vec![
-            ("tenant".to_string(), "acme".to_string()),
-            ("route".to_string(), "backup".to_string()),
-        ]),
-    ])
-    .expect("grouped metadata must concatenate");
+    let second_headers: super::IngestHeaders = vec![
+        ("tenant".to_string(), "acme".to_string()),
+        ("route".to_string(), "backup".to_string()),
+    ];
+    let grouped_metadata = ingest_metadata_for_test(
+        super::IngestMetadataKind::Headers,
+        &[
+            super::IngestMetadataRow::Headers {
+                headers: &first_headers,
+            },
+            super::IngestMetadataRow::Headers {
+                headers: &second_headers,
+            },
+        ],
+    );
     let grouped_runtime_metadata =
         vec![record.metadata().clone(), second_record.metadata().clone()];
     let grouped_keys = vec![None, None];

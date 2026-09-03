@@ -146,10 +146,14 @@ impl PulsarIngestor {
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
 
+                /// One decoded message of an acknowledged group.
+                ///
+                /// The group dispatches after its messages have moved, so it keeps the
+                /// header values it will append rather than a built Arrow batch.
                 struct PulsarBatchEntry {
                     message: PulsarMessage<Vec<u8>>,
                     record: RuntimeRecordBatch,
-                    filter_map_metadata: IngestFilterMapMetadata,
+                    headers: IngestHeaders,
                 }
 
                 info!(
@@ -169,7 +173,8 @@ impl PulsarIngestor {
                 let retry_policy = task_retry_policy;
                 let batch_timeout = task_batch_timeout;
                 let mut retry_delay = retry_policy.backoff;
-                let mut ingest_collector = IngestRouteCollector::default();
+                let mut ingest_collector =
+                    IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
                 let mut no_ack_messages = Vec::new();
 
                 'ingest: loop {
@@ -292,10 +297,11 @@ impl PulsarIngestor {
                                             .await
                                             {
                                                 Ok(record) => {
-                                                    let filter_map_metadata =
-                                                        IngestFilterMapMetadata::from_headers(
-                                                            Self::headers_from_message(&message),
-                                                        );
+                                                    let headers =
+                                                        Self::headers_from_message(&message);
+                                                    let metadata = [IngestMetadataRow::Headers {
+                                                        headers: &headers,
+                                                    }];
                                                     let collected_before = ingest_collector.len();
                                                     if let Err(error) = task_runtime
                                                         .dispatch_ingested_records(IngestGroupDispatch {
@@ -307,7 +313,7 @@ impl PulsarIngestor {
                                                             output_routes: &task_output_routes,
                                                             filter_where: task_filter_where.as_ref(),
                                                             records: vec![record],
-                                                            metadata: Some(filter_map_metadata),
+                                                            metadata: &metadata,
                                                             ingested_at: current_timestamp(),
                                                             acks: vec![AckSet::empty()],
                                                         })
@@ -393,14 +399,12 @@ impl PulsarIngestor {
                                             .await
                                             {
                                                 Ok(record) => {
-                                                    let filter_map_metadata =
-                                                        IngestFilterMapMetadata::from_headers(
-                                                            Self::headers_from_message(&message),
-                                                        );
+                                                    let headers =
+                                                        Self::headers_from_message(&message);
                                                     PulsarBatchEntry {
                                                         message,
                                                         record,
-                                                        filter_map_metadata,
+                                                        headers,
                                                     }
                                                 }
                                                 Err(error) => {
@@ -424,12 +428,19 @@ impl PulsarIngestor {
                                                 }
                                             };
 
+                                            let metadata = [IngestMetadataRow::Headers {
+                                                headers: &entry.headers,
+                                            }];
+
                                             loop {
                                                 tokio::task::consume_budget().await;
                                                 let (acks, completion) =
                                                     task_runtime.tracked_ack_root(&task_domain);
-                                                let mut collector =
-                                                    IngestRouteCollector::default();
+                                                // One acknowledged message is one group.
+                                                let mut collector = IngestRouteCollector::new(
+                                                    IngestMetadataKind::Headers,
+                                                    1,
+                                                );
                                                 let dispatch_result = task_runtime
                                                     .dispatch_ingested_records(IngestGroupDispatch {
                                                         collector: &mut collector,
@@ -440,9 +451,7 @@ impl PulsarIngestor {
                                                         output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
                                                         records: vec![entry.record.clone()],
-                                                        metadata: Some(
-                                                            entry.filter_map_metadata.clone(),
-                                                        ),
+                                                        metadata: &metadata,
                                                         ingested_at: current_timestamp(),
                                                         acks: vec![if !task_branched_senders.is_empty() {
                                                             acks.attached()
@@ -538,14 +547,12 @@ impl PulsarIngestor {
                                             .await
                                             {
                                                 Ok(record) => {
-                                                    let filter_map_metadata =
-                                                        IngestFilterMapMetadata::from_headers(
-                                                            Self::headers_from_message(&message),
-                                                        );
+                                                    let headers =
+                                                        Self::headers_from_message(&message);
                                                     PulsarBatchEntry {
                                                         message,
                                                         record,
-                                                        filter_map_metadata,
+                                                        headers,
                                                     }
                                                 }
                                                 Err(error) => {
@@ -596,16 +603,14 @@ impl PulsarIngestor {
                                                                 .await
                                                                 {
                                                                     Ok(record) => {
-                                                                        let filter_map_metadata =
-                                                                            IngestFilterMapMetadata::from_headers(
-                                                                                Self::headers_from_message(
-                                                                                    &next_message,
-                                                                                ),
+                                                                        let headers =
+                                                                            Self::headers_from_message(
+                                                                                &next_message,
                                                                             );
                                                                         batch.push(PulsarBatchEntry {
                                                                             message: next_message,
                                                                             record,
-                                                                            filter_map_metadata,
+                                                                            headers,
                                                                         });
                                                                     }
                                                                     Err(error) => {
@@ -647,23 +652,26 @@ impl PulsarIngestor {
                                             let mut records = Vec::with_capacity(batch.len());
                                             for entry in batch {
                                                 messages.push(entry.message);
-                                                records.push((entry.record, entry.filter_map_metadata));
+                                                records.push((entry.record, entry.headers));
                                             }
                                                 tokio::task::consume_budget().await;
                                                 let mut completions = Vec::with_capacity(records.len());
                                                 let mut batch_failure = None::<String>;
                                                 let ingested_at = current_timestamp();
-                                                let mut collector =
-                                                    IngestRouteCollector::default();
+                                                // The poll group is one ingest group.
+                                                let mut collector = IngestRouteCollector::new(
+                                                    IngestMetadataKind::Headers,
+                                                    records.len(),
+                                                );
 
                                                 // Every message keeps its own ack root; the group only
                                                 // shares the dispatch call, so an ack still resolves per
                                                 // message.
                                                 let mut roots = Vec::with_capacity(records.len());
                                                 let mut group_records = Vec::with_capacity(records.len());
-                                                let mut group_metadata = Vec::with_capacity(records.len());
+                                                let mut group_headers = Vec::with_capacity(records.len());
                                                 let mut dispatch_acks = Vec::with_capacity(records.len());
-                                                for (record, filter_map_metadata) in records {
+                                                for (record, headers) in records {
                                                     tokio::task::consume_budget().await;
                                                     let (acks, completion) =
                                                         task_runtime.tracked_ack_root(&task_domain);
@@ -677,26 +685,27 @@ impl PulsarIngestor {
                                                     roots.push(acks);
                                                     completions.push(completion);
                                                     group_records.push(record);
-                                                    group_metadata.push(filter_map_metadata);
+                                                    group_headers.push(headers);
                                                 }
-                                                let dispatch_result = match IngestFilterMapMetadata::concat(&group_metadata) {
-                                                    Ok(metadata) => task_runtime
-                                                        .dispatch_ingested_records(IngestGroupDispatch {
-                                                            collector: &mut collector,
-                                                            domain: &task_domain,
-                                                            ingestor: &task_ingestor,
-                                                            timestamp_source: task_timestamp_source
-                                                                .as_ref(),
-                                                            output_routes: &task_output_routes,
-                                                            filter_where: task_filter_where.as_ref(),
-                                                            records: group_records,
-                                                            metadata: Some(metadata),
-                                                            acks: dispatch_acks,
-                                                            ingested_at,
-                                                        })
-                                                        .await,
-                                                    Err(error) => Err(error),
-                                                };
+                                                let metadata = group_headers
+                                                    .iter()
+                                                    .map(|headers| IngestMetadataRow::Headers { headers })
+                                                    .collect::<Vec<_>>();
+                                                let dispatch_result = task_runtime
+                                                    .dispatch_ingested_records(IngestGroupDispatch {
+                                                        collector: &mut collector,
+                                                        domain: &task_domain,
+                                                        ingestor: &task_ingestor,
+                                                        timestamp_source: task_timestamp_source
+                                                            .as_ref(),
+                                                        output_routes: &task_output_routes,
+                                                        filter_where: task_filter_where.as_ref(),
+                                                        records: group_records,
+                                                        metadata: &metadata,
+                                                        acks: dispatch_acks,
+                                                        ingested_at,
+                                                    })
+                                                    .await;
                                                 let dispatched = dispatch_result
                                                     .map(|()| true)
                                                     .unwrap_or_else(|error| {

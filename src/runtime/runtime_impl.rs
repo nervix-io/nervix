@@ -7654,7 +7654,7 @@ impl Runtime {
         for binding in &bindings {
             let payload = BufferedIngestPayload::new(
                 payload,
-                IngestFilterMapMetadata::from_headers(headers.clone()),
+                BufferedIngestMetadata::Headers(headers.clone()),
             );
             match binding.quiesce.intake(0, payload, true) {
                 IngestorQuiesceIntake::Dispatch(payload) => {
@@ -7694,7 +7694,10 @@ impl Runtime {
     ) {
         match decode_ingested_payload(binding.codec.clone(), payload.payload()).await {
             Ok(record) => {
-                let mut collector = IngestRouteCollector::default();
+                // One request is one group, so its builders are sized for the single row
+                // this binding decodes.
+                let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
+                let metadata = [payload.first_metadata_row()];
                 let dispatch_result = self
                     .dispatch_ingested_records(IngestGroupDispatch {
                         collector: &mut collector,
@@ -7704,7 +7707,7 @@ impl Runtime {
                         output_routes: &binding.output_routes,
                         filter_where: binding.filter_where.as_ref(),
                         records: vec![record],
-                        metadata: Some(payload.metadata().clone()),
+                        metadata: &metadata,
                         ingested_at: current_timestamp(),
                         acks: vec![AckSet::empty()],
                     })
@@ -7778,6 +7781,7 @@ impl Runtime {
             );
         }
         let row_count = records.len();
+        let metadata = payload.metadata_rows();
         self.dispatch_ingested_records(IngestGroupDispatch {
             collector,
             domain,
@@ -7786,7 +7790,7 @@ impl Runtime {
             output_routes,
             filter_where,
             records,
-            metadata: Some(payload.metadata().clone()),
+            metadata: &metadata,
             ingested_at: current_timestamp(),
             acks: vec![AckSet::empty(); row_count],
         })

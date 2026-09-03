@@ -278,7 +278,8 @@ impl SyslogIngestor {
             .runtime
             .clear_ingestor_transient_error(&context.domain, &context.ingestor);
         backoff.reset();
-        let mut collector = IngestRouteCollector::default();
+        let mut collector =
+            IngestRouteCollector::new(IngestMetadataKind::Syslog, INGEST_GROUP_MAX_ROWS);
         let mut datagram = vec![0_u8; 65_535];
         loop {
             tokio::task::consume_budget().await;
@@ -327,7 +328,7 @@ impl SyslogIngestor {
                     }
                     let payload = BufferedIngestPayload::new(
                         &datagram[..size],
-                        IngestFilterMapMetadata::syslog(peer_addr),
+                        BufferedIngestMetadata::Syslog { peer_addr },
                     );
                     if let IngestorQuiesceIntake::Dispatch(payload) =
                         context.quiesce.intake(0, payload, false)
@@ -361,7 +362,8 @@ impl SyslogIngestor {
         backoff.reset();
         let (frame_tx, mut frame_rx) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
         let mut connections = JoinSet::new();
-        let mut collector = IngestRouteCollector::default();
+        let mut collector =
+            IngestRouteCollector::new(IngestMetadataKind::Syslog, INGEST_GROUP_MAX_ROWS);
         loop {
             tokio::task::consume_budget().await;
             if Self::dispatch_buffered(context, &mut collector).await {
@@ -459,7 +461,9 @@ impl SyslogIngestor {
                     };
                     let payload = BufferedIngestPayload::new(
                         &frame.payload,
-                        IngestFilterMapMetadata::syslog(frame.peer_addr),
+                        BufferedIngestMetadata::Syslog {
+                            peer_addr: frame.peer_addr,
+                        },
                     );
                     if let IngestorQuiesceIntake::Dispatch(payload) =
                         context.quiesce.intake(0, payload, false)

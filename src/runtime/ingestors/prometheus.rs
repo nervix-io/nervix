@@ -125,7 +125,8 @@ impl PrometheusIngestor {
                 if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
                     continue;
                 }
-                let mut buffered_collector = IngestRouteCollector::default();
+                let mut buffered_collector =
+                    IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
                 let mut drained_buffer = false;
                 while let Some(payload) = task_quiesce.pop_buffered(0) {
                     tokio::task::consume_budget().await;
@@ -285,7 +286,7 @@ impl PrometheusIngestor {
                                         Ok(payload) => {
                                             entries.push((
                                                 payload,
-                                                IngestFilterMapMetadata::default(),
+                                                BufferedIngestMetadata::Headers(IngestHeaders::new()),
                                             ));
                                         }
                                         Err(error) => {
@@ -311,7 +312,10 @@ impl PrometheusIngestor {
                                 if let IngestorQuiesceIntake::Dispatch(payload) =
                                     task_quiesce.intake(0, payload, false)
                                 {
-                                    let mut collector = IngestRouteCollector::default();
+                                    let mut collector = IngestRouteCollector::new(
+                                        IngestMetadataKind::Headers,
+                                        payload.len(),
+                                    );
                                     if let Err(error) = task_runtime
                                         .dispatch_raw_ingest_payload(RawIngestDispatch {
                                             domain: &task_domain,

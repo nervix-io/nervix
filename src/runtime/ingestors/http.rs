@@ -110,7 +110,8 @@ impl HttpIngestor {
                     continue;
                 }
                 if let Some(payload) = task_quiesce.pop_buffered(0) {
-                    let mut collector = IngestRouteCollector::default();
+                    let mut collector =
+                        IngestRouteCollector::new(IngestMetadataKind::Headers, payload.len());
                     if let Err(error) = task_runtime
                         .dispatch_raw_ingest_payload(RawIngestDispatch {
                             domain: &task_domain,
@@ -185,12 +186,15 @@ impl HttpIngestor {
                                         );
                                         let payload = BufferedIngestPayload::new(
                                             payload.as_ref(),
-                                            IngestFilterMapMetadata::from_headers(headers),
+                                            BufferedIngestMetadata::Headers(headers),
                                         );
                                         if let IngestorQuiesceIntake::Dispatch(payload) =
                                             task_quiesce.intake(0, payload, false)
                                         {
-                                            let mut collector = IngestRouteCollector::default();
+                                            let mut collector = IngestRouteCollector::new(
+                                                IngestMetadataKind::Headers,
+                                                payload.len(),
+                                            );
                                             if let Err(error) = task_runtime
                                                 .dispatch_raw_ingest_payload(RawIngestDispatch {
                                                     domain: &task_domain,

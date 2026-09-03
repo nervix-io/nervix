@@ -205,7 +205,8 @@ impl MqttIngestor {
             let task = tokio::spawn(async move {
                 let qos = Self::qos(task_mode.qos());
                 let mut backoff = RuntimeReconnectBackoff::default();
-                let mut ingest_collector = IngestRouteCollector::default();
+                let mut ingest_collector =
+                    IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
 
                 info!(
                     domain = task_context.domain.as_str(),
@@ -715,7 +716,7 @@ impl MqttIngestor {
     ) -> Option<Publish> {
         let payload = BufferedIngestPayload::new(
             publish.payload.as_ref(),
-            IngestFilterMapMetadata::default(),
+            BufferedIngestMetadata::Headers(IngestHeaders::new()),
         );
         match context.quiesce.intake(instance_idx, payload, false) {
             IngestorQuiesceIntake::Dispatch(_) => Some(publish),
@@ -777,7 +778,8 @@ impl MqttIngestor {
         loop {
             tokio::task::consume_budget().await;
             let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
-            let mut collector = IngestRouteCollector::default();
+            // One acknowledged message is one group.
+            let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
             let dispatch_result = Self::dispatch_entry(
                 context,
                 entry.record.clone(),
@@ -887,7 +889,9 @@ impl MqttIngestor {
             };
             let mut completions = Vec::with_capacity(records.len());
             let mut batch_failure = None::<String>;
-            let mut collector = IngestRouteCollector::default();
+            // The poll group is one ingest group.
+            let mut collector =
+                IngestRouteCollector::new(IngestMetadataKind::Headers, records.len());
 
             for record in records {
                 tokio::task::consume_budget().await;
@@ -1058,7 +1062,9 @@ impl MqttIngestor {
                 output_routes: &context.output_routes,
                 filter_where: context.filter_where.as_ref(),
                 records: vec![record],
-                metadata: None,
+                metadata: &[IngestMetadataRow::Headers {
+                    headers: &NoIngestHeaders,
+                }],
                 ingested_at: current_timestamp(),
                 acks: vec![acks],
             })

@@ -72,7 +72,8 @@ impl RedisPubSubIngestor {
         let task = tokio::spawn(async move {
             let _client_mounts = task_client_mounts;
             let mut backoff = RuntimeReconnectBackoff::default();
-            let mut collector = IngestRouteCollector::default();
+            let mut collector =
+                IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
 
             info!(
                 domain = task_domain.as_str(),
@@ -264,7 +265,7 @@ impl RedisPubSubIngestor {
 
                                     let payload = BufferedIngestPayload::new(
                                         payload,
-                                        IngestFilterMapMetadata::default(),
+                                        BufferedIngestMetadata::Headers(IngestHeaders::new()),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         task_quiesce.intake(0, payload, false)

@@ -51,7 +51,8 @@ impl ZeroMqIngestor {
         let task_events = runtime.events.clone();
         let task = tokio::spawn(async move {
             let mut backoff = RuntimeReconnectBackoff::default();
-            let mut collector = IngestRouteCollector::default();
+            let mut collector =
+                IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
             info!(
                 domain = task_domain.as_str(),
                 ingestor = task_ingestor.as_str(),
@@ -199,7 +200,7 @@ impl ZeroMqIngestor {
 
                                     let payload = BufferedIngestPayload::new(
                                         payload,
-                                        IngestFilterMapMetadata::default(),
+                                        BufferedIngestMetadata::Headers(IngestHeaders::new()),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         quiesce.intake(0, payload, false)
