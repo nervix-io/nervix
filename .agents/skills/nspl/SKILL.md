@@ -130,6 +130,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
   separation policy exists. Lower `RANK` values are stronger, unranked rules are the weakest rule
   tier, and equal-rank different-policy claims conflict.
+- Treat Endpoint and Syslog ingestors as cluster-wide listeners. Every client-source ingestor,
+  including an outbound WebSocket client, is single-owner and keeps its live assignment across
+  ordinary schedule recomputation; use drain or a hard colocation requirement when it must move.
 - An emitter may list multiple `FROM <relay> [WHERE <expr>]` inputs when every relay declares the
   same payload schema. Unlike ordinary processors, those inputs may use differently named
   branches. Keep collection separate per source relay and concrete branch, and remember that one

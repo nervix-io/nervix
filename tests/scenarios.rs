@@ -77,9 +77,9 @@ use crate::common::{
     },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
-        REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
+        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
+        MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
+        RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
 };
 
@@ -10277,6 +10277,46 @@ async fn when_websocket_message_is_published(
         .publish_websocket("node-1", &host, &path, &payload)
         .await
         .expect("failed to publish websocket message");
+}
+
+#[when("the websocket client test server sends a payload")]
+async fn when_websocket_client_test_server_sends_a_payload(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let base = world
+        .dependencies
+        .endpoints()
+        .get(MOCK_HTTP_ADDR)
+        .expect("HTTP mock server endpoint must be available");
+    let mut url = url::Url::parse(base).expect("HTTP mock server endpoint must be a valid URL");
+    url.set_path(&format!("/ws/{}", world.test_id));
+    let payload = expand_placeholders(world, docstring(step));
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        tokio::task::consume_budget().await;
+        match client.post(url.clone()).body(payload.clone()).send().await {
+            Ok(response) if response.status().is_success() => {
+                world.last_server_error = None;
+                return;
+            }
+            Ok(response) => {
+                world.last_server_error = Some(format!(
+                    "websocket client test server returned {}",
+                    response.status()
+                ))
+            }
+            Err(error) => world.last_server_error = Some(error.to_string()),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for an outbound WebSocket client connection. last error: {:?}",
+            world.last_server_error
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[when(expr = "websocket frames are exchanged with host {string} path {string}")]
