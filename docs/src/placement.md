@@ -238,6 +238,13 @@ violates `REQUIRE COLOCATION`. A cordoned cluster node is not considered for a n
 group relocation. See [Control Plane](control-plane.md) for the surrounding drain, failover, and
 activation behavior.
 
+Failover, drain, and colocation consolidation restart only the runtime nodes whose assignment
+changed. A runtime node that keeps its primary owner and replica set keeps running on every cluster
+node, including the former and the new owner of a moved node: it keeps its buffered work, its
+retained `REQUIRED WAIT` messages, its branch-local state, and its external source session. Its
+neighbors re-point to the new owner without restarting. Draining a cluster node that hosts several
+runtime nodes moves them one at a time, and each moved runtime node restarts exactly once.
+
 Placement constrains executing primary assignments. It does not control replica count or replica
 placement. Branches also have no separate placement dimension: every concrete branch of one
 runtime node executes within that runtime node's assignment.

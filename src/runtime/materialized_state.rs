@@ -10,6 +10,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
     BranchKey, PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+    StateReplicationRoles,
 };
 use crate::{
     metrics::{RuntimeMetrics, RuntimeMetricsSnapshot},
@@ -37,7 +38,7 @@ type DecodedMaterializedRelaySnapshot = (
 pub(super) struct ReplicatedMaterializedRelayState {
     pub(super) placement: RuntimeStatePlacement,
     schema: StdArc<arrow_schema::Schema>,
-    pub(super) primary_node: Option<String>,
+    roles: parking_lot::RwLock<StateReplicationRoles>,
     pub(super) physical_node_id: String,
     pub(super) entries: DashMap<Option<BranchKey>, RuntimeRow, RandomState>,
     pub(super) current_lsm: AtomicU64,
@@ -74,13 +75,21 @@ impl ReplicatedMaterializedRelayState {
         Ok(Self {
             placement,
             schema,
-            primary_node,
+            roles: parking_lot::RwLock::new(StateReplicationRoles::owned_by(primary_node)),
             physical_node_id,
             entries,
             current_lsm: AtomicU64::new(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
         })
+    }
+
+    pub(super) fn primary_node(&self) -> Option<String> {
+        self.roles.read().primary_node.clone()
+    }
+
+    pub(super) fn rebind_roles(&self, roles: StateReplicationRoles) {
+        *self.roles.write() = roles;
     }
 
     pub(super) fn apply_snapshot(

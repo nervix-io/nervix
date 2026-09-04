@@ -593,6 +593,7 @@ impl Runtime {
                         Model::Generator(generator) => {
                             Some(vec![generator.materialized_relay.clone()])
                         }
+                        Model::Materializer(materializer) => Some(vec![materializer.relay.clone()]),
                         _ => None,
                     })
                     .unwrap_or_default()
@@ -1767,7 +1768,7 @@ impl Runtime {
         state: &ReplicatedKafkaOffsetState,
         lsm: u64,
     ) -> Result<(), String> {
-        if state.required_replica_acks == 0 {
+        if state.required_replica_acks() == 0 {
             return Ok(());
         }
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1932,6 +1933,11 @@ impl Runtime {
         required_replica_acks: usize,
     ) -> Result<Arc<ReplicatedKafkaOffsetState>, RuntimePersistenceError> {
         if let Some(existing) = self.replicated_kafka_offset_states.get(&placement) {
+            existing.rebind_roles(StateReplicationRoles::new(
+                primary_node,
+                replica_nodes,
+                required_replica_acks,
+            ));
             return Ok(existing.clone());
         }
         let initial = self
@@ -1959,6 +1965,7 @@ impl Runtime {
         primary_node: Option<String>,
     ) -> Result<Arc<ReplicatedMaterializedRelayState>, RuntimePersistenceError> {
         if let Some(existing) = self.replicated_materialized_stream_states.get(&placement) {
+            existing.rebind_roles(StateReplicationRoles::owned_by(primary_node));
             return Ok(existing.clone());
         }
         let initial = self
@@ -2040,6 +2047,7 @@ impl Runtime {
         required_replica_acks: usize,
     ) -> Result<Arc<ReplicatedBranchAggregatedState>, RuntimePersistenceError> {
         if let Some(existing) = self.replicated_branch_aggregated_states.get(&placement) {
+            existing.rebind_roles(StateReplicationRoles::owned_by(primary_node.clone()));
             if let Some(snapshot) = self
                 .state_store
                 .as_ref()
@@ -2301,7 +2309,7 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         state: Arc<ReplicatedKafkaOffsetState>,
     ) -> Option<JoinHandle<()>> {
-        let primary_node = state.primary_node.clone()?;
+        let primary_node = state.primary_node()?;
         let poll_interval = self.state_replication_poll_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -2374,7 +2382,7 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         state: Arc<ReplicatedMaterializedRelayState>,
     ) -> Option<JoinHandle<()>> {
-        let primary_node = state.primary_node.clone()?;
+        let primary_node = state.primary_node()?;
         let poll_interval = self.state_replication_poll_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -2450,7 +2458,7 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         state: Arc<ReplicatedBranchAggregatedState>,
     ) -> Option<JoinHandle<()>> {
-        let primary_node = state.primary_node.clone()?;
+        let primary_node = state.primary_node()?;
         let poll_interval = self.state_replication_poll_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -5176,6 +5184,7 @@ impl Runtime {
             }
             ScheduleDelta::EntitySwap {
                 entities,
+                reassignments,
                 dynamic_updates,
             } => {
                 if let Err(error) = self
@@ -5183,6 +5192,7 @@ impl Runtime {
                         &desired.domain,
                         desired.clone(),
                         &entities,
+                        &reassignments,
                         &dynamic_updates,
                     )
                     .await
@@ -5206,16 +5216,230 @@ impl Runtime {
         }
     }
 
+    /// The reassigned nodes whose runtime must change on this cluster node: those that started or
+    /// stopped executing here. A node that keeps executing here across a reassignment keeps its
+    /// task, its buffers, and its branch-local state. Materializers are excluded because their
+    /// task is placement-owned and rebound with the rest of their replication runtime, and lookups
+    /// because they load on every cluster node regardless of assignment.
+    fn locally_relocated_nodes(
+        &self,
+        domain: &Domain,
+        desired: &DomainSchedule,
+        reassignments: &[RegistryEntity],
+    ) -> Vec<RegistryEntity> {
+        let Some(local_node_id) = self.local_node_id.read().clone() else {
+            return Vec::new();
+        };
+        let Some(execution) = self.executions.get(domain) else {
+            return Vec::new();
+        };
+        reassignments
+            .iter()
+            .filter(|entity| {
+                !matches!(entity.kind, ModelKind::Materializer | ModelKind::Lookup)
+                    && Self::scheduled_node(&execution.schedule, entity).is_some_and(|existing| {
+                        Self::scheduled_node(desired, entity).is_some_and(|desired_node| {
+                            existing.executes_on(&local_node_id)
+                                != desired_node.executes_on(&local_node_id)
+                        })
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn scheduled_node<'a>(
+        schedule: &'a DomainSchedule,
+        entity: &RegistryEntity,
+    ) -> Option<&'a ScheduledNode> {
+        schedule
+            .nodes
+            .iter()
+            .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
+    }
+
+    /// Rebuilds the placement-derived runtime of every reassigned node: the replicated states this
+    /// cluster node owns or replicates for it, the tasks that maintain them, and, for a moved
+    /// materializer, the task that materializes its relay. Nodes the schedule did not reassign are
+    /// never touched.
+    async fn rebind_reassigned_nodes(
+        &self,
+        domain: &Domain,
+        schedule: &DomainSchedule,
+        reassignments: &[RegistryEntity],
+        local_node_id: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let Some(local_node_id) = local_node_id else {
+            return Ok(());
+        };
+        if reassignments.is_empty() {
+            return Ok(());
+        }
+        let shutdown = self
+            .executions
+            .get(domain)
+            .map(|execution| execution.shutdown.clone())
+            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: "domain execution is unavailable for schedule reassignment".to_string(),
+            })?;
+        let mut materializers_moved = false;
+        for entity in reassignments {
+            tokio::task::consume_budget().await;
+            let desired_node = Self::scheduled_node(schedule, entity).ok_or_else(|| {
+                RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "missing reassigned {} '{}'",
+                        entity.kind.as_str(),
+                        entity.identifier.as_str()
+                    ),
+                }
+            })?;
+            let was_local = self.executions.get(domain).is_some_and(|execution| {
+                Self::scheduled_node(&execution.schedule, entity)
+                    .is_some_and(|existing| existing.executes_on(local_node_id))
+            });
+            let previous_tasks = self
+                .executions
+                .get_mut(domain)
+                .and_then(|mut execution| execution.placement_tasks.remove(entity));
+            for task in previous_tasks.unwrap_or_default() {
+                task.abort();
+                let _ = task.await;
+            }
+
+            let materialized_relay =
+                if let Model::Materializer(materializer) = desired_node.config.as_ref() {
+                    Some(materializer.relay.clone())
+                } else {
+                    None
+                };
+            let materialized_schema = materialized_relay.as_ref().and_then(|relay| {
+                self.executions.get(domain).and_then(|execution| {
+                    execution
+                        .materialized_stream_specs
+                        .get(relay)
+                        .map(|spec| spec.schema.clone())
+                })
+            });
+            let placement = self.build_scheduled_node_placement(
+                domain,
+                &shutdown,
+                desired_node,
+                local_node_id,
+                materialized_schema,
+            )?;
+            let tasks = placement.tasks;
+
+            if let Some(relay) = materialized_relay {
+                materializers_moved = true;
+                let executes_locally = desired_node.executes_on(local_node_id);
+                let services = self
+                    .executions
+                    .get(domain)
+                    .and_then(|execution| execution.relay_services.get(&relay).cloned());
+                if was_local && !executes_locally {
+                    let previous = self
+                        .executions
+                        .get_mut(domain)
+                        .and_then(|mut execution| execution.materializer_tasks.remove(&relay));
+                    if let Some(task) = previous {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                    if let Some(services) = services.as_ref() {
+                        services.remove_local_runtime_consumer(AckMode::Detached);
+                    }
+                }
+                if executes_locally && !was_local {
+                    let services = services.ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing relay services for relocated materializer '{}'",
+                            relay.as_str()
+                        ),
+                    })?;
+                    let state = placement.materialized_state.ok_or_else(|| {
+                        RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing materialized relay state '{}'",
+                                relay.as_str()
+                            ),
+                        }
+                    })?;
+                    let task = self.spawn_materializer_task(
+                        domain,
+                        &shutdown,
+                        MaterializerTaskSpec {
+                            relay: relay.clone(),
+                            state,
+                            retention: MaterializedRelayRetention::from_schedule(
+                                domain, schedule, &relay,
+                            )?,
+                            receiver: services.add_local_runtime_consumer(AckMode::Detached),
+                        },
+                    );
+                    if let Some(mut execution) = self.executions.get_mut(domain) {
+                        execution.materializer_tasks.insert(relay.clone(), task);
+                    }
+                }
+                if let Some(mut execution) = self.executions.get_mut(domain) {
+                    execution
+                        .materialized_stream_owner_nodes
+                        .insert(relay, desired_node.execution_node().map(str::to_string));
+                }
+            }
+
+            if !tasks.is_empty()
+                && let Some(mut execution) = self.executions.get_mut(domain)
+            {
+                execution.placement_tasks.insert(entity.clone(), tasks);
+            }
+        }
+        if materializers_moved {
+            self.bump_materializer_epoch(domain);
+        }
+        Ok(())
+    }
+
     pub(super) async fn swap_scheduled_nodes(
         &self,
         domain: &Domain,
         schedule: DomainSchedule,
         entities: &[RegistryEntity],
+        reassignments: &[RegistryEntity],
         dynamic_updates: &[nervix_models::DynamicModelUpdate],
     ) -> Result<(), RuntimeError> {
+        let local_node_id = self.local_node_id.read().clone();
+        // A reassignment only replaces this cluster node's runtime when the node stopped or
+        // started executing here. A node that keeps executing here, such as a server-side ingestor
+        // that merely lost one of its other placements, is left running.
+        let relocated = self.locally_relocated_nodes(domain, &schedule, reassignments);
+        let entities = SortedSet::from_unsorted(
+            entities
+                .iter()
+                .chain(relocated.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .into_vec();
+        let entities = entities.as_slice();
         let desired_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
-        let mut relays = self.entity_pause_relays(domain, entities);
-        relays.extend(Self::entity_pause_relays_for_schedule(&schedule, entities));
+        // Fence the relays feeding every entity this activation replaces, and the relays feeding
+        // every reassigned node, so producers pause instead of dispatching into an owner that is
+        // about to stop.
+        let gated = SortedSet::from_unsorted(
+            entities
+                .iter()
+                .chain(reassignments.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .into_vec();
+        let mut relays = self.entity_pause_relays(domain, &gated);
+        relays.extend(Self::entity_pause_relays_for_schedule(&schedule, &gated));
         relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         relays.dedup();
         let mut local_gate_hold = self.engage_entity_gates(
@@ -5249,7 +5473,9 @@ impl Runtime {
             .iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        let local_node_id = self.local_node_id.read().clone();
+
+        self.rebind_reassigned_nodes(domain, &schedule, reassignments, local_node_id.as_deref())
+            .await?;
 
         for entity in entities {
             tokio::task::consume_budget().await;
@@ -5352,6 +5578,27 @@ impl Runtime {
                     self.stop_ingestor(domain, &entity.identifier).await?;
                 }
 
+                // The ingestor builds its branch entrypoints from the specs the execution holds
+                // for it, so an ingestor arriving on this node needs its desired specs installed
+                // before it starts and one leaving needs them removed.
+                let desired_entrypoint_specs = desired_specs
+                    .entrypoints
+                    .iter()
+                    .filter(|spec| {
+                        spec.kind == ModelKind::Ingestor && spec.identifier == entity.identifier
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if let Some(mut execution) = self.executions.get_mut(domain) {
+                    if desired_entrypoint_specs.is_empty() {
+                        execution.branched_ingestors.remove(&entity.identifier);
+                    } else {
+                        execution
+                            .branched_ingestors
+                            .insert(entity.identifier.clone(), desired_entrypoint_specs);
+                    }
+                }
+
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_deref()) {
                     let source_model =
                         Self::source_model_for_scheduled_ingestor(&schedule, desired_ingestor)
@@ -5362,7 +5609,7 @@ impl Runtime {
                                     entity.identifier.as_str()
                                 ),
                             })?;
-                    let kafka_offset_state = self.kafka_offset_state_for_memory_pressure_resume(
+                    let kafka_offset_state = self.scheduled_kafka_offset_state(
                         domain,
                         desired_node,
                         desired_ingestor,
@@ -6129,6 +6376,14 @@ impl Runtime {
                         );
                     }
                 }
+                Model::Materializer(materializer) => {
+                    push_remote_runtime_consumer(
+                        consumers.entry(materializer.relay.clone()).or_default(),
+                        target_node,
+                        &materializer.relay,
+                        AckMode::Detached,
+                    );
+                }
                 _ => {}
             }
         }
@@ -6270,6 +6525,154 @@ impl Runtime {
         })
     }
 
+    /// Builds every part of a scheduled node's runtime that follows only from its assignment: the
+    /// replicated states this cluster node owns or replicates for it, and the background tasks
+    /// that snapshot and poll them. An assignment change rebuilds exactly this for the moved node
+    /// and leaves every other node alone.
+    fn build_scheduled_node_placement(
+        &self,
+        domain: &Domain,
+        shutdown_tx: &watch::Sender<bool>,
+        node: &ScheduledNode,
+        local_node_id: &str,
+        materialized_schema: Option<StdArc<arrow_schema::Schema>>,
+    ) -> Result<ScheduledNodePlacement, RuntimeError> {
+        let mut placement = ScheduledNodePlacement::default();
+        let executes_locally = node.executes_on(local_node_id);
+        let assigned_locally = node.is_assigned_to(local_node_id);
+        let execution_node = node.execution_node().map(str::to_string);
+
+        if let Model::Materializer(materializer) = node.config.as_ref()
+            && (executes_locally || assigned_locally)
+        {
+            let schema = materialized_schema.ok_or_else(|| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "missing materialized relay spec '{}'",
+                    materializer.relay.as_str()
+                ),
+            })?;
+            let state = self
+                .replicated_materialized_stream_state(
+                    self.state_placement(
+                        domain,
+                        RuntimeStateKind::MaterializedRelay,
+                        ModelKind::Materializer,
+                        &materializer.relay,
+                        None,
+                    ),
+                    schema,
+                    execution_node.clone(),
+                )
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
+            if let Some(task) =
+                self.spawn_materialized_stream_snapshot_task(shutdown_tx, state.clone())
+            {
+                placement.tasks.push(task);
+            }
+            if !executes_locally
+                && let Some(task) =
+                    self.spawn_materialized_stream_replica_poll_task(shutdown_tx, state.clone())
+            {
+                placement.tasks.push(task);
+            }
+            placement.materialized_state = Some(state);
+        }
+
+        if let Model::Ingestor(ingestor) = node.config.as_ref()
+            && let IngestSource::Kafka {
+                offset_mode: KafkaOffsetMode::Domain,
+                ..
+            } = &ingestor.source
+            && assigned_locally
+        {
+            let replica_nodes = node
+                .replica_nodes()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let required_replica_acks = replica_nodes.len();
+            let state = self
+                .replicated_kafka_offset_state(
+                    self.state_placement(
+                        domain,
+                        RuntimeStateKind::KafkaOffset,
+                        node.kind,
+                        &node.identifier,
+                        None,
+                    ),
+                    node.primary_node.clone(),
+                    replica_nodes,
+                    required_replica_acks,
+                )
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
+            if let Some(task) = self.spawn_kafka_offset_snapshot_task(shutdown_tx, state.clone()) {
+                placement.tasks.push(task);
+            }
+            if node.is_primary_on(local_node_id) {
+                placement.kafka_offset_state = Some(state);
+            } else if let Some(task) = self.spawn_kafka_offset_replica_poll_task(shutdown_tx, state)
+            {
+                placement.tasks.push(task);
+            }
+        }
+
+        let aggregate_primary_node = execution_node
+            .clone()
+            .or_else(|| executes_locally.then(|| local_node_id.to_string()));
+        let aggregate_replica_nodes = if execution_node.is_some() {
+            node.replica_nodes()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if executes_locally || (assigned_locally && aggregate_primary_node.is_some()) {
+            let required_replica_acks = aggregate_replica_nodes.len();
+            let state = self
+                .replicated_branch_aggregated_state(
+                    self.state_placement(
+                        domain,
+                        RuntimeStateKind::BranchAggregated,
+                        node.kind,
+                        &node.identifier,
+                        None,
+                    ),
+                    aggregate_primary_node.clone(),
+                    aggregate_primary_node.unwrap_or_else(|| local_node_id.to_string()),
+                    aggregate_replica_nodes,
+                    required_replica_acks,
+                )
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
+            let task = if executes_locally {
+                self.spawn_branch_aggregated_snapshot_task(shutdown_tx, state)
+            } else {
+                self.spawn_branch_aggregated_replica_poll_task(shutdown_tx, state)
+            };
+            if let Some(task) = task {
+                placement.tasks.push(task);
+            }
+        }
+        self.metrics.register_global_node(
+            domain,
+            node.kind,
+            &node.identifier,
+            execution_node.as_deref().or(Some(local_node_id)),
+        );
+
+        Ok(placement)
+    }
+
     pub(in crate::runtime) async fn rebuild_domain_from_schedule(
         &self,
         local_node_id: &str,
@@ -6329,8 +6732,6 @@ impl Runtime {
         let mut relay_schemas = HashMap::new();
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
-        let mut materialized_stream_branch_ttls = HashMap::new();
-        let mut materialized_stream_branch_capacities = HashMap::new();
         let mut schemas = HashMap::new();
         let mut wire_schemas = HashMap::new();
         let mut codecs = HashMap::new();
@@ -6610,55 +7011,6 @@ impl Runtime {
                 relay_branching_schemas.insert(node.identifier.clone(), branching_schema);
                 relay_schemas.insert(node.identifier.clone(), schema);
                 if relay.materialized_state.is_some() {
-                    if let Some(branch) = relay.branching.branch() {
-                        let branch_model = schedule
-                            .nodes
-                            .iter()
-                            .find_map(|node| {
-                                let Model::Branch(candidate) = node.config.as_ref() else {
-                                    return None;
-                                };
-                                (&candidate.name == branch).then_some(candidate)
-                            })
-                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing branch '{}' for materialized relay '{}'",
-                                    branch.as_str(),
-                                    node.identifier.as_str()
-                                ),
-                            })?;
-                        let branch_ttl =
-                            humantime::parse_duration(&branch_model.ttl).map_err(|error| {
-                                RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "invalid branch ttl '{}' for materialized relay '{}': \
-                                         {error}",
-                                        branch_model.ttl,
-                                        node.identifier.as_str()
-                                    ),
-                                }
-                            })?;
-                        materialized_stream_branch_ttls.insert(node.identifier.clone(), branch_ttl);
-                        if let Some(eviction) = branch_model.eviction.as_ref() {
-                            let capacity =
-                                usize::try_from(eviction.max_instances()).map_err(|_| {
-                                    RuntimeError::BuildDomainExecution {
-                                        domain: domain.as_str().to_string(),
-                                        reason: format!(
-                                            "branch '{}' max instances {} does not fit usize for \
-                                             materialized relay '{}'",
-                                            branch.as_str(),
-                                            eviction.max_instances(),
-                                            node.identifier.as_str()
-                                        ),
-                                    }
-                                })?;
-                            materialized_stream_branch_capacities
-                                .insert(node.identifier.clone(), capacity);
-                        }
-                    }
                     materialized_stream_specs.insert(
                         node.identifier.clone(),
                         RuntimeMaterializedRelaySpec::new(
@@ -6678,17 +7030,50 @@ impl Runtime {
             }
         }
 
+        let mut placement_tasks = HashMap::<RegistryEntity, Vec<JoinHandle<()>>>::new();
+        let mut kafka_offset_states = HashMap::new();
+        let mut materialized_states = HashMap::new();
+        for node in &schedule.nodes {
+            tokio::task::consume_budget().await;
+            let materialized_schema =
+                if let Model::Materializer(materializer) = node.config.as_ref() {
+                    materialized_stream_specs
+                        .get(&materializer.relay)
+                        .map(|spec| spec.schema.clone())
+                } else {
+                    None
+                };
+            let placement = self.build_scheduled_node_placement(
+                domain,
+                &shutdown_tx,
+                node,
+                local_node_id,
+                materialized_schema,
+            )?;
+            if let Some(state) = placement.kafka_offset_state {
+                kafka_offset_states.insert(node.identifier.clone(), state);
+            }
+            if let Some(state) = placement.materialized_state {
+                materialized_states.insert(node.identifier.clone(), state);
+            }
+            if !placement.tasks.is_empty() {
+                placement_tasks.insert(
+                    RegistryEntity {
+                        kind: node.kind,
+                        identifier: node.identifier.clone(),
+                    },
+                    placement.tasks,
+                );
+            }
+        }
+
         for node in &schedule.nodes {
             match node.config.as_ref() {
                 Model::Materializer(materializer) => {
-                    let primary_node = node.execution_node().map(str::to_string);
-                    materialized_stream_owner_nodes
-                        .insert(materializer.relay.clone(), primary_node.clone());
-                    let materialized_schema = materialized_stream_specs
-                        .get(&materializer.relay)
-                        .expect("materialized relay spec must exist")
-                        .schema
-                        .clone();
+                    materialized_stream_owner_nodes.insert(
+                        materializer.relay.clone(),
+                        node.execution_node().map(str::to_string),
+                    );
                     let Some(relay) = relay_builders.get_mut(&materializer.relay) else {
                         return Err(RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -6698,72 +7083,27 @@ impl Runtime {
                             ),
                         });
                     };
-                    let placement = self.state_placement(
-                        domain,
-                        RuntimeStateKind::MaterializedRelay,
-                        ModelKind::Materializer,
-                        &materializer.relay,
-                        None,
-                    );
                     if node.executes_on(local_node_id) {
-                        let state = self
-                            .replicated_materialized_stream_state(
-                                placement,
-                                materialized_schema.clone(),
-                                primary_node,
-                            )
-                            .map_err(|error| RuntimeError::BuildDomainExecution {
+                        let state = materialized_states
+                            .get(&node.identifier)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
-                                reason: error.to_string(),
+                                reason: format!(
+                                    "missing materialized relay state '{}'",
+                                    materializer.relay.as_str()
+                                ),
                             })?;
-                        if let Some(task) = self
-                            .spawn_materialized_stream_snapshot_task(&shutdown_tx, state.clone())
-                        {
-                            tasks.push(task);
-                        }
                         materializer_specs.push(MaterializerTaskSpec {
                             relay: materializer.relay.clone(),
                             state,
-                            branch_ttl: materialized_stream_branch_ttls
-                                .get(&materializer.relay)
-                                .copied(),
-                            branch_capacity: materialized_stream_branch_capacities
-                                .get(&materializer.relay)
-                                .copied(),
+                            retention: MaterializedRelayRetention::from_schedule(
+                                domain,
+                                &schedule,
+                                &materializer.relay,
+                            )?,
                             receiver: relay.runtime_consumer_fan_in_for_mode(AckMode::Detached),
                         });
-                    } else {
-                        if let Some(primary_node) = node.execution_node() {
-                            push_remote_runtime_consumer(
-                                &mut relay.remote_runtime_consumers,
-                                primary_node,
-                                &materializer.relay,
-                                AckMode::Detached,
-                            );
-                        }
-                        if node.is_assigned_to(local_node_id) {
-                            let state = self
-                                .replicated_materialized_stream_state(
-                                    placement,
-                                    materialized_schema,
-                                    primary_node,
-                                )
-                                .map_err(|error| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: error.to_string(),
-                                })?;
-                            if let Some(task) = self.spawn_materialized_stream_snapshot_task(
-                                &shutdown_tx,
-                                state.clone(),
-                            ) {
-                                tasks.push(task);
-                            }
-                            if let Some(task) = self
-                                .spawn_materialized_stream_replica_poll_task(&shutdown_tx, state)
-                            {
-                                tasks.push(task);
-                            }
-                        }
                     }
                 }
                 Model::Generator(generator) if node.executes_on(local_node_id) => {
@@ -6849,13 +7189,6 @@ impl Runtime {
                                 input_relay.clone(),
                                 relay.runtime_consumer_fan_in_for_mode(emitter.mode),
                             ));
-                        } else if let Some(assigned_node) = node.execution_node() {
-                            push_remote_runtime_consumer(
-                                &mut relay.remote_runtime_consumers,
-                                assigned_node,
-                                input_relay,
-                                emitter.mode,
-                            );
                         }
                     }
                     if node.executes_on(local_node_id) {
@@ -6880,88 +7213,14 @@ impl Runtime {
                                 from_relay.clone(),
                                 receiver,
                             ));
-                        } else if let Some(assigned_node) = node.execution_node() {
-                            push_remote_runtime_consumer(
-                                &mut relay.remote_runtime_consumers,
-                                assigned_node,
-                                from_relay,
-                                reingestor.mode,
-                            );
                         }
                     }
                 }
-                Model::Ingestor(ingestor) => {
-                    let kafka_offset_state = if let IngestSource::Kafka {
-                        offset_mode: KafkaOffsetMode::Domain,
-                        ..
-                    } = &ingestor.source
-                    {
-                        let placement = self.state_placement(
-                            domain,
-                            RuntimeStateKind::KafkaOffset,
-                            node.kind,
-                            &node.identifier,
-                            None,
-                        );
-                        if node.is_primary_on(local_node_id) {
-                            Some(
-                                self.replicated_kafka_offset_state(
-                                    placement,
-                                    node.primary_node.clone(),
-                                    node.replica_nodes()
-                                        .into_iter()
-                                        .map(str::to_string)
-                                        .collect(),
-                                    node.replica_nodes().len(),
-                                )
-                                .map_err(|error| {
-                                    RuntimeError::BuildDomainExecution {
-                                        domain: domain.as_str().to_string(),
-                                        reason: error.to_string(),
-                                    }
-                                })?,
-                            )
-                        } else if node.is_assigned_to(local_node_id) {
-                            let state = self
-                                .replicated_kafka_offset_state(
-                                    placement,
-                                    node.primary_node.clone(),
-                                    node.replica_nodes()
-                                        .into_iter()
-                                        .map(str::to_string)
-                                        .collect(),
-                                    node.replica_nodes().len(),
-                                )
-                                .map_err(|error| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: error.to_string(),
-                                })?;
-                            if let Some(task) =
-                                self.spawn_kafka_offset_snapshot_task(&shutdown_tx, state.clone())
-                            {
-                                tasks.push(task);
-                            }
-                            if let Some(task) =
-                                self.spawn_kafka_offset_replica_poll_task(&shutdown_tx, state)
-                            {
-                                tasks.push(task);
-                            }
-                            None
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    if node.executes_on(local_node_id) {
-                        if let Some(state) = kafka_offset_state.as_ref()
-                            && let Some(task) =
-                                self.spawn_kafka_offset_snapshot_task(&shutdown_tx, state.clone())
-                        {
-                            tasks.push(task);
-                        }
-                        ingestor_specs.push((ingestor.clone(), kafka_offset_state));
-                    }
+                Model::Ingestor(ingestor) if node.executes_on(local_node_id) => {
+                    ingestor_specs.push((
+                        ingestor.clone(),
+                        kafka_offset_states.get(&node.identifier).cloned(),
+                    ));
                 }
                 _ => {}
             }
@@ -6993,18 +7252,22 @@ impl Runtime {
                         input_relay.clone(),
                         relay.runtime_consumer_fan_in_for_mode(node_spec.spec.mode),
                     ));
-                } else if let Some(assigned_node) = node.execution_node() {
-                    push_remote_runtime_consumer(
-                        &mut relay.remote_runtime_consumers,
-                        assigned_node,
-                        input_relay,
-                        node_spec.spec.mode,
-                    );
                 }
             }
             if executes_locally {
                 processor_input_specs.push((node_spec.clone(), inputs));
             }
+        }
+
+        // Remote delivery targets follow only from the published schedule, so the same derivation
+        // seeds a freshly built domain and re-points the relays of an incrementally moved node.
+        let remote_runtime_consumers =
+            Self::remote_runtime_consumers_for_schedule(&schedule, local_node_id);
+        for (relay, builder) in relay_builders.iter_mut() {
+            builder.remote_runtime_consumers = remote_runtime_consumers
+                .get(relay)
+                .cloned()
+                .unwrap_or_default();
         }
 
         let relay_registries = relay_builders
@@ -7036,73 +7299,6 @@ impl Runtime {
             }
             self.metrics
                 .register_global_stream(domain, relay, Some(local_node_id));
-        }
-        for node in &schedule.nodes {
-            let primary_node = node.execution_node().map(str::to_string).or_else(|| {
-                node.executes_on(local_node_id)
-                    .then(|| local_node_id.to_string())
-            });
-            let physical_node_id = primary_node
-                .clone()
-                .unwrap_or_else(|| local_node_id.to_string());
-            let replica_nodes = if node.execution_node().is_some() {
-                node.replica_nodes()
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            let required_replica_acks = replica_nodes.len();
-            let placement = self.state_placement(
-                domain,
-                RuntimeStateKind::BranchAggregated,
-                node.kind,
-                &node.identifier,
-                None,
-            );
-            if node.executes_on(local_node_id) {
-                let state = self
-                    .replicated_branch_aggregated_state(
-                        placement,
-                        primary_node,
-                        physical_node_id,
-                        replica_nodes,
-                        required_replica_acks,
-                    )
-                    .map_err(|error| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: error.to_string(),
-                    })?;
-                if let Some(task) = self.spawn_branch_aggregated_snapshot_task(&shutdown_tx, state)
-                {
-                    tasks.push(task);
-                }
-            } else if node.is_assigned_to(local_node_id) && primary_node.is_some() {
-                let state = self
-                    .replicated_branch_aggregated_state(
-                        placement,
-                        primary_node,
-                        physical_node_id,
-                        replica_nodes,
-                        required_replica_acks,
-                    )
-                    .map_err(|error| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: error.to_string(),
-                    })?;
-                if let Some(task) =
-                    self.spawn_branch_aggregated_replica_poll_task(&shutdown_tx, state)
-                {
-                    tasks.push(task);
-                }
-            }
-            self.metrics.register_global_node(
-                domain,
-                node.kind,
-                &node.identifier,
-                node.execution_node().or(Some(local_node_id)),
-            );
         }
         let relay_services = relay_builders
             .into_iter()
@@ -7259,8 +7455,11 @@ impl Runtime {
             );
         }
 
+        let mut materializer_tasks = HashMap::new();
         for spec in materializer_specs {
-            tasks.push(self.spawn_materializer_task(domain, &shutdown_tx, spec));
+            let relay = spec.relay.clone();
+            let task = self.spawn_materializer_task(domain, &shutdown_tx, spec);
+            materializer_tasks.insert(relay, task);
         }
 
         for (emitter, inputs) in emitter_specs {
@@ -7328,6 +7527,8 @@ impl Runtime {
                 emitter_tasks,
                 generator_tasks,
                 reingestor_tasks,
+                placement_tasks,
+                materializer_tasks,
                 clients: transports,
                 tasks,
             },
@@ -9710,6 +9911,8 @@ impl Runtime {
                 emitter_tasks,
                 generator_tasks,
                 reingestor_tasks,
+                placement_tasks: HashMap::default(),
+                materializer_tasks: HashMap::default(),
                 clients: transports,
                 tasks,
             },
@@ -9935,6 +10138,8 @@ impl Runtime {
             emitter_tasks: HashMap::default(),
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
+            placement_tasks: HashMap::default(),
+            materializer_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         })
@@ -11749,8 +11954,11 @@ impl Runtime {
         let MaterializerTaskSpec {
             relay,
             state,
-            branch_ttl,
-            branch_capacity,
+            retention:
+                MaterializedRelayRetention {
+                    branch_ttl,
+                    branch_capacity,
+                },
             receiver,
         } = spec;
         let runtime = self.clone();
@@ -12067,7 +12275,7 @@ impl Runtime {
                     domain: domain.clone(),
                     source_model,
                     ingestor: ingestor.clone(),
-                    kafka_offset_state: self.kafka_offset_state_for_memory_pressure_resume(
+                    kafka_offset_state: self.scheduled_kafka_offset_state(
                         &domain,
                         node,
                         ingestor,
@@ -12117,7 +12325,7 @@ impl Runtime {
             .map(|node| (*node.config).clone())
     }
 
-    fn kafka_offset_state_for_memory_pressure_resume(
+    fn scheduled_kafka_offset_state(
         &self,
         domain: &Domain,
         node: &ScheduledNode,
@@ -12181,6 +12389,20 @@ impl Runtime {
                 Self::await_shutdown_task(task, domain, Some(&entity.identifier), "reingestor")
                     .await;
             }
+        }
+        for (entity, tasks) in execution.placement_tasks {
+            for task in tasks {
+                Self::await_shutdown_task(
+                    task,
+                    domain,
+                    Some(&entity.identifier),
+                    "scheduled node placement",
+                )
+                .await;
+            }
+        }
+        for (relay, task) in execution.materializer_tasks {
+            Self::await_shutdown_task(task, domain, Some(&relay), "materializer").await;
         }
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;

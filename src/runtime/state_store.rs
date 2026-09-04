@@ -19,6 +19,38 @@ pub(crate) struct RuntimeStatePlacement {
     pub(crate) branch_key: Option<BranchKey>,
 }
 
+/// Which cluster nodes currently own and replicate one runtime state. Ownership moves while the
+/// state itself lives on, so a replicated state keeps its roles as rebindable configuration rather
+/// than as a construction-time constant.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct StateReplicationRoles {
+    pub(crate) primary_node: Option<String>,
+    pub(crate) replica_nodes: Vec<String>,
+    pub(crate) required_replica_acks: usize,
+}
+
+impl StateReplicationRoles {
+    pub(crate) fn new(
+        primary_node: Option<String>,
+        replica_nodes: Vec<String>,
+        required_replica_acks: usize,
+    ) -> Self {
+        Self {
+            primary_node,
+            replica_nodes,
+            required_replica_acks,
+        }
+    }
+
+    pub(crate) fn owned_by(primary_node: Option<String>) -> Self {
+        Self {
+            primary_node,
+            replica_nodes: Vec::new(),
+            required_replica_acks: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct PersistedRuntimeStateEntry {
     pub lsm: u64,

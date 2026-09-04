@@ -171,8 +171,10 @@ Prometheus exposes branch lifecycle state without a concrete branch-key label:
   idle expiration.
 
 Normal shutdown, schedule replacement, and runtime detachment reduce the live gauge but do not
-increment the eviction counter. Lifecycle metrics are live process-local Prometheus state and are
-not persisted or replicated.
+increment the eviction counter. A schedule replacement reduces it only for the runtime nodes whose
+assignment changed: a drain, failover, or colocation consolidation leaves the gauges of unaffected
+runtime nodes continuous. Lifecycle metrics are live process-local Prometheus state and are not
+persisted or replicated.
 
 Concrete branch-local inspection remains available through `DESCRIBE RELAY <relay> WHERE (...)`.
 `DESCRIBE` does not provide a common branch inventory or eviction history. Prometheus deliberately

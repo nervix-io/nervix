@@ -148,6 +148,12 @@ delivers payloads the ingestor already admitted, but any volatile quiesce buffer
 termination or crash interrupts it. The gap until a later start is covered only by the external
 source's own retention; ephemeral sources provide none.
 
+A node drain, cordon move, or failover ends the source session only of the ingestors it actually
+moved. Every other ingestor in the domain keeps its session open and keeps ingesting throughout the
+activation, including ingestors on the former and the new owner of the moved one. A moved ingestor
+starts on its new owner as soon as that node activates the revision, without waiting for the rest of
+the domain.
+
 Entering quiesce does not wait for downstream ACK chains. Already admitted route batches continue
 downstream. A source item not yet acknowledged, committed, or deleted is eligible for redelivery on
 resume, so existing at-least-once duplicate windows remain. A quiesced ingestor counts as drained
