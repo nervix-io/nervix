@@ -238,6 +238,23 @@ pub struct RegistryEntity {
     pub identifier: Identifier,
 }
 
+impl Ord for RegistryEntity {
+    /// Orders affected entities by kind name and then identifier so every cluster node applies the
+    /// same schedule change in the same order.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.kind
+            .as_str()
+            .cmp(other.kind.as_str())
+            .then_with(|| self.identifier.cmp(&other.identifier))
+    }
+}
+
+impl PartialOrd for RegistryEntity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeChange {
     StartIngestor {

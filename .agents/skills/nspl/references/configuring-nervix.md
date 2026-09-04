@@ -190,8 +190,9 @@ relay. Do not use them to scan across branches.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
 - Entity holds, domain pauses, and memory-pressure quiescing automatically consult the ingestor's
-  mode. Stop, drop, drain/cordon relocation, failover, and shutdown terminate the source session.
-  Do not emit `PAUSE` or `RESUME` syntax.
+  mode. Stop, drop, drain/cordon relocation, failover, and shutdown terminate the source session,
+  and a relocation terminates only the ingestors it actually moved. Do not emit `PAUSE` or `RESUME`
+  syntax.
 - External entities and resource contents are provisioned before the graph is started.
 
 ## Verification and troubleshooting

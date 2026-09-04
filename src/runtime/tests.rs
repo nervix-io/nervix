@@ -3570,7 +3570,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     config.mode = AckMode::Detached;
 
     runtime
-        .swap_scheduled_nodes(&domain, desired.clone(), &[entity], &[])
+        .swap_scheduled_nodes(&domain, desired.clone(), &[entity], &[], &[])
         .await
         .expect("non-junction scheduled processors must use the shared swap path");
     let execution = runtime
@@ -3677,7 +3677,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     };
 
     runtime
-        .swap_scheduled_nodes(&domain, desired, &[entity], &[])
+        .swap_scheduled_nodes(&domain, desired, &[entity], &[], &[])
         .await
         .expect("entity swap must apply");
 
@@ -5671,6 +5671,8 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             emitter_tasks: HashMap::default(),
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
+            placement_tasks: HashMap::default(),
+            materializer_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -5748,6 +5750,8 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 emitter_tasks: HashMap::default(),
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
+                placement_tasks: HashMap::default(),
+                materializer_tasks: HashMap::default(),
                 clients: HashMap::default(),
                 tasks: Vec::new(),
             },
@@ -5786,8 +5790,7 @@ async fn materializer_shutdown_drains_every_ready_relay_batch() {
         super::MaterializerTaskSpec {
             relay: relay.clone(),
             state: state.clone(),
-            branch_ttl: None,
-            branch_capacity: None,
+            retention: super::MaterializedRelayRetention::default(),
             receiver,
         },
     );
@@ -5882,6 +5885,8 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
             emitter_tasks: HashMap::default(),
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
+            placement_tasks: HashMap::default(),
+            materializer_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -8760,6 +8765,8 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             emitter_tasks: HashMap::default(),
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
+            placement_tasks: HashMap::default(),
+            materializer_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -8977,6 +8984,8 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
             emitter_tasks: HashMap::default(),
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
+            placement_tasks: HashMap::default(),
+            materializer_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -11588,6 +11597,8 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             emitter_tasks: HashMap::default(),
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
+            placement_tasks: HashMap::default(),
+            materializer_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },

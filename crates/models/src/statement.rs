@@ -3679,6 +3679,13 @@ impl ScheduledNode {
             self.is_primary_on(node_id)
         }
     }
+
+    /// True when `other` gives this runtime node the same primary owner and the same replica set.
+    /// A schedule difference that fails this check is an assignment change, which activates
+    /// narrowly instead of rebuilding the domain.
+    pub fn has_same_assignment_as(&self, other: &Self) -> bool {
+        self.primary_node == other.primary_node && self.assigned_nodes == other.assigned_nodes
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

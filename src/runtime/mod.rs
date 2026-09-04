@@ -218,7 +218,7 @@ pub(crate) type RelaySubscriptionRecvError = async_broadcast::RecvError;
 use service_url::ServiceUrl;
 pub(crate) use state_store::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateKind, RuntimeStatePlacement,
-    RuntimeStateStore,
+    RuntimeStateStore, StateReplicationRoles,
 };
 use test_hooks::EmitterFaultMode;
 pub use test_hooks::{
@@ -976,6 +976,11 @@ struct DomainExecution {
     emitter_tasks: HashMap<RegistryEntity, ScheduledEmitterTask>,
     generator_tasks: HashMap<RegistryEntity, JoinHandle<()>>,
     reingestor_tasks: HashMap<RegistryEntity, Vec<JoinHandle<()>>>,
+    /// Placement-derived tasks grouped by the scheduled node whose assignment owns them, so a
+    /// reassignment can replace one node's replication runtime without disturbing its siblings.
+    placement_tasks: HashMap<RegistryEntity, Vec<JoinHandle<()>>>,
+    /// The task maintaining each locally owned materialized relay, keyed by that relay.
+    materializer_tasks: HashMap<Identifier, JoinHandle<()>>,
     clients: HashMap<Identifier, Arc<Model>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -3255,13 +3260,103 @@ struct EmitterTaskBuildDeps<'a> {
     deps: EmitterTaskDeps,
 }
 
+/// Everything a scheduled node's assignment gives it on one cluster node: the replicated states it
+/// owns or replicates and the background tasks that maintain them. Reassignment replaces this set
+/// for the moved node without touching the rest of the domain.
+#[derive(Default)]
+struct ScheduledNodePlacement {
+    tasks: Vec<JoinHandle<()>>,
+    kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
+    materialized_state: Option<Arc<ReplicatedMaterializedRelayState>>,
+}
+
+/// The branch retention a materialized relay's materializer enforces. Derived from the branch the
+/// relay is branched by, so a materializer can be started on any owner directly from the published
+/// schedule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MaterializedRelayRetention {
+    branch_ttl: Option<Duration>,
+    branch_capacity: Option<usize>,
+}
+
+impl MaterializedRelayRetention {
+    fn from_schedule(
+        domain: &Domain,
+        schedule: &DomainSchedule,
+        relay: &Identifier,
+    ) -> Result<Self, RuntimeError> {
+        let Some(Model::Relay(model)) = schedule
+            .nodes
+            .iter()
+            .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
+            .map(|node| node.config.as_ref())
+        else {
+            return Err(RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("missing materialized relay '{}'", relay.as_str()),
+            });
+        };
+        let Some(branch) = model.branching.branch() else {
+            return Ok(Self::default());
+        };
+        let branch_model = schedule
+            .nodes
+            .iter()
+            .find_map(|node| {
+                let Model::Branch(candidate) = node.config.as_ref() else {
+                    return None;
+                };
+                (&candidate.name == branch).then_some(candidate)
+            })
+            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "missing branch '{}' for materialized relay '{}'",
+                    branch.as_str(),
+                    relay.as_str()
+                ),
+            })?;
+        let branch_ttl = humantime::parse_duration(&branch_model.ttl).map_err(|error| {
+            RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "invalid branch ttl '{}' for materialized relay '{}': {error}",
+                    branch_model.ttl,
+                    relay.as_str()
+                ),
+            }
+        })?;
+        let branch_capacity = branch_model
+            .eviction
+            .as_ref()
+            .map(|eviction| {
+                usize::try_from(eviction.max_instances()).map_err(|_| {
+                    RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "branch '{}' max instances {} does not fit usize for materialized \
+                             relay '{}'",
+                            branch.as_str(),
+                            eviction.max_instances(),
+                            relay.as_str()
+                        ),
+                    }
+                })
+            })
+            .transpose()?;
+        Ok(Self {
+            branch_ttl: Some(branch_ttl),
+            branch_capacity,
+        })
+    }
+}
+
 /// One materialized relay's runtime task: the relay it serves, the replicated state it maintains,
 /// the branch retention limits it enforces, and the fan-in it consumes.
 struct MaterializerTaskSpec {
     relay: Identifier,
     state: Arc<ReplicatedMaterializedRelayState>,
-    branch_ttl: Option<Duration>,
-    branch_capacity: Option<usize>,
+    retention: MaterializedRelayRetention,
     receiver: RelayRuntimeFanIn,
 }
 
@@ -7301,7 +7396,7 @@ impl BranchRuntime {
         for materialized_state in self.materializers.values() {
             let local_node_id = self.runtime.local_node_id.read().clone();
             let is_primary = match (
-                materialized_state.primary_node.as_deref(),
+                materialized_state.primary_node().as_deref(),
                 local_node_id.as_deref(),
             ) {
                 (Some(primary_node), Some(local_node_id)) => primary_node == local_node_id,

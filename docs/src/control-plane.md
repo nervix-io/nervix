@@ -196,6 +196,23 @@ operator `PAUSE` or `RESUME` statement.
   as well. A WASM processor participates like every other stateful node: the host gates its input
   relays, asks the guest to release what it buffers, snapshots it, and restores that snapshot into
   the replacement instance.
+- An **assignment-only** change contributes no quiesce level at all. It is a published schedule in
+  which one or more runtime nodes changed primary owner or replica set while no model changed, and
+  it reaches every live node as a narrow activation rather than a domain rebuild. Node drain,
+  failover after a cluster node becomes unavailable, and consolidation of a newly effective
+  `REQUIRE COLOCATION` group all produce this class. A runtime node whose primary owner and replica
+  set are unchanged does not stop, restart, restore a snapshot, or re-open an external session: its
+  in-flight batches are not negatively acknowledged by the activation, its retained `REQUIRED WAIT`
+  messages persist, its branch instances and branch-local state persist, and its ingestor source
+  session keeps ingesting throughout. Producers into a moved node's input relays re-point to the new
+  owner when they activate the revision, consumers of its outputs keep running, and readers
+  declaring `USING MATERIALIZED STATE` on a moved materialized relay re-bind their state source
+  without restarting. A cluster node that gains or loses a replica role starts or stops replica
+  polling and local snapshotting for that runtime node without restarting its primary. A change
+  touching several runtime nodes, such as a hard colocation group move, is one activation affecting
+  exactly those nodes. A batch that changes both a model and an assignment applies the model change
+  at its classified quiesce level and the assignment change narrowly; runtime nodes affected by
+  neither are untouched.
 - `DOMAIN_PAUSE` changes stop ingestion and generators across the domain and fully drain attached
   work before commit. Relay schema or branching changes and schema or wire-schema definition
   changes use this level. Changing the membership of an emitter's `FROM` relay list also uses this
@@ -221,9 +238,24 @@ the hold's deadline bounds the window.
 These modes govern only pauses that resume the same running graph on the same node. Stopping a
 domain, dropping an ingestor, node drain or cordon relocation, failover, and graceful shutdown are
 terminations: the source session ends after already admitted work drains, and a later start relies
-only on external source retention. Volatile quiesce buffers do not migrate and are lost if a
+only on external source retention. A drain, cordon relocation, or failover terminates only the
+runtime nodes whose primary owner changed; every other runtime node in the domain keeps running,
+including on the former and the new owner. Volatile quiesce buffers do not migrate and are lost if a
 termination or crash interrupts them. Quiesced connected modes count as drained because their raw
 buffers have not entered the graph.
+
+A moved runtime node terminates on its former owner once its already admitted work drains within the
+existing shutdown grace, and starts on its new owner. State migration is unchanged: replicated state
+kinds are present on the new owner only when it was already a replica, and every other state kind
+restarts from the new owner's local snapshot. A producer re-points when it activates the revision;
+until then its dispatches to the former owner fail and are retried within the dispatch timeout,
+after which attached batches are negatively acknowledged and detached batches are dropped. Batches
+addressed to a moved runtime node between the former owner's stop and the new owner's readiness are
+therefore negatively acknowledged; batches for unaffected runtime nodes never are. Draining a
+cluster node that hosts several runtime nodes performs one narrow activation per moved node, and
+each moved node restarts exactly once. There is no domain-wide ingestion pause for an assignment
+change, so a lagging cluster node no longer stalls ingestion elsewhere while the initiating command
+waits for every live node to activate the revision.
 
 An unchanged candidate contributes no aspect. An all-no-op batch therefore performs no storage
 write or schedule publication and reports `DYNAMIC`, even when the running domain has work that

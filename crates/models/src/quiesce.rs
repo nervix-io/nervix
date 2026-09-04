@@ -152,6 +152,13 @@ pub enum StatePurge {
 }
 
 impl ModelChangeAspect {
+    /// True when this change only redefines a control-plane scheduling input. Placement
+    /// definitions decide where runtime nodes execute; the runtime learns the outcome from the
+    /// published schedule's assignments and has nothing else to apply.
+    pub const fn is_control_plane_only(self) -> bool {
+        matches!(self, Self::PlacementDefinition)
+    }
+
     /// The runtime state this change invalidates, if any. Schema-driven staleness is already
     /// handled by keying persisted state on the schema fingerprint; this covers the changes that
     /// keep the schema identical but redefine what the retained state means.
@@ -280,6 +287,18 @@ impl ModelChangeAspects {
 
     pub fn is_empty(&self) -> bool {
         self.aspects.is_empty()
+    }
+
+    /// True when the change set only redefines control-plane scheduling inputs. Such a change has
+    /// no runtime work of its own: whatever it decides reaches the runtime as the published
+    /// schedule's assignments.
+    pub fn is_control_plane_only(&self) -> bool {
+        !self.aspects.is_empty()
+            && self
+                .aspects
+                .iter()
+                .copied()
+                .all(ModelChangeAspect::is_control_plane_only)
     }
 
     pub fn quiesce_level(&self) -> QuiesceLevel {
