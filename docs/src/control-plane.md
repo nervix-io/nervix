@@ -148,6 +148,13 @@ rule claims, applies rank resolution, rejects equal-rank policy conflicts, and f
 `REQUIRE COLOCATION` groups before publishing the schedule. A rejected candidate writes nothing
 and leaves the prior models and schedule active.
 
+Schedule publication preserves the existing primary and replicas of every single-owner ingestor
+while all cluster nodes in that assignment are live. Outbound WebSocket-client ingestors follow
+this rule along with the other client sources, so unrelated graph changes, cluster-node joins or
+uncordons, and soft placement changes do not restart their external sessions. Endpoint-source and
+Syslog ingestors are the only ingestors whose assignments follow live membership, because their
+listeners execute on every cluster node.
+
 Hard colocation groups constrain every scheduler. A newly effective require group is consolidated
 through the normal runtime-node handoff path, and failover or drain moves the group as one unit.
 Soft policies affect only future placement decisions and do not relocate existing assignments.

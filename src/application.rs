@@ -12104,17 +12104,7 @@ impl SessionServiceImpl {
     }
 
     fn scheduled_node_should_follow_desired_assignment(node: &ScheduledNode) -> bool {
-        if let Model::Ingestor(CreateIngestor {
-            source:
-                IngestSource::Endpoint { .. }
-                | IngestSource::Websockets { .. }
-                | IngestSource::Syslog { .. },
-            ..
-        }) = node.config.as_ref()
-        {
-            return true;
-        }
-        false
+        node.config.executes_on_every_cluster_node()
     }
 
     fn kafka_partition_watcher_specs(

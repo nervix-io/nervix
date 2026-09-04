@@ -53,7 +53,9 @@ buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-
 At runtime, the ingestor:
 
 - decodes inbound payloads into runtime records
-- collects decoded records into a bounded source ingest group
+- collects decoded records into a bounded source ingest group of at most 1,024 messages, closing
+  it earlier when the source goes quiet for 5 ms; this bound is independent of every route
+  `FLUSH` policy and caps the size of the first Arrow batch built from external input
 - executes `FILTER WHERE` once against that whole group
 - executes each route's ordered construction and `WHERE` program once against the surviving group
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
@@ -635,6 +637,15 @@ This opens an outbound WebSocket connection and decodes text or binary frames.
 Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
+
+A WebSocket-client ingestor is a single-owner ingestor. It keeps its existing primary and replica
+assignment through schedule recomputation while every assigned cluster node remains live, just
+like Kafka, MQTT, and the other client sources. Creating or changing another runtime node, a
+cluster node joining or being uncordoned, and a soft placement-policy change do not move its
+outbound session. Failover, draining its owner, or a newly effective `REQUIRE COLOCATION` group can
+move it; a real move closes the former owner's session and opens a new session on the new owner.
+Endpoint and Syslog ingestors are different because their listeners execute on every live cluster
+node.
 
 Outbound WebSocket clients can declare `WITH SIGNALING PROTOCOL <name>` after
 `TYPE WEBSOCKETS`. Server-side WebSocket endpoints can declare the same clause

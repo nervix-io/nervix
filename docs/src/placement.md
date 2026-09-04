@@ -216,6 +216,13 @@ soft spreading preference.
 Placement coverage, rank resolution, and colocation groups are recalculated as part of graph
 activation. A conflicting candidate is rejected before it replaces the active graph.
 
+Every single-owner ingestor keeps its existing primary and replica assignment across schedule
+recomputation while all assigned cluster nodes are live. This includes outbound WebSocket-client
+ingestors. Model changes, cluster-node joins and uncordons, and soft placement changes therefore do
+not migrate those ingestors. Endpoint-source and Syslog ingestors are the only ingestors that
+instead follow live cluster membership, because their server listeners execute on every cluster
+node.
+
 When a new `REQUIRE COLOCATION` relationship becomes effective, Nervix consolidates the complete
 colocation group onto one eligible cluster node. Existing assignments are preserved only when
 they satisfy the hard requirement. The command response reports the number of planned

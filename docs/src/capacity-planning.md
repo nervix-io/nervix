@@ -53,8 +53,14 @@ not pay for a window's state, and a window width does not bound a correlator.
   Eviction drops the least recently used branch and its suspended or buffered branch-local work.
 - Relay `CAPACITY` trades burst absorption against queued Arrow batches per consumer channel.
   Smaller capacity applies backpressure sooner.
-- Route `FLUSH EACH` interval and size trade latency and per-route memory against batch throughput.
-  `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
+- Route `FLUSH EACH` interval and `MAX BATCH SIZE` bound how long rows wait and how much a route
+  buffers. `MAX BATCH SIZE` only clamps a batch and never grows one: the batch a route emits is
+  roughly arrival rate × interval, up to the byte cap. Larger batches reduce per-batch cost only
+  at boundaries that work per batch; see the [flush tuning guidance](nspl-overview.md) for which
+  sinks those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
+- Cluster interconnect carries each relay batch as one Arrow IPC frame with a fixed 8 MiB limit.
+  Keep `MAX BATCH SIZE` well below 8 MiB on any route whose consumer may be scheduled on another
+  node.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained
   entries, open windows, and buffered rows.
 - Source `INSTANCES` trades source parallelism against concurrent admission pressure. It does not
