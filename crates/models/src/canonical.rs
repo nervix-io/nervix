@@ -16,20 +16,19 @@ use crate::{
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreateMaterializer, CreatePlacement, CreateReingestor,
-    CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DomainPace, DomainStartPoint,
-    EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-    Expression, FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog,
-    Identifier, InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
-    IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind,
-    MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry, NatsIngestMode,
-    OtelConfigEntry, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType, PlacementPolicy,
-    PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
+    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
+    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, CreateWireSchema, DomainPace, DomainStartPoint, EmitSink,
+    EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType, Expression,
+    FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
+    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
+    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
+    NatsConfigEntry, NatsIngestMode, OtelConfigEntry, OtelMetricKind, OtelSignal, OutputBranch,
+    ParseAsType, PlacementPolicy, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
     RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
     RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
     SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup,
@@ -508,7 +507,6 @@ fn output_branch_to_nspl(branching: &OutputBranch) -> Result<String, CanonicalNs
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalNsplError {
     UnrepresentableFloat { value: String },
-    DerivedModel { kind: ModelKind },
     InvalidCodec { reason: String },
 }
 
@@ -518,11 +516,6 @@ impl Display for CanonicalNsplError {
             Self::UnrepresentableFloat { value } => {
                 write!(f, "cannot represent non-finite float in NSPL: {value}")
             }
-            Self::DerivedModel { kind } => write!(
-                f,
-                "{} is derived from its owning statement and has no NSPL form",
-                kind.keyword_phrase()
-            ),
             Self::InvalidCodec { reason } => write!(f, "invalid codec: {reason}"),
         }
     }
@@ -826,7 +819,6 @@ impl Model {
             Self::Ingestor(ingestor) => ingestor.to_canonical_nspl(),
             Self::Reingestor(reingestor) => reingestor.to_canonical_nspl(),
             Self::Relay(relay) => relay.to_canonical_nspl(),
-            Self::Materializer(materializer) => materializer.to_canonical_nspl(),
             Self::Lookup(lookup) => lookup.to_canonical_nspl(),
             Self::Junction(junction) => junction.to_canonical_nspl(),
             Self::Deduplicator(deduplicator) => deduplicator.to_canonical_nspl(),
@@ -1995,20 +1987,6 @@ impl CreateRelay {
         }
         rendered.push(';');
         Ok(rendered)
-    }
-}
-
-impl CreateMaterializer {
-    /// Materializers have no surface syntax and cannot be rendered.
-    ///
-    /// A materializer is derived by the registry from a relay that declares materialized state; the
-    /// owning `CREATE RELAY ... WITH MATERIALIZED STATE` statement is what users write and what
-    /// renders. There is nothing valid to emit here, so rendering reports the derived kind rather
-    /// than inventing text that would not parse.
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        Err(CanonicalNsplError::DerivedModel {
-            kind: ModelKind::Materializer,
-        })
     }
 }
 

@@ -410,8 +410,8 @@ mod tests {
     fn test_task(
         flush_policy: RuntimeFlushPolicy,
         fanout: RelayBoundaryFanout,
-    ) -> MessageErrorRouteTask {
-        MessageErrorRouteTask {
+    ) -> (MessageErrorRouteTask, RelayOwnerTask) {
+        let task = MessageErrorRouteTask {
             runtime: Runtime::default(),
             route: MessageErrorRouteKey {
                 domain: Domain::try_from("test").expect("valid domain"),
@@ -426,7 +426,15 @@ mod tests {
             },
             flush_policy,
             pending: HashMap::default(),
-        }
+        };
+        let owner_task = task.runtime.spawn_relay_owner_task(
+            &task.route.domain,
+            &task.route.error_relay,
+            task.target.registry.clone(),
+            task.target.services.clone(),
+            RelayRetention::default(),
+        );
+        (task, owner_task)
     }
 
     #[tokio::test]
@@ -435,7 +443,7 @@ mod tests {
         let fanout = RelayBoundaryFanout::direct_with_capacity(
             NonZeroUsize::new(1).expect("non-zero test capacity"),
         );
-        let task = test_task(
+        let (task, owner_task) = test_task(
             RuntimeFlushPolicy::Each {
                 interval,
                 max_batch_size: u64::MAX,
@@ -465,6 +473,10 @@ mod tests {
         shutdown.send_replace(true);
         task.await.expect("message-error task must stop cleanly");
         assert_eq!(completion.wait().await, AckOutcome::Ack);
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
     }
 
     #[tokio::test]
@@ -477,7 +489,7 @@ mod tests {
             Instant::now() + Duration::from_secs(2),
             "block message-error relay delivery",
         );
-        let task = test_task(RuntimeFlushPolicy::Immediate, fanout);
+        let (task, owner_task) = test_task(RuntimeFlushPolicy::Immediate, fanout);
         let (sender, input) = mpsc::channel(1);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(task.run(input, shutdown_rx));
@@ -502,5 +514,9 @@ mod tests {
         assert_eq!(completion.wait().await, AckOutcome::Ack);
         shutdown.send_replace(true);
         task.await.expect("message-error task must stop cleanly");
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
     }
 }

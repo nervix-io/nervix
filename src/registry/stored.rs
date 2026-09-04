@@ -1684,9 +1684,6 @@ impl From<Model> for StoredModelVersioned {
             Model::Emitter(v) => Self::EmitterPublishing(v.into()),
             Model::Placement(v) => Self::Placement(v.into()),
             Model::Udf(v) => Self::Udf(v.into()),
-            Model::Materializer(_) => {
-                unreachable!("synthetic materializers must not be stored")
-            }
         }
     }
 }

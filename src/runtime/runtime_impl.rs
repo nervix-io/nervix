@@ -512,6 +512,7 @@ impl Runtime {
             local_node_id: Arc::new(RwLock::new(None)),
             next_remote_ack_id: Arc::new(AtomicU64::new(1)),
             pending_remote_acks: Arc::new(DashMap::default()),
+            pending_relay_admissions: Arc::new(DashMap::default()),
             next_state_sync_correlation_id: Arc::new(AtomicU64::new(1)),
             pending_state_syncs: Arc::new(DashMap::default()),
             expiring_stream_states: Arc::new(DashMap::default()),
@@ -519,7 +520,7 @@ impl Runtime {
             replicated_deduplicator_states: Arc::new(DashMap::default()),
             replicated_kafka_offset_states: Arc::new(DashMap::default()),
             replicated_materialized_stream_states: Arc::new(DashMap::default()),
-            materializer_epochs: Arc::new(DashMap::default()),
+            relay_state_epochs: Arc::new(DashMap::default()),
             materialized_state_changed: Arc::new(Notify::new()),
             replicated_window_processor_states: Arc::new(DashMap::default()),
             replicated_wasm_processor_states: Arc::new(DashMap::default()),
@@ -593,7 +594,6 @@ impl Runtime {
                         Model::Generator(generator) => {
                             Some(vec![generator.materialized_relay.clone()])
                         }
-                        Model::Materializer(materializer) => Some(vec![materializer.relay.clone()]),
                         _ => None,
                     })
                     .unwrap_or_default()
@@ -722,7 +722,7 @@ impl Runtime {
             .filter_map(|relay| {
                 self.relay_boundary_fanouts
                     .get(&(domain.clone(), relay.clone()))
-                    .map(|fanout| fanout.runtime_consumer_buffer_len())
+                    .map(|fanout| fanout.outstanding_work_len())
             })
             .sum();
         let node_work_items = affected_entities
@@ -814,15 +814,15 @@ impl Runtime {
             .clone()
     }
 
-    pub(super) fn materializer_epoch(&self, domain: &Domain) -> Arc<AtomicU64> {
-        self.materializer_epochs
+    pub(super) fn relay_state_epoch(&self, domain: &Domain) -> Arc<AtomicU64> {
+        self.relay_state_epochs
             .entry(domain.clone())
             .or_insert_with(|| Arc::new(AtomicU64::new(0)))
             .clone()
     }
 
-    fn bump_materializer_epoch(&self, domain: &Domain) {
-        self.materializer_epoch(domain)
+    fn bump_relay_state_epoch(&self, domain: &Domain) {
+        self.relay_state_epoch(domain)
             .fetch_add(1, Ordering::AcqRel);
     }
 
@@ -836,7 +836,7 @@ impl Runtime {
             .iter()
             .filter(|entry| {
                 entry.key().domain == *domain
-                    && entry.key().kind == ModelKind::Materializer
+                    && entry.key().kind == ModelKind::Relay
                     && entry.key().identifier == *relay
             })
             .map(|entry| entry.key().clone())
@@ -850,7 +850,7 @@ impl Runtime {
                 .purge_entity(
                     domain,
                     RuntimeStateKind::MaterializedRelay,
-                    ModelKind::Materializer,
+                    ModelKind::Relay,
                     relay,
                 )
                 .map_err(|error| RuntimeError::BuildDomainExecution {
@@ -1337,6 +1337,9 @@ impl Runtime {
         kind: ModelKind,
         identifier: &Identifier,
     ) {
+        if kind == ModelKind::Relay {
+            return;
+        }
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::BranchAggregated,
@@ -1381,6 +1384,7 @@ impl Runtime {
             local_node_id: self.local_node_id.clone(),
             next_remote_ack_id: self.next_remote_ack_id.clone(),
             pending_remote_acks: self.pending_remote_acks.clone(),
+            pending_relay_admissions: self.pending_relay_admissions.clone(),
         }));
     }
 
@@ -1576,7 +1580,6 @@ impl Runtime {
             let mut entries = Vec::new();
             let mut latest_lsm = 0;
             let mut found = false;
-            let mut metrics_snapshot = crate::metrics::RuntimeMetricsSnapshot::default();
             for state in self.replicated_materialized_stream_states.iter() {
                 let concrete = state.key();
                 if concrete.domain != placement.domain
@@ -1597,9 +1600,6 @@ impl Runtime {
                 }
                 found = true;
                 latest_lsm = latest_lsm.max(state.current_lsm.load(Ordering::SeqCst));
-                if concrete.branch_key.is_none() {
-                    metrics_snapshot = state.metrics_snapshot(&self.metrics);
-                }
                 if let Some(requested) = placement.branch_key.as_ref() {
                     let key = Some(requested.clone());
                     if let Some(entry) = self.visible_materialized_stream_remote_entry(
@@ -1622,11 +1622,8 @@ impl Runtime {
                 return Ok(Some(PersistedRuntimeStateEntry {
                     lsm: latest_lsm,
                     schema_fingerprint: placement.schema_fingerprint,
-                    payload: encode_materialized_stream_snapshot_entries(
-                        &entries,
-                        metrics_snapshot,
-                    )
-                    .map_err(|error| error.to_string())?,
+                    payload: encode_materialized_stream_snapshot_entries(&entries)
+                        .map_err(|error| error.to_string())?,
                 }));
             }
         }
@@ -1648,11 +1645,8 @@ impl Runtime {
             let snapshot = PersistedRuntimeStateEntry {
                 lsm: state.current_lsm.load(Ordering::SeqCst),
                 schema_fingerprint: placement.schema_fingerprint,
-                payload: encode_materialized_stream_snapshot_entries(
-                    &entries,
-                    state.metrics_snapshot(&self.metrics),
-                )
-                .map_err(|error| error.to_string())?,
+                payload: encode_materialized_stream_snapshot_entries(&entries)
+                    .map_err(|error| error.to_string())?,
             };
             if snapshot.lsm > after_lsm {
                 return Ok(Some(snapshot));
@@ -1978,11 +1972,6 @@ impl Runtime {
             placement.clone(),
             schema,
             primary_node,
-            self.local_node_id
-                .read()
-                .clone()
-                .unwrap_or_else(|| "-".to_string()),
-            &self.metrics,
             initial,
         )?);
         self.replicated_materialized_stream_states
@@ -2175,20 +2164,17 @@ impl Runtime {
         state: Arc<ReplicatedMaterializedRelayState>,
     ) -> Option<JoinHandle<()>> {
         let store = self.state_store.as_ref()?.clone();
-        let metrics = self.metrics.clone();
         let snapshot_interval = self.state_snapshot_interval;
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             let flush_latest_snapshot =
-                |state: &ReplicatedMaterializedRelayState,
-                 metrics: &RuntimeMetrics,
-                 store: &RuntimeStateStore| {
+                |state: &ReplicatedMaterializedRelayState, store: &RuntimeStateStore| {
                     persist_dirty_runtime_state_snapshot(
                         store,
                         &state.placement,
                         &state.last_persisted_lsm,
                         &state.dirty,
-                        || state.latest_snapshot(metrics),
+                        || state.latest_snapshot(),
                     )
                 };
             loop {
@@ -2196,14 +2182,14 @@ impl Runtime {
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
-                            if let Err(error) = flush_latest_snapshot(&state, &metrics, &store) {
+                            if let Err(error) = flush_latest_snapshot(&state, &store) {
                                 warn!(error = %error, "failed to flush materialized relay snapshot during shutdown");
                             }
                             break;
                         }
                     }
                     _ = sleep(snapshot_interval) => {
-                        if let Err(error) = flush_latest_snapshot(&state, &metrics, &store) {
+                        if let Err(error) = flush_latest_snapshot(&state, &store) {
                             warn!(error = %error, "failed to persist materialized relay snapshot");
                         }
                     }
@@ -2413,9 +2399,7 @@ impl Runtime {
                     .await
                 {
                     Ok(Some(snapshot)) => {
-                        if let Err(error) =
-                            state.apply_snapshot(&runtime.metrics, snapshot.lsm, &snapshot.payload)
-                        {
+                        if let Err(error) = state.apply_snapshot(snapshot.lsm, &snapshot.payload) {
                             warn!(error = %error, "failed to apply replicated materialized relay snapshot");
                             continue;
                         }
@@ -2741,7 +2725,7 @@ impl Runtime {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
-            ModelKind::Materializer,
+            ModelKind::Relay,
             relay,
             None,
         );
@@ -2759,7 +2743,7 @@ impl Runtime {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
-            ModelKind::Materializer,
+            ModelKind::Relay,
             relay,
             None,
         );
@@ -2772,29 +2756,16 @@ impl Runtime {
         &self,
         domain: &Domain,
         relay: &Identifier,
-        registry: &RelayRegistry,
+        _registry: &RelayRegistry,
         services: &RelayBoundaryServices,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        let now = self
-            .current_stream_expiration_time(domain)
-            .ok()
-            .flatten()
-            .unwrap_or_else(current_timestamp);
-        registry.touch(&batch.key, now);
-        self.touch_stream_key(domain, relay, &batch.key, now);
-        self.metrics.observe_global_stream_received(
-            domain,
-            relay,
-            self.local_node_id.read().as_deref(),
-            batch.message_count(),
-            batch.estimated_bytes(),
-            batch.domain_timestamp(),
-        );
-        self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Relay, relay);
         let physical_node_id = self.local_node_id.read().clone();
+        if !services.is_owned_by(physical_node_id.as_deref()) {
+            return services.dispatch_to_owner(domain, relay, batch).await;
+        }
         services
-            .ingest_message(
+            .enqueue_owner_batch(
                 &self.metrics,
                 domain,
                 relay,
@@ -2804,21 +2775,34 @@ impl Runtime {
             .await
     }
 
-    pub(in crate::runtime) async fn inject_remote_stream_boundary_message(
+    async fn fanout_relay_owner_batch(
         &self,
         domain: &Domain,
         relay: &Identifier,
-        registry: &RelayRegistry,
         services: &RelayBoundaryServices,
+        branches: &mut RelayOwnerBranchState,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
+        let physical_node_id = self.local_node_id.read().clone();
         let now = self
             .current_stream_expiration_time(domain)
             .ok()
             .flatten()
             .unwrap_or_else(current_timestamp);
-        registry.touch(&batch.key, now);
+        branches.registry.touch(&batch.key, now);
         self.touch_stream_key(domain, relay, &batch.key, now);
+        branches
+            .instances
+            .get_or_try_create_with(batch.key.clone(), now, |_| {
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .expect("relay branch tracking is infallible");
+        if let Some(capacity) = branches.capacity {
+            for (evicted_key, _) in branches.instances.evict_lru_to_capacity(capacity) {
+                branches.registry.remove(&evicted_key);
+                self.remove_stream_key_presence(domain, relay, &evicted_key);
+            }
+        }
         self.metrics.observe_global_stream_received(
             domain,
             relay,
@@ -2827,17 +2811,37 @@ impl Runtime {
             batch.estimated_bytes(),
             batch.domain_timestamp(),
         );
+        self.metrics.observe_branch_stream_received(
+            branch_key_display(&batch.key),
+            RelayBatchObservation {
+                domain,
+                relay,
+                physical_node_id: self.local_node_id.read().as_deref(),
+                messages: batch.message_count(),
+                bytes: batch.estimated_bytes(),
+                domain_timestamp: batch.domain_timestamp(),
+            },
+        );
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Relay, relay);
-        let physical_node_id = self.local_node_id.read().clone();
-        services
-            .inject_remote_message(
+        let result = services
+            .fanout_owner_batch(
                 &self.metrics,
                 domain,
                 relay,
                 physical_node_id.as_deref(),
                 batch,
             )
-            .await
+            .await;
+        batch.ack_success();
+        result
+    }
+
+    pub(in crate::runtime) async fn inject_remote_stream_boundary_message(
+        &self,
+        services: &RelayBoundaryServices,
+        batch: &RelayRecordBatch,
+    ) -> RelayDispatchResult {
+        services.inject_remote_message(batch).await
     }
 
     pub(in crate::runtime) fn expiring_stream_state(
@@ -2848,7 +2852,7 @@ impl Runtime {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
-            ModelKind::Materializer,
+            ModelKind::Relay,
             relay,
             None,
         );
@@ -2944,11 +2948,84 @@ impl Runtime {
     }
 
     pub async fn handle_remote_stream(&self, payload: RelayPayload) -> Result<(), RuntimeError> {
-        match payload.kind {
-            RelayPayloadKind::Routed => self.handle_remote_stream_payload(payload).await,
-            RelayPayloadKind::SubscriptionFanout => {
-                self.handle_remote_subscription_payload(payload).await
+        let admission =
+            payload
+                .admission
+                .clone()
+                .ok_or_else(|| RuntimeError::DecodeRemoteRelay {
+                    domain: payload.domain.as_str().to_string(),
+                    relay: payload.relay.as_str().to_string(),
+                    reason: "relay payload is missing its admission registration".to_string(),
+                })?;
+        let handling = async {
+            match payload.kind {
+                RelayPayloadKind::Routed => self.handle_remote_stream_payload(payload).await,
+                RelayPayloadKind::SubscriptionFanout => {
+                    self.handle_remote_subscription_payload(payload).await
+                }
+                RelayPayloadKind::Ingress => {
+                    self.handle_remote_stream_payload_with_owner_ingress(payload, true)
+                        .await
+                }
             }
+        };
+        let heartbeats = async {
+            loop {
+                tokio::task::consume_budget().await;
+                sleep(REMOTE_ACK_ALIVE_INTERVAL).await;
+                self.send_remote_relay_admission_outcome(&admission, RemoteAckOutcome::Alive)
+                    .await;
+            }
+        };
+        tokio::pin!(handling);
+        tokio::pin!(heartbeats);
+        let result = tokio::select! {
+            biased;
+            result = &mut handling => result,
+            _ = &mut heartbeats => unreachable!("relay admission heartbeat loop cannot complete"),
+        };
+        self.resolve_remote_relay_admission(&admission, &result)
+            .await;
+        result
+    }
+
+    async fn resolve_remote_relay_admission(
+        &self,
+        admission: &RemoteAckRegistration,
+        result: &Result<(), RuntimeError>,
+    ) {
+        let outcome = match result {
+            Ok(()) => RemoteAckOutcome::Ack,
+            Err(error) => RemoteAckOutcome::NoAck(error.to_string()),
+        };
+        self.send_remote_relay_admission_outcome(admission, outcome)
+            .await;
+    }
+
+    async fn send_remote_relay_admission_outcome(
+        &self,
+        admission: &RemoteAckRegistration,
+        outcome: RemoteAckOutcome,
+    ) {
+        let Some(dispatcher) = self.remote_dispatcher.read().clone() else {
+            return;
+        };
+        if let Err(error) = dispatcher
+            .dispatch(
+                &admission.reply_node_id,
+                Envelope::Ack(RemoteAckResolution {
+                    ack_id: admission.ack_id,
+                    outcome,
+                }),
+            )
+            .await
+        {
+            warn!(
+                target_node = admission.reply_node_id,
+                admission_id = admission.ack_id,
+                error = %error,
+                "failed to return relay admission response"
+            );
         }
     }
 
@@ -3028,9 +3105,24 @@ impl Runtime {
         &self,
         remote: RelayPayload,
     ) -> Result<(), RuntimeError> {
+        self.handle_remote_stream_payload_with_owner_ingress(remote, false)
+            .await
+    }
+
+    async fn handle_remote_stream_payload_with_owner_ingress(
+        &self,
+        remote: RelayPayload,
+        owner_ingress: bool,
+    ) -> Result<(), RuntimeError> {
         let (registry, services, schema) = self
             .wait_for_remote_stream_target(&remote.domain, &remote.relay)
             .await?;
+        if owner_ingress && !services.is_owned_by(self.local_node_id.read().as_deref()) {
+            return Err(RuntimeError::RelayNotInstantiated {
+                domain: remote.domain.as_str().to_string(),
+                relay: remote.relay.as_str().to_string(),
+            });
+        }
         let decoded_batch = schema
             .arrow_batch_from_ipc_bytes(&remote.batch_ipc)
             .map_err(|reason| RuntimeError::DecodeRemoteRelay {
@@ -3096,8 +3188,8 @@ impl Runtime {
             relay: remote.relay.as_str().to_string(),
             reason,
         })?;
-        if self
-            .inject_remote_stream_boundary_message(
+        let dispatch = if owner_ingress {
+            self.ingest_stream_boundary_message(
                 &remote.domain,
                 &remote.relay,
                 &registry,
@@ -3105,17 +3197,24 @@ impl Runtime {
                 &batch,
             )
             .await
-            .is_ok()
-        {
+        } else {
+            self.inject_remote_stream_boundary_message(&services, &batch)
+                .await
+        };
+        if dispatch.is_ok() {
             for ack in batch.acks.iter() {
                 ack.ack_success();
             }
-        } else {
-            for ack in batch.acks.iter() {
-                ack.no_ack("failed to inject remote relay message into local runtime");
-            }
+            return Ok(());
         }
-        Ok(())
+        for ack in batch.acks.iter() {
+            ack.no_ack("failed to admit remote relay message into local runtime");
+        }
+        Err(RuntimeError::DecodeRemoteRelay {
+            domain: remote.domain.as_str().to_string(),
+            relay: remote.relay.as_str().to_string(),
+            reason: "local relay boundary rejected the batch".to_string(),
+        })
     }
 
     pub(in crate::runtime) async fn handle_remote_subscription_payload(
@@ -3206,7 +3305,14 @@ impl Runtime {
     }
 
     pub(crate) fn handle_remote_ack_resolution(&self, ack: RemoteAckResolution) {
-        if let RemoteAckOutcome::Alive = ack.outcome {
+        if let RemoteAckOutcome::Alive = &ack.outcome {
+            if let Some(admission) = self.pending_relay_admissions.get(&ack.ack_id) {
+                if admission.send(RemoteAckOutcome::Alive).is_err() {
+                    drop(admission);
+                    self.pending_relay_admissions.remove(&ack.ack_id);
+                }
+                return;
+            }
             let Some(pending) = self.pending_remote_acks.get(&ack.ack_id) else {
                 warn!(
                     ack_id = ack.ack_id,
@@ -3216,6 +3322,11 @@ impl Runtime {
             };
             trace!(ack_id = ack.ack_id, "received remote ack alive");
             pending.ack_alive();
+            return;
+        }
+
+        if let Some((_, admission)) = self.pending_relay_admissions.remove(&ack.ack_id) {
+            let _ = admission.send(ack.outcome);
             return;
         }
 
@@ -5218,9 +5329,9 @@ impl Runtime {
 
     /// The reassigned nodes whose runtime must change on this cluster node: those that started or
     /// stopped executing here. A node that keeps executing here across a reassignment keeps its
-    /// task, its buffers, and its branch-local state. Materializers are excluded because their
-    /// task is placement-owned and rebound with the rest of their replication runtime, and lookups
-    /// because they load on every cluster node regardless of assignment.
+    /// task, its buffers, and its branch-local state. Relays are excluded because their ownership
+    /// and optional state task are rebound with the placement runtime, and lookups because they
+    /// load on every cluster node regardless of assignment.
     fn locally_relocated_nodes(
         &self,
         domain: &Domain,
@@ -5236,7 +5347,8 @@ impl Runtime {
         reassignments
             .iter()
             .filter(|entity| {
-                !matches!(entity.kind, ModelKind::Materializer | ModelKind::Lookup)
+                entity.kind != ModelKind::Relay
+                    && entity.kind != ModelKind::Lookup
                     && Self::scheduled_node(&execution.schedule, entity).is_some_and(|existing| {
                         Self::scheduled_node(desired, entity).is_some_and(|desired_node| {
                             existing.executes_on(&local_node_id)
@@ -5259,9 +5371,8 @@ impl Runtime {
     }
 
     /// Rebuilds the placement-derived runtime of every reassigned node: the replicated states this
-    /// cluster node owns or replicates for it, the tasks that maintain them, and, for a moved
-    /// materializer, the task that materializes its relay. Nodes the schedule did not reassign are
-    /// never touched.
+    /// cluster node owns or replicates for it, including a materialized relay's state task. Nodes
+    /// the schedule did not reassign are never touched.
     async fn rebind_reassigned_nodes(
         &self,
         domain: &Domain,
@@ -5283,7 +5394,7 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason: "domain execution is unavailable for schedule reassignment".to_string(),
             })?;
-        let mut materializers_moved = false;
+        let mut relay_states_moved = false;
         for entity in reassignments {
             tokio::task::consume_budget().await;
             let desired_node = Self::scheduled_node(schedule, entity).ok_or_else(|| {
@@ -5300,27 +5411,59 @@ impl Runtime {
                 Self::scheduled_node(&execution.schedule, entity)
                     .is_some_and(|existing| existing.executes_on(local_node_id))
             });
+            let executes_locally = desired_node.executes_on(local_node_id);
+            let relay_runtime = (entity.kind == ModelKind::Relay)
+                .then(|| {
+                    self.executions.get(domain).and_then(|execution| {
+                        Some((
+                            execution.relay_registries.get(&entity.identifier)?.clone(),
+                            execution.relay_services.get(&entity.identifier)?.clone(),
+                        ))
+                    })
+                })
+                .flatten();
+
+            if entity.kind == ModelKind::Relay && was_local && !executes_locally {
+                let previous = self.executions.get_mut(domain).and_then(|mut execution| {
+                    execution.relay_owner_tasks.remove(&entity.identifier)
+                });
+                if let Some(task) = previous {
+                    task.stop(
+                        self.domain_drain_timeout()
+                            .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
+                    )
+                    .await
+                    .map_err(|reason| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "failed to drain relay '{}' before reassignment: {reason}",
+                            entity.identifier.as_str()
+                        ),
+                    })?;
+                }
+            }
             let previous_tasks = self
                 .executions
                 .get_mut(domain)
                 .and_then(|mut execution| execution.placement_tasks.remove(entity));
             for task in previous_tasks.unwrap_or_default() {
+                tokio::task::consume_budget().await;
                 task.abort();
                 let _ = task.await;
             }
 
-            let materialized_relay =
-                if let Model::Materializer(materializer) = desired_node.config.as_ref() {
-                    Some(materializer.relay.clone())
-                } else {
-                    None
-                };
+            let materialized_relay = match desired_node.config.as_ref() {
+                Model::Relay(relay) if relay.materialized_state.is_some() => {
+                    Some(relay.name.clone())
+                }
+                _ => None,
+            };
             let materialized_schema = materialized_relay.as_ref().and_then(|relay| {
                 self.executions.get(domain).and_then(|execution| {
                     execution
-                        .materialized_stream_specs
+                        .relay_schemas
                         .get(relay)
-                        .map(|spec| spec.schema.clone())
+                        .map(|schema| schema.arrow_schema())
                 })
             });
             let placement = self.build_scheduled_node_placement(
@@ -5333,8 +5476,7 @@ impl Runtime {
             let tasks = placement.tasks;
 
             if let Some(relay) = materialized_relay {
-                materializers_moved = true;
-                let executes_locally = desired_node.executes_on(local_node_id);
+                relay_states_moved = true;
                 let services = self
                     .executions
                     .get(domain)
@@ -5343,10 +5485,14 @@ impl Runtime {
                     let previous = self
                         .executions
                         .get_mut(domain)
-                        .and_then(|mut execution| execution.materializer_tasks.remove(&relay));
+                        .and_then(|mut execution| execution.relay_state_tasks.remove(&relay));
                     if let Some(task) = previous {
-                        task.abort();
-                        let _ = task.await;
+                        task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+                            .await
+                            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason,
+                            })?;
                     }
                     if let Some(services) = services.as_ref() {
                         services.remove_local_runtime_consumer(AckMode::Detached);
@@ -5356,7 +5502,7 @@ impl Runtime {
                     let services = services.ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
-                            "missing relay services for relocated materializer '{}'",
+                            "missing relay services for relocated materialized relay '{}'",
                             relay.as_str()
                         ),
                     })?;
@@ -5369,20 +5515,17 @@ impl Runtime {
                             ),
                         }
                     })?;
-                    let task = self.spawn_materializer_task(
+                    let task = self.spawn_relay_state_task(
                         domain,
-                        &shutdown,
-                        MaterializerTaskSpec {
+                        RelayStateTaskSpec {
                             relay: relay.clone(),
                             state,
-                            retention: MaterializedRelayRetention::from_schedule(
-                                domain, schedule, &relay,
-                            )?,
+                            retention: RelayRetention::from_schedule(domain, schedule, &relay)?,
                             receiver: services.add_local_runtime_consumer(AckMode::Detached),
                         },
                     );
                     if let Some(mut execution) = self.executions.get_mut(domain) {
-                        execution.materializer_tasks.insert(relay.clone(), task);
+                        execution.relay_state_tasks.insert(relay.clone(), task);
                     }
                 }
                 if let Some(mut execution) = self.executions.get_mut(domain) {
@@ -5392,14 +5535,37 @@ impl Runtime {
                 }
             }
 
+            if entity.kind == ModelKind::Relay && executes_locally && !was_local {
+                let (registry, services) =
+                    relay_runtime.ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing runtime boundary for relocated relay '{}'",
+                            entity.identifier.as_str()
+                        ),
+                    })?;
+                let task = self.spawn_relay_owner_task(
+                    domain,
+                    &entity.identifier,
+                    registry,
+                    services,
+                    RelayRetention::from_schedule(domain, schedule, &entity.identifier)?,
+                );
+                if let Some(mut execution) = self.executions.get_mut(domain) {
+                    execution
+                        .relay_owner_tasks
+                        .insert(entity.identifier.clone(), task);
+                }
+            }
+
             if !tasks.is_empty()
                 && let Some(mut execution) = self.executions.get_mut(domain)
             {
                 execution.placement_tasks.insert(entity.clone(), tasks);
             }
         }
-        if materializers_moved {
-            self.bump_materializer_epoch(domain);
+        if relay_states_moved {
+            self.bump_relay_state_epoch(domain);
         }
         Ok(())
     }
@@ -5474,6 +5640,10 @@ impl Runtime {
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
 
+        // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
+        // desired fingerprints before constructing state so the post-swap stale-state purge does
+        // not discard the newly attached state instance.
+        self.install_state_schema_fingerprints(&schedule);
         self.rebind_reassigned_nodes(domain, &schedule, reassignments, local_node_id.as_deref())
             .await?;
 
@@ -5499,7 +5669,15 @@ impl Runtime {
                         ),
                     });
                 };
-                let dropped_materialized_state = {
+                let desired_materialized = desired_relay.materialized_state.is_some();
+                let (
+                    was_materialized,
+                    shutdown,
+                    schema,
+                    services,
+                    previous_state_task,
+                    previous_placement_tasks,
+                ) = {
                     let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -5510,18 +5688,29 @@ impl Runtime {
                     let was_materialized = execution
                         .materialized_stream_specs
                         .contains_key(&entity.identifier);
-                    if desired_relay.materialized_state.is_some() {
-                        let schema = execution
-                            .relay_schemas
-                            .get(&entity.identifier)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing schema for materialized relay '{}'",
-                                    entity.identifier.as_str()
-                                ),
-                            })?;
+                    let schema = execution
+                        .relay_schemas
+                        .get(&entity.identifier)
+                        .cloned()
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing schema for relay '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
+                    let services = execution
+                        .relay_services
+                        .get(&entity.identifier)
+                        .cloned()
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing runtime boundary for relay '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
+                    if desired_materialized {
                         execution.materialized_stream_specs.insert(
                             entity.identifier.clone(),
                             RuntimeMaterializedRelaySpec::new(
@@ -5530,9 +5719,10 @@ impl Runtime {
                                 desired_node.effective_branching.clone().unwrap_or_default(),
                             ),
                         );
-                        execution
-                            .materialized_stream_owner_nodes
-                            .insert(entity.identifier.clone(), None);
+                        execution.materialized_stream_owner_nodes.insert(
+                            entity.identifier.clone(),
+                            desired_node.execution_node().map(str::to_string),
+                        );
                     } else {
                         execution
                             .materialized_stream_specs
@@ -5541,10 +5731,92 @@ impl Runtime {
                             .materialized_stream_owner_nodes
                             .remove(&entity.identifier);
                     }
-                    was_materialized && desired_relay.materialized_state.is_none()
+                    (
+                        was_materialized,
+                        execution.shutdown.clone(),
+                        schema,
+                        services,
+                        execution.relay_state_tasks.remove(&entity.identifier),
+                        execution.placement_tasks.remove(entity).unwrap_or_default(),
+                    )
                 };
-                self.bump_materializer_epoch(domain);
-                if dropped_materialized_state {
+
+                if let Some(task) = previous_state_task {
+                    task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+                        .await
+                        .map_err(|reason| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "failed to stop relay '{}' state task: {reason}",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
+                    services.remove_local_runtime_consumer(AckMode::Detached);
+                }
+                for task in previous_placement_tasks {
+                    tokio::task::consume_budget().await;
+                    task.abort();
+                    let _ = task.await;
+                }
+
+                if desired_materialized {
+                    let placement = self.build_scheduled_node_placement(
+                        domain,
+                        &shutdown,
+                        desired_node,
+                        local_node_id.as_deref().ok_or_else(|| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "local node id is unavailable for relay transition"
+                                    .to_string(),
+                            }
+                        })?,
+                        Some(schema.arrow_schema()),
+                    )?;
+                    let state_task = if desired_node.executes_on(
+                        local_node_id
+                            .as_deref()
+                            .expect("validated local node id must remain available"),
+                    ) {
+                        Some(self.spawn_relay_state_task(
+                            domain,
+                            RelayStateTaskSpec {
+                                relay: entity.identifier.clone(),
+                                state: placement.materialized_state.clone().ok_or_else(|| {
+                                    RuntimeError::BuildDomainExecution {
+                                        domain: domain.as_str().to_string(),
+                                        reason: format!(
+                                            "missing materialized state for relay '{}'",
+                                            entity.identifier.as_str()
+                                        ),
+                                    }
+                                })?,
+                                retention: RelayRetention::from_schedule(
+                                    domain,
+                                    &schedule,
+                                    &entity.identifier,
+                                )?,
+                                receiver: services.add_local_runtime_consumer(AckMode::Detached),
+                            },
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(mut execution) = self.executions.get_mut(domain) {
+                        if !placement.tasks.is_empty() {
+                            execution
+                                .placement_tasks
+                                .insert(entity.clone(), placement.tasks);
+                        }
+                        if let Some(state_task) = state_task {
+                            execution
+                                .relay_state_tasks
+                                .insert(entity.identifier.clone(), state_task);
+                        }
+                    }
+                }
+                self.bump_relay_state_epoch(domain);
+                if was_materialized && !desired_materialized {
                     self.purge_materialized_relay_state(domain, &entity.identifier)?;
                 }
                 continue;
@@ -6302,12 +6574,18 @@ impl Runtime {
 
         self.apply_dynamic_model_updates(domain, dynamic_updates)
             .await?;
-        self.install_state_schema_fingerprints(&schedule);
         if let Some(mut execution) = self.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id.as_deref() {
                 let remote_consumers =
                     Self::remote_runtime_consumers_for_schedule(&schedule, local_node_id);
                 for (relay, services) in &execution.relay_services {
+                    let owner_node = schedule
+                        .nodes
+                        .iter()
+                        .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
+                        .and_then(ScheduledNode::execution_node)
+                        .map(str::to_string);
+                    services.replace_owner_node(owner_node);
                     services.replace_remote_runtime_consumers(
                         remote_consumers.get(relay).cloned().unwrap_or_default(),
                     );
@@ -6324,6 +6602,14 @@ impl Runtime {
         local_node_id: &str,
     ) -> HashMap<Identifier, Vec<RemoteRuntimeConsumer>> {
         let mut consumers = HashMap::<Identifier, Vec<RemoteRuntimeConsumer>>::new();
+        let owned_relays = schedule
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.kind == ModelKind::Relay && node.execution_node() == Some(local_node_id)
+            })
+            .map(|node| node.identifier.clone())
+            .collect::<HashSet<_>>();
         let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         for spec in processor_specs.processors {
             let Some(node) = schedule
@@ -6333,13 +6619,13 @@ impl Runtime {
             else {
                 continue;
             };
-            if node.executes_on(local_node_id) {
-                continue;
-            }
             let Some(target_node) = node.execution_node() else {
                 continue;
             };
             for relay in &spec.spec.input_relays {
+                if !owned_relays.contains(relay) || node.executes_on(local_node_id) {
+                    continue;
+                }
                 push_remote_runtime_consumer(
                     consumers.entry(relay.clone()).or_default(),
                     target_node,
@@ -6349,15 +6635,15 @@ impl Runtime {
             }
         }
         for node in &schedule.nodes {
-            if node.executes_on(local_node_id) {
-                continue;
-            }
             let Some(target_node) = node.execution_node() else {
                 continue;
             };
             match node.config.as_ref() {
                 Model::Emitter(emitter) => {
                     for relay in emitter.from.relays() {
+                        if !owned_relays.contains(relay) || node.executes_on(local_node_id) {
+                            continue;
+                        }
                         push_remote_runtime_consumer(
                             consumers.entry(relay.clone()).or_default(),
                             target_node,
@@ -6368,6 +6654,9 @@ impl Runtime {
                 }
                 Model::Reingestor(reingestor) => {
                     for relay in reingestor.from.relays() {
+                        if !owned_relays.contains(relay) || node.executes_on(local_node_id) {
+                            continue;
+                        }
                         push_remote_runtime_consumer(
                             consumers.entry(relay.clone()).or_default(),
                             target_node,
@@ -6375,14 +6664,6 @@ impl Runtime {
                             reingestor.mode,
                         );
                     }
-                }
-                Model::Materializer(materializer) => {
-                    push_remote_runtime_consumer(
-                        consumers.entry(materializer.relay.clone()).or_default(),
-                        target_node,
-                        &materializer.relay,
-                        AckMode::Detached,
-                    );
                 }
                 _ => {}
             }
@@ -6542,23 +6823,21 @@ impl Runtime {
         let assigned_locally = node.is_assigned_to(local_node_id);
         let execution_node = node.execution_node().map(str::to_string);
 
-        if let Model::Materializer(materializer) = node.config.as_ref()
+        if let Model::Relay(relay) = node.config.as_ref()
+            && relay.materialized_state.is_some()
             && (executes_locally || assigned_locally)
         {
             let schema = materialized_schema.ok_or_else(|| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
-                reason: format!(
-                    "missing materialized relay spec '{}'",
-                    materializer.relay.as_str()
-                ),
+                reason: format!("missing materialized relay spec '{}'", relay.name.as_str()),
             })?;
             let state = self
                 .replicated_materialized_stream_state(
                     self.state_placement(
                         domain,
                         RuntimeStateKind::MaterializedRelay,
-                        ModelKind::Materializer,
-                        &materializer.relay,
+                        ModelKind::Relay,
+                        &relay.name,
                         None,
                     ),
                     schema,
@@ -6626,7 +6905,7 @@ impl Runtime {
         let aggregate_primary_node = execution_node
             .clone()
             .or_else(|| executes_locally.then(|| local_node_id.to_string()));
-        let aggregate_replica_nodes = if execution_node.is_some() {
+        let aggregate_replica_nodes = if execution_node.is_some() && node.kind != ModelKind::Relay {
             node.replica_nodes()
                 .into_iter()
                 .map(str::to_string)
@@ -6634,7 +6913,9 @@ impl Runtime {
         } else {
             Vec::new()
         };
-        if executes_locally || (assigned_locally && aggregate_primary_node.is_some()) {
+        if node.kind != ModelKind::Relay
+            && (executes_locally || (assigned_locally && aggregate_primary_node.is_some()))
+        {
             let required_replica_acks = aggregate_replica_nodes.len();
             let state = self
                 .replicated_branch_aggregated_state(
@@ -6663,12 +6944,14 @@ impl Runtime {
                 placement.tasks.push(task);
             }
         }
-        self.metrics.register_global_node(
-            domain,
-            node.kind,
-            &node.identifier,
-            execution_node.as_deref().or(Some(local_node_id)),
-        );
+        if node.kind != ModelKind::Relay || executes_locally {
+            self.metrics.register_global_node(
+                domain,
+                node.kind,
+                &node.identifier,
+                execution_node.as_deref().or(Some(local_node_id)),
+            );
+        }
 
         Ok(placement)
     }
@@ -6742,11 +7025,10 @@ impl Runtime {
         let mut endpoint_routes = HashMap::new();
         let mut generator_specs = Vec::new();
         let mut lookup_specs = Vec::new();
-        let mut materializer_specs = Vec::new();
+        let mut relay_state_specs = Vec::new();
         let mut emitter_specs = Vec::new();
         let mut reingestor_specs = Vec::new();
         let mut ingestor_specs = Vec::new();
-        let mut tasks = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
         let mut generator_tasks = HashMap::new();
@@ -6971,9 +7253,9 @@ impl Runtime {
                         ),
                     });
                 };
-                let expiring_state = branch_relays
-                    .contains(&node.identifier)
-                    .then(|| self.expiring_stream_state(domain, &node.identifier));
+                let expiring_state = (node.executes_on(local_node_id)
+                    && branch_relays.contains(&node.identifier))
+                .then(|| self.expiring_stream_state(domain, &node.identifier));
                 let capacity = Self::relay_capacity(domain, &node.identifier, relay.buffer)?;
                 let fanout = self
                     .relay_boundary_fanout_with_capacity(
@@ -7035,14 +7317,14 @@ impl Runtime {
         let mut materialized_states = HashMap::new();
         for node in &schedule.nodes {
             tokio::task::consume_budget().await;
-            let materialized_schema =
-                if let Model::Materializer(materializer) = node.config.as_ref() {
+            let materialized_schema = match node.config.as_ref() {
+                Model::Relay(relay) if relay.materialized_state.is_some() => {
                     materialized_stream_specs
-                        .get(&materializer.relay)
+                        .get(&relay.name)
                         .map(|spec| spec.schema.clone())
-                } else {
-                    None
-                };
+                }
+                _ => None,
+            };
             let placement = self.build_scheduled_node_placement(
                 domain,
                 &shutdown_tx,
@@ -7069,17 +7351,17 @@ impl Runtime {
 
         for node in &schedule.nodes {
             match node.config.as_ref() {
-                Model::Materializer(materializer) => {
+                Model::Relay(relay_model) if relay_model.materialized_state.is_some() => {
                     materialized_stream_owner_nodes.insert(
-                        materializer.relay.clone(),
+                        relay_model.name.clone(),
                         node.execution_node().map(str::to_string),
                     );
-                    let Some(relay) = relay_builders.get_mut(&materializer.relay) else {
+                    let Some(relay) = relay_builders.get_mut(&relay_model.name) else {
                         return Err(RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: format!(
                                 "missing materialized relay '{}'",
-                                materializer.relay.as_str()
+                                relay_model.name.as_str()
                             ),
                         });
                     };
@@ -7091,16 +7373,16 @@ impl Runtime {
                                 domain: domain.as_str().to_string(),
                                 reason: format!(
                                     "missing materialized relay state '{}'",
-                                    materializer.relay.as_str()
+                                    relay_model.name.as_str()
                                 ),
                             })?;
-                        materializer_specs.push(MaterializerTaskSpec {
-                            relay: materializer.relay.clone(),
+                        relay_state_specs.push(RelayStateTaskSpec {
+                            relay: relay_model.name.clone(),
                             state,
-                            retention: MaterializedRelayRetention::from_schedule(
+                            retention: RelayRetention::from_schedule(
                                 domain,
                                 &schedule,
-                                &materializer.relay,
+                                &relay_model.name,
                             )?,
                             receiver: relay.runtime_consumer_fan_in_for_mode(AckMode::Detached),
                         });
@@ -7275,27 +7557,12 @@ impl Runtime {
             .map(|(identifier, relay)| (identifier.clone(), relay.registry.clone()))
             .collect::<HashMap<_, _>>();
         for relay in relay_registries.keys() {
-            let placement = self.state_placement(
-                domain,
-                RuntimeStateKind::BranchAggregated,
-                ModelKind::Relay,
-                relay,
-                None,
-            );
-            let state = self
-                .replicated_branch_aggregated_state(
-                    placement,
-                    Some(local_node_id.to_string()),
-                    local_node_id.to_string(),
-                    Vec::new(),
-                    0,
-                )
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
-            if let Some(task) = self.spawn_branch_aggregated_snapshot_task(&shutdown_tx, state) {
-                tasks.push(task);
+            if !schedule.nodes.iter().any(|node| {
+                node.kind == ModelKind::Relay
+                    && node.identifier == *relay
+                    && node.executes_on(local_node_id)
+            }) {
+                continue;
             }
             self.metrics
                 .register_global_stream(domain, relay, Some(local_node_id));
@@ -7315,6 +7582,39 @@ impl Runtime {
                 )
             })
             .collect::<HashMap<_, _>>();
+        for (relay, services) in &relay_services {
+            let owner_node = schedule
+                .nodes
+                .iter()
+                .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
+                .and_then(ScheduledNode::execution_node)
+                .map(str::to_string);
+            services.replace_owner_node(owner_node);
+        }
+        let mut relay_owner_tasks = HashMap::new();
+        for node in &schedule.nodes {
+            if node.kind != ModelKind::Relay || !node.executes_on(local_node_id) {
+                continue;
+            }
+            let services = relay_services
+                .get(&node.identifier)
+                .cloned()
+                .expect("scheduled relay services must exist");
+            let registry = relay_registries
+                .get(&node.identifier)
+                .cloned()
+                .expect("scheduled relay registry must exist");
+            relay_owner_tasks.insert(
+                node.identifier.clone(),
+                self.spawn_relay_owner_task(
+                    domain,
+                    &node.identifier,
+                    registry,
+                    services,
+                    RelayRetention::from_schedule(domain, &schedule, &node.identifier)?,
+                ),
+            );
+        }
 
         let mut branched_entrypoints = HashMap::new();
         let mut branched_entrypoint_senders = HashMap::new();
@@ -7455,11 +7755,11 @@ impl Runtime {
             );
         }
 
-        let mut materializer_tasks = HashMap::new();
-        for spec in materializer_specs {
+        let mut relay_state_tasks = HashMap::new();
+        for spec in relay_state_specs {
             let relay = spec.relay.clone();
-            let task = self.spawn_materializer_task(domain, &shutdown_tx, spec);
-            materializer_tasks.insert(relay, task);
+            let task = self.spawn_relay_state_task(domain, spec);
+            relay_state_tasks.insert(relay, task);
         }
 
         for (emitter, inputs) in emitter_specs {
@@ -7528,9 +7828,10 @@ impl Runtime {
                 generator_tasks,
                 reingestor_tasks,
                 placement_tasks,
-                materializer_tasks,
+                relay_state_tasks,
+                relay_owner_tasks,
                 clients: transports,
-                tasks,
+                tasks: Vec::new(),
             },
         );
 
@@ -7574,7 +7875,10 @@ impl Runtime {
             .get(&schedule.domain)
             .map_or(0, |state| state.start_version);
         for node in &schedule.nodes {
-            let schema_fingerprint = if node.kind == ModelKind::Materializer {
+            let schema_fingerprint = if matches!(
+                node.config.as_ref(),
+                Model::Relay(relay) if relay.materialized_state.is_some()
+            ) {
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(b"nervix/materialized-state/start-version");
                 hasher.update(&node.schema_fingerprint);
@@ -8275,6 +8579,12 @@ impl Runtime {
         kind: &str,
         identifier: &Identifier,
     ) -> Result<(), RuntimePersistenceError> {
+        let Ok(kind) = kind.to_ascii_lowercase().parse::<ModelKind>() else {
+            return Ok(());
+        };
+        if kind == ModelKind::Relay {
+            return Ok(());
+        }
         let Some(store) = &self.state_store else {
             return Ok(());
         };
@@ -8284,7 +8594,7 @@ impl Runtime {
             .filter_map(|entry| {
                 let placement = entry.key();
                 if &placement.domain == domain
-                    && placement.kind.as_str().eq_ignore_ascii_case(kind)
+                    && placement.kind == kind
                     && &placement.identifier == identifier
                 {
                     Some(placement.clone())
@@ -8301,9 +8611,6 @@ impl Runtime {
                 state.restore_persisted_snapshot(&self.metrics, snapshot)?;
             }
         }
-        let Ok(kind) = kind.to_ascii_lowercase().parse::<ModelKind>() else {
-            return Ok(());
-        };
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::BranchAggregated,
@@ -8437,7 +8744,7 @@ impl Runtime {
         for state in self.replicated_materialized_stream_states.iter() {
             let placement = state.key();
             if placement.domain == *domain
-                && placement.kind == ModelKind::Materializer
+                && placement.kind == ModelKind::Relay
                 && placement.identifier == *relay
             {
                 entries.extend(
@@ -8454,21 +8761,20 @@ impl Runtime {
         self.local_materialized_stream_state_for_branch(domain, relay, &None)
     }
 
-    pub(in crate::runtime) fn materialized_relay_is_scheduled(
+    pub(in crate::runtime) fn relay_is_cluster_scheduled(
         &self,
         domain: &Domain,
         relay: &Identifier,
     ) -> bool {
-        self.executions
-            .get(domain)
-            .and_then(|execution| {
-                execution
-                    .materialized_stream_owner_nodes
-                    .get(relay)
-                    .cloned()
-            })
-            .flatten()
-            .is_some()
+        self.executions.get(domain).is_some_and(|execution| {
+            execution
+                .schedule
+                .nodes
+                .iter()
+                .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
+                .and_then(ScheduledNode::execution_node)
+                .is_some()
+        })
     }
 
     pub(in crate::runtime) fn local_materialized_stream_state_for_branch(
@@ -8480,7 +8786,7 @@ impl Runtime {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
-            ModelKind::Materializer,
+            ModelKind::Relay,
             relay,
             branch_key.clone(),
         );
@@ -8586,7 +8892,7 @@ impl Runtime {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
-            ModelKind::Materializer,
+            ModelKind::Relay,
             relay,
             branch_key.clone(),
         );
@@ -8660,7 +8966,7 @@ impl Runtime {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
-            ModelKind::Materializer,
+            ModelKind::Relay,
             relay,
             branch_key.clone(),
         );
@@ -8748,7 +9054,7 @@ impl Runtime {
         let expiring_placement = self.state_placement(
             &placement.domain,
             RuntimeStateKind::MaterializedRelay,
-            ModelKind::Materializer,
+            ModelKind::Relay,
             &placement.identifier,
             None,
         );
@@ -8840,7 +9146,7 @@ impl Runtime {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
-            ModelKind::Materializer,
+            ModelKind::Relay,
             relay,
             branch_key.clone(),
         );
@@ -9059,24 +9365,6 @@ impl Runtime {
                                 "node stopped while waiting for required materialized state at \
                                  relay '{}'",
                                 input_relay
-                            ));
-                        }
-                        return Ok(None);
-                    }
-                    if let Some(branch_key) = batch.key.as_ref()
-                        && self
-                            .executions
-                            .get(domain)
-                            .and_then(|execution| {
-                                execution.relay_registries.get(input_relay).cloned()
-                            })
-                            .is_some_and(|registry| !registry.contains_key(&batch.key))
-                    {
-                        for ack in batch.acks.iter() {
-                            ack.no_ack(format!(
-                                "branch was evicted while waiting for materialized state at {} \
-                                 '{}'",
-                                input_relay, branch_key
                             ));
                         }
                         return Ok(None);
@@ -9683,6 +9971,25 @@ impl Runtime {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let relay_owner_tasks = relay_services
+            .iter()
+            .map(|(relay, services)| {
+                let registry = relay_registries
+                    .get(relay)
+                    .cloned()
+                    .expect("relay registry must exist");
+                (
+                    relay.clone(),
+                    self.spawn_relay_owner_task(
+                        domain,
+                        relay,
+                        registry,
+                        services.clone(),
+                        RelayRetention::default(),
+                    ),
+                )
+            })
+            .collect();
 
         let mut branched_entrypoints = HashMap::new();
         let mut branched_entrypoint_senders = HashMap::new();
@@ -9912,7 +10219,8 @@ impl Runtime {
                 generator_tasks,
                 reingestor_tasks,
                 placement_tasks: HashMap::default(),
-                materializer_tasks: HashMap::default(),
+                relay_state_tasks: HashMap::default(),
+                relay_owner_tasks,
                 clients: transports,
                 tasks,
             },
@@ -10139,7 +10447,8 @@ impl Runtime {
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
             placement_tasks: HashMap::default(),
-            materializer_tasks: HashMap::default(),
+            relay_state_tasks: HashMap::default(),
+            relay_owner_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         })
@@ -11945,17 +12254,122 @@ impl Runtime {
         emitters::EmitterTask::spawn(self, build, emitter, inputs)
     }
 
-    pub(in crate::runtime) fn spawn_materializer_task(
+    pub(in crate::runtime) fn spawn_relay_owner_task(
         &self,
         domain: &Domain,
-        shutdown_tx: &watch::Sender<bool>,
-        spec: MaterializerTaskSpec,
-    ) -> JoinHandle<()> {
-        let MaterializerTaskSpec {
+        relay: &Identifier,
+        registry: RelayRegistry,
+        services: Arc<RelayBoundaryServices>,
+        retention: RelayRetention,
+    ) -> RelayOwnerTask {
+        let mut receiver = services.activate_owner_buffer();
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let runtime = self.clone();
+        let domain = domain.clone();
+        let relay = relay.clone();
+        let RelayRetention {
+            branch_ttl,
+            branch_capacity,
+        } = retention;
+        let expiration_scan_interval = self.branch_instance_expiration_scan_interval;
+        let task = tokio::spawn(async move {
+            let mut branches = RelayOwnerBranchState {
+                registry,
+                instances: BranchInstanceRegistry::new(),
+                capacity: branch_capacity,
+            };
+            let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
+            loop {
+                tokio::task::consume_budget().await;
+                tokio::select! {
+                    biased;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    batch = receiver.recv() => {
+                        let Some(batch) = batch else {
+                            break;
+                        };
+                        let _completion = services.begin_owner_batch_completion();
+                        let _ = runtime
+                            .fanout_relay_owner_batch(
+                                &domain,
+                                &relay,
+                                &services,
+                                &mut branches,
+                                &batch,
+                            )
+                            .await;
+                    }
+                    _ = async {
+                        if branch_ttl.is_some() {
+                            sleep_until(next_expiration_scan).await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        let now = runtime
+                            .current_stream_expiration_time(&domain)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(current_timestamp);
+                        for (expired_key, _) in branches.instances.expire(
+                            now,
+                            branch_ttl.expect("expiration wake requires relay branch ttl"),
+                        ) {
+                            branches.registry.remove(&expired_key);
+                            runtime.remove_stream_key_presence(&domain, &relay, &expired_key);
+                        }
+                        next_expiration_scan = Instant::now() + expiration_scan_interval;
+                    }
+                }
+            }
+
+            loop {
+                tokio::task::consume_budget().await;
+                let batch = match receiver.try_recv() {
+                    Ok(batch) => batch,
+                    Err(
+                        async_broadcast::TryRecvError::Empty
+                        | async_broadcast::TryRecvError::Closed,
+                    ) => {
+                        break;
+                    }
+                    Err(async_broadcast::TryRecvError::Overflowed(_)) => {
+                        unreachable!("relay owner buffer is backpressured and must not overflow")
+                    }
+                };
+                let _completion = services.begin_owner_batch_completion();
+                let _ = runtime
+                    .fanout_relay_owner_batch(&domain, &relay, &services, &mut branches, &batch)
+                    .await;
+            }
+            services.observe_owner_buffer_length(
+                &runtime.metrics,
+                &domain,
+                &relay,
+                runtime.local_node_id.read().as_deref(),
+                None,
+            );
+            services.deactivate_owner_buffer();
+            branches.registry.clear();
+            runtime.metrics.remove_relay(&domain, &relay);
+        });
+        RelayOwnerTask { shutdown, task }
+    }
+
+    pub(in crate::runtime) fn spawn_relay_state_task(
+        &self,
+        domain: &Domain,
+        spec: RelayStateTaskSpec,
+    ) -> RelayStateTask {
+        let RelayStateTaskSpec {
             relay,
             state,
             retention:
-                MaterializedRelayRetention {
+                RelayRetention {
                     branch_ttl,
                     branch_capacity,
                 },
@@ -11964,10 +12378,10 @@ impl Runtime {
         let runtime = self.clone();
         let domain = domain.clone();
         let expiration_scan_interval = self.branch_instance_expiration_scan_interval;
-        let shutdown_rx = shutdown_tx.subscribe();
+        let (shutdown, shutdown_rx) = watch::channel(false);
         let quiesce_counters = self.node_quiesce_counters(&domain, &relay);
         let force_flush = self.force_flush_participant(&domain, quiesce_counters.clone());
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let interaction_input = RelayInteractionInput::new(relay.clone(), receiver, None);
             let mut interaction = RelayInteraction::new(
                 vec![interaction_input],
@@ -11975,7 +12389,7 @@ impl Runtime {
                 Some(force_flush),
                 Some(quiesce_counters),
             )
-            .expect("validated materializer input must build a relay interaction");
+            .expect("validated relay-state input must build a relay interaction");
             let mut branch_instances = BranchInstanceRegistry::<Option<BranchKey>, ()>::new();
             let mut restored_branches = state
                 .entries
@@ -12004,7 +12418,6 @@ impl Runtime {
                         .unwrap_or_else(current_timestamp);
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         tokio::task::consume_budget().await;
-                        runtime.remove_stream_key_presence(&domain, &relay, &key);
                         runtime.delete_materialized_stream_key(&state, &key);
                     }
                     next_expiration_scan = Instant::now() + expiration_scan_interval;
@@ -12021,7 +12434,7 @@ impl Runtime {
                     Err(error) => {
                         if let Some(acks) = error.acks() {
                             acks.no_ack(format!(
-                                "materializer for relay '{}' failed to collect input: {error}",
+                                "state task for relay '{}' failed to collect input: {error}",
                                 relay.as_str()
                             ));
                         }
@@ -12029,7 +12442,7 @@ impl Runtime {
                             domain = domain.as_str(),
                             relay = relay.as_str(),
                             error = %error,
-                            "materializer relay interaction failed"
+                            "materialized relay interaction failed"
                         );
                         continue;
                     }
@@ -12054,7 +12467,7 @@ impl Runtime {
                             domain = domain.as_str(),
                             relay = relay.as_str(),
                             ?reason,
-                            "materializer relay interaction stopped"
+                            "materialized relay interaction stopped"
                         );
                         break;
                     }
@@ -12074,11 +12487,9 @@ impl Runtime {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {
                         tokio::task::consume_budget().await;
-                        runtime.remove_stream_key_presence(&domain, &relay, &evicted_key);
                         runtime.delete_materialized_stream_key(&state, &evicted_key);
                     }
                 }
-                runtime.touch_stream_key(&domain, &relay, &branch_key, now);
                 let messages = match batch.try_into_messages() {
                     Ok(messages) => messages,
                     Err(error_and_batch) => {
@@ -12102,7 +12513,8 @@ impl Runtime {
                     );
                 }
             }
-        })
+        });
+        RelayStateTask { shutdown, task }
     }
 
     pub(in crate::runtime) async fn start_scheduled_ingestor(
@@ -12361,6 +12773,34 @@ impl Runtime {
         execution: DomainExecution,
     ) {
         let _ = execution.shutdown.send(true);
+        for (relay, task) in execution.relay_owner_tasks {
+            tokio::task::consume_budget().await;
+            if let Err(reason) = task
+                .stop(
+                    self.domain_drain_timeout()
+                        .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
+                )
+                .await
+            {
+                warn!(
+                    domain = domain.as_str(),
+                    relay = relay.as_str(),
+                    reason,
+                    "relay owner task did not stop cleanly"
+                );
+            }
+        }
+        for (relay, task) in execution.relay_state_tasks {
+            tokio::task::consume_budget().await;
+            if let Err(reason) = task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE).await {
+                warn!(
+                    domain = domain.as_str(),
+                    relay = relay.as_str(),
+                    reason,
+                    "relay state task did not stop cleanly"
+                );
+            }
+        }
         for (entity, node_task) in execution.node_tasks {
             Self::await_shutdown_task(
                 node_task.task,
@@ -12400,9 +12840,6 @@ impl Runtime {
                 )
                 .await;
             }
-        }
-        for (relay, task) in execution.materializer_tasks {
-            Self::await_shutdown_task(task, domain, Some(&relay), "materializer").await;
         }
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;

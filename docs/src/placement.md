@@ -6,8 +6,8 @@ expensive stages across machines.
 
 Nervix distinguishes two kinds of nodes throughout this chapter:
 
-- A **runtime node** is a schedulable graph entity such as an ingestor, processor, materializer,
-  lookup, generator, or emitter.
+- A **runtime node** is a schedulable graph entity such as a relay, ingestor, processor, lookup,
+  generator, or emitter.
 - A **cluster node** is a machine participating in the Nervix cluster.
 
 A named placement rule marks the directed paths between existing runtime nodes. For example, this
@@ -69,7 +69,8 @@ CREATE UNPACED DOMAIN realtime
 ```
 
 The default applies to directly connected runtime nodes when no named placement rule claims that
-relationship. It is deliberately per hop:
+relationship. Relays are runtime nodes, so producer-to-relay and relay-to-consumer are separate
+hops. The default is deliberately per hop:
 
 - `REQUIRE COLOCATION` places each connected graph component on one cluster node unless a stronger
   named rule carves out part of it.
@@ -110,11 +111,12 @@ The following user-declared runtime-node kinds are placement-eligible:
 - junctions, deduplicators, correlators, reorderers, and window processors;
 - inferencers and WASM processors;
 - emitters and `HASH MAP` lookups; and
-- materialized relays, which refer to their materializing runtime nodes.
+- every relay, whether or not it has materialized state.
 
-An ordinary relay is not a schedulable entity and cannot be a placement member. A materialized
-relay is the exception because its name denotes the runtime node that owns its materialized state.
-See [Materialized Relay State](processors.md#materialized-relay-state) for dependency behavior.
+A relay name always denotes its relay runtime node. Enabling materialized state adds
+scheduler-selected state replicas to that relay; it does not add another placement member or
+runtime-node kind. See [Materialized Relay State](processors.md#materialized-relay-state) for
+dependency behavior.
 
 Endpoint-source and Syslog ingestors execute on every cluster node and therefore cannot be
 constrained by a placement rule. Member names are unqualified; a name shared by more than one
@@ -147,12 +149,12 @@ Placement follows the relationships that can deliver messages or state:
 - message-error routes;
 - correlation-timeout routes;
 - generator feeds; and
-- materialized-state dependencies, directed from the materializing runtime node to each reader
+- materialized-state dependencies, directed from the relay to each reader
   that declares `USING MATERIALIZED STATE`.
 
-Relays are transparent when Nervix calculates a corridor. They are node-local channels rather
-than scheduled work; whether a relay hop uses the interconnect depends on the assignments of its
-producer and consumer runtime nodes.
+Relays are corridor members. A producer-to-relay or relay-to-consumer relationship is one placement
+hop, so a domain default applies independently on both sides and a named path captures relay nodes
+between its endpoints.
 
 A disconnected endpoint pair contributes no coverage. A rule for which every endpoint pair is
 disconnected is valid and remains available for inspection with `coverage=empty`. Nervix does not
@@ -239,15 +241,17 @@ group relocation. See [Control Plane](control-plane.md) for the surrounding drai
 activation behavior.
 
 Failover, drain, and colocation consolidation restart only the runtime nodes whose assignment
-changed. A runtime node that keeps its primary owner and replica set keeps running on every cluster
-node, including the former and the new owner of a moved node: it keeps its buffered work, its
-retained `REQUIRED WAIT` messages, its branch-local state, and its external source session. Its
-neighbors re-point to the new owner without restarting. Draining a cluster node that hosts several
-runtime nodes moves them one at a time, and each moved runtime node restarts exactly once.
+changed. A runtime node that keeps its primary owner and replica set keeps its buffered work,
+retained `REQUIRED WAIT` messages, branch-local state, or external source session. Its neighbors
+re-point to the new owner without restarting. A planned relay move gates producers, drains the
+owner buffer and dispatch slots, then starts one owner on the target. An unplanned owner loss drops
+that volatile relay state. Draining a cluster node that hosts several runtime nodes moves them one
+at a time, and each moved runtime node restarts exactly once.
 
-Placement constrains executing primary assignments. It does not control replica count or replica
-placement. Branches also have no separate placement dimension: every concrete branch of one
-runtime node executes within that runtime node's assignment.
+Placement constrains primary owners. It does not control replica count or replica placement. An
+ordinary relay has no replicas; a materialized relay's replicas contain only materialized state.
+Branches also have no separate placement dimension: every concrete relay branch is owned by its
+relay owner, and every processor branch executes within that processor's assignment.
 
 ## Altering And Dropping Rules
 
@@ -279,8 +283,8 @@ ALTER PLACEMENT scoring_local
 A placement pins the entities named in its `FROM` and `TO` lists even when its current coverage is
 empty. Dropping a referenced runtime node is blocked until every pinning placement is altered or
 dropped. A change that would make a member ineligible, such as changing an ingestor to an endpoint
-or Syslog source or removing materialized state from a referenced relay, is blocked in the same
-way.
+or Syslog source, is blocked in the same way. Adding or dropping a relay's materialized state does
+not change its placement identity.
 
 When a topology edit and its placement update depend on one another, put the complete set of model
 changes in one explicit transaction and order creation before reference. Nervix validates the
@@ -343,8 +347,8 @@ with other runtime nodes outside hard colocation groups.
 | A runtime node remains in a hard group after a carve-out. | Inspect the group's hard relationships in `DESCRIBE DOMAIN`; another uncut requirement still connects it to the group. |
 | Dropping or reshaping a member is blocked. | Alter or drop every placement named by the diagnostic before changing the member. |
 
-Creation also rejects an unknown or ambiguous member, a non-schedulable entity, an ordinary relay,
-a cluster-wide server-listener ingestor, an empty side, and `RANK 0`.
+Creation also rejects an unknown or ambiguous member, a non-schedulable entity, a cluster-wide
+server-listener ingestor, an empty side, and `RANK 0`.
 
 ## Common Patterns
 

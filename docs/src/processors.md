@@ -185,7 +185,7 @@ is evaluated against the new policy without waiting for another input.
 
 Input/route topology, attachment, branching, dependencies, and changed error-route targets are
 classified entity pause. Nervix gates their source relays across the cluster, drains affected
-relay rings and node work, and swaps only the altered junction task. Pending materialized-state
+relay owner buffers, dispatch slots, and node work, and swaps only the altered junction task. Pending materialized-state
 work and branch presence residue are handed to the replacement before it resumes. Other nodes in
 the domain continue to run; sibling consumers of a gated relay can experience bounded
 backpressure until the gate is released.

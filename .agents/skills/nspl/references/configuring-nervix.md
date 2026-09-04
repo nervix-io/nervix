@@ -94,7 +94,7 @@ Within the graph transaction, declare dependencies before consumers:
 6. ingestors;
 7. branch-preserving processors, generators, and reingestors;
 8. emitters;
-9. placement rules, after every runtime-node or materialized-relay member they reference.
+9. placement rules, after every runtime-node member they reference, including relays.
 
 Resource upload paths, credentials, broker addresses, and external object names are deployment
 inputs. Keep placeholders obvious and list provisioning that must happen outside Nervix.
@@ -124,7 +124,8 @@ relay. Do not use them to scan across branches.
 
 - Every referenced name is declared in the active domain before use.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
-  schedulable runtime nodes or materialized relays. Treat coverage as path-gated, allow a valid
+  schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,
+  whether or not it has materialized state. Treat coverage as path-gated, allow a valid
   zero-effect rule, use lower `RANK` numbers for stronger claims, and never invent hard separation.
 - Endpoint and Syslog ingestors follow live cluster membership because their listeners execute on
   every cluster node. Every client-source ingestor, including an outbound WebSocket client, keeps
@@ -141,7 +142,9 @@ relay. Do not use them to scan across branches.
   documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
   use only `NO_ACK` source/sink modes, and configure TLS identity and framing for the client
   direction that consumes it.
-- Every relay declares a schema and explicit branch selection.
+- Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
+  owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
+  nodes each have one additional fixed dispatch slot.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
 - Every multi-input emitter source declares the same payload schema. Its sources may use different
   branch names, but each source retains its own branch through collection and external publish;
@@ -203,8 +206,8 @@ relay. Do not use them to scan across branches.
 Choose checks relevant to the configured graph:
 
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
-- `DESCRIBE RELAY <relay>;` and `DESCRIBE RELAY <relay> WHERE (...);` inspect logical and concrete
-  branch state.
+- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas;
+  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics.

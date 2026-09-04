@@ -5,7 +5,7 @@
 //! input draining, and quiesce work accounting. Nodes retain their processing and output behavior.
 //!
 //! The mode deliberately uses Tokio's wall-clock [`Instant`]. Emitters and reingestors have this
-//! contract today, while materializers use it for their wall-clock expiration scan. Processor
+//! contract today, while relay-state tasks use it for their wall-clock expiration scan. Processor
 //! supervisors use it for relay fan-in, but their branch workers retain paced domain timestamps
 //! and operation-owned buffers behind that boundary. Connector ingestors consume external
 //! transports rather than relays and remain outside this boundary.

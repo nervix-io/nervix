@@ -89,12 +89,14 @@ pub struct RelayPayload {
     pub batch_ipc: Vec<u8>,
     pub metadata: Vec<RemoteRuntimeRecordMetadata>,
     pub acks: Vec<Option<RemoteAckRegistration>>,
+    pub admission: Option<RemoteAckRegistration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayPayloadKind {
     Routed,
     SubscriptionFanout,
+    Ingress,
 }
 
 impl RelayPayloadKind {
@@ -102,6 +104,7 @@ impl RelayPayloadKind {
         match self {
             Self::Routed => 1,
             Self::SubscriptionFanout => 2,
+            Self::Ingress => 3,
         }
     }
 
@@ -109,6 +112,7 @@ impl RelayPayloadKind {
         match tag {
             1 => Ok(Self::Routed),
             2 => Ok(Self::SubscriptionFanout),
+            3 => Ok(Self::Ingress),
             _ => Err(TransportError::Decode(format!(
                 "unknown relay payload kind tag {tag}"
             ))),
@@ -1313,6 +1317,14 @@ fn encode_stream_payload(
             None => bytes.push(0),
         }
     }
+    match &payload.admission {
+        Some(admission) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&admission.ack_id.to_be_bytes());
+            encode_string(bytes, admission.reply_node_id.as_str())?;
+        }
+        None => bytes.push(0),
+    }
     encode_bytes(bytes, &payload.batch_ipc)?;
     Ok(())
 }
@@ -1351,6 +1363,18 @@ fn decode_stream_payload(bytes: &[u8]) -> Result<RelayPayload, TransportError> {
             }
         }
     }
+    let admission = match cursor.read_u8()? {
+        0 => None,
+        1 => Some(RemoteAckRegistration {
+            ack_id: cursor.read_u64()?,
+            reply_node_id: cursor.read_string()?,
+        }),
+        flag => {
+            return Err(TransportError::Decode(format!(
+                "invalid relay admission presence flag {flag}"
+            )));
+        }
+    };
     let batch_ipc = cursor.read_bytes()?.to_vec();
     cursor.finish()?;
     let domain = Domain::try_from(domain_raw.as_str()).map_err(|error| {
@@ -1367,6 +1391,7 @@ fn decode_stream_payload(bytes: &[u8]) -> Result<RelayPayload, TransportError> {
         batch_ipc,
         metadata,
         acks,
+        admission,
     })
 }
 
@@ -1946,6 +1971,7 @@ mod tests {
                 ingested_at_high_watermark: Timestamp::from_unix_nanos(2),
             }],
             acks: vec![None],
+            admission: None,
         }
     }
 

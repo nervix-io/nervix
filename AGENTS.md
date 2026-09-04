@@ -395,7 +395,9 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   state the explicit user-approved reason.
 - After completing requested repository changes, include a proposed Conventional Commit title and
   description in the final response. Follow Conventional Commits and select the title type from the
-  current `type-enum` in `./commitlint.config.js`.
+  current `type-enum` in `./commitlint.config.js`. Put the title and description together in one
+  fenced code block. Keep the title and each description paragraph on a single unwrapped line; do
+  not insert manual line breaks within them because Git and GitHub handle display wrapping.
 - When the user requests follow-up changes, regenerate both so the final response contains an
   updated title and description that reflect the complete resulting change instead of a stale
   earlier proposal.

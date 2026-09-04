@@ -685,5 +685,12 @@ General notes:
 - native schema fields may use the `SENSITIVE` modifier; session subscription output masks those values as `<masked>`, while emitters may send sensitive values to their configured external sink
 - `CREATE SUBSCRIPTION` and `DELETE SUBSCRIPTION` are not persisted in the registry
 - session subscription names are unique within a connected session; one session may subscribe to relays from multiple domains, and `DELETE SUBSCRIPTION` uses the name rather than repeating subscription parameters
-- `RELAY` names a connection between runtime nodes; ingestors and reingestors create branch instances with runtime relay instances inside them
+- every `RELAY` is scheduled with one owner; only that owner instantiates its buffer, concrete
+  branch presence, fan-out, subscriptions, and metrics
+- relay `CAPACITY` bounds the single owner buffer cluster-wide; each producer node and remote
+  consumer node adds one fixed in-flight dispatch slot, independent of branch count
+- materialized state adds scheduler-selected state replicas to the relay rather than a separate
+  runtime-node kind; ordinary relays report no replicas
+- ingestors and reingestors construct branch identities, and a relay owner applies branch TTL and
+  `MAX INSTANCES` across all producers for that relay
 - `DESCRIBE INGESTOR` exposes runtime-facing ingestor state, including memory-backpressure state and committed Kafka `OFFSET BY DOMAIN` partition assignment

@@ -1,4 +1,26 @@
 Feature: Cluster scheduling
+  Scenario: Relays are scheduled and only materialized state has replicas
+    Given runtime replication is configured with replica count 1 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( id I64 );
+      CREATE RELAY transient_events SCHEMA event UNBRANCHED;
+      CREATE RELAY latest_events SCHEMA event UNBRANCHED
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "relay" "transient_events" is saved as placeholder "transient_relay_owner"
+    And the last command output contains
+      """
+      kind=relay name=transient_events owner={{transient_relay_owner}} replicas=-
+      """
+    And the last cluster status owner for scheduled "relay" "latest_events" is saved as placeholder "materialized_relay_owner"
+    And the first replica for scheduled "relay" "latest_events" in the last cluster status is saved as placeholder "materialized_relay_replica"
+
   Scenario Outline: All nodes can be terminated with an active session
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands

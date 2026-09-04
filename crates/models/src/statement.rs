@@ -235,8 +235,6 @@ pub enum ModelKind {
     Reingestor,
     #[strum(props(completion_label = "ref:relay", keyword = "RELAY"))]
     Relay,
-    #[strum(props(completion_label = "ref:materializer", keyword = "MATERIALIZER"))]
-    Materializer,
     #[strum(props(completion_label = "ref:lookup", keyword = "HASH MAP"))]
     Lookup,
     #[strum(props(completion_label = "ref:junction", keyword = "JUNCTION"))]
@@ -756,7 +754,6 @@ pub enum Model {
     Ingestor(CreateIngestor),
     Reingestor(CreateReingestor),
     Relay(CreateRelay),
-    Materializer(CreateMaterializer),
     Lookup(CreateLookup),
     Junction(CreateJunction),
     Deduplicator(CreateDeduplicator),
@@ -816,7 +813,6 @@ impl Model {
             Self::Ingestor(_) => ModelKind::Ingestor,
             Self::Reingestor(_) => ModelKind::Reingestor,
             Self::Relay(_) => ModelKind::Relay,
-            Self::Materializer(_) => ModelKind::Materializer,
             Self::Lookup(_) => ModelKind::Lookup,
             Self::Junction(_) => ModelKind::Junction,
             Self::Deduplicator(_) => ModelKind::Deduplicator,
@@ -907,7 +903,6 @@ impl Model {
             Self::Ingestor(v) => &v.name,
             Self::Reingestor(v) => &v.name,
             Self::Relay(v) => &v.name,
-            Self::Materializer(v) => &v.relay,
             Self::Lookup(v) => &v.name,
             Self::Junction(v) => &v.name,
             Self::Deduplicator(v) => &v.name,
@@ -959,7 +954,6 @@ impl Model {
             | Self::Ingestor(_)
             | Self::Reingestor(_)
             | Self::Relay(_)
-            | Self::Materializer(_)
             | Self::Lookup(_)
             | Self::Junction(_)
             | Self::Deduplicator(_)
@@ -3686,12 +3680,6 @@ impl ScheduledNode {
     pub fn has_same_assignment_as(&self, other: &Self) -> bool {
         self.primary_node == other.primary_node && self.assigned_nodes == other.assigned_nodes
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateMaterializer {
-    pub relay: Identifier,
-    pub state: MaterializedRelayState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

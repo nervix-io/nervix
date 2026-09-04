@@ -501,7 +501,6 @@ impl Model {
             | (Self::WasmProcessor(_), _)
             | (Self::Ingestor(_), _)
             | (Self::Reingestor(_), _)
-            | (Self::Materializer(_), _)
             | (Self::Lookup(_), _)
             | (Self::Deduplicator(_), _)
             | (Self::Correlator(_), _)

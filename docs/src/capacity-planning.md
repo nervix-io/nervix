@@ -18,7 +18,7 @@ One live branch instance can hold the following at each graph node that belongs 
 
 - branch-local task and runtime-node state;
 - route buffers until the route's flush boundary;
-- relay fan-out buffers up to `CAPACITY` Arrow batches per bounded consumer channel;
+- the relay owner's shared buffer, bounded by `CAPACITY` across all concrete branches;
 - pending flush timers;
 - deduplication entries retained within `MAX TIME`;
 - open window state retained by `WIDTH` and advanced by `STEP`;
@@ -51,8 +51,11 @@ not pay for a window's state, and a window width does not bound a correlator.
   remain live. Shorter TTL releases idle branches sooner.
 - `MAX INSTANCES <n> EVICT LRU` trades branch coverage against a hard branch-population ceiling.
   Eviction drops the least recently used branch and its suspended or buffered branch-local work.
-- Relay `CAPACITY` trades burst absorption against queued Arrow batches per consumer channel.
-  Smaller capacity applies backpressure sooner.
+- Relay `CAPACITY` trades burst absorption against Arrow batches in the single owner buffer.
+  Smaller capacity applies backpressure sooner. In addition to that buffer, each producer cluster
+  node can hold one batch on its dispatch to the owner and the owner can hold one batch on its
+  dispatch to each remote consumer cluster node. Those fixed slots do not resize with `CAPACITY`
+  and do not multiply with consumers or subscriptions on the same node.
 - Route `FLUSH EACH` interval and `MAX BATCH SIZE` bound how long rows wait and how much a route
   buffers. `MAX BATCH SIZE` only clamps a batch and never grows one: the batch a route emits is
   roughly arrival rate × interval, up to the byte cap. Larger batches reduce per-batch cost only
@@ -76,8 +79,8 @@ defaults.
 - `nervix_branch_instances` shows the current concrete branch-key population per domain, branch
   declaration, and physical node.
 - `nervix_branch_evictions_total` shows LRU pressure and TTL churn through its `reason` label.
-- Sustained high `nervix_relay_buffer_len` percentiles show downstream backpressure at relay
-  fan-out buffers.
+- Sustained high `nervix_relay_buffer_len` percentiles show downstream backpressure at the relay
+  owner buffer.
 - High `nervix_delivery_latency_seconds` percentiles show downstream lag between graph nodes.
 - `DESCRIBE RELAY <relay> WHERE (...)` confirms whether one concrete branch-local relay exists and
   reports its buffer metrics when available.

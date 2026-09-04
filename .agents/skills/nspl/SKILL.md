@@ -51,7 +51,7 @@ Build configuration in dependency order:
    UDFs as needed.
 5. Define relays before nodes that read or write them.
 6. Define ingestors, processors, generators, and emitters in graph order.
-7. Define placement rules after every referenced runtime node and materialized relay exists.
+7. Define placement rules after every referenced runtime node, including each relay, exists.
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
 Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
@@ -130,6 +130,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
   separation policy exists. Lower `RANK` values are stronger, unranked rules are the weakest rule
   tier, and equal-rank different-policy claims conflict.
+- Treat every relay as a scheduled runtime node with one owner. `CAPACITY` bounds its one owner
+  buffer cluster-wide, while each producer node and remote consumer node contributes one fixed
+  in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
+  separate runtime-node kind. All relays are valid placement members and corridor hops.
 - Treat Endpoint and Syslog ingestors as cluster-wide listeners. Every client-source ingestor,
   including an outbound WebSocket client, is single-owner and keeps its live assignment across
   ordinary schedule recomputation; use drain or a hard colocation requirement when it must move.
@@ -204,7 +208,8 @@ When authoring a graph, provide:
 4. A short verification sequence using the relevant `SHOW`, `DESCRIBE`, lookup, or subscription
    commands.
 
-Use `DESCRIBE JUNCTION <junction>;` when the verification should include a junction's stored
+Use `DESCRIBE RELAY <relay>;` to verify its owner and optional state replicas; an ordinary relay
+reports no replicas. Use `DESCRIBE JUNCTION <junction>;` when the verification should include a junction's stored
 routing contract, scheduled placement, and local edge metrics.
 
 Use `SHOW PLACEMENTS;`, `DESCRIBE PLACEMENT <placement>;`, and `DESCRIBE DOMAIN;` to verify rule

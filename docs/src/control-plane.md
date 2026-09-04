@@ -155,6 +155,10 @@ uncordons, and soft placement changes do not restart their external sessions. En
 Syslog ingestors are the only ingestors whose assignments follow live membership, because their
 listeners execute on every cluster node.
 
+Every relay is also scheduled with one primary owner. Ordinary relays have no replicas.
+Materialized relays use the same relay schedule entry: additional assigned nodes are replicas of
+materialized state only, not relay buffers, branch presence, fan-out, or metrics.
+
 Hard colocation groups constrain every scheduler. A newly effective require group is consolidated
 through the normal runtime-node handoff path, and failover or drain moves the group as one unit.
 Soft policies affect only future placement decisions and do not relocate existing assignments.
@@ -186,7 +190,8 @@ operator `PAUSE` or `RESUME` statement.
   Placement changes can still hand off runtime nodes when a new hard colocation group requires it.
   `CREATE` and `DROP` retain their existing pause-free schedule-rebuild behavior.
 - `ENTITY_PAUSE` changes gate only the affected relays on every live node, force-flush affected
-  work, and wait for the gated relay rings and target-node work counters to drain before commit.
+  work, and wait for the owner buffers, fixed dispatch slots, and target-node work counters to
+  drain before commit.
   Other domain traffic continues. A processor topology change then swaps only the affected node
   tasks and hands pending materialized-state work to their replacements. Deduplicator key changes
   also purge the old keyspace before the replacement starts; reorderer ordering changes flush the
@@ -211,11 +216,11 @@ operator `PAUSE` or `RESUME` statement.
   set are unchanged does not stop, restart, restore a snapshot, or re-open an external session: its
   in-flight batches are not negatively acknowledged by the activation, its retained `REQUIRED WAIT`
   messages persist, its branch instances and branch-local state persist, and its ingestor source
-  session keeps ingesting throughout. Producers into a moved node's input relays re-point to the new
-  owner when they activate the revision, consumers of its outputs keep running, and readers
-  declaring `USING MATERIALIZED STATE` on a moved materialized relay re-bind their state source
-  without restarting. A cluster node that gains or loses a replica role starts or stops replica
-  polling and local snapshotting for that runtime node without restarting its primary. A change
+  session keeps ingesting throughout. A moved relay first drains its owner buffer and dispatch
+  slots; producers and consumers then re-point to its new owner without restarting. Readers
+  declaring `USING MATERIALIZED STATE` on that relay re-bind their state source without
+  restarting. A cluster node that gains or loses a relay state-replica role starts or stops replica
+  polling and local snapshotting without instantiating the relay itself. A change
   touching several runtime nodes, such as a hard colocation group move, is one activation affecting
   exactly those nodes. A batch that changes both a model and an assignment applies the model change
   at its classified quiesce level and the assignment change narrowly; runtime nodes affected by
@@ -252,13 +257,13 @@ termination or crash interrupts them. Quiesced connected modes count as drained 
 buffers have not entered the graph.
 
 A moved runtime node terminates on its former owner once its already admitted work drains within the
-existing shutdown grace, and starts on its new owner. State migration is unchanged: replicated state
-kinds are present on the new owner only when it was already a replica, and every other state kind
-restarts from the new owner's local snapshot. A producer re-points when it activates the revision;
-until then its dispatches to the former owner fail and are retried within the dispatch timeout,
-after which attached batches are negatively acknowledged and detached batches are dropped. Batches
-addressed to a moved runtime node between the former owner's stop and the new owner's readiness are
-therefore negatively acknowledged; batches for unaffected runtime nodes never are. Draining a
+existing shutdown grace, and starts on its new owner. For a planned relay move, producer dispatch is
+gated until the new owner is ready, so the owner buffer and fixed dispatch slots cut over without
+loss. State migration is unchanged: replicated state kinds are present on the new owner only when
+it was already a replica, and every other state kind restarts from the new owner's local snapshot.
+An unplanned relay-owner failure loses its volatile buffer, presence, and metrics; materialized
+records survive when a current state replica is available for promotion. Batches for unaffected
+runtime nodes are not interrupted. Draining a
 cluster node that hosts several runtime nodes performs one narrow activation per moved node, and
 each moved node restarts exactly once. There is no domain-wide ingestion pause for an assignment
 change, so a lagging cluster node no longer stalls ingestion elsewhere while the initiating command
