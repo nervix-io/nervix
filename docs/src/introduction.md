@@ -25,7 +25,7 @@ evolve, however, and focused breaking changes may still occur. See
 The core runtime model is a graph of connected nodes:
 
 - ingestors bring data into the system
-- processors, junctions, deduplicators, reingestors, and materializers transform or route that data
+- relay owners route data, while processors, junctions, deduplicators, and reingestors transform it
 - emitters push results out to external systems
 
 Current built-in transport integrations include Kafka, Pulsar, HTTP, Prometheus,
@@ -40,7 +40,12 @@ independently. A branch names the key schema, such as `CREATE BRANCH by_tenant_u
 tenant_user_branch TTL 5m`; ingestor and reingestor routes construct concrete keys with `BRANCHED
 BY by_tenant_user SET ...`.
 
-`RELAY`s name the connections between runtime nodes. Relays are declared as `BRANCHED BY <branch>` or `UNBRANCHED`; only ingestors and reingestors carry the `VALUES { ... }` key mapping that materializes concrete branch instances. When a group appears, Nervix runs that part of the graph as a branch instance for the group. The branch contains runtime relay instances and processing node state for that group, so batches, deduplicator history, window state, and downstream routing for one group do not interfere with other groups. An emitter drains records out of the graph. A reingestor can compute a new group and start downstream branches under that grouping.
+`RELAY`s are scheduled runtime nodes between producers and consumers. Each has one owner that holds
+its buffer, concrete branch presence, fan-out, and metrics. Relays are declared as `BRANCHED BY
+<branch>` or `UNBRANCHED`; only ingestors and reingestors carry the key mapping that constructs
+concrete branch identities. Processing state remains isolated by that identity, while one relay
+owner coordinates its cluster-wide buffering and delivery. An emitter drains records out of the
+graph. A reingestor can compute a new group and start downstream branches under that grouping.
 
 Nervix already runs clustered deployments, schedules graph nodes across multiple servers, executes codecs in the runtime, replicates selected runtime state, and supports multi-node failover scenarios. It is still evolving, but it is beyond a parser-only prototype.
 

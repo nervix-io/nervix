@@ -829,7 +829,7 @@ Feature: Narrow schedule activation on ownership change
       "transaction_id":"txn-2"
       """
 
-  Scenario: A reader keeps running when its materialized relay's materializer moves
+  Scenario: A reader keeps running when its materialized relay moves
     Given runtime replication is configured with replica count 1 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -943,7 +943,7 @@ Feature: Narrow schedule activation on ownership change
       """
       - domain={{domain}} kind=junction name=enrich_events owner=node-1
       """
-    And the last cluster status owner for scheduled "materializer" "tenant_state" is saved as placeholder "materializer_owner"
+    And the last cluster status owner for scheduled "relay" "tenant_state" is saved as placeholder "relay_owner"
     When these NSPL commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION enriched_subscription TO enriched;
@@ -967,9 +967,9 @@ Feature: Narrow schedule activation on ownership change
     Then the relay subscription does not receive a payload within "2s"
     When these NSPL commands are executed through the client on node "node-1"
       """
-      DRAIN NODE {{materializer_owner}};
+      DRAIN NODE {{relay_owner}};
       """
-    Then within "15s" node "node-1" eventually reports scheduled "materializer" "tenant_state" owner different from placeholder "materializer_owner"
+    Then within "15s" node "node-1" eventually reports scheduled "relay" "tenant_state" owner different from placeholder "relay_owner"
     When these NSPL commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;

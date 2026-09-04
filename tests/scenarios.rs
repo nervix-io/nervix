@@ -8445,6 +8445,11 @@ async fn then_last_cluster_status_scheduled_owner_is_saved_as_placeholder(
                 world.domain
             )
         });
+    assert_ne!(
+        owner, "-",
+        "scheduled {kind} {name} in domain '{}' must have an owner, got: {output}",
+        world.domain
+    );
     world.placeholders.insert(placeholder, owner.to_string());
 }
 

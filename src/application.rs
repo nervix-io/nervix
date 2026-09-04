@@ -560,7 +560,7 @@ use crate::{
         RelaySubscriptionReceiver, RelaySubscriptionRecvError, RetainedIngestHeaders, Runtime,
         RuntimeEvent, RuntimeMaterializedRelaySpec, RuntimeTestHooks, RuntimeVmCompileContext,
         SignalingDataSink, WebsocketSignalingSession, compile_session_filter_map_program,
-        execute_filter_map_on_record, scheduled_branched_stream_owner_nodes,
+        execute_filter_map_on_record, scheduled_relay_owner_nodes,
     },
     runtime_schema,
 };
@@ -3037,6 +3037,25 @@ struct DrainMove {
     fallback_node: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum AssignmentRelocation {
+    Planned,
+    Failure,
+}
+
+impl AssignmentRelocation {
+    fn target(
+        self,
+        desired_target: Option<String>,
+        existing_replica: Option<String>,
+    ) -> Option<String> {
+        match self {
+            Self::Planned => desired_target.or(existing_replica),
+            Self::Failure => existing_replica.or(desired_target),
+        }
+    }
+}
+
 type AuthRateLimiter = DefaultKeyedRateLimiter<String>;
 
 #[derive(Clone)]
@@ -4849,10 +4868,7 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(Vec::new());
         };
-        Ok(scheduled_branched_stream_owner_nodes(
-            domain_schedule,
-            relay,
-        ))
+        Ok(scheduled_relay_owner_nodes(domain_schedule, relay))
     }
 
     async fn dispatch_interconnect_control(
@@ -5118,11 +5134,29 @@ impl SessionServiceImpl {
             }
         };
 
+        let schedule = self.consensus.current_schedule().await;
+        let scheduled_relay = schedule.domain(domain).and_then(|domain_schedule| {
+            domain_schedule
+                .nodes
+                .iter()
+                .find(|node| node.kind == ModelKind::Relay && node.identifier == describe.relay)
+        });
         if describe.bindings.is_empty() {
+            let metrics = match self
+                .describe_metrics_for_scheduled_node(
+                    domain,
+                    ModelKind::Relay,
+                    &describe.relay,
+                    scheduled_relay,
+                )
+                .await
+            {
+                Ok(metrics) => metrics,
+                Err(message) => return command_error(message),
+            };
             return command_ok(append_metrics_lines(
-                format_relay_describe_output(&ack_model, &branching),
-                self.runtime
-                    .describe_metrics_for(domain, "RELAY", &describe.relay),
+                format_relay_describe_output(&ack_model, &branching, scheduled_relay),
+                metrics,
             ));
         }
 
@@ -5291,10 +5325,19 @@ impl SessionServiceImpl {
         if exists {
             lines.push(format!("capacity: {}", ack_model.buffer));
         }
-        lines.extend(
-            self.runtime
-                .describe_metrics_for(domain, "RELAY", &describe.relay),
-        );
+        let metrics = match self
+            .describe_metrics_for_scheduled_node(
+                domain,
+                ModelKind::Relay,
+                &describe.relay,
+                scheduled_relay,
+            )
+            .await
+        {
+            Ok(metrics) => metrics,
+            Err(message) => return command_error(message),
+        };
+        lines.extend(metrics);
 
         CommandResult {
             success: true,
@@ -10629,10 +10672,14 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         };
-        let Some(materializer) = domain_schedule
+        let Some(relay_node) = domain_schedule
             .nodes
             .iter()
-            .find(|node| node.kind == ModelKind::Materializer && node.identifier == show.relay)
+            .find(|node| {
+                node.kind == ModelKind::Relay
+                    && node.identifier == show.relay
+                    && matches!(node.config.as_ref(), Model::Relay(relay) if relay.materialized_state.is_some())
+            })
         else {
             return command_error(format!(
                 "stream '{}' in domain '{}' is not materialized",
@@ -10646,8 +10693,8 @@ impl SessionServiceImpl {
             .local_materialized_stream_state(domain, &show.relay)
         {
             Ok(entries) if !entries.is_empty() => entries,
-            Ok(_) if !materializer.executes_on(self.consensus.local_node_id()) => {
-                if let Some(primary_node) = materializer.primary_node() {
+            Ok(_) if !relay_node.executes_on(self.consensus.local_node_id()) => {
+                if let Some(primary_node) = relay_node.primary_node() {
                     match self
                         .runtime
                         .remote_materialized_stream_state(primary_node, domain, &show.relay)
@@ -10665,7 +10712,7 @@ impl SessionServiceImpl {
         };
 
         let message = if entries.is_empty() {
-            format_materialized_stream_state_output(&show.relay, materializer, Vec::new())
+            format_materialized_stream_state_output(&show.relay, relay_node, Vec::new())
         } else {
             let entry_lines = entries
                 .into_iter()
@@ -10684,7 +10731,7 @@ impl SessionServiceImpl {
                     )
                 })
                 .collect::<Vec<_>>();
-            format_materialized_stream_state_output(&show.relay, materializer, entry_lines)
+            format_materialized_stream_state_output(&show.relay, relay_node, entry_lines)
         };
         command_ok(message)
     }
@@ -11602,6 +11649,7 @@ impl SessionServiceImpl {
                     node_id,
                     live_nodes,
                     target_nodes,
+                    AssignmentRelocation::Planned,
                 );
             }
         }
@@ -11642,6 +11690,7 @@ impl SessionServiceImpl {
                 node_id,
                 live_nodes,
                 target_nodes,
+                AssignmentRelocation::Planned,
             );
         }
         None
@@ -11654,6 +11703,7 @@ impl SessionServiceImpl {
         unavailable_node_id: &str,
         live_nodes: &BTreeSet<String>,
         target_nodes: &BTreeSet<String>,
+        relocation: AssignmentRelocation,
     ) -> Option<DrainMove> {
         let current_nodes = group
             .members
@@ -11719,8 +11769,7 @@ impl SessionServiceImpl {
         });
         let target = preserved_primary
             .cloned()
-            .or(desired_target)
-            .or_else(|| common_replicas.first().cloned())
+            .or_else(|| relocation.target(desired_target, common_replicas.first().cloned()))
             .or_else(|| target_nodes.first().cloned())?;
         let primary_changed = old_primary.as_ref() != Some(&target);
         let promoted_replica = (primary_changed
@@ -11780,6 +11829,7 @@ impl SessionServiceImpl {
         unavailable_node_id: &str,
         live_nodes: &BTreeSet<String>,
         target_nodes: &BTreeSet<String>,
+        relocation: AssignmentRelocation,
     ) -> Option<DrainMove> {
         if !node.is_assigned_to(unavailable_node_id) {
             return None;
@@ -11812,8 +11862,7 @@ impl SessionServiceImpl {
             .find(|assigned| target_nodes.contains(*assigned))
             .cloned();
         let target = preserved_primary
-            .or(desired_target)
-            .or(existing_replica)
+            .or_else(|| relocation.target(desired_target, existing_replica))
             .or_else(|| target_nodes.first().cloned())?;
         let replica_slots = node
             .assigned_nodes
@@ -11921,6 +11970,7 @@ impl SessionServiceImpl {
                 &unavailable_node_id,
                 live_nodes,
                 target_nodes,
+                AssignmentRelocation::Failure,
             ) {
                 moves.push(failover_move);
             }
@@ -11959,6 +12009,7 @@ impl SessionServiceImpl {
                     &unavailable_node_id,
                     live_nodes,
                     target_nodes,
+                    AssignmentRelocation::Failure,
                 ) {
                     moves.push(failover_move);
                 }
@@ -12090,6 +12141,7 @@ impl SessionServiceImpl {
                     &unavailable_node_id,
                     &live_node_ids,
                     &target_nodes,
+                    AssignmentRelocation::Failure,
                 )
                 .is_some()
                 {
@@ -12676,16 +12728,9 @@ impl SessionServiceImpl {
                     relay_node.effective_branching.clone().unwrap_or_default(),
                 ),
             );
-            owners.insert(ack_model.name.clone(), None);
-        }
-        for node in domain_schedule
-            .nodes
-            .iter()
-            .filter(|node| node.kind == ModelKind::Materializer)
-        {
             owners.insert(
-                node.identifier.clone(),
-                node.primary_node().map(str::to_string),
+                ack_model.name.clone(),
+                relay_node.primary_node().map(str::to_string),
             );
         }
 
@@ -13469,10 +13514,14 @@ fn append_metrics_lines(mut output: String, metrics: Vec<String>) -> String {
 fn format_relay_describe_output(
     relay: &nervix_models::CreateRelay,
     branching: &[Identifier],
+    scheduled_node: Option<&ScheduledNode>,
 ) -> String {
     let mut lines = vec![
         format!("relay: {}", relay.name.as_str()),
         "kind: RELAY".to_string(),
+    ];
+    lines.extend(format_schedule_placement_lines(scheduled_node));
+    lines.extend([
         format!("schema: {}", relay.schema.as_str()),
         format!(
             "branched by: {}",
@@ -13509,7 +13558,7 @@ fn format_relay_describe_output(
                 "none"
             }
         ),
-    ];
+    ]);
     if !branching.is_empty() {
         lines.push("branch-local describe: use WHERE bindings".to_string());
     }
@@ -14144,7 +14193,7 @@ fn format_materialized_stream_state_output(
 ) -> String {
     let mut lines = vec![
         format!("materialized relay: {}", relay.as_str()),
-        "kind: MATERIALIZER".to_string(),
+        "kind: RELAY".to_string(),
     ];
     lines.extend(format_schedule_placement_lines(Some(scheduled_node)));
     if entries.is_empty() {
@@ -14369,7 +14418,7 @@ fn placement_member_model_is_eligible(model: &Model) -> bool {
         | Model::WindowProcessor(_)
         | Model::Emitter(_) => true,
         Model::Ingestor(ingestor) => !matches!(&ingestor.source, IngestSource::Endpoint { .. }),
-        Model::Relay(relay) => relay.materialized_state.is_some(),
+        Model::Relay(_) => true,
         _ => false,
     }
 }
@@ -18211,6 +18260,7 @@ mod tests {
             batch_ipc: Vec::new(),
             metadata: Vec::new(),
             acks: Vec::new(),
+            admission: None,
         };
 
         assert!(lane.route(Envelope::RelayPayload(routed)).is_none());
@@ -19330,7 +19380,7 @@ mod tests {
     }
 
     #[test]
-    fn failover_prefers_policy_target_over_live_replica() {
+    fn failover_promotes_live_replica_before_policy_target() {
         let domain = Domain::parse("payments").expect("valid domain");
         let mut schedule = DomainSchedule {
             domain: domain.clone(),
@@ -19362,11 +19412,15 @@ mod tests {
             moves,
             vec![DrainMove {
                 label: "deduplicator dedup_notifications".to_string(),
-                promoted_replica: None,
-                fallback_node: Some("node-1".to_string()),
+                promoted_replica: Some("node-3".to_string()),
+                fallback_node: None,
             }]
         );
-        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-1"));
+        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-3"));
+        assert_eq!(
+            schedule.nodes[0].assigned_nodes,
+            vec!["node-3".to_string(), "node-1".to_string()]
+        );
     }
 
     #[test]
@@ -20686,7 +20740,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn placement_member_completion_expands_only_eligible_runtime_names() {
+    async fn placement_member_completion_expands_all_schedulable_runtime_names() {
         let (service, _registry, path) = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
@@ -20734,8 +20788,8 @@ mod tests {
             "{values:?}"
         );
         assert!(values.contains(&"eligible_state".to_string()), "{values:?}");
-        assert!(!values.contains(&"plain_input".to_string()), "{values:?}");
-        assert!(!values.contains(&"plain_output".to_string()), "{values:?}");
+        assert!(values.contains(&"plain_input".to_string()), "{values:?}");
+        assert!(values.contains(&"plain_output".to_string()), "{values:?}");
         assert!(
             !values.contains(&"ref:runtime_node".to_string()),
             "{values:?}"
@@ -21027,7 +21081,7 @@ mod tests {
         let values =
             suggestion_values(&service, &subscriptions, "CREATE PLACEMENT policy FROM ").await;
         assert!(values.contains(&"queued_state".to_string()), "{values:?}");
-        assert!(!values.contains(&"queued_plain".to_string()), "{values:?}");
+        assert!(values.contains(&"queued_plain".to_string()), "{values:?}");
 
         subscriptions.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);

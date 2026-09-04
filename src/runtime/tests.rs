@@ -30,9 +30,9 @@ use nervix_models::{
     IngestTimestampSource, JsonType, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy,
     ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-    RemoteAckOutcome, RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus,
-    RetryPolicy, ScheduledNode, SchemaField, SqsFifoGroup, StructuredMessageError, Timestamp,
-    WindowBound, WireSchemaField, ZeroMqIngestMode,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, ResourceId, ResourceVersion,
+    ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField, SqsFifoGroup,
+    StructuredMessageError, Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 use nervix_nspl::window_processor::aggregate::lower_window_assignments;
 use nervix_wasm::{
@@ -843,6 +843,135 @@ async fn remote_ack_alive_packet_resets_ingestor_ack_timeout() {
         "terminal ack must clear the pending remote ack"
     );
     drop(shutdown_tx);
+}
+
+#[tokio::test]
+async fn remote_relay_admission_alive_resets_dispatch_timeout() {
+    let runtime = super::Runtime::default();
+    let (admission_tx, admission_rx) = mpsc::unbounded_channel();
+    runtime.pending_relay_admissions.insert(9, admission_tx);
+    let runtime_task = runtime.clone();
+
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(100)).await;
+        runtime_task.handle_remote_ack_resolution(RemoteAckResolution {
+            ack_id: 9,
+            outcome: RemoteAckOutcome::Alive,
+        });
+        sleep(Duration::from_millis(150)).await;
+        runtime_task.handle_remote_ack_resolution(RemoteAckResolution {
+            ack_id: 9,
+            outcome: RemoteAckOutcome::Ack,
+        });
+    });
+
+    assert_eq!(
+        super::RemoteDispatcher::await_relay_admission(
+            "relay-owner",
+            admission_rx,
+            Duration::from_millis(200),
+        )
+        .await,
+        Ok(())
+    );
+    assert!(
+        runtime.pending_relay_admissions.get(&9).is_none(),
+        "terminal admission ack must clear pending admission state"
+    );
+}
+
+#[tokio::test]
+async fn forwarding_to_a_remote_relay_owner_extends_the_ack_chain() {
+    let (acks, completion) = AckSet::root();
+    let forwarded = super::RemoteDispatcher::forwarded_ack(&acks);
+    let completion = completion.wait();
+    tokio::pin!(completion);
+
+    acks.ack_success();
+    assert!(
+        timeout(Duration::from_millis(50), &mut completion)
+            .await
+            .is_err(),
+        "local producer completion must wait for the remote relay path"
+    );
+    forwarded.ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), &mut completion)
+            .await
+            .expect("remote relay completion should resolve the producer ACK"),
+        AckOutcome::Ack
+    );
+}
+
+#[tokio::test]
+async fn relay_gate_holds_nonowner_dispatch_before_the_remote_slot() {
+    let services = test_relay_boundary_services();
+    services.replace_owner_node(Some("node-2".to_string()));
+    let gate = services.fanout.dispatch_gate();
+    let lease = super::RelayDispatchGateLease::engage(
+        gate,
+        Instant::now() + Duration::from_secs(1),
+        "relay owner is moving",
+    );
+    let task_services = services.clone();
+    let dispatch = tokio::spawn(async move {
+        task_services
+            .dispatch_to_owner(
+                &domain("default"),
+                &identifier("orders"),
+                &quiesce_test_batch(),
+            )
+            .await
+    });
+
+    tokio::task::yield_now().await;
+    assert!(
+        !dispatch.is_finished(),
+        "a gated nonowner must not enter its remote dispatch slot"
+    );
+
+    drop(lease);
+    timeout(Duration::from_secs(1), dispatch)
+        .await
+        .expect("releasing the gate should wake the nonowner dispatch")
+        .expect("dispatch task should join")
+        .expect_err("the isolated test has no remote dispatcher");
+}
+
+#[tokio::test]
+async fn relay_gate_allows_admitted_owner_batches_to_reach_consumers() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let relay = identifier("orders");
+    let services = test_relay_boundary_services();
+    let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
+    let gate = services.fanout.dispatch_gate();
+    let mut lease = super::RelayDispatchGateLease::engage(
+        gate,
+        Instant::now() + Duration::from_secs(1),
+        "relay owner is moving",
+    );
+    assert!(lease.wait_quiescent().await);
+
+    timeout(
+        Duration::from_millis(100),
+        services.fanout_owner_batch(
+            &runtime.metrics,
+            &domain,
+            &relay,
+            None,
+            &quiesce_test_batch(),
+        ),
+    )
+    .await
+    .expect("the gate must not pause a batch already admitted to the owner buffer")
+    .expect("the owner should fan out the admitted batch");
+    timeout(Duration::from_secs(1), consumer.recv())
+        .await
+        .expect("the attached consumer should receive the admitted batch")
+        .expect("the attached consumer should remain open");
+
+    services.remove_local_runtime_consumer(AckMode::Attached);
 }
 
 #[tokio::test]
@@ -2785,6 +2914,81 @@ fn scheduled_model(
 }
 
 #[tokio::test]
+async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let relay = identifier("events");
+    let schema = identifier("event");
+    runtime.sync_domains(&BTreeMap::from([(
+        domain.clone(),
+        DomainState {
+            id: domain.clone(),
+            config: DomainConfig {
+                pace: DomainPace::Unpaced,
+                period: "1s".to_string(),
+                skew: "0s".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
+            },
+            status: DomainStatus::Running,
+            start_version: 1,
+            last_start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
+        },
+    )]));
+    let schedule = ClusterSchedule {
+        domains: vec![DomainSchedule {
+            domain: domain.clone(),
+            nodes: vec![
+                ScheduledNode {
+                    identifier: schema.clone(),
+                    kind: ModelKind::Schema,
+                    config: Box::new(nervix_models::Model::Schema(CreateSchema {
+                        name: schema.clone(),
+                        fields: vec![SchemaField {
+                            name: identifier("value"),
+                            ty: ParseAsType::I64,
+                            optional: false,
+                            sensitive: false,
+                        }],
+                    })),
+                    effective_branching: None,
+                    effective_branching_schema: None,
+                    schema_fingerprint: [0; 32],
+                    kafka_partition_schedule: None,
+                    primary_node: None,
+                    assigned_nodes: Vec::new(),
+                },
+                scheduled_model(
+                    ModelKind::Relay,
+                    relay.clone(),
+                    nervix_models::Model::Relay(CreateRelay {
+                        name: relay.clone(),
+                        schema,
+                        buffer: 2,
+                        branching: RelayBranching::unbranched(),
+                        materialized_state: None,
+                    }),
+                ),
+            ],
+            placement_groups: Vec::new(),
+        }],
+    };
+
+    runtime
+        .apply_cluster_schedule("node-1", &schedule)
+        .await
+        .expect("relay schedule should build");
+
+    assert!(
+        !runtime
+            .replicated_branch_aggregated_states
+            .iter()
+            .any(|state| state.key().kind == ModelKind::Relay),
+        "relay metrics must remain volatile owner-only state"
+    );
+}
+
+#[tokio::test]
 async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
@@ -3442,17 +3646,39 @@ fn emitter_entity_pause_gates_every_input_relay() {
         construction: nervix_models::RouteConstruction::default(),
         materialized_state: Vec::new(),
     };
+    let input_relay = |name: &str| {
+        scheduled_model(
+            ModelKind::Relay,
+            identifier(name),
+            nervix_models::Model::Relay(CreateRelay {
+                name: identifier(name),
+                schema: identifier("event"),
+                buffer: 2,
+                branching: RelayBranching::unbranched(),
+                materialized_state: None,
+            }),
+        )
+    };
     let mut schedule = DomainSchedule {
         domain: domain("testing"),
-        nodes: vec![scheduled_model(
-            ModelKind::Emitter,
-            emitter.name.clone(),
-            nervix_models::Model::Emitter(emitter.clone()),
-        )],
+        nodes: vec![
+            input_relay("source_a"),
+            input_relay("source_b"),
+            scheduled_model(
+                ModelKind::Emitter,
+                emitter.name.clone(),
+                nervix_models::Model::Emitter(emitter.clone()),
+            ),
+        ],
         placement_groups: Vec::new(),
     };
-    schedule.nodes[0].primary_node = Some("node-2".to_string());
-    schedule.nodes[0].assigned_nodes = vec!["node-2".to_string()];
+    let emitter_node = schedule
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == ModelKind::Emitter)
+        .expect("test schedule must contain its emitter");
+    emitter_node.primary_node = Some("node-2".to_string());
+    emitter_node.assigned_nodes = vec!["node-2".to_string()];
     let entity = crate::registry::RegistryEntity {
         kind: ModelKind::Emitter,
         identifier: emitter.name,
@@ -4013,6 +4239,76 @@ fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
 }
 
 #[tokio::test]
+async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let relay = identifier("orders");
+    let services = test_relay_boundary_services();
+    let _owner_receiver = services.activate_owner_buffer();
+    runtime
+        .relay_boundary_fanouts
+        .insert((domain.clone(), relay.clone()), services.fanout.clone());
+    services
+        .enqueue_owner_batch(
+            &runtime.metrics,
+            &domain,
+            &relay,
+            None,
+            &quiesce_test_batch(),
+        )
+        .await
+        .expect("the relay owner buffer should admit the batch");
+
+    let status = runtime.entity_drain_status(&domain, std::slice::from_ref(&relay), &[]);
+
+    assert_eq!(status.buffered_relay_batches, 1);
+    assert!(!status.is_drained());
+}
+
+#[tokio::test]
+async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let relay = identifier("orders");
+    let services = test_relay_boundary_services();
+    let mut owner_receiver = services.activate_owner_buffer();
+    let (acks, completion) = AckSet::root();
+    let batch = super::RelayRecordBatch::single(
+        test_schema(&[("value", ParseAsType::I64)]),
+        None,
+        test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]),
+        acks.clone(),
+    )
+    .expect("relay owner ACK test batch should build");
+
+    services
+        .enqueue_owner_batch(&runtime.metrics, &domain, &relay, None, &batch)
+        .await
+        .expect("the relay owner buffer should admit the batch");
+    let completion = completion.wait();
+    tokio::pin!(completion);
+    acks.ack_success();
+    assert!(
+        timeout(Duration::from_millis(50), &mut completion)
+            .await
+            .is_err(),
+        "owner admission must not complete the upstream ACK before fanout"
+    );
+
+    owner_receiver
+        .recv()
+        .await
+        .expect("the owner buffer should retain the batch")
+        .ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), &mut completion)
+            .await
+            .expect("owner fanout completion should resolve the ACK"),
+        AckOutcome::Ack
+    );
+}
+
+#[tokio::test]
 async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
@@ -4346,7 +4642,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeStateKind::MaterializedRelay,
-        kind: ModelKind::Materializer,
+        kind: ModelKind::Relay,
         identifier: identifier("latest_orders"),
         schema_fingerprint: [0; 32],
         branch_key: None,
@@ -4377,7 +4673,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
             .latest_snapshot(&placement)
             .expect("snapshot lookup should succeed")
             .is_none(),
-        "the materializer hot path must not persist a snapshot"
+        "the relay-state hot path must not persist a snapshot"
     );
 
     shutdown_tx.send_replace(true);
@@ -4560,7 +4856,7 @@ fn runtime_state_store_purges_only_the_requested_entity() {
     let removed = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeStateKind::MaterializedRelay,
-        kind: ModelKind::Materializer,
+        kind: ModelKind::Relay,
         identifier: identifier("events"),
         schema_fingerprint: [1; 32],
         branch_key: None,
@@ -5126,6 +5422,13 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     let schema = test_schema(&[("customer_id", ParseAsType::String)]);
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        registry.clone(),
+        services.clone(),
+        super::RelayRetention::default(),
+    );
     let mut subscription_rx = services.subscription_receiver();
     let mut runtime_rx = services
         .fanout
@@ -5171,6 +5474,10 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
         AckOutcome::Ack
     );
     drop(subscription_batch);
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -5181,6 +5488,13 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        registry.clone(),
+        services.clone(),
+        super::RelayRetention::default(),
+    );
     let mut runtime_rx = services
         .fanout
         .runtime_consumer_receiver_for_mode(AckMode::Detached);
@@ -5211,6 +5525,10 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
             .expect("ack completion should resolve"),
         AckOutcome::Ack
     );
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -5221,6 +5539,13 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        registry.clone(),
+        services.clone(),
+        super::RelayRetention::default(),
+    );
     let mut first_consumer = services
         .fanout
         .runtime_consumer_receiver_for_mode(AckMode::Attached);
@@ -5261,6 +5586,10 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
             .expect("ack completion should resolve"),
         AckOutcome::Ack
     );
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -5286,6 +5615,13 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         Vec::new(),
         None,
     ));
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        registry.clone(),
+        services.clone(),
+        super::RelayRetention::default(),
+    );
     let mut relay_runtime = super::ConcreteRelayRuntime::new(super::ConcreteRelayRuntimeBuild {
         runtime: runtime.clone(),
         domain: domain.clone(),
@@ -5334,6 +5670,10 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
             .expect("ack completion should resolve"),
         AckOutcome::Ack
     );
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -5626,7 +5966,7 @@ fn relay_fanout_shares_arrow_columns_and_exposes_row_views() {
 }
 
 #[tokio::test]
-async fn remote_stream_payload_touches_expiring_stream_state() {
+async fn owner_ingress_touches_expiring_stream_state() {
     let runtime = super::Runtime::default();
     let domain = Domain::parse("default").expect("valid domain");
     let relay_id = Identifier::parse("notifications").expect("valid identifier");
@@ -5640,7 +5980,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
     let mut relay_schemas = HashMap::default();
     relay_schemas.insert(relay_id.clone(), schema.clone());
     let mut relay_services = HashMap::default();
-    relay_services.insert(relay_id.clone(), services);
+    relay_services.insert(relay_id.clone(), services.clone());
     runtime.executions.insert(
         domain.clone(),
         super::DomainExecution {
@@ -5672,7 +6012,8 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
             placement_tasks: HashMap::default(),
-            materializer_tasks: HashMap::default(),
+            relay_state_tasks: HashMap::default(),
+            relay_owner_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -5684,9 +6025,16 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
         .expect("batch ipc should serialize");
 
     let key = u32_branch_key("user_id", 42);
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay_id,
+        expiring_state.registry.clone(),
+        services,
+        super::RelayRetention::default(),
+    );
     runtime
         .handle_remote_stream(RelayPayload {
-            kind: RelayPayloadKind::Routed,
+            kind: RelayPayloadKind::Ingress,
             domain: domain.clone(),
             relay: relay_id.clone(),
             key: BranchKey::to_remote_key(&key),
@@ -5698,15 +6046,152 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
                     .to_remote(),
             ],
             acks: vec![None],
+            admission: Some(RemoteAckRegistration {
+                ack_id: 1,
+                reply_node_id: "producer-node".to_string(),
+            }),
         })
         .await
         .expect("remote relay payload should dispatch");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            tokio::task::consume_budget().await;
+            if runtime
+                .describe_local_stream_exists(&domain, &relay_id, &key)
+                .expect("stream existence should be queryable")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owner should admit and observe the relay branch");
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should drain");
+}
 
-    assert!(
-        runtime
-            .describe_local_stream_exists(&domain, &relay_id, &key)
-            .expect("stream existence should be queryable")
+#[tokio::test]
+async fn relay_owner_enforces_branch_capacity_across_batches() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let relay = identifier("orders");
+    let registry = super::RelayRegistry::new();
+    let services = test_relay_boundary_services();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        registry.clone(),
+        services.clone(),
+        super::RelayRetention {
+            branch_ttl: None,
+            branch_capacity: Some(2),
+        },
     );
+    let schema = test_schema(&[]);
+    let keys = [
+        string_branch_key("tenant", "acme"),
+        string_branch_key("tenant", "globex"),
+        string_branch_key("tenant", "initech"),
+    ];
+    for key in &keys {
+        tokio::task::consume_budget().await;
+        let batch = super::RelayRecordBatch::single(
+            schema.clone(),
+            key.clone(),
+            test_runtime_row([]),
+            AckSet::empty(),
+        )
+        .expect("relay batch should build");
+        services
+            .enqueue_owner_batch(&runtime.metrics, &domain, &relay, None, &batch)
+            .await
+            .expect("owner should admit the batch");
+    }
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            tokio::task::consume_budget().await;
+            if !registry.contains_key(&keys[0])
+                && registry.contains_key(&keys[1])
+                && registry.contains_key(&keys[2])
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("relay owner should evict the least-recently-used branch");
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
+}
+
+#[tokio::test]
+async fn relay_owner_expires_branch_presence_by_ttl() {
+    let runtime = super::Runtime::with_persistence(
+        None,
+        Duration::from_secs(60),
+        super::RuntimeTestHooks {
+            branch_instance_expiration_scan_interval: Some(Duration::from_millis(5)),
+            ..Default::default()
+        },
+    )
+    .expect("runtime should build");
+    let domain = domain("default");
+    let relay = identifier("orders");
+    let key = string_branch_key("tenant", "acme");
+    let registry = super::RelayRegistry::new();
+    let services = test_relay_boundary_services();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        registry.clone(),
+        services.clone(),
+        super::RelayRetention {
+            branch_ttl: Some(Duration::from_millis(20)),
+            branch_capacity: None,
+        },
+    );
+    let batch = super::RelayRecordBatch::single(
+        test_schema(&[]),
+        key.clone(),
+        test_runtime_row([]),
+        AckSet::empty(),
+    )
+    .expect("relay batch should build");
+    services
+        .enqueue_owner_batch(&runtime.metrics, &domain, &relay, None, &batch)
+        .await
+        .expect("owner should admit the batch");
+
+    timeout(Duration::from_secs(1), async {
+        while !registry.contains_key(&key) {
+            tokio::task::consume_budget().await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("relay owner should observe branch presence");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            tokio::task::consume_budget().await;
+            if !registry.contains_key(&key) {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("relay owner should expire idle branch presence");
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -5751,7 +6236,8 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
                 placement_tasks: HashMap::default(),
-                materializer_tasks: HashMap::default(),
+                relay_state_tasks: HashMap::default(),
+                relay_owner_tasks: HashMap::default(),
                 clients: HashMap::default(),
                 tasks: Vec::new(),
             },
@@ -5762,7 +6248,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
 }
 
 #[tokio::test]
-async fn materializer_shutdown_drains_every_ready_relay_batch() {
+async fn relay_state_shutdown_drains_every_ready_batch() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let relay = identifier("materialized_orders");
@@ -5772,7 +6258,7 @@ async fn materializer_shutdown_drains_every_ready_relay_batch() {
             RuntimeStatePlacement {
                 domain: domain.clone(),
                 state: RuntimeStateKind::MaterializedRelay,
-                kind: ModelKind::Materializer,
+                kind: ModelKind::Relay,
                 identifier: relay.clone(),
                 schema_fingerprint: [0; 32],
                 branch_key: None,
@@ -5783,14 +6269,12 @@ async fn materializer_shutdown_drains_every_ready_relay_batch() {
         .expect("materialized state should initialize");
     let broadcast = super::RelayBroadcast::with_capacity(nonzero_capacity(2));
     let receiver = super::RelayRuntimeFanIn::new(broadcast.new_receiver());
-    let (shutdown, _) = watch::channel(false);
-    let task = runtime.spawn_materializer_task(
+    let task = runtime.spawn_relay_state_task(
         &domain,
-        &shutdown,
-        super::MaterializerTaskSpec {
+        super::RelayStateTaskSpec {
             relay: relay.clone(),
             state: state.clone(),
-            retention: super::MaterializedRelayRetention::default(),
+            retention: super::RelayRetention::default(),
             receiver,
         },
     );
@@ -5813,11 +6297,9 @@ async fn materializer_shutdown_drains_every_ready_relay_batch() {
             .expect("materialized batch should queue");
     }
 
-    shutdown.send(true).expect("materializer should stop");
-    timeout(Duration::from_secs(1), task)
+    task.stop(Duration::from_secs(1))
         .await
-        .expect("materializer should drain before the shutdown deadline")
-        .expect("materializer task should join");
+        .expect("relay state task should drain before the shutdown deadline");
 
     assert!(state.entries.contains_key(&acme));
     assert!(state.entries.contains_key(&beta));
@@ -5886,7 +6368,8 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
             placement_tasks: HashMap::default(),
-            materializer_tasks: HashMap::default(),
+            relay_state_tasks: HashMap::default(),
+            relay_owner_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -6163,7 +6646,7 @@ fn stopped_unpaced_domain_rejects_ingestion() {
 }
 
 #[tokio::test]
-async fn direct_fanout_subscription_uses_configured_buffer_capacity() {
+async fn direct_fanout_owner_buffer_uses_configured_capacity() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let relay = identifier("orders");
@@ -6171,16 +6654,10 @@ async fn direct_fanout_subscription_uses_configured_buffer_capacity() {
     let fanout = runtime
         .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(1))
         .await;
-    let direct_fanout = match &fanout {
-        super::RelayBoundaryFanout::Direct(fanout) => fanout.clone(),
-        super::RelayBoundaryFanout::BranchCollapse(_) => {
-            panic!("unbranched relay must use direct fanout")
-        }
-    };
-    let mut receiver = fanout.subscription_receiver();
+    let mut receiver = fanout.activate_owner_buffer();
+    let owner_buffer = fanout.owner_buffer().expect("owner buffer must be active");
 
-    direct_fanout
-        .subscriptions
+    owner_buffer
         .broadcast(
             super::RelayRecordBatch::single(
                 schema.clone(),
@@ -6194,10 +6671,9 @@ async fn direct_fanout_subscription_uses_configured_buffer_capacity() {
         .expect("first send should succeed");
 
     let pending_send = tokio::spawn({
-        let direct_fanout = direct_fanout.clone();
+        let owner_buffer = owner_buffer.clone();
         async move {
-            direct_fanout
-                .subscriptions
+            owner_buffer
                 .broadcast(
                     super::RelayRecordBatch::single(
                         schema,
@@ -6236,7 +6712,7 @@ async fn direct_fanout_subscription_uses_configured_buffer_capacity() {
 }
 
 #[tokio::test]
-async fn relay_boundary_fanout_resize_preserves_existing_subscription_receiver() {
+async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let relay = identifier("orders");
@@ -6244,7 +6720,7 @@ async fn relay_boundary_fanout_resize_preserves_existing_subscription_receiver()
     let fanout = runtime
         .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(1))
         .await;
-    let mut receiver = fanout.subscription_receiver();
+    let mut receiver = fanout.activate_owner_buffer();
     let resized = runtime
         .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(5))
         .await;
@@ -6255,10 +6731,13 @@ async fn relay_boundary_fanout_resize_preserves_existing_subscription_receiver()
             super::RelayBoundaryFanout::Direct(resized_fanout),
         ) => {
             assert!(Arc::ptr_eq(original, resized_fanout));
-            assert_eq!(resized_fanout.subscriptions.capacity(), 5);
-            assert_eq!(resized_fanout.attached_runtime_consumers.capacity(), 5);
-            assert_eq!(resized_fanout.detached_runtime_consumers.capacity(), 5);
-            &resized_fanout.subscriptions
+            assert_eq!(resized_fanout.owner_buffer_len(), Some((0, 5)));
+            assert_eq!(resized_fanout.subscriptions.capacity(), 1);
+            assert_eq!(resized_fanout.attached_runtime_consumers.capacity(), 1);
+            assert_eq!(resized_fanout.detached_runtime_consumers.capacity(), 1);
+            resized_fanout
+                .owner_buffer()
+                .expect("owner buffer must remain active")
         }
         _ => panic!("unbranched relay must use direct fanout"),
     };
@@ -8419,6 +8898,13 @@ async fn branched_root_without_children_acks_success() {
     let root_relay = identifier("tenant_orders");
     let root_registry = super::RelayRegistry::new();
     let root_services = test_relay_boundary_services();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &root_domain,
+        &root_relay,
+        root_registry.clone(),
+        root_services.clone(),
+        super::RelayRetention::default(),
+    );
     let mut root = super::BranchRuntime {
         key: Some(concrete_branch_key([(
             identifier("tenant"),
@@ -8446,8 +8932,8 @@ async fn branched_root_without_children_acks_success() {
         )]
         .into_iter()
         .collect(),
-        materializers: HashMap::default(),
-        materializer_epoch: None,
+        materialized_states: HashMap::default(),
+        relay_state_epoch: None,
         processors: HashMap::default(),
     };
     let graph = StdArc::new(ArcSwapOption::from(None));
@@ -8475,6 +8961,10 @@ async fn branched_root_without_children_acks_success() {
             .expect("ack completion should resolve"),
         AckOutcome::Ack
     );
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -8494,6 +8984,14 @@ async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filte
         Vec::new(),
         None,
     ));
+    let registry = super::RelayRegistry::new();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &root_relay,
+        registry.clone(),
+        services.clone(),
+        super::RelayRetention::default(),
+    );
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
     let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Reingestor,
@@ -8506,8 +9004,8 @@ async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filte
         relays: [(
             root_relay.clone(),
             super::RelayProcessorRelayTemplate {
-                registry: super::RelayRegistry::new(),
-                services,
+                registry,
+                services: services.clone(),
             },
         )]
         .into_iter()
@@ -8626,6 +9124,10 @@ async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filte
         ]
     );
     route_runtime.shutdown().await;
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -8640,6 +9142,14 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         Vec::new(),
         None,
     ));
+    let registry = super::RelayRegistry::new();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &root_relay,
+        registry.clone(),
+        services.clone(),
+        super::RelayRetention::default(),
+    );
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
     let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Reingestor,
@@ -8652,8 +9162,8 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         relays: [(
             root_relay.clone(),
             super::RelayProcessorRelayTemplate {
-                registry: super::RelayRegistry::new(),
-                services,
+                registry,
+                services: services.clone(),
             },
         )]
         .into_iter()
@@ -8712,6 +9222,10 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
 
         assert_eq!(instances.len(), 64);
     }
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -8721,6 +9235,13 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     let relay = identifier("tenant_orders");
     let output_registry = super::RelayRegistry::new();
     let output_services = test_relay_boundary_services();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        output_registry.clone(),
+        output_services.clone(),
+        super::RelayRetention::default(),
+    );
     let mut output_subscription = output_services.subscription_receiver();
     let schema = test_schema(&[
         ("tenant", ParseAsType::String),
@@ -8766,7 +9287,8 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
             placement_tasks: HashMap::default(),
-            materializer_tasks: HashMap::default(),
+            relay_state_tasks: HashMap::default(),
+            relay_owner_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -8788,8 +9310,8 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
                 relays: [(
                     relay.clone(),
                     super::RelayProcessorRelayTemplate {
-                        registry: output_registry,
-                        services: output_services,
+                        registry: output_registry.clone(),
+                        services: output_services.clone(),
                     },
                 )]
                 .into_iter()
@@ -8935,6 +9457,10 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     let _ = shutdown_tx.send(true);
     let _ = task.await;
     branched_runtime.shutdown().await;
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -8985,7 +9511,8 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
             placement_tasks: HashMap::default(),
-            materializer_tasks: HashMap::default(),
+            relay_state_tasks: HashMap::default(),
+            relay_owner_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -9136,145 +9663,6 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
     );
 }
 
-#[test]
-fn branch_runtime_detach_removes_relay_presence_without_deleting_materialized_state() {
-    let runtime = super::Runtime::default();
-    let domain = domain("default");
-    let relay = identifier("tenant_orders");
-    let branch_key = string_branch_key("tenant", "acme");
-    let registry = super::RelayRegistry::new();
-    registry.touch(&branch_key, Timestamp::from_unix_nanos(1));
-    let materialized_record = test_runtime_row([(
-        "tenant".to_string(),
-        RuntimeValue::String("acme".to_string()),
-    )]);
-    let materialized_state = Arc::new(
-        super::ReplicatedMaterializedRelayState::new(
-            RuntimeStatePlacement {
-                domain: domain.clone(),
-                state: RuntimeStateKind::MaterializedRelay,
-                kind: ModelKind::Materializer,
-                identifier: relay.clone(),
-                schema_fingerprint: [0; 32],
-                branch_key: branch_key.clone(),
-            },
-            materialized_record.arrow_schema(),
-            None,
-            "node-1".to_string(),
-            &RuntimeMetrics::default(),
-            None,
-        )
-        .expect("materialized state should build"),
-    );
-    materialized_state
-        .entries
-        .insert(branch_key.clone(), materialized_record);
-    let branch = super::BranchRuntime {
-        key: branch_key.clone(),
-        runtime: runtime.clone(),
-        domain: domain.clone(),
-        source_kind: ModelKind::Ingestor,
-        source: identifier("tenant_ingestor"),
-        root_relay: relay.clone(),
-        relays: [(
-            relay.clone(),
-            super::ConcreteRelayRuntime::new(super::ConcreteRelayRuntimeBuild {
-                runtime,
-                domain,
-                relay: relay.clone(),
-                registry: registry.clone(),
-                services: test_relay_boundary_services(),
-                key: branch_key.clone(),
-            }),
-        )]
-        .into_iter()
-        .collect(),
-        materializers: [(relay, materialized_state.clone())].into_iter().collect(),
-        materializer_epoch: None,
-        processors: HashMap::default(),
-        error_policies: ErrorPolicies::handled_by_log(),
-    };
-
-    branch.detach();
-
-    assert!(!registry.contains_key(&branch_key));
-    assert!(materialized_state.entries.contains_key(&branch_key));
-}
-
-#[tokio::test]
-async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
-    let runtime = super::Runtime::default();
-    let domain = domain("default");
-    let root_relay = identifier("tenant_orders");
-    let registry = super::RelayRegistry::new();
-    let schema = test_schema(&[("tenant", ParseAsType::String)]);
-    let branched_runtime = super::BranchExecutionRuntime::new(
-        runtime,
-        domain.clone(),
-        identifier("tenant_ingestor"),
-        StdArc::new(ArcSwapOption::from(None)),
-        super::BranchInstanceTemplate {
-            source_kind: ModelKind::Ingestor,
-            source: identifier("tenant_ingestor"),
-            root_relay: root_relay.clone(),
-            branch: None,
-            branch_ttl: Some(Duration::from_secs(30)),
-            branch_max_instances: None,
-            error_policies: ErrorPolicies::handled_by_log(),
-            relays: [(
-                root_relay,
-                super::RelayProcessorRelayTemplate {
-                    registry: registry.clone(),
-                    services: test_relay_boundary_services(),
-                },
-            )]
-            .into_iter()
-            .collect(),
-            materialized_streams: HashSet::default(),
-            processors: HashMap::default(),
-        },
-        Duration::from_secs(30),
-    );
-    let branch_key = string_branch_key("tenant", "acme");
-
-    branched_runtime
-        .sender()
-        .send(
-            super::RelayRecordBatch::single(
-                schema,
-                branch_key.clone(),
-                test_runtime_row([(
-                    "tenant".to_string(),
-                    RuntimeValue::String("acme".to_string()),
-                )]),
-                AckSet::empty(),
-            )
-            .expect("branch input batch should build"),
-        )
-        .await
-        .expect("branched runtime should accept input");
-
-    let deadline = Instant::now() + Duration::from_secs(1);
-    loop {
-        tokio::task::consume_budget().await;
-        if registry.contains_key(&branch_key) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "branch relay presence should be registered before shutdown"
-        );
-        sleep(Duration::from_millis(10)).await;
-    }
-
-    branched_runtime.shutdown().await;
-
-    assert!(
-        !registry.contains_key(&branch_key),
-        "branched runtime shutdown must evict concrete branch relay presence"
-    );
-}
-
 #[tokio::test]
 async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     let runtime = super::Runtime::default();
@@ -9290,6 +9678,14 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         Vec::new(),
         None,
     ));
+    let registry = super::RelayRegistry::new();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &root_relay,
+        registry.clone(),
+        services.clone(),
+        super::RelayRetention::default(),
+    );
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let branched_runtime = super::BranchExecutionRuntime::new(
         runtime,
@@ -9307,8 +9703,8 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
             relays: [(
                 root_relay,
                 super::RelayProcessorRelayTemplate {
-                    registry: super::RelayRegistry::new(),
-                    services,
+                    registry,
+                    services: services.clone(),
                 },
             )]
             .into_iter()
@@ -9340,6 +9736,10 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     assert_eq!(batch.message_count(), 1);
 
     branched_runtime.shutdown().await;
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[tokio::test]
@@ -9372,6 +9772,14 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             Vec::new(),
             None,
         ));
+        let registry = super::RelayRegistry::new();
+        let owner_task = runtime.spawn_relay_owner_task(
+            &domain,
+            &root_relay,
+            registry.clone(),
+            services.clone(),
+            super::RelayRetention::default(),
+        );
         let schema = test_schema(&[
             ("tenant", ParseAsType::String),
             ("user_id", ParseAsType::U32),
@@ -9410,8 +9818,8 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
                     relays: [(
                         root_relay,
                         super::RelayProcessorRelayTemplate {
-                            registry: super::RelayRegistry::new(),
-                            services,
+                            registry,
+                            services: services.clone(),
                         },
                     )]
                     .into_iter()
@@ -9476,6 +9884,10 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         assert_eq!(beta.message_count(), 2);
 
         route_runtime.shutdown().await;
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
     }
 }
 
@@ -9520,109 +9932,6 @@ fn relay_batch_estimated_bytes_counts_arrow_payload_buffers() {
 
     assert!(allocated_bytes > payload_bytes);
     assert_eq!(batch.estimated_bytes(), payload_bytes);
-}
-
-#[tokio::test]
-async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
-    let runtime = super::Runtime::default();
-    let domain = domain("default");
-    let root_relay = identifier("tenant_orders");
-    let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1));
-    let mut fan_in =
-        super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let services = Arc::new(super::RelayBoundaryServices::new(
-        fanout.clone(),
-        1,
-        0,
-        Vec::new(),
-        None,
-    ));
-    let schema = test_schema(&[("tenant", ParseAsType::String)]);
-    let template = super::BranchInstanceTemplate {
-        source_kind: ModelKind::Ingestor,
-        source: identifier("metric_ingestor"),
-        root_relay: root_relay.clone(),
-        branch: None,
-        branch_ttl: None,
-        branch_max_instances: None,
-        error_policies: ErrorPolicies::handled_by_log(),
-        relays: [(
-            root_relay.clone(),
-            super::RelayProcessorRelayTemplate {
-                registry: super::RelayRegistry::new(),
-                services,
-            },
-        )]
-        .into_iter()
-        .collect(),
-        materialized_streams: HashSet::default(),
-        processors: HashMap::default(),
-    };
-    let inputs = (0..8)
-        .map(|index| {
-            let tenant = format!("tenant-{index}");
-            super::RelayRecordBatch::single(
-                schema.clone(),
-                string_branch_key("tenant", &tenant),
-                test_runtime_row([("tenant".to_string(), RuntimeValue::String(tenant))]),
-                AckSet::empty(),
-            )
-            .expect("branch input batch should build")
-        })
-        .collect::<Vec<_>>();
-    let graph = StdArc::new(ArcSwapOption::from(None));
-    let dispatch_task = tokio::spawn({
-        let runtime = runtime.clone();
-        let domain = domain.clone();
-        let ingestor = identifier("metric_ingestor");
-        let template = template.clone();
-        async move {
-            let mut instances =
-                BranchInstanceRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
-            super::BranchExecutionRuntime::dispatch_prepared_inputs(
-                super::BranchExecutionDispatchContext {
-                    runtime_handle: &runtime,
-                    domain: &domain,
-                    ingestor: &ingestor,
-                    graph: &graph,
-                    template: &template,
-                    now: Timestamp::from_unix_nanos(1_000_000_000),
-                },
-                &mut instances,
-                inputs,
-            )
-            .await
-        }
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(1);
-    loop {
-        tokio::task::consume_budget().await;
-        if fanout.runtime_consumer_buffer_len_for_mode(AckMode::Attached) == 1 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "branched dispatch should fill the bounded runtime consumer buffer"
-        );
-        sleep(Duration::from_millis(10)).await;
-    }
-
-    dispatch_task.abort();
-    let _ = dispatch_task.await;
-
-    let first = timeout(Duration::from_secs(1), fan_in.recv())
-        .await
-        .expect("queued branch batch should be readable")
-        .expect("runtime consumer should remain open");
-    assert_eq!(first.message_count(), 1);
-    assert!(
-        timeout(Duration::from_millis(100), fan_in.recv())
-            .await
-            .is_err(),
-        "cancelled branched dispatch must not keep detached branch tasks that publish after \
-         receiver capacity is freed"
-    );
 }
 
 #[tokio::test]
@@ -11567,6 +11876,9 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             )
         })
         .collect();
+    let relay_registries = [(identifier("input"), super::RelayRegistry::new())]
+        .into_iter()
+        .collect();
     runtime.executions.insert(
         domain.clone(),
         super::DomainExecution {
@@ -11579,7 +11891,7 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             start_version: 0,
             shutdown,
             graph: StdArc::new(ArcSwapOption::empty()),
-            relay_registries: HashMap::default(),
+            relay_registries,
             relay_schemas: HashMap::default(),
             relay_services: HashMap::default(),
             relay_branchings: HashMap::default(),
@@ -11598,7 +11910,8 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
             placement_tasks: HashMap::default(),
-            materializer_tasks: HashMap::default(),
+            relay_state_tasks: HashMap::default(),
+            relay_owner_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -11645,6 +11958,57 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             .await
             .expect("missing dependencies should produce a policy outcome"),
         super::MaterializedDependencyResolution::Skip
+    ));
+
+    let (acks, completion) = AckSet::root();
+    let retained_row = state_schema
+        .batch_from_test_rows([[(
+            "status".to_string(),
+            RuntimeValue::String("pending".to_string()),
+        )]])
+        .expect("required-wait branch Arrow batch must build")
+        .runtime_row(0, RuntimeRecordMetadata::test())
+        .expect("required-wait branch Arrow row must build");
+    let retained = super::RelayRecordBatch::single(
+        state_schema.clone(),
+        string_branch_key("tenant", "acme"),
+        retained_row,
+        acks,
+    )
+    .expect("required-wait branch batch must build");
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let input_relay = identifier("input");
+    let dependencies = [nervix_models::MaterializedStateDependency {
+        relay: identifier("profiles"),
+        policy: nervix_models::MaterializedStatePolicy::RequiredWait,
+    }];
+    let resolution = runtime.resolve_materialized_dependencies_for_batch(
+        &domain,
+        &input_relay,
+        &dependencies,
+        retained,
+        &mut shutdown_rx,
+        true,
+    );
+    tokio::pin!(resolution);
+    assert!(
+        timeout(Duration::from_millis(50), &mut resolution)
+            .await
+            .is_err(),
+        "an empty non-owner relay registry must not evict retained branch work"
+    );
+    shutdown_tx.send_replace(true);
+    assert!(
+        timeout(Duration::from_secs(1), &mut resolution)
+            .await
+            .expect("shutdown should release retained branch work")
+            .expect("retained branch resolution should not fail")
+            .is_none()
+    );
+    assert!(matches!(
+        completion.wait().await,
+        AckOutcome::NoAck(reason)
+            if reason.contains("node stopped while waiting for required materialized state")
     ));
 
     let (acks, completion) = AckSet::root();

@@ -26,15 +26,15 @@ use nervix_models::{
     AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchSelection, CborType,
     ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction,
     CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreateMaterializer,
-    CreatePlacement, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
-    CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
-    Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind,
-    MqttIngestMode, OtelAggregationTemporality, OtelMetricKind, OtelSignal, OtelValueMapping,
-    OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementPolicy, PlacementRuntimeNode,
-    ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode, SchemaField,
-    SignalingWireFormat, SqsFifoGroup, WireSchemaDefinition,
+    CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreatePlacement, CreateSchema,
+    CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule,
+    DropModel, EmitSink, EndpointType, Expression, Identifier, IngestSource, IngestTimestampSource,
+    JsonType, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+    ModelChangeAspect, ModelKind, MqttIngestMode, OtelAggregationTemporality, OtelMetricKind,
+    OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule,
+    PlacementPolicy, PlacementRuntimeNode, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
+    RouteConstruction, ScheduledNode, SchemaField, SignalingWireFormat, SqsFifoGroup,
+    WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -442,14 +442,11 @@ impl Registry {
             let models = domain_schedule
                 .nodes
                 .iter()
-                .filter_map(|node| {
-                    if let Model::Materializer(_) = node.config.as_ref() {
-                        return None;
-                    }
-                    Some((
+                .map(|node| {
+                    (
                         RegistryKey::new(node.kind, node.identifier.clone()),
                         node.config.as_ref().clone(),
-                    ))
+                    )
                 })
                 .collect::<HashMap<_, _>>();
             self.synchronize_domain_models(&domain_schedule.domain, models)?;
@@ -1947,7 +1944,7 @@ impl DomainState {
                         graph.add_edge(signaling_protocol, source, EdgeKind::RequiredBy);
                     }
                 }
-                Model::Materializer(_) | Model::Placement(_) => {}
+                Model::Placement(_) => {}
                 Model::SignalingProtocol(protocol) => {
                     ensure_signaling_protocol_is_valid(domain, identifier, protocol)?;
                 }
@@ -3183,7 +3180,6 @@ impl DomainState {
         validate_endpoint_paths(domain, models)?;
         infer_stream_branchings(domain, models, &indices, &mut graph)?;
         validate_processing_branch_selections(domain, models, &indices, &graph)?;
-        attach_materializer_nodes(models, &mut indices, &mut graph);
         let placement = PlacementAnalysis::build(domain, models, &indices, &mut graph)?;
 
         Ok(Self {
@@ -3639,12 +3635,9 @@ impl PlacementTopology {
                 continue;
             }
             for relay in placement_materialized_relays(model) {
-                let materializer = RegistryKey::new(ModelKind::Materializer, relay.clone());
-                if indices.contains_key(&materializer) {
-                    adjacency_sets
-                        .entry(materializer)
-                        .or_default()
-                        .insert(key.clone());
+                let relay = RegistryKey::new(ModelKind::Relay, relay.clone());
+                if indices.contains_key(&relay) {
+                    adjacency_sets.entry(relay).or_default().insert(key.clone());
                 }
             }
         }
@@ -3819,17 +3812,9 @@ fn resolve_placement_member(
 ) -> Result<ResolvedPlacementMember, Report<RegistryError>> {
     let mut eligible = Vec::new();
     let mut cluster_wide_ingestor = false;
-    let mut relay_without_state = false;
     let mut ineligible_kinds = Vec::new();
     for (key, model) in models.iter().filter(|(key, _)| key.identifier == *member) {
         match model {
-            Model::Relay(relay) if relay.materialized_state.is_some() => {
-                eligible.push(ResolvedPlacementMember {
-                    runtime: RegistryKey::new(ModelKind::Materializer, member.clone()),
-                    pin: key.clone(),
-                });
-            }
-            Model::Relay(_) => relay_without_state = true,
             Model::Ingestor(_) if model.executes_on_every_cluster_node() => {
                 cluster_wide_ingestor = true;
             }
@@ -3839,7 +3824,6 @@ fn resolve_placement_member(
                     pin: key.clone(),
                 });
             }
-            Model::Materializer(_) => {}
             _ => ineligible_kinds.push(key.kind),
         }
     }
@@ -3862,12 +3846,6 @@ fn resolve_placement_member(
         format!(
             "placement member '{}' is not placement-eligible: server-listener ingestors execute \
              on every cluster node",
-            member
-        )
-    } else if relay_without_state {
-        format!(
-            "placement member '{}' is a relay that is not materialized and is not \
-             placement-eligible",
             member
         )
     } else if !ineligible_kinds.is_empty() {
@@ -3899,6 +3877,7 @@ fn is_user_placement_member_model(model: &Model) -> bool {
             | Model::Inferencer(_)
             | Model::Ingestor(_)
             | Model::Reingestor(_)
+            | Model::Relay(_)
             | Model::Lookup(_)
             | Model::Junction(_)
             | Model::Deduplicator(_)
@@ -3912,7 +3891,6 @@ fn is_user_placement_member_model(model: &Model) -> bool {
 
 fn is_placement_eligible_member_model(model: &Model) -> bool {
     match model {
-        Model::Relay(relay) => relay.materialized_state.is_some(),
         Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
         _ => is_user_placement_member_model(model),
     }
@@ -3963,7 +3941,6 @@ fn ensure_placement_member_shape_change_allowed(
 fn is_placement_runtime_model(model: &Model) -> bool {
     match model {
         Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
-        Model::Materializer(_) => true,
         _ => is_user_placement_member_model(model),
     }
 }
@@ -4410,7 +4387,7 @@ impl ActiveGraph {
         for (index, node, _) in nodes {
             let key = node.key();
             let group_index = placement.group_by_member.get(&key).copied();
-            let assigned_nodes = if let Some(existing) =
+            let mut assigned_nodes = if let Some(existing) =
                 group_index.and_then(|group_index| group_assignments.get(&group_index))
             {
                 existing.clone()
@@ -4448,6 +4425,11 @@ impl ActiveGraph {
                 }
                 assignment
             };
+            if let Model::Relay(relay) = node.config.as_ref()
+                && relay.materialized_state.is_none()
+            {
+                assigned_nodes.truncate(1);
+            }
             let primary_node = assigned_nodes.first().cloned();
             if !assigned_nodes.is_empty() {
                 assigned_by_key.insert(key, assigned_nodes.clone());
@@ -5474,7 +5456,7 @@ fn is_schedulable_model(model: &Model) -> bool {
             | Model::Inferencer(_)
             | Model::Ingestor(_)
             | Model::Reingestor(_)
-            | Model::Materializer(_)
+            | Model::Relay(_)
             | Model::Lookup(_)
             | Model::Deduplicator(_)
             | Model::Correlator(_)
@@ -5484,57 +5466,6 @@ fn is_schedulable_model(model: &Model) -> bool {
             | Model::WasmProcessor(_)
             | Model::Emitter(_)
     )
-}
-
-fn attach_materializer_nodes(
-    models: &HashMap<RegistryKey, Model>,
-    indices: &mut HashMap<RegistryKey, NodeIndex>,
-    graph: &mut DiGraph<ActiveNode, EdgeKind>,
-) {
-    let materialized_streams = models
-        .iter()
-        .filter_map(|(key, model)| {
-            let Model::Relay(relay) = model else {
-                return None;
-            };
-            relay
-                .materialized_state
-                .clone()
-                .map(|state| (key.identifier.clone(), relay.clone(), state))
-        })
-        .collect::<Vec<_>>();
-
-    for (identifier, relay, state) in materialized_streams {
-        let Some(stream_index) = indices
-            .get(&RegistryKey::new(ModelKind::Relay, identifier.clone()))
-            .copied()
-        else {
-            continue;
-        };
-        let effective_branching = graph
-            .node_weight(stream_index)
-            .and_then(|node| node.effective_branching.clone());
-        let effective_branching_schema = graph
-            .node_weight(stream_index)
-            .and_then(|node| node.effective_branching_schema.clone());
-        let materializer = CreateMaterializer {
-            relay: relay.name,
-            state,
-        };
-        let materializer_index = graph.add_node(ActiveNode {
-            identifier: identifier.clone(),
-            kind: ModelKind::Materializer,
-            config: Arc::new(Model::Materializer(materializer)),
-            effective_branching,
-            effective_branching_schema,
-        });
-        indices.insert(
-            RegistryKey::new(ModelKind::Materializer, identifier),
-            materializer_index,
-        );
-        graph.add_edge(stream_index, materializer_index, EdgeKind::RequiredBy);
-        graph.add_edge(stream_index, materializer_index, EdgeKind::SendsTo);
-    }
 }
 
 fn validate_branch_model(
@@ -6378,7 +6309,7 @@ impl AssignmentPlanner<'_> {
             | Model::Inferencer(_)
             | Model::Ingestor(_)
             | Model::Reingestor(_)
-            | Model::Materializer(_)
+            | Model::Relay(_)
             | Model::Lookup(_)
             | Model::Deduplicator(_)
             | Model::Correlator(_)
@@ -13268,13 +13199,14 @@ mod tests {
                 0,
                 PlacementPolicy::Neutral,
             );
-        assert!(
-            schedule
-                .nodes
-                .iter()
-                .any(|node| node.kind == ModelKind::Materializer),
-            "fixture schedule must include its synthetic materializer"
-        );
+        let scheduled_relay = schedule
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == ModelKind::Relay && node.identifier == identifier("notifications")
+            })
+            .expect("fixture schedule must include its materialized relay");
+        assert_eq!(scheduled_relay.assigned_nodes, ["node-1"]);
 
         let replica_path = temp_db_path();
         {
@@ -14398,23 +14330,28 @@ mod tests {
             .map(|member| member.identifier.as_str())
             .collect::<Vec<_>>();
         corridor.sort_unstable();
-        assert_eq!(corridor, vec!["emit", "ing", "p99_proc"]);
-        assert_eq!(rule.claims.len(), 3, "a three-member corridor is a clique");
-        assert_eq!(endpoint.witnesses.len(), 1);
         assert_eq!(
-            endpoint.witnesses[0].captured.identifier,
-            identifier("p99_proc")
+            corridor,
+            vec!["emit", "ing", "notifications", "p99", "p99_proc"]
         );
-        assert_eq!(
-            endpoint.witnesses[0]
+        assert_eq!(rule.claims.len(), 10, "a five-member corridor is a clique");
+        assert_eq!(endpoint.witnesses.len(), 3);
+        let mut captured = endpoint
+            .witnesses
+            .iter()
+            .map(|witness| witness.captured.identifier.as_str())
+            .collect::<Vec<_>>();
+        captured.sort_unstable();
+        assert_eq!(captured, ["notifications", "p99", "p99_proc"]);
+        assert!(endpoint.witnesses.iter().all(|witness| {
+            witness
                 .path
                 .iter()
                 .map(|member| member.identifier.as_str())
-                .collect::<Vec<_>>(),
-            vec!["ing", "p99_proc", "emit"]
-        );
+                .eq(["ing", "notifications", "p99_proc", "p99", "emit"])
+        }));
         assert_eq!(plan.require_groups.len(), 1);
-        assert_eq!(plan.require_groups[0].members.len(), 3);
+        assert_eq!(plan.require_groups[0].members.len(), 5);
 
         let _ = fs::remove_dir_all(path);
     }
@@ -14548,8 +14485,12 @@ mod tests {
         assert_eq!(error_domain, domain.as_str());
         assert_eq!([left_rule.as_str(), right_rule.as_str()], ["cut", "glue"]);
         let witness = [left_identifier.as_str(), right_identifier.as_str()];
-        assert!(witness.contains(&"ing"));
-        assert!(witness.contains(&"p99_proc"));
+        assert_ne!(witness[0], witness[1]);
+        assert!(
+            witness
+                .iter()
+                .all(|member| { ["ing", "notifications", "p99_proc"].contains(member) })
+        );
 
         let _ = fs::remove_dir_all(path);
     }
@@ -14601,7 +14542,7 @@ mod tests {
             .placement_plan(PlacementPolicy::Neutral);
         let endpoint = &plan.rules[0].endpoint_pairs[0];
         assert!(endpoint.connected);
-        assert_eq!(endpoint.source.kind, ModelKind::Materializer);
+        assert_eq!(endpoint.source.kind, ModelKind::Relay);
         assert_eq!(endpoint.source.identifier, identifier("profiles"));
         assert_eq!(endpoint.destination.identifier, identifier("p99_proc"));
         assert_eq!(endpoint.corridor.len(), 2);
@@ -14611,7 +14552,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_rejects_nonmaterialized_relay_and_cluster_wide_ingestor_members() {
+    fn placement_accepts_relay_and_rejects_cluster_wide_ingestor_members() {
         let relay_path = temp_db_path();
         let relay_registry = Registry::open(&relay_path).expect("registry should open");
         let relay_domain = Domain::parse("placement_plain_relay").expect("valid domain");
@@ -14623,12 +14564,16 @@ mod tests {
             PlacementPolicy::RequireColocation,
             None,
         ));
-        let relay_error = relay_registry
+        relay_registry
             .apply_batch(&relay_domain, relay_models)
-            .expect_err("a plain relay is not a placement member");
-        assert!(
-            format!("{relay_error:#}").contains("relay that is not materialized"),
-            "unexpected relay error: {relay_error:#}"
+            .expect("a relay is a placement member");
+        let relay_plan = relay_registry
+            .active_graph(&relay_domain)
+            .expect("relay graph should be installed")
+            .placement_plan(PlacementPolicy::Neutral);
+        assert_eq!(
+            relay_plan.rules[0].endpoint_pairs[0].source.kind,
+            ModelKind::Relay
         );
 
         let endpoint_path = temp_db_path();
@@ -14876,14 +14821,14 @@ mod tests {
             .expect("graph should be installed");
         let plan = graph.placement_plan(PlacementPolicy::RequireColocation);
 
-        assert_eq!(plan.effective_pairs.len(), 2, "the default is per-hop");
+        assert_eq!(plan.effective_pairs.len(), 4, "the default is per-hop");
         assert!(
             plan.effective_pairs
                 .iter()
                 .all(|pair| pair.from_domain_default)
         );
         assert_eq!(plan.require_groups.len(), 1);
-        assert_eq!(plan.require_groups[0].members.len(), 3);
+        assert_eq!(plan.require_groups[0].members.len(), 5);
         let schedule = graph.schedule_for_domain(
             &domain,
             &["node-1".to_string(), "node-2".to_string()],
@@ -14895,6 +14840,14 @@ mod tests {
             .expect("ingestor should be assigned");
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Relay, "notifications").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Relay, "p99").assigned_single_node(),
             Some(owner)
         );
         assert_eq!(
@@ -14948,8 +14901,16 @@ mod tests {
             scheduled_node(&schedule, ModelKind::Emitter, "emit").assigned_single_node(),
             Some(owner)
         );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Relay, "notifications").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Relay, "p99").assigned_single_node(),
+            Some(owner)
+        );
         assert_eq!(schedule.placement_groups.len(), 1);
-        assert_eq!(schedule.placement_groups[0].members.len(), 3);
+        assert_eq!(schedule.placement_groups[0].members.len(), 5);
         assert_eq!(
             schedule.placement_groups[0].primary_node.as_deref(),
             Some(owner)
@@ -19590,7 +19551,7 @@ mod tests {
     }
 
     #[test]
-    fn dataflow_graph_excludes_synthetic_materializer_nodes() {
+    fn dataflow_graph_represents_materialized_state_with_the_relay_node() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -19634,10 +19595,6 @@ mod tests {
         assert!(
             node_ids.contains(&"relay:state_txns"),
             "relay missing from {node_ids:?}"
-        );
-        assert!(
-            !node_ids.contains(&"materializer:state_txns"),
-            "materializer must not be part of dataflow graph: {node_ids:?}"
         );
         let edges = dataflow_graph
             .edges

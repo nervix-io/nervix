@@ -71,11 +71,11 @@ Feature: Placement policies
       """
     And the last command output contains
       """
-      covered: corridor_source, corridor_middle, corridor_sink
+      covered: corridor_source, placement_stage_one, corridor_middle, placement_stage_two, corridor_sink
       """
     And the last command output contains
       """
-      witness: corridor_source -> corridor_middle -> corridor_sink
+      witness: corridor_source -> placement_stage_one -> corridor_middle -> placement_stage_two -> corridor_sink
       """
     When these NSPL commands are executed on the leader node
       """
@@ -125,7 +125,9 @@ Feature: Placement policies
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "corridor_owner"
+    And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage_one" owner equals placeholder "corridor_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_middle" owner equals placeholder "corridor_owner"
+    And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage_two" owner equals placeholder "corridor_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "corridor_owner"
     When these NSPL commands are executed on the leader node
       """
@@ -133,7 +135,7 @@ Feature: Placement policies
       """
     Then the last command output contains
       """
-      members: corridor_middle, corridor_sink, corridor_source
+      members: corridor_middle, corridor_sink, corridor_source, placement_stage_one, placement_stage_two
       """
     And the last command output contains
       """
@@ -181,7 +183,7 @@ Feature: Placement policies
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "materializer" "state_cache" is saved as placeholder "state_group_owner"
+    Then the last cluster status owner for scheduled "relay" "state_cache" is saved as placeholder "state_group_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "state_reader" owner equals placeholder "state_group_owner"
 
   Scenario: PREFER COLOCATION overrides the spreading domain default for a new assignment
@@ -215,9 +217,12 @@ Feature: Placement policies
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "source_owner"
+    And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner equals placeholder "source_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "source_owner"
     And the last cluster status owner for scheduled "junction" "control_source" is saved as placeholder "control_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "control_sink" owner different from placeholder "control_owner"
+    And the last cluster status owner for scheduled "relay" "control_stage" is saved as placeholder "control_stage_owner"
+    And within "5s" node "node-1" eventually reports scheduled "relay" "control_stage" owner different from placeholder "control_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "control_sink" owner different from placeholder "control_stage_owner"
 
   Scenario: SUGGEST SEPARATION overrides upstream locality for a new assignment
     Given the production sticky scheduler is configured
@@ -243,7 +248,9 @@ Feature: Placement policies
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "source_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "source_owner"
+    And the last cluster status owner for scheduled "relay" "placement_stage" is saved as placeholder "stage_owner"
+    And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner different from placeholder "source_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "stage_owner"
 
   Scenario: Changing a soft placement policy does not migrate existing assignments
     Given the production sticky scheduler is configured
@@ -269,16 +276,20 @@ Feature: Placement policies
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "original_source_owner"
+    And the last cluster status owner for scheduled "relay" "placement_stage" is saved as placeholder "original_stage_owner"
     And the last cluster status owner for scheduled "junction" "corridor_sink" is saved as placeholder "original_sink_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "original_source_owner"
+    And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner different from placeholder "original_source_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "original_stage_owner"
     When these NSPL commands are executed on the leader node
       """
       ALTER PLACEMENT existing_soft_policy SET POLICY PREFER COLOCATION;
       SHOW CLUSTER STATUS;
       """
     Then within "5s" node "node-1" eventually reports scheduled "junction" "corridor_source" owner equals placeholder "original_source_owner"
+    And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner equals placeholder "original_stage_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "original_sink_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "original_source_owner"
+    And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner different from placeholder "original_source_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "original_stage_owner"
 
   Scenario Outline: A stronger rank overrides a claim and equal-rank policy claims conflict
     Given the production sticky scheduler is configured
@@ -328,11 +339,11 @@ Feature: Placement policies
       """
     And the last command error contains
       """
-      corridor_source
+      conflict at equal rank
       """
     And the last command error contains
       """
-      corridor_sink
+      runtime nodes
       """
     When these NSPL commands are executed on the leader node
       """
@@ -438,11 +449,11 @@ Feature: Placement policies
       """
     And the last command output contains
       """
-      covered: disconnected_source, corridor_bridge, disconnected_sink
+      covered: disconnected_source, left_output, corridor_bridge, right_input, disconnected_sink
       """
     And the last command output contains
       """
-      witness: disconnected_source -> corridor_bridge -> disconnected_sink
+      witness: disconnected_source -> left_output -> corridor_bridge -> right_input -> disconnected_sink
       """
     When these NSPL commands are executed on the leader node
       """
@@ -564,21 +575,6 @@ Feature: Placement policies
     Then the last command error contains
       """
       missing_runtime_node
-      """
-    When these NSPL commands fail
-      """
-      CREATE PLACEMENT relay_member
-        FROM placement_input
-        TO corridor_sink
-        REQUIRE COLOCATION;
-      """
-    Then the last command error contains
-      """
-      placement_input
-      """
-    And the last command error contains
-      """
-      not materialized
       """
     When these NSPL commands fail
       """

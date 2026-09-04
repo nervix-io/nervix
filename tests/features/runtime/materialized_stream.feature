@@ -167,7 +167,7 @@ Feature: Materialized relay state
     And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       materialized relay: notifications
-      kind: MATERIALIZER
+      kind: RELAY
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """

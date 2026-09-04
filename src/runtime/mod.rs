@@ -181,11 +181,12 @@ use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
     matching_message_error_output,
 };
+#[cfg(test)]
+use planning::branched_node_specs_from_models;
 use planning::{
-    branched_node_specs_from_active_graph, branched_node_specs_from_models,
-    branched_node_specs_from_scheduled_nodes, format_branched_by,
-    materialize_ingestor_route_template, materialize_processor_instance_template,
-    processor_template_for_graph_node,
+    branched_node_specs_from_active_graph, branched_node_specs_from_scheduled_nodes,
+    format_branched_by, materialize_ingestor_route_template,
+    materialize_processor_instance_template, processor_template_for_graph_node,
 };
 use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
@@ -980,7 +981,9 @@ struct DomainExecution {
     /// reassignment can replace one node's replication runtime without disturbing its siblings.
     placement_tasks: HashMap<RegistryEntity, Vec<JoinHandle<()>>>,
     /// The task maintaining each locally owned materialized relay, keyed by that relay.
-    materializer_tasks: HashMap<Identifier, JoinHandle<()>>,
+    relay_state_tasks: HashMap<Identifier, RelayStateTask>,
+    /// The single buffer-and-fan-out task for every relay owned by this cluster node.
+    relay_owner_tasks: HashMap<Identifier, RelayOwnerTask>,
     clients: HashMap<Identifier, Arc<Model>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -1266,6 +1269,10 @@ impl RelayRegistry {
         self.presences.remove(key);
     }
 
+    fn clear(&self) {
+        self.presences.clear();
+    }
+
     fn keys(&self) -> Vec<String> {
         let mut keys = self
             .presences
@@ -1302,6 +1309,9 @@ struct RelayBoundaryServices {
     detached_runtime_consumer_count: AtomicUsize,
     remote_runtime_consumers: ArcSwap<Vec<RemoteRuntimeConsumer>>,
     remote_dispatcher: Option<Arc<RemoteDispatcher>>,
+    owner_node: RwLock<Option<String>>,
+    ingress_slot: Mutex<()>,
+    outbound_slots: DashMap<String, Arc<Mutex<()>>, RandomState>,
 }
 
 impl std::fmt::Debug for ConcreteRelayRuntime {
@@ -1326,9 +1336,51 @@ struct RelayBoundaryBuilder {
 #[derive(Debug)]
 struct RelayConsumerFanout {
     dispatch_gate: Arc<RelayDispatchGate>,
+    owner_buffer: RwLock<Option<Arc<RelayBroadcast<RelayRecordBatch>>>>,
+    owner_capacity: AtomicUsize,
+    owner_pending_batches: Arc<AtomicUsize>,
     subscriptions: RelayBroadcast<RelayRecordBatch>,
     attached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
     detached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
+}
+
+struct RelayOwnerAdmission {
+    pending_batches: Arc<AtomicUsize>,
+    accepted: bool,
+}
+
+impl RelayOwnerAdmission {
+    fn new(pending_batches: Arc<AtomicUsize>) -> Self {
+        pending_batches.fetch_add(1, Ordering::AcqRel);
+        Self {
+            pending_batches,
+            accepted: false,
+        }
+    }
+
+    fn accept(mut self) {
+        self.accepted = true;
+    }
+}
+
+impl Drop for RelayOwnerAdmission {
+    fn drop(&mut self) {
+        if !self.accepted {
+            let previous = self.pending_batches.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous > 0, "relay owner pending batch count underflow");
+        }
+    }
+}
+
+struct RelayOwnerBatchCompletion {
+    pending_batches: Arc<AtomicUsize>,
+}
+
+impl Drop for RelayOwnerBatchCompletion {
+    fn drop(&mut self) {
+        let previous = self.pending_batches.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "relay owner pending batch count underflow");
+    }
 }
 
 #[derive(Debug)]
@@ -1347,6 +1399,58 @@ struct RemoteRuntimeConsumer {
     node_id: String,
     relay: Identifier,
     mode: AckMode,
+}
+
+struct RelayOwnerTask {
+    shutdown: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+struct RelayOwnerBranchState {
+    registry: RelayRegistry,
+    instances: BranchInstanceRegistry<Option<BranchKey>, ()>,
+    capacity: Option<usize>,
+}
+
+struct RelayStateTask {
+    shutdown: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+impl RelayStateTask {
+    async fn stop(mut self, grace: Duration) -> Result<(), String> {
+        self.shutdown.send_replace(true);
+        match tokio::time::timeout(grace, &mut self.task).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("relay state task failed: {error}")),
+            Err(_) => {
+                self.task.abort();
+                let _ = self.task.await;
+                Err(format!(
+                    "relay state task did not drain within {}",
+                    humantime::format_duration(grace)
+                ))
+            }
+        }
+    }
+}
+
+impl RelayOwnerTask {
+    async fn stop(mut self, grace: Duration) -> Result<(), String> {
+        self.shutdown.send_replace(true);
+        match tokio::time::timeout(grace, &mut self.task).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("relay owner task failed: {error}")),
+            Err(_) => {
+                self.task.abort();
+                let _ = self.task.await;
+                Err(format!(
+                    "relay owner task did not drain within {}",
+                    humantime::format_duration(grace)
+                ))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2497,11 +2601,15 @@ struct RelayRuntimeFanIn {
 
 impl RelayConsumerFanout {
     fn with_capacity(capacity: NonZeroUsize) -> Self {
+        let dispatch_capacity = NonZeroUsize::new(1).expect("one is nonzero");
         Self {
             dispatch_gate: Arc::new(RelayDispatchGate::new()),
-            subscriptions: RelayBroadcast::with_capacity(capacity),
-            attached_runtime_consumers: RelayBroadcast::with_capacity(capacity),
-            detached_runtime_consumers: RelayBroadcast::with_capacity(capacity),
+            owner_buffer: RwLock::new(None),
+            owner_capacity: AtomicUsize::new(capacity.get()),
+            owner_pending_batches: Arc::new(AtomicUsize::new(0)),
+            subscriptions: RelayBroadcast::with_capacity(dispatch_capacity),
+            attached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
+            detached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
         }
     }
 
@@ -2510,9 +2618,42 @@ impl RelayConsumerFanout {
     }
 
     fn set_capacity(&self, capacity: NonZeroUsize) {
-        self.subscriptions.set_capacity(capacity);
-        self.attached_runtime_consumers.set_capacity(capacity);
-        self.detached_runtime_consumers.set_capacity(capacity);
+        self.owner_capacity.store(capacity.get(), Ordering::Release);
+        if let Some(buffer) = self.owner_buffer.read().as_ref() {
+            buffer.set_capacity(capacity);
+        }
+    }
+
+    fn activate_owner_buffer(&self) -> RelayRuntimeConsumerReceiver {
+        let capacity = NonZeroUsize::new(self.owner_capacity.load(Ordering::Acquire))
+            .expect("validated relay capacity must remain nonzero");
+        let buffer = Arc::new(RelayBroadcast::with_capacity(capacity));
+        let receiver = buffer.new_receiver();
+        *self.owner_buffer.write() = Some(buffer);
+        receiver
+    }
+
+    fn deactivate_owner_buffer(&self) {
+        *self.owner_buffer.write() = None;
+    }
+
+    fn owner_buffer(&self) -> Option<Arc<RelayBroadcast<RelayRecordBatch>>> {
+        self.owner_buffer.read().clone()
+    }
+
+    fn owner_buffer_len(&self) -> Option<(usize, usize)> {
+        self.owner_buffer()
+            .map(|buffer| (buffer.len(), buffer.capacity()))
+    }
+
+    fn begin_owner_admission(&self) -> RelayOwnerAdmission {
+        RelayOwnerAdmission::new(self.owner_pending_batches.clone())
+    }
+
+    fn begin_owner_batch_completion(&self) -> RelayOwnerBatchCompletion {
+        RelayOwnerBatchCompletion {
+            pending_batches: self.owner_pending_batches.clone(),
+        }
     }
 
     fn runtime_consumer_receiver_for_mode(&self, mode: AckMode) -> RelayRuntimeConsumerReceiver {
@@ -2530,6 +2671,12 @@ impl RelayConsumerFanout {
             .saturating_add(self.detached_runtime_consumers.len())
     }
 
+    fn outstanding_work_len(&self) -> usize {
+        self.owner_pending_batches
+            .load(Ordering::Acquire)
+            .saturating_add(self.runtime_consumer_buffer_len())
+    }
+
     fn runtime_consumer_broadcast_for_mode(
         &self,
         mode: AckMode,
@@ -2537,58 +2684,6 @@ impl RelayConsumerFanout {
         match mode {
             AckMode::Attached => &self.attached_runtime_consumers,
             AckMode::Detached => &self.detached_runtime_consumers,
-        }
-    }
-
-    #[cfg(test)]
-    fn runtime_consumer_buffer_len_for_mode(&self, mode: AckMode) -> usize {
-        self.runtime_consumer_broadcast_for_mode(mode).len()
-    }
-
-    fn observe_buffer_lengths(
-        &self,
-        metrics: &RuntimeMetrics,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
-        branch_key: Option<&BranchKey>,
-    ) {
-        let buffers = [
-            (
-                self.subscriptions.receiver_count(),
-                self.subscriptions.len(),
-                self.subscriptions.capacity(),
-            ),
-            (
-                self.attached_runtime_consumers.receiver_count(),
-                self.attached_runtime_consumers.len(),
-                self.attached_runtime_consumers.capacity(),
-            ),
-            (
-                self.detached_runtime_consumers.receiver_count(),
-                self.detached_runtime_consumers.len(),
-                self.detached_runtime_consumers.capacity(),
-            ),
-        ];
-        let Some((len, capacity)) = buffers
-            .into_iter()
-            .filter(|(receivers, _, _)| *receivers > 0)
-            .map(|(_, len, capacity)| (len, capacity))
-            .max_by_key(|(len, _)| *len)
-        else {
-            return;
-        };
-        let observation = RelayBufferObservation {
-            domain,
-            relay,
-            physical_node_id,
-            direction: RELAY_BUFFER_DIRECTION_CONCRETE,
-            len,
-            capacity,
-        };
-        metrics.observe_global_relay_buffer_len(observation);
-        if let Some(branch_key) = branch_key {
-            metrics.observe_branch_relay_buffer_len(branch_key.as_str(), observation);
         }
     }
 
@@ -2605,7 +2700,6 @@ impl RelayConsumerFanout {
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        let _dispatch_permit = self.dispatch_gate.acquire_dispatch().await;
         let attached_receiver_count = self
             .runtime_consumer_broadcast_for_mode(AckMode::Attached)
             .receiver_count();
@@ -2677,18 +2771,6 @@ impl BranchCollapseNode {
         self.fanout.runtime_consumer_receiver_for_mode(mode)
     }
 
-    fn observe_buffer_lengths(
-        &self,
-        metrics: &RuntimeMetrics,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
-        branch_key: Option<&BranchKey>,
-    ) {
-        self.fanout
-            .observe_buffer_lengths(metrics, domain, relay, physical_node_id, branch_key);
-    }
-
     async fn fanout_subscriptions(&self, batch: &RelayRecordBatch) {
         self.fanout.fanout_subscriptions(batch).await;
     }
@@ -2732,6 +2814,52 @@ impl RelayBoundaryFanout {
         }
     }
 
+    fn activate_owner_buffer(&self) -> RelayRuntimeConsumerReceiver {
+        match self {
+            Self::Direct(fanout) => fanout.activate_owner_buffer(),
+            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.activate_owner_buffer(),
+        }
+    }
+
+    fn deactivate_owner_buffer(&self) {
+        match self {
+            Self::Direct(fanout) => fanout.deactivate_owner_buffer(),
+            Self::BranchCollapse(branch_collapse) => {
+                branch_collapse.fanout.deactivate_owner_buffer();
+            }
+        }
+    }
+
+    fn owner_buffer(&self) -> Option<Arc<RelayBroadcast<RelayRecordBatch>>> {
+        match self {
+            Self::Direct(fanout) => fanout.owner_buffer(),
+            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.owner_buffer(),
+        }
+    }
+
+    fn owner_buffer_len(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Direct(fanout) => fanout.owner_buffer_len(),
+            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.owner_buffer_len(),
+        }
+    }
+
+    fn begin_owner_admission(&self) -> RelayOwnerAdmission {
+        match self {
+            Self::Direct(fanout) => fanout.begin_owner_admission(),
+            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.begin_owner_admission(),
+        }
+    }
+
+    fn begin_owner_batch_completion(&self) -> RelayOwnerBatchCompletion {
+        match self {
+            Self::Direct(fanout) => fanout.begin_owner_batch_completion(),
+            Self::BranchCollapse(branch_collapse) => {
+                branch_collapse.fanout.begin_owner_batch_completion()
+            }
+        }
+    }
+
     fn dispatch_gate(&self) -> Arc<RelayDispatchGate> {
         match self {
             Self::Direct(fanout) => fanout.dispatch_gate(),
@@ -2739,12 +2867,10 @@ impl RelayBoundaryFanout {
         }
     }
 
-    fn runtime_consumer_buffer_len(&self) -> usize {
+    fn outstanding_work_len(&self) -> usize {
         match self {
-            Self::Direct(fanout) => fanout.runtime_consumer_buffer_len(),
-            Self::BranchCollapse(branch_collapse) => {
-                branch_collapse.fanout.runtime_consumer_buffer_len()
-            }
+            Self::Direct(fanout) => fanout.outstanding_work_len(),
+            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.outstanding_work_len(),
         }
     }
 
@@ -2760,40 +2886,6 @@ impl RelayBoundaryFanout {
             Self::Direct(fanout) => fanout.runtime_consumer_receiver_for_mode(mode),
             Self::BranchCollapse(branch_collapse) => {
                 branch_collapse.runtime_consumer_receiver_for_mode(mode)
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn runtime_consumer_buffer_len_for_mode(&self, mode: AckMode) -> usize {
-        match self {
-            Self::Direct(fanout) => fanout.runtime_consumer_buffer_len_for_mode(mode),
-            Self::BranchCollapse(branch_collapse) => branch_collapse
-                .fanout
-                .runtime_consumer_buffer_len_for_mode(mode),
-        }
-    }
-
-    fn observe_buffer_lengths(
-        &self,
-        metrics: &RuntimeMetrics,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
-        branch_key: Option<&BranchKey>,
-    ) {
-        match self {
-            Self::Direct(fanout) => {
-                fanout.observe_buffer_lengths(metrics, domain, relay, physical_node_id, branch_key);
-            }
-            Self::BranchCollapse(branch_collapse) => {
-                branch_collapse.observe_buffer_lengths(
-                    metrics,
-                    domain,
-                    relay,
-                    physical_node_id,
-                    branch_key,
-                );
             }
         }
     }
@@ -2841,7 +2933,6 @@ impl RelayRuntimeFanIn {
         Self { receiver }
     }
 
-    #[cfg(test)]
     async fn recv(&mut self) -> Option<RelayRecordBatch> {
         tokio::task::consume_budget().await;
         match self.receiver.recv().await {
@@ -2956,8 +3047,8 @@ struct BranchRuntime {
     root_relay: Identifier,
     error_policies: ErrorPolicies,
     relays: HashMap<Identifier, ConcreteRelayRuntime>,
-    materializers: HashMap<Identifier, Arc<ReplicatedMaterializedRelayState>>,
-    materializer_epoch: Option<u64>,
+    materialized_states: HashMap<Identifier, Arc<ReplicatedMaterializedRelayState>>,
+    relay_state_epoch: Option<u64>,
     processors: HashMap<Identifier, RelayProcessorNode>,
 }
 
@@ -3270,16 +3361,15 @@ struct ScheduledNodePlacement {
     materialized_state: Option<Arc<ReplicatedMaterializedRelayState>>,
 }
 
-/// The branch retention a materialized relay's materializer enforces. Derived from the branch the
-/// relay is branched by, so a materializer can be started on any owner directly from the published
-/// schedule.
+/// The branch retention enforced by a relay owner. It is derived from the relay's branch so an
+/// owner can start directly from the published schedule.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct MaterializedRelayRetention {
+struct RelayRetention {
     branch_ttl: Option<Duration>,
     branch_capacity: Option<usize>,
 }
 
-impl MaterializedRelayRetention {
+impl RelayRetention {
     fn from_schedule(
         domain: &Domain,
         schedule: &DomainSchedule,
@@ -3293,7 +3383,7 @@ impl MaterializedRelayRetention {
         else {
             return Err(RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
-                reason: format!("missing materialized relay '{}'", relay.as_str()),
+                reason: format!("missing relay '{}'", relay.as_str()),
             });
         };
         let Some(branch) = model.branching.branch() else {
@@ -3311,7 +3401,7 @@ impl MaterializedRelayRetention {
             .ok_or_else(|| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
-                    "missing branch '{}' for materialized relay '{}'",
+                    "missing branch '{}' for relay '{}'",
                     branch.as_str(),
                     relay.as_str()
                 ),
@@ -3320,7 +3410,7 @@ impl MaterializedRelayRetention {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
-                    "invalid branch ttl '{}' for materialized relay '{}': {error}",
+                    "invalid branch ttl '{}' for relay '{}': {error}",
                     branch_model.ttl,
                     relay.as_str()
                 ),
@@ -3334,8 +3424,7 @@ impl MaterializedRelayRetention {
                     RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
-                            "branch '{}' max instances {} does not fit usize for materialized \
-                             relay '{}'",
+                            "branch '{}' max instances {} does not fit usize for relay '{}'",
                             branch.as_str(),
                             eviction.max_instances(),
                             relay.as_str()
@@ -3353,10 +3442,10 @@ impl MaterializedRelayRetention {
 
 /// One materialized relay's runtime task: the relay it serves, the replicated state it maintains,
 /// the branch retention limits it enforces, and the fan-in it consumes.
-struct MaterializerTaskSpec {
+struct RelayStateTaskSpec {
     relay: Identifier,
     state: Arc<ReplicatedMaterializedRelayState>,
-    retention: MaterializedRelayRetention,
+    retention: RelayRetention,
     receiver: RelayRuntimeFanIn,
 }
 
@@ -3907,6 +3996,8 @@ pub struct Runtime {
     local_node_id: Arc<RwLock<Option<String>>>,
     next_remote_ack_id: Arc<AtomicU64>,
     pending_remote_acks: Arc<DashMap<u64, AckSet, RandomState>>,
+    pending_relay_admissions:
+        Arc<DashMap<u64, mpsc::UnboundedSender<RemoteAckOutcome>, RandomState>>,
     next_state_sync_correlation_id: Arc<AtomicU64>,
     pending_state_syncs: Arc<DashMap<u64, PendingStateSyncSender, RandomState>>,
     expiring_stream_states:
@@ -3918,7 +4009,7 @@ pub struct Runtime {
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedKafkaOffsetState>, RandomState>>,
     replicated_materialized_stream_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedMaterializedRelayState>, RandomState>>,
-    materializer_epochs: Arc<DashMap<Domain, Arc<AtomicU64>, RandomState>>,
+    relay_state_epochs: Arc<DashMap<Domain, Arc<AtomicU64>, RandomState>>,
     materialized_state_changed: Arc<Notify>,
     replicated_window_processor_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedWindowProcessorState>, RandomState>>,
@@ -3944,6 +4035,8 @@ struct RemoteDispatcher {
     local_node_id: Arc<RwLock<Option<String>>>,
     next_remote_ack_id: Arc<AtomicU64>,
     pending_remote_acks: Arc<DashMap<u64, AckSet, RandomState>>,
+    pending_relay_admissions:
+        Arc<DashMap<u64, mpsc::UnboundedSender<RemoteAckOutcome>, RandomState>>,
 }
 
 impl std::fmt::Debug for RemoteDispatcher {
@@ -3982,6 +4075,9 @@ impl RelayBoundaryServices {
             detached_runtime_consumer_count: AtomicUsize::new(detached_runtime_consumer_count),
             remote_runtime_consumers: ArcSwap::from_pointee(remote_runtime_consumers),
             remote_dispatcher,
+            owner_node: RwLock::new(None),
+            ingress_slot: Mutex::new(()),
+            outbound_slots: DashMap::default(),
         }
     }
 
@@ -3989,7 +4085,155 @@ impl RelayBoundaryServices {
         self.fanout.subscription_receiver()
     }
 
-    fn observe_local_fanout_buffer_lengths(
+    fn replace_owner_node(&self, owner_node: Option<String>) {
+        *self.owner_node.write() = owner_node;
+    }
+
+    fn is_owned_by(&self, node_id: Option<&str>) -> bool {
+        self.owner_node
+            .read()
+            .as_deref()
+            .is_none_or(|owner| Some(owner) == node_id)
+    }
+
+    fn activate_owner_buffer(&self) -> RelayRuntimeFanIn {
+        RelayRuntimeFanIn::new(self.fanout.activate_owner_buffer())
+    }
+
+    fn deactivate_owner_buffer(&self) {
+        self.fanout.deactivate_owner_buffer();
+    }
+
+    fn outbound_slot(&self, node_id: &str) -> Arc<Mutex<()>> {
+        self.outbound_slots
+            .entry(node_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    async fn enqueue_owner_batch(
+        &self,
+        metrics: &RuntimeMetrics,
+        domain: &Domain,
+        relay: &Identifier,
+        physical_node_id: Option<&str>,
+        batch: &RelayRecordBatch,
+    ) -> RelayDispatchResult {
+        let dispatch_gate = self.fanout.dispatch_gate();
+        let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
+        let Some(buffer) = self.fanout.owner_buffer() else {
+            for ack in batch.acks.iter() {
+                ack.no_ack("relay owner buffer is unavailable");
+            }
+            return Err(Box::new(batch.clone()));
+        };
+        let admission = self.fanout.begin_owner_admission();
+        if let Err(error) = buffer.broadcast(batch.attached()).await {
+            for ack in error.0.acks.iter() {
+                ack.no_ack("relay owner buffer is unavailable");
+            }
+            return Err(Box::new(batch.clone()));
+        }
+        admission.accept();
+        self.observe_owner_buffer_length(
+            metrics,
+            domain,
+            relay,
+            physical_node_id,
+            batch.key.as_ref(),
+        );
+        Ok(())
+    }
+
+    fn begin_owner_batch_completion(&self) -> RelayOwnerBatchCompletion {
+        self.fanout.begin_owner_batch_completion()
+    }
+
+    async fn dispatch_to_owner(
+        &self,
+        domain: &Domain,
+        relay: &Identifier,
+        batch: &RelayRecordBatch,
+    ) -> RelayDispatchResult {
+        let dispatch_gate = self.fanout.dispatch_gate();
+        let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
+        let Some(owner_node) = self.owner_node.read().clone() else {
+            for ack in batch.acks.iter() {
+                ack.no_ack("relay owner is unavailable");
+            }
+            return Err(Box::new(batch.clone()));
+        };
+        let Some(dispatcher) = &self.remote_dispatcher else {
+            for ack in batch.acks.iter() {
+                ack.no_ack("remote dispatcher is unavailable for relay owner delivery");
+            }
+            return Err(Box::new(batch.clone()));
+        };
+        let Some(local_node_id) = dispatcher.local_node_id() else {
+            for ack in batch.acks.iter() {
+                ack.no_ack("local node id is unavailable for relay owner delivery");
+            }
+            return Err(Box::new(batch.clone()));
+        };
+        let _slot = self.ingress_slot.lock().await;
+        let batch_ipc = match batch.batch.to_arrow_ipc_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                for ack in batch.acks.iter() {
+                    ack.no_ack(error.clone());
+                }
+                return Err(Box::new(batch.clone()));
+            }
+        };
+        let mut registered_ack_ids = Vec::new();
+        let remote_acks = batch
+            .acks
+            .iter()
+            .map(|ack| {
+                if ack.is_empty() {
+                    return None;
+                }
+                let ack_id = dispatcher.next_ack_id();
+                dispatcher.register_pending_ack(ack_id, RemoteDispatcher::forwarded_ack(ack));
+                registered_ack_ids.push(ack_id);
+                Some(RemoteAckRegistration {
+                    ack_id,
+                    reply_node_id: local_node_id.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let admission_result = dispatcher
+            .dispatch_admitted_relay_payload(
+                &owner_node,
+                RelayPayload {
+                    kind: RelayPayloadKind::Ingress,
+                    domain: domain.clone(),
+                    relay: relay.clone(),
+                    key: BranchKey::to_remote_key(&batch.key),
+                    batch_ipc,
+                    metadata: batch
+                        .metadata
+                        .iter()
+                        .map(RuntimeRecordMetadata::to_remote)
+                        .collect(),
+                    acks: remote_acks,
+                    admission: None,
+                },
+            )
+            .await;
+        if let Err(reason) = admission_result {
+            for ack_id in registered_ack_ids {
+                dispatcher.clear_pending_ack(ack_id);
+            }
+            for ack in batch.acks.iter() {
+                ack.no_ack(reason.clone());
+            }
+            return Err(Box::new(batch.clone()));
+        }
+        Ok(())
+    }
+
+    fn observe_owner_buffer_length(
         &self,
         metrics: &RuntimeMetrics,
         domain: &Domain,
@@ -3997,8 +4241,21 @@ impl RelayBoundaryServices {
         physical_node_id: Option<&str>,
         branch_key: Option<&BranchKey>,
     ) {
-        self.fanout
-            .observe_buffer_lengths(metrics, domain, relay, physical_node_id, branch_key);
+        let Some((len, capacity)) = self.fanout.owner_buffer_len() else {
+            return;
+        };
+        let observation = RelayBufferObservation {
+            domain,
+            relay,
+            physical_node_id,
+            direction: RELAY_BUFFER_DIRECTION_CONCRETE,
+            len,
+            capacity,
+        };
+        metrics.observe_global_relay_buffer_len(observation);
+        if let Some(branch_key) = branch_key {
+            metrics.observe_branch_relay_buffer_len(branch_key.as_str(), observation);
+        }
     }
 
     async fn fanout_local_subscriptions(&self, batch: &RelayRecordBatch) {
@@ -4020,7 +4277,7 @@ impl RelayBoundaryServices {
             .map(|consumer| consumer.node_id.clone())
             .collect::<BTreeSet<_>>();
         dispatcher
-            .dispatch_subscription_fanout(domain, relay, &batch.detached(), &excluded_nodes)
+            .dispatch_subscription_fanout(self, domain, relay, &batch.detached(), &excluded_nodes)
             .await;
     }
 
@@ -4047,6 +4304,9 @@ impl RelayBoundaryServices {
             return Ok(());
         }
         for consumer in remote_runtime_consumers.iter() {
+            tokio::task::consume_budget().await;
+            let outbound_slot = self.outbound_slot(&consumer.node_id);
+            let _slot = outbound_slot.lock().await;
             let Some(dispatcher) = &self.remote_dispatcher else {
                 if consumer.mode == AckMode::Attached {
                     for ack in batch.acks.iter() {
@@ -4100,9 +4360,9 @@ impl RelayBoundaryServices {
                 vec![None; remote_batch.acks.len()]
             };
             let result = dispatcher
-                .dispatch(
+                .dispatch_admitted_relay_payload(
                     &consumer.node_id,
-                    Envelope::RelayPayload(RelayPayload {
+                    RelayPayload {
                         kind: RelayPayloadKind::Routed,
                         domain: domain.clone(),
                         relay: consumer.relay.clone(),
@@ -4114,7 +4374,8 @@ impl RelayBoundaryServices {
                             .map(RuntimeRecordMetadata::to_remote)
                             .collect(),
                         acks: remote_acks.clone(),
-                    }),
+                        admission: None,
+                    },
                 )
                 .await;
 
@@ -4170,7 +4431,7 @@ impl RelayBoundaryServices {
         self.remote_runtime_consumers.store(StdArc::new(consumers));
     }
 
-    async fn ingest_message(
+    async fn fanout_owner_batch(
         &self,
         metrics: &RuntimeMetrics,
         domain: &Domain,
@@ -4180,7 +4441,7 @@ impl RelayBoundaryServices {
     ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
         self.fanout_remote_subscriptions(domain, relay, batch).await;
-        self.observe_local_fanout_buffer_lengths(
+        self.observe_owner_buffer_length(
             metrics,
             domain,
             relay,
@@ -4191,32 +4452,8 @@ impl RelayBoundaryServices {
         self.dispatch_remote_runtime_consumers(domain, batch).await
     }
 
-    async fn ingest_concrete_message(
-        &self,
-        domain: &Domain,
-        relay: &Identifier,
-        batch: &RelayRecordBatch,
-    ) -> RelayDispatchResult {
-        self.fanout_remote_subscriptions(domain, relay, batch).await;
-        self.dispatch_remote_runtime_consumers(domain, batch).await
-    }
-
-    async fn inject_remote_message(
-        &self,
-        metrics: &RuntimeMetrics,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
-        batch: &RelayRecordBatch,
-    ) -> RelayDispatchResult {
+    async fn inject_remote_message(&self, batch: &RelayRecordBatch) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
-        self.observe_local_fanout_buffer_lengths(
-            metrics,
-            domain,
-            relay,
-            physical_node_id,
-            batch.key.as_ref(),
-        );
         self.dispatch_local_runtime_consumers(batch).await
     }
 }
@@ -4243,45 +4480,15 @@ impl ConcreteRelayRuntime {
 
     async fn dispatch_boundary(&mut self, batch: &RelayRecordBatch) -> RelayDispatchResult {
         debug_assert_eq!(&self.key, &batch.key);
-        let now = self
-            .runtime
-            .current_stream_expiration_time(&self.domain)
-            .ok()
-            .flatten()
-            .unwrap_or_else(current_timestamp);
-        self.registry.touch(&batch.key, now);
         self.runtime
-            .touch_stream_key(&self.domain, &self.relay, &batch.key, now);
-        self.runtime.metrics.observe_global_stream_received(
-            &self.domain,
-            &self.relay,
-            self.runtime.local_node_id.read().as_deref(),
-            batch.message_count(),
-            batch.estimated_bytes(),
-            batch.domain_timestamp(),
-        );
-        self.runtime.mark_branch_aggregated_metrics_updated(
-            &self.domain,
-            ModelKind::Relay,
-            &self.relay,
-        );
-        let physical_node_id = self.runtime.local_node_id.read().clone();
-        self.services.fanout_local_subscriptions(batch).await;
-        self.services.observe_local_fanout_buffer_lengths(
-            &self.runtime.metrics,
-            &self.domain,
-            &self.relay,
-            physical_node_id.as_deref(),
-            self.key.as_ref(),
-        );
-        self.services
-            .dispatch_local_runtime_consumers(batch)
-            .await?;
-        self.services
-            .ingest_concrete_message(&self.domain, &self.relay, batch)
-            .await?;
-
-        Ok(())
+            .ingest_stream_boundary_message(
+                &self.domain,
+                &self.relay,
+                &self.registry,
+                &self.services,
+                batch,
+            )
+            .await
     }
 }
 
@@ -4301,12 +4508,81 @@ impl RemoteDispatcher {
         self.pending_remote_acks.insert(ack_id, acks);
     }
 
+    fn forwarded_ack(acks: &AckSet) -> AckSet {
+        acks.attached()
+    }
+
     fn clear_pending_ack(&self, ack_id: u64) {
         self.pending_remote_acks.remove(&ack_id);
     }
 
+    fn register_pending_relay_admission(
+        &self,
+        admission_id: u64,
+    ) -> mpsc::UnboundedReceiver<RemoteAckOutcome> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.pending_relay_admissions.insert(admission_id, sender);
+        receiver
+    }
+
+    fn clear_pending_relay_admission(&self, admission_id: u64) {
+        self.pending_relay_admissions.remove(&admission_id);
+    }
+
+    async fn dispatch_admitted_relay_payload(
+        &self,
+        node_id: &str,
+        mut payload: RelayPayload,
+    ) -> Result<(), String> {
+        let local_node_id = self
+            .local_node_id()
+            .ok_or_else(|| "local node id is unavailable for relay delivery".to_string())?;
+        let admission_id = self.next_ack_id();
+        payload.admission = Some(RemoteAckRegistration {
+            ack_id: admission_id,
+            reply_node_id: local_node_id,
+        });
+        let admission = self.register_pending_relay_admission(admission_id);
+        if let Err(error) = self
+            .dispatch(node_id, Envelope::RelayPayload(payload))
+            .await
+        {
+            self.clear_pending_relay_admission(admission_id);
+            return Err(error);
+        }
+        let result = Self::await_relay_admission(node_id, admission, Self::DISPATCH_TIMEOUT).await;
+        if result.is_err() {
+            self.clear_pending_relay_admission(admission_id);
+        }
+        result
+    }
+
+    async fn await_relay_admission(
+        node_id: &str,
+        mut admission: mpsc::UnboundedReceiver<RemoteAckOutcome>,
+        inactivity_timeout: Duration,
+    ) -> Result<(), String> {
+        loop {
+            tokio::task::consume_budget().await;
+            match tokio::time::timeout(inactivity_timeout, admission.recv()).await {
+                Ok(Some(RemoteAckOutcome::Alive)) => {}
+                Ok(Some(RemoteAckOutcome::Ack)) => return Ok(()),
+                Ok(Some(RemoteAckOutcome::NoAck(error))) => return Err(error),
+                Ok(None) => {
+                    return Err("relay admission response channel closed".to_string());
+                }
+                Err(_) => {
+                    return Err(format!(
+                        "timed out waiting for cluster node '{node_id}' to admit a relay batch"
+                    ));
+                }
+            }
+        }
+    }
+
     async fn dispatch_subscription_fanout(
         &self,
+        services: &RelayBoundaryServices,
         domain: &Domain,
         relay: &Identifier,
         batch: &RelayRecordBatch,
@@ -4332,13 +4608,16 @@ impl RemoteDispatcher {
             .nodes_with_subscription_interest(domain.as_str(), relay.as_str())
             .await;
         for node_id in interested_nodes {
+            tokio::task::consume_budget().await;
             if node_id == local_node_id || excluded_nodes.contains(&node_id) {
                 continue;
             }
+            let outbound_slot = services.outbound_slot(&node_id);
+            let _slot = outbound_slot.lock().await;
             if let Err(error) = self
-                .dispatch(
+                .dispatch_admitted_relay_payload(
                     &node_id,
-                    Envelope::RelayPayload(RelayPayload {
+                    RelayPayload {
                         kind: RelayPayloadKind::SubscriptionFanout,
                         domain: domain.clone(),
                         relay: relay.clone(),
@@ -4350,7 +4629,8 @@ impl RemoteDispatcher {
                             .map(RuntimeRecordMetadata::to_remote)
                             .collect(),
                         acks: vec![None; batch.acks.len()],
-                    }),
+                        admission: None,
+                    },
                 )
                 .await
             {
@@ -7311,10 +7591,10 @@ impl BranchInstanceTemplate {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let materializers = self
+        let materialized_states = self
             .materialized_streams
             .iter()
-            .filter(|relay| !runtime.materialized_relay_is_scheduled(domain, relay))
+            .filter(|relay| !runtime.relay_is_cluster_scheduled(domain, relay))
             .map(|relay| {
                 let schema = runtime
                     .executions
@@ -7335,7 +7615,7 @@ impl BranchInstanceTemplate {
                 let placement = runtime.state_placement(
                     domain,
                     RuntimeStateKind::MaterializedRelay,
-                    ModelKind::Materializer,
+                    ModelKind::Relay,
                     relay,
                     key.clone(),
                 );
@@ -7363,8 +7643,8 @@ impl BranchInstanceTemplate {
             source: self.source.clone(),
             root_relay: self.root_relay.clone(),
             relays,
-            materializers,
-            materializer_epoch: None,
+            materialized_states,
+            relay_state_epoch: None,
             processors,
             error_policies: self.error_policies.clone(),
         }))
@@ -7372,50 +7652,18 @@ impl BranchInstanceTemplate {
 }
 
 impl BranchRuntime {
-    fn restore_presence(&self, last_ingestion: Timestamp) {
-        for relay in self.relays.values() {
-            relay.registry.touch(&self.key, last_ingestion);
-            self.runtime
-                .touch_stream_key(&self.domain, &relay.relay, &self.key, last_ingestion);
-        }
-    }
-
-    fn detach(&self) {
-        for relay in self.relays.values() {
-            relay.registry.remove(&self.key);
-            self.runtime
-                .remove_stream_key_presence(&self.domain, &relay.relay, &self.key);
-        }
-    }
-
     async fn evict(&mut self) {
         for processor in self.processors.values_mut() {
             processor.drop_collected_inputs("processor branch was evicted");
         }
-        self.detach();
-        for materialized_state in self.materializers.values() {
-            let local_node_id = self.runtime.local_node_id.read().clone();
-            let is_primary = match (
-                materialized_state.primary_node().as_deref(),
-                local_node_id.as_deref(),
-            ) {
-                (Some(primary_node), Some(local_node_id)) => primary_node == local_node_id,
-                (None, _) => true,
-                _ => false,
-            };
-            if is_primary {
-                self.runtime
-                    .delete_materialized_stream_key(materialized_state, &self.key);
-            }
-        }
     }
 
-    fn reconcile_materializer_membership(&mut self, relay: &Identifier) {
+    fn reconcile_materialized_state_membership(&mut self, relay: &Identifier) {
         let current_epoch = self
             .runtime
-            .materializer_epoch(&self.domain)
+            .relay_state_epoch(&self.domain)
             .load(Ordering::Acquire);
-        if self.materializer_epoch == Some(current_epoch) {
+        if self.relay_state_epoch == Some(current_epoch) {
             return;
         }
         let desired_relays = self
@@ -7436,9 +7684,9 @@ impl BranchRuntime {
                     .collect::<HashSet<_>>()
             })
             .unwrap_or_default();
-        self.materializers
+        self.materialized_states
             .retain(|identifier, _| desired_relays.contains(identifier));
-        if desired_relays.contains(relay) && !self.materializers.contains_key(relay) {
+        if desired_relays.contains(relay) && !self.materialized_states.contains_key(relay) {
             let Some(schema) = self
                 .runtime
                 .executions
@@ -7460,7 +7708,7 @@ impl BranchRuntime {
             let placement = self.runtime.state_placement(
                 &self.domain,
                 RuntimeStateKind::MaterializedRelay,
-                ModelKind::Materializer,
+                ModelKind::Relay,
                 relay,
                 self.key.clone(),
             );
@@ -7469,7 +7717,7 @@ impl BranchRuntime {
                 .replicated_materialized_stream_state(placement, schema, None)
             {
                 Ok(state) => {
-                    self.materializers.insert(relay.clone(), state);
+                    self.materialized_states.insert(relay.clone(), state);
                 }
                 Err(error) => {
                     warn!(
@@ -7482,18 +7730,15 @@ impl BranchRuntime {
                 }
             }
         }
-        self.materializer_epoch = Some(current_epoch);
+        self.relay_state_epoch = Some(current_epoch);
     }
 
     async fn materialize_stream_batch(&mut self, relay: &Identifier, batch: &RelayRecordBatch) {
-        if self
-            .runtime
-            .materialized_relay_is_scheduled(&self.domain, relay)
-        {
+        if self.runtime.relay_is_cluster_scheduled(&self.domain, relay) {
             return;
         }
-        self.reconcile_materializer_membership(relay);
-        let Some(state) = self.materializers.get(relay) else {
+        self.reconcile_materialized_state_membership(relay);
+        let Some(state) = self.materialized_states.get(relay) else {
             return;
         };
         let messages = match batch.detached().try_into_messages() {
@@ -7663,17 +7908,6 @@ impl BranchRuntime {
             runtime_stream.dispatch_boundary(batch).await?;
             self.materialize_stream_batch(relay, batch).await;
             self.retry_materialized_waiters(graph, relay).await;
-            self.runtime.metrics.observe_branch_stream_received(
-                branch_key_display(&self.key),
-                RelayBatchObservation {
-                    domain: &self.domain,
-                    relay,
-                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
-                    messages: batch.message_count(),
-                    bytes: batch.estimated_bytes(),
-                    domain_timestamp: batch.domain_timestamp(),
-                },
-            );
 
             Ok(())
         })
@@ -8653,8 +8887,7 @@ async fn shutdown_all_branch_instance_instances(
 ) {
     for (key, state) in instances.drain() {
         runtime.observe_branch_instance_removed(domain, branch, &key, None);
-        let branch = state.lock().await;
-        branch.detach();
+        drop(state);
         debug!(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
@@ -8695,8 +8928,7 @@ fn restore_branch_instance_lru_snapshot(
         return Ok(0);
     };
     for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
-        let mut state = template.instantiate(runtime, domain, key.clone())?;
-        state.get_mut().restore_presence(last_ingestion);
+        let state = template.instantiate(runtime, domain, key.clone())?;
         runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
         instances.insert_restored(key, last_ingestion, state);
     }
@@ -9138,7 +9370,6 @@ async fn run_processor_node_runtime(
                 ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone(), graph.clone()),
                 &template,
                 key.clone(),
-                Some(handoff.restored_at),
                 handoff.pending_materialized,
             ) {
                 Ok(entry) => {
@@ -9363,7 +9594,6 @@ async fn dispatch_processor_node_input(
             ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone(), graph.clone()),
             template,
             key.clone(),
-            None,
             VecDeque::new(),
         )
     }) {
@@ -9445,7 +9675,6 @@ fn spawn_processor_branch_task(
     context: ProcessorRuntimeContext,
     template: &BranchInstanceTemplate,
     key: Option<BranchKey>,
-    restored_at: Option<Timestamp>,
     pending_materialized: VecDeque<(Identifier, RelayRecordBatch)>,
 ) -> Result<ProcessorBranchTask, String> {
     let mut branch = template
@@ -9453,9 +9682,6 @@ fn spawn_processor_branch_task(
         .into_inner();
     if let Some(processor) = branch.processors.get_mut(&template.source) {
         processor.pending_materialized = pending_materialized;
-    }
-    if let Some(restored_at) = restored_at {
-        branch.restore_presence(restored_at);
     }
     let (input_tx, input_rx) = mpsc::channel(1);
     let (stop_tx, stop_rx) = mpsc::channel(1);
@@ -9657,12 +9883,9 @@ async fn run_processor_branch_task(
                 restored_at,
                 pending_materialized,
             };
-            branch.detach();
             let _ = response.send(handoff);
         }
-        Some(ProcessorBranchStopMode::Detach) | None => {
-            branch.detach();
-        }
+        Some(ProcessorBranchStopMode::Detach) | None => {}
     }
 }
 
@@ -9852,7 +10075,6 @@ fn restore_processor_branch_lru_snapshot(
             ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
             template,
             key.clone(),
-            Some(last_ingestion),
             VecDeque::new(),
         )?;
         runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
@@ -20044,53 +20266,17 @@ async fn decode_ingested_payload_owned(
         })?
 }
 
-pub(crate) fn scheduled_branched_stream_owner_nodes(
+pub(crate) fn scheduled_relay_owner_nodes(
     schedule: &DomainSchedule,
     relay: &Identifier,
 ) -> Vec<String> {
-    let specs = branched_node_specs_from_models(
-        schedule
-            .nodes
-            .iter()
-            .map(|node| (node.kind, node.identifier.clone(), (*node.config).clone())),
-    );
-    let mut producers = Vec::new();
-    for spec in &specs.entrypoints {
-        if &spec.root_relay == relay {
-            producers.push((spec.kind, spec.identifier.clone()));
-        }
-    }
-    for node_spec in &specs.processors {
-        if node_spec.spec.output_relays().contains(relay) {
-            producers.push((node_spec.spec.kind, node_spec.spec.processor.clone()));
-        }
-    }
-    let mut owners = BTreeSet::new();
-    for (kind, identifier) in producers {
-        let Some(producer_node) = schedule
-            .nodes
-            .iter()
-            .find(|node| node.kind == kind && node.identifier == identifier)
-        else {
-            continue;
-        };
-        match producer_node.config.as_ref() {
-            Model::Ingestor(CreateIngestor {
-                source: IngestSource::Endpoint { .. },
-                ..
-            }) => {
-                for owner in &producer_node.assigned_nodes {
-                    owners.insert(owner.clone());
-                }
-            }
-            _ => {
-                if let Some(owner) = producer_node.execution_node() {
-                    owners.insert(owner.to_string());
-                }
-            }
-        }
-    }
-    owners.into_iter().collect()
+    schedule
+        .nodes
+        .iter()
+        .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
+        .and_then(ScheduledNode::execution_node)
+        .map(|owner| vec![owner.to_string()])
+        .unwrap_or_default()
 }
 
 fn current_timestamp() -> Timestamp {

@@ -167,6 +167,12 @@ impl MetricKey {
     fn is_relay_buffer_len(&self) -> bool {
         self.metric == RELAY_BUFFER_LEN
     }
+
+    fn belongs_to_relay(&self, domain: &Domain, relay: &Identifier) -> bool {
+        self.domain == domain.as_str()
+            && self.target_kind == "RELAY"
+            && self.target == relay.as_str()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1469,6 +1475,31 @@ impl PrometheusMetrics {
         }
     }
 
+    fn remove(&self, key: &MetricKey) {
+        let labels = prometheus_label_values(key);
+        match key.metric {
+            MESSAGES_TOTAL => {
+                let _ = self.messages_total.remove_label_values(&labels);
+            }
+            BATCHES_TOTAL => {
+                let _ = self.batches_total.remove_label_values(&labels);
+            }
+            BYTES_TOTAL => {
+                let _ = self.bytes_total.remove_label_values(&labels);
+            }
+            MESSAGES_PER_BATCH => {
+                let _ = self.messages_per_batch.remove_label_values(&labels);
+            }
+            DELIVERY_LATENCY_SECONDS => {
+                let _ = self.delivery_latency_seconds.remove_label_values(&labels);
+            }
+            RELAY_BUFFER_LEN => {
+                let _ = self.relay_buffer_len.remove_label_values(&labels);
+            }
+            _ => {}
+        }
+    }
+
     fn text(&self) -> String {
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
@@ -1931,6 +1962,33 @@ impl RuntimeMetrics {
             "received",
             MESSAGES_TOTAL,
         ));
+    }
+
+    pub(crate) fn remove_relay(&self, domain: &Domain, relay: &Identifier) {
+        let counter_keys = self
+            .counters
+            .iter()
+            .filter(|entry| entry.key().belongs_to_relay(domain, relay))
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in counter_keys {
+            self.counters.remove(&key);
+            self.prometheus.remove(&key);
+        }
+        let histogram_keys = self
+            .histograms
+            .iter()
+            .filter(|entry| entry.key().belongs_to_relay(domain, relay))
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in histogram_keys {
+            self.histograms.remove(&key);
+            self.prometheus.remove(&key);
+        }
+        self.branch_counters
+            .retain(|key, _| !key.key.belongs_to_relay(domain, relay));
+        self.branch_histograms
+            .retain(|key, _| !key.key.belongs_to_relay(domain, relay));
     }
 
     pub fn observe_global_stream_received(
@@ -4083,6 +4141,61 @@ mod tests {
         assert!(rendered.contains("relay=\"events\""));
         assert!(rendered.contains("physical_node_id=\"node-1\""));
         assert!(rendered.contains(" 2"));
+    }
+
+    #[test]
+    fn relinquishing_relay_ownership_removes_its_local_metrics() {
+        let metrics = RuntimeMetrics::default();
+        let domain = Domain::parse("main").expect("valid domain");
+        let relay = Identifier::parse("events").expect("valid identifier");
+        metrics.observe_global_stream_received(&domain, &relay, Some("node-1"), 2, 64, None);
+        metrics.observe_branch_stream_received(
+            r#"{"tenant":"acme"}"#,
+            RelayBatchObservation {
+                domain: &domain,
+                relay: &relay,
+                physical_node_id: Some("node-1"),
+                messages: 2,
+                bytes: 64,
+                domain_timestamp: None,
+            },
+        );
+        metrics.observe_global_relay_buffer_len(RelayBufferObservation {
+            domain: &domain,
+            relay: &relay,
+            physical_node_id: Some("node-1"),
+            direction: "concrete",
+            len: 1,
+            capacity: 2,
+        });
+
+        metrics.remove_relay(&domain, &relay);
+
+        assert!(
+            metrics
+                .counters
+                .iter()
+                .all(|entry| entry.key().target != relay.as_str())
+        );
+        assert!(
+            metrics
+                .histograms
+                .iter()
+                .all(|entry| entry.key().target != relay.as_str())
+        );
+        assert!(
+            metrics
+                .branch_counters
+                .iter()
+                .all(|entry| entry.key().key.target != relay.as_str())
+        );
+        assert!(
+            metrics
+                .branch_histograms
+                .iter()
+                .all(|entry| entry.key().key.target != relay.as_str())
+        );
+        assert!(!metrics.prometheus_text().contains("target=\"events\""));
     }
 
     #[test]
