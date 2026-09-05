@@ -8590,7 +8590,7 @@ fn rewrite_lookup_hash_map_expr(
                     let generated_field = format!("value_{}", *next_field);
                     *next_field += 1;
                     calls.push((
-                        FieldName::from(&lookup.clone().clone()),
+                        FieldName::from(&lookup.clone().clone().clone()),
                         lookup_field,
                         key,
                         generated_field.clone(),
@@ -9063,19 +9063,19 @@ fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSc
             name: SchemaName::from(&ModelName::parse("ingestor_metadata").expect("valid metadata schema name")),
             fields: vec![
                 SchemaField {
-                    name: FieldName::from(&ModelName::parse("topic").expect("valid metadata field").clone().clone()),
+                    name: FieldName::from(&ModelName::parse("topic").expect("valid metadata field").clone().clone().clone()),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: FieldName::from(&ModelName::parse("partition").expect("valid metadata field").clone().clone()),
+                    name: FieldName::from(&ModelName::parse("partition").expect("valid metadata field").clone().clone().clone()),
                     ty: ParseAsType::I32,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: FieldName::from(&ModelName::parse("offset").expect("valid metadata field").clone().clone()),
+                    name: FieldName::from(&ModelName::parse("offset").expect("valid metadata field").clone().clone().clone()),
                     ty: ParseAsType::I64,
                     optional: true,
                     sensitive: false,
@@ -9085,7 +9085,7 @@ fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSc
         IngestSource::Syslog { .. } => Some(CreateSchema {
             name: SchemaName::from(&ModelName::parse("ingestor_metadata").expect("valid metadata schema name")),
             fields: vec![SchemaField {
-                name: FieldName::from(&ModelName::parse("peer_addr").expect("valid metadata field").clone().clone()),
+                name: FieldName::from(&ModelName::parse("peer_addr").expect("valid metadata field").clone().clone().clone()),
                 ty: ParseAsType::String,
                 optional: true,
                 sensitive: false,
@@ -9730,7 +9730,7 @@ fn ensure_inferencer_input_mappings(
         let parsed = lower_route_construction(
             &RouteConstruction {
                 assignments: vec![Assignment {
-                    target: AssignmentTarget::bare(FieldName::from(&target.clone().clone())),
+                    target: AssignmentTarget::bare(FieldName::from(&target.clone().clone().clone())),
                     value: mapping.expression.clone(),
                 }],
                 ..RouteConstruction::default()

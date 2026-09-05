@@ -767,7 +767,7 @@ impl SessionSubscriptions {
                                     tokio::task::consume_budget().await;
                                     let Some(message) = (match filter_map.as_ref() {
                                         Some(filter_map) => match execute_filter_map_on_record(
-                                            &SubscriptionName::from(&event_name.clone()),
+                                            &SubscriptionName::from(&event_name.clone().clone()),
                                             filter_map,
                                             message.record.clone(),
                                             message.key.as_ref(),
@@ -897,7 +897,7 @@ impl SessionSubscriptions {
         });
 
         self.subscriptions.insert(
-            SubscriptionName::from(&name.clone().clone()),
+            SubscriptionName::from(&name.clone().clone().clone()),
             SessionSubscription {
                 domain,
                 relay,
@@ -3950,7 +3950,7 @@ impl SessionService for SessionServiceImpl {
         };
 
         let resources = self.consensus.current_resources().await;
-        if !resources.is_declared(&domain, &ResourceName::from(&identifier.clone())) {
+        if !resources.is_declared(&domain, &ResourceName::from(&identifier.clone().clone())) {
             return Ok(Response::new(UploadResourceResponse {
                 success: false,
                 message: format!("resource '{}' does not exist", identifier.as_str()),
@@ -10916,7 +10916,7 @@ impl SessionServiceImpl {
         let created_at = current_timestamp();
         let version = match self
             .consensus
-            .allocate_resource_version(domain, &ResourceName::from(&identifier.clone()))
+            .allocate_resource_version(domain, &ResourceName::from(&identifier.clone().clone()))
             .await
         {
             Ok(version) => version,
@@ -10927,7 +10927,7 @@ impl SessionServiceImpl {
                 ));
             }
         };
-        let id = ResourceId::new(domain.clone(), ResourceName::from(&identifier.clone().clone()), version);
+        let id = ResourceId::new(domain.clone(), ResourceName::from(&identifier.clone().clone().clone()), version);
 
         let manifest = match self
             .resource_store
@@ -11803,7 +11803,7 @@ impl SessionServiceImpl {
             .domains
             .iter()
             .flat_map(|schedule| &schedule.nodes)
-            .filter(|node| node.execution_node() == Some(&ClusterNodeName::from(&node_id.clone().clone())))
+            .filter(|node| node.execution_node() == Some(&ClusterNodeName::from(&node_id.clone().clone().clone())))
             .count();
         let mut moved = 0usize;
         let mut outcomes = Vec::new();
@@ -12158,7 +12158,7 @@ impl SessionServiceImpl {
         &self,
         client: &NervixClient,
         local_node_id: &ClusterNodeName,
-        leader_id: \&ClusterNodeName,
+        leader_id: &ClusterNodeName,
     ) {
         match client
             .execute(format!("UNCORDON NODE {local_node_id};"))
@@ -12191,7 +12191,7 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn leader_grpc_uri(&self, leader_id: \&ClusterNodeName) -> Option<String> {
+    async fn leader_grpc_uri(&self, leader_id: &ClusterNodeName) -> Option<String> {
         self.cluster
             .gossip_state()
             .await
@@ -12326,7 +12326,7 @@ impl SessionServiceImpl {
         schedule: &mut nervix_models::DomainSchedule,
         desired: &nervix_models::DomainSchedule,
         group: &PlacementGroupSchedule,
-        unavailable_node_id: \&ClusterNodeName,
+        unavailable_node_id: &ClusterNodeName,
         live_nodes: &BTreeSet<ClusterNodeName>,
         target_nodes: &BTreeSet<ClusterNodeName>,
         relocation: AssignmentRelocation,
@@ -12461,7 +12461,7 @@ impl SessionServiceImpl {
     fn relocate_scheduled_node_assignment(
         node: &mut ScheduledNode,
         desired_node: &ScheduledNode,
-        unavailable_node_id: \&ClusterNodeName,
+        unavailable_node_id: &ClusterNodeName,
         live_nodes: &BTreeSet<ClusterNodeName>,
         target_nodes: &BTreeSet<ClusterNodeName>,
         relocation: AssignmentRelocation,
@@ -13394,7 +13394,7 @@ impl SessionServiceImpl {
         let Some(lookup_node) = domain_schedule
             .nodes
             .iter()
-            .find(|node| node.kind == ModelKind::Lookup \&\& node.identifier == *name)
+            .find(|node| node.kind == ModelKind::Lookup && node.identifier == *name)
         else {
             return Ok(None);
         };
@@ -13459,7 +13459,7 @@ impl SessionServiceImpl {
         let Some(ingestor_node) = domain_schedule
             .nodes
             .iter()
-            .find(|node| node.kind == ModelKind::Ingestor \&\& node.identifier == *name)
+            .find(|node| node.kind == ModelKind::Ingestor && node.identifier == *name)
         else {
             return Ok(None);
         };
@@ -15449,7 +15449,7 @@ fn password_argon2() -> Argon2<'static> {
 async fn user_credentials(name: UserName, password: String) -> Result<UserCredentials, String> {
     let password_hash = hash_password(password).await?;
     Ok(UserCredentials {
-        UserName::from(&name),
+        name,
         password_hash,
     })
 }
