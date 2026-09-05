@@ -481,15 +481,19 @@ impl PostgresEmitter {
         indices
             .iter()
             .map(|row| {
-                rows.get(*row)
-                    .and_then(|values| values.as_ref().ok())
-                    .map(Vec::as_slice)
-                    .ok_or_else(|| {
-                        PostgresWriteError::InvalidValues(format!(
-                            "pending row {row} has no mapped VALUES in batch with {} rows",
-                            rows.len()
-                        ))
-                    })
+                let Some(values) = rows.get(*row) else {
+                    return Err(PostgresWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                let Ok(values) = values else {
+                    return Err(PostgresWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                Ok(values.as_slice())
             })
             .collect()
     }

@@ -302,10 +302,11 @@ impl RabbitMqIngestor {
                                                                 &mut collector,
                                                             )
                                                             .await;
-                                                        let dispatched = dispatch_result
+                                                        let dispatched = match dispatch_result
                                                             .and(flush_result)
-                                                            .map(|()| true)
-                                                            .unwrap_or_else(|error| {
+                                                        {
+                                                            Ok(()) => true,
+                                                            Err(error) => {
                                                                 let _ = task_events.send(RuntimeEvent::Error(format!(
                                                                     "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
@@ -313,7 +314,8 @@ impl RabbitMqIngestor {
                                                                     error
                                                                 )));
                                                                 false
-                                                            });
+                                                            }
+                                                        };
                                                         if dispatched {
                                                             acks.ack_success();
                                                             match Runtime::await_ack_completion(

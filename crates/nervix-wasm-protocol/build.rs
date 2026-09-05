@@ -13,14 +13,13 @@ fn main() {
         flatc_rust::Flatc::from_env_path,
         flatc_rust::Flatc::from_path,
     );
-    compiler
-        .check()
-        .and_then(|()| {
-            compiler.run(flatc_rust::Args {
-                inputs: &[SCHEMA.as_ref()],
-                out_dir: &generated_dir,
-                ..Default::default()
-            })
-        })
-        .expect("failed to generate Rust FlatBuffers bindings; install flatc or set FLATC_PATH");
+    let result = match compiler.check() {
+        Ok(()) => compiler.run(flatc_rust::Args {
+            inputs: &[SCHEMA.as_ref()],
+            out_dir: &generated_dir,
+            ..Default::default()
+        }),
+        Err(error) => Err(error),
+    };
+    result.expect("failed to generate Rust FlatBuffers bindings; install flatc or set FLATC_PATH");
 }

@@ -524,27 +524,37 @@ fn unsatisfied_preference_lines(
             }
         }
     }
-    unit.preferences
-        .iter()
-        .filter_map(|preference| {
-            let left = scheduled_node(schedule, &preference.left)?.execution_node()?;
-            let right = scheduled_node(schedule, &preference.right)?.execution_node()?;
-            let unsatisfied = match preference.policy {
-                PlacementPolicy::PreferColocation => left != right,
-                PlacementPolicy::SuggestSeparation => left == right,
-                PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => false,
-            };
-            unsatisfied.then(|| {
-                format!(
-                    "- {} {} <-> {} ({})",
-                    preference.policy.as_ref().to_lowercase(),
-                    format_placement_runtime_node(&preference.left, &context),
-                    format_placement_runtime_node(&preference.right, &context),
-                    placement_claim_owner(&preference.winning_rules)
-                )
-            })
-        })
-        .collect()
+    let mut lines = Vec::new();
+    for preference in &unit.preferences {
+        let Some(left_node) = scheduled_node(schedule, &preference.left) else {
+            continue;
+        };
+        let Some(left) = left_node.execution_node() else {
+            continue;
+        };
+        let Some(right_node) = scheduled_node(schedule, &preference.right) else {
+            continue;
+        };
+        let Some(right) = right_node.execution_node() else {
+            continue;
+        };
+        let unsatisfied = match preference.policy {
+            PlacementPolicy::PreferColocation => left != right,
+            PlacementPolicy::SuggestSeparation => left == right,
+            PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => false,
+        };
+        if !unsatisfied {
+            continue;
+        }
+        lines.push(format!(
+            "- {} {} <-> {} ({})",
+            preference.policy.as_ref().to_lowercase(),
+            format_placement_runtime_node(&preference.left, &context),
+            format_placement_runtime_node(&preference.right, &context),
+            placement_claim_owner(&preference.winning_rules)
+        ));
+    }
+    lines
 }
 
 /// The owner a unit member is relocated away from.

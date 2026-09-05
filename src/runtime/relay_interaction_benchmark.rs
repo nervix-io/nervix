@@ -220,14 +220,15 @@ fn benchmark_batch() -> RelayRecordBatch {
     builder
         .finish_row()
         .expect("benchmark row must be complete");
-    let record = builder
-        .finish()
-        .and_then(|batch| {
-            batch.runtime_row(
-                0,
-                RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
-            )
-        })
+    let batch = match builder.finish() {
+        Ok(batch) => batch,
+        Err(error) => panic!("benchmark Arrow batch must build: {error}"),
+    };
+    let record = batch
+        .runtime_row(
+            0,
+            RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
+        )
         .expect("benchmark Arrow row must build");
     RelayRecordBatch::single(schema, None, record, AckSet::empty())
         .expect("benchmark batch must build")

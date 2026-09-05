@@ -794,10 +794,9 @@ impl MqttIngestor {
             )
             .await;
             let flush_result = Self::flush_collector(context, &mut collector).await;
-            let dispatched = dispatch_result
-                .and(flush_result)
-                .map(|()| true)
-                .unwrap_or_else(|error| {
+            let dispatched = match dispatch_result.and(flush_result) {
+                Ok(()) => true,
+                Err(error) => {
                     let _ = context.events.send(RuntimeEvent::Error(format!(
                         "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                         context.ingestor.as_str(),
@@ -805,7 +804,8 @@ impl MqttIngestor {
                         error
                     )));
                     false
-                });
+                }
+            };
             if dispatched {
                 acks.ack_success();
                 match Runtime::await_ack_completion(shutdown_rx, completion, ack_timeout).await {
@@ -900,7 +900,7 @@ impl MqttIngestor {
                 let (acks, completion) = context
                     .runtime
                     .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
-                let dispatched = Self::dispatch_entry(
+                let dispatch_result = Self::dispatch_entry(
                     context,
                     record,
                     if !context.branched_senders.is_empty() {
@@ -910,17 +910,19 @@ impl MqttIngestor {
                     },
                     &mut collector,
                 )
-                .await
-                .map(|()| true)
-                .unwrap_or_else(|error| {
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
-                        "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                        context.ingestor.as_str(),
-                        context.domain.as_str(),
-                        error
-                    )));
-                    false
-                });
+                .await;
+                let dispatched = match dispatch_result {
+                    Ok(()) => true,
+                    Err(error) => {
+                        let _ = context.events.send(RuntimeEvent::Error(format!(
+                            "failed to dispatch message for ingestor '{}' in domain '{}': {}",
+                            context.ingestor.as_str(),
+                            context.domain.as_str(),
+                            error
+                        )));
+                        false
+                    }
+                };
                 if dispatched {
                     acks.ack_success();
                     completions.push(completion);

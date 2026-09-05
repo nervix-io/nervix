@@ -1364,18 +1364,16 @@ mod tests {
             tokio::task::consume_budget().await;
             match event(&mut interaction, None).await {
                 RelayInteractionEvent::Batch { relay, batch } => {
-                    let tenant = batch
-                        .key
-                        .as_ref()
-                        .and_then(|key| key.field_value("tenant"))
-                        .and_then(|value| {
-                            if let RuntimeValue::String(value) = value {
-                                Some(value.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .expect("collected branch must be retained");
+                    let Some(key) = batch.key.as_ref() else {
+                        panic!("collected branch must be retained");
+                    };
+                    let Some(value) = key.field_value("tenant") else {
+                        panic!("collected branch must retain its tenant");
+                    };
+                    let RuntimeValue::String(tenant) = value else {
+                        panic!("collected tenant branch value must be STRING");
+                    };
+                    let tenant = tenant.clone();
                     groups.push((relay.as_str().to_string(), tenant, batch.message_count()));
                 }
                 RelayInteractionEvent::ForceFlush(completion) => {

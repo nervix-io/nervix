@@ -136,10 +136,13 @@ fn verify(input: &str, formatted: &str) -> Result<(), FormatError> {
 }
 
 fn statement_line(input: &str, index: usize) -> usize {
-    parse_client_statement_sources(input)
-        .ok()
-        .and_then(|statements| statements.get(index).map(|s| line_of(input, s.span.start)))
-        .unwrap_or(1)
+    let Ok(statements) = parse_client_statement_sources(input) else {
+        return 1;
+    };
+    let Some(statement) = statements.get(index) else {
+        return 1;
+    };
+    line_of(input, statement.span.start)
 }
 
 /// The 1-based line number containing byte `offset`.
