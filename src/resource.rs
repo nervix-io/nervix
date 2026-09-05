@@ -8,6 +8,7 @@ use async_tar::{
     Archive as AsyncTarArchive, Builder as AsyncTarBuilder, EntryType, Header, HeaderMode,
 };
 use blake3::Hasher;
+use meticulous::ResultExt as _;
 use nervix_models::{ResourceId, ResourceVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -440,7 +441,7 @@ fn collect_manifest_entries_recursive(
             .map_err(|_| ResourceStoreError::ReadDirectory)?;
         let relative = path
             .strip_prefix(root)
-            .expect("current path must remain under root")
+            .verified("the walk only yields entries below the root it started from")
             .to_string_lossy()
             .replace('\\', "/");
         if file_type.is_dir() {

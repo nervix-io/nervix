@@ -26,6 +26,7 @@ use arrow_select::{
     concat::concat as concat_arrow_arrays, filter::filter_record_batch, take::take,
 };
 use chrono::{DateTime, FixedOffset};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AvroType, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
     CreateWireSchema, Identifier, JsonType, ParseAsType, RemoteRuntimeElementValue,
@@ -522,14 +523,14 @@ pub(crate) fn test_runtime_row(
                 .map(|data_type| ArrowField::new(name, data_type, false))
         })
         .collect::<Result<Vec<_>, _>>()
-        .expect("test Arrow row fields must have inferable types");
+        .verified("the columns are built from the very types inferred from these same values");
     let schema = StdArc::new(ArrowSchema::new(arrow_fields));
     let columns = fields
         .iter()
         .zip(schema.fields())
         .map(|((_, value), field)| runtime_value_arrow_array(field.data_type(), Some(value), 1))
         .collect::<Result<Vec<_>, _>>()
-        .expect("test Arrow row values must match their inferred types");
+        .verified("the columns are built from the very types inferred from these same values");
     let batch = if columns.is_empty() {
         RecordBatch::try_new_with_options(
             schema.clone(),
@@ -539,10 +540,10 @@ pub(crate) fn test_runtime_row(
     } else {
         RecordBatch::try_new(schema.clone(), columns)
     }
-    .expect("test Arrow row batch must be valid");
+    .verified("the columns are built from the very types inferred from these same values");
     RuntimeRecordBatch::from_record_batch(schema, batch)
         .and_then(|batch| batch.runtime_row(0, RuntimeRecordMetadata::test()))
-        .expect("test Arrow row view must be valid")
+        .verified("the columns are built from the very types inferred from these same values")
 }
 
 #[cfg(test)]
@@ -1559,7 +1560,7 @@ impl RuntimeValue {
             RemoteRuntimeValue::String(v) => Self::String(v),
             RemoteRuntimeValue::Datetime(v) => Self::Datetime(
                 DateTime::parse_from_rfc3339(&v)
-                    .expect("remote runtime values must contain valid rfc3339 strings"),
+                    .assured("the peer renders these with to_rfc3339, which this parser accepts"),
             ),
             RemoteRuntimeValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeValue::F64(v) => Self::F64(OrderedFloat(v)),
@@ -1610,7 +1611,7 @@ impl RuntimeValue {
             RemoteRuntimeElementValue::String(v) => Self::String(v),
             RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(
                 DateTime::parse_from_rfc3339(&v)
-                    .expect("remote runtime values must contain valid rfc3339 strings"),
+                    .assured("the peer renders these with to_rfc3339, which this parser accepts"),
             ),
             RemoteRuntimeElementValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeElementValue::F64(v) => Self::F64(OrderedFloat(v)),
@@ -1644,13 +1645,16 @@ impl RuntimeValue {
             Self::Bool(v) => JsonValue::Bool(*v),
             Self::String(v) => JsonValue::String(v.clone()),
             Self::Datetime(v) => JsonValue::String(v.to_rfc3339()),
-            Self::F32(v) => JsonValue::Number(
-                JsonNumber::from_f64(v.into_inner() as f64)
-                    .expect("finite f32 must map to json number"),
-            ),
-            Self::F64(v) => JsonValue::Number(
-                JsonNumber::from_f64(v.into_inner()).expect("finite f64 must map to json number"),
-            ),
+            Self::F32(v) => {
+                JsonValue::Number(JsonNumber::from_f64(v.into_inner() as f64).verified(
+                    "the VM turns a non-finite float result into a row error, so a stored float \
+                     is finite",
+                ))
+            }
+            Self::F64(v) => JsonValue::Number(JsonNumber::from_f64(v.into_inner()).verified(
+                "the VM turns a non-finite float result into a row error, so a stored float is \
+                 finite",
+            )),
             Self::Array(values) | Self::Vec(values) => {
                 JsonValue::Array(values.iter().map(RuntimeValue::to_json_value).collect())
             }
@@ -3025,7 +3029,10 @@ pub(crate) fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
         ParseAsType::F64 => ArrowDataType::Float64,
         ParseAsType::Array { element, len } => ArrowDataType::FixedSizeList(
             ArrowFieldRef::new(ArrowField::new("item", arrow_data_type(element), false)),
-            i32::try_from(*len).expect("array length must fit Arrow fixed-size list"),
+            i32::try_from(*len).verified(
+                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
+                 list",
+            ),
         ),
         ParseAsType::Vec { element } => ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
             "item",

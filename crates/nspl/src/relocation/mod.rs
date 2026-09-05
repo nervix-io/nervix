@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     ModelKind, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection,
@@ -174,7 +175,7 @@ pub fn parse_relocate(input: &str) -> Result<Relocation, ParseFromSourceError> {
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -193,7 +194,7 @@ pub fn parse_describe_relocation(input: &str) -> Result<Relocation, ParseFromSou
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

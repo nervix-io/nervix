@@ -18,4 +18,5 @@ prost = { workspace = true }
 tonic = { workspace = true, optional = true }
 
 [build-dependencies]
+meticulous = { workspace = true }
 tonic-build = { workspace = true }

@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     CanonicalNsplError, CreateSubscription, DeleteSubscription, Domain, Statement, UploadResource,
 };
@@ -155,7 +156,7 @@ pub fn parse_use_domain(input: &str) -> Result<Domain, ParseFromSourceError> {
     }
     Ok(out
         .into_output()
-        .expect("successful parse must have output"))
+        .verified("has_errors returned false above, so this parse produced output"))
 }
 
 pub fn parse_upload_resource_query(input: &str) -> Result<UploadResource, ParseFromSourceError> {
@@ -170,7 +171,7 @@ pub fn parse_client_statement(input: &str) -> Result<ClientStatement, ParseFromS
     if !out.has_errors() {
         return Ok(out
             .into_output()
-            .expect("successful parse must have output"));
+            .verified("has_errors returned false above, so this parse produced output"));
     }
     let client_errors = out.into_errors();
     if starts_with_client_command_keyword(&tokens) {

@@ -4,6 +4,7 @@ use chumsky::{
     input::{Stream, ValueInput},
     prelude::*,
 };
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{AssignmentTargetScope, Expression, RouteConstruction};
 use sorted_vec::SortedSet;
 
@@ -403,7 +404,7 @@ pub fn parse_aggregate_tokens(
     } else {
         let mut program = parsed
             .into_output()
-            .expect("successful parse must contain an aggregate program");
+            .verified("has_errors returned false above, so this parse produced output");
         assign_aggregate_demands(&mut program.inner);
         Ok(program)
     }
@@ -702,19 +703,17 @@ fn assign_vm_expr_demands(expr: &mut SpannedExpr, demands: &mut Vec<WindowAggreg
             };
             let percentile =
                 if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
-                    Some(
-                        percentile_arg(&args[1], expr.span)
-                            .expect("validated percentile argument must remain valid"),
-                    )
+                    Some(percentile_arg(&args[1], expr.span).verified(
+                        "the parser validated these same arguments before the demand pass runs",
+                    ))
                 } else {
                     None
                 };
             let linear_histogram =
                 if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
-                    Some(
-                        linear_histogram_config(args, expr.span)
-                            .expect("validated histogram configuration must remain valid"),
-                    )
+                    Some(linear_histogram_config(args, expr.span).verified(
+                        "the parser validated these same arguments before the demand pass runs",
+                    ))
                 } else {
                     None
                 };
@@ -769,7 +768,7 @@ fn aggregate_demand_for_call(
 ) -> WindowAggregateDemand {
     let input = Some(
         args.first()
-            .expect("aggregate call must carry its validated input argument")
+            .verified("the parser rejects an aggregate call without its input argument")
             .inner
             .clone(),
     );

@@ -1,5 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, IntoStaticStr};
@@ -265,13 +266,13 @@ pub enum ModelKind {
 impl ModelKind {
     pub fn completion_label(self) -> &'static str {
         self.get_str("completion_label")
-            .expect("every model kind must define a completion_label")
+            .assured("the strum property is declared on every variant of this enum")
     }
 
     /// The NSPL keyword phrase that names this kind in `DROP` and `SHOW CREATE`.
     pub fn keyword_phrase(self) -> &'static str {
         self.get_str("keyword")
-            .expect("every model kind must define a keyword phrase")
+            .assured("the strum property is declared on every variant of this enum")
     }
 
     pub fn from_completion_label(label: &str) -> Option<Self> {
@@ -527,7 +528,7 @@ impl RelocationPreferenceStrategy {
     /// The composed NSPL keyword phrase that spells this strategy.
     pub fn keyword_phrase(self) -> &'static str {
         self.get_str("keyword")
-            .expect("every relocation strategy must define a keyword phrase")
+            .assured("the strum property is declared on every variant of this enum")
     }
 
     pub fn follows_preferences(self) -> bool {

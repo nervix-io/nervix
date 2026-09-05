@@ -45,7 +45,10 @@ impl EndpointIngestor {
             runtime_key: key.clone(),
             quiesce: runtime
                 .ingestor_quiesce_control(domain, &ingestor.name)
-                .expect("scheduled endpoint ingestor must have quiesce control"),
+                .verified(
+                    "the runtime registers quiesce control for an ingestor before it starts the \
+                     task",
+                ),
             domain: domain.clone(),
             ingestor: ingestor.name.clone(),
             timestamp_source: ingestor.timestamp_source.clone(),

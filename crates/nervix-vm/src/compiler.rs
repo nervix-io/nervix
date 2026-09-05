@@ -6,6 +6,7 @@ use std::{
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::{DataType, Field, Schema};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_nspl::vm_program::{
     BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
     Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
@@ -1200,7 +1201,7 @@ impl Compiler {
                 self.expr_may_be_null(
                     else_result
                         .as_ref()
-                        .expect("checked CASE ELSE presence above"),
+                        .verified("the branch above returned for the absent case"),
                 )
             }
         }
@@ -1476,7 +1477,9 @@ impl Compiler {
                 let left_reg = self.compile_expr(left)?;
                 let right_reg = self.compile_expr(right)?;
                 let output_type = RegisterType::from_data_type(&self.infer_expr_type(expr)?)
-                    .expect("validated expression type must be supported");
+                    .verified(
+                        "type inference above rejected every data type that has no register type",
+                    );
                 let dst = self.alloc_temp(output_type);
                 self.emit(
                     InstructionKind::Binary {
@@ -1494,8 +1497,9 @@ impl Compiler {
                 data_type,
             } => {
                 let input = self.compile_expr(inner)?;
-                let target = RegisterType::from_data_type(data_type)
-                    .expect("validated cast target must be supported");
+                let target = RegisterType::from_data_type(data_type).verified(
+                    "type inference above rejected every data type that has no register type",
+                );
                 let dst = self.alloc_temp(target);
                 self.emit(InstructionKind::Cast { dst, input, target }, expr.span);
                 Ok(dst)
@@ -1511,10 +1515,9 @@ impl Compiler {
                         .iter()
                         .map(|arg| self.compile_expr(arg))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let dst = self.alloc_temp(
-                        RegisterType::from_data_type(&output_type)
-                            .expect("validated injected output type must be supported"),
-                    );
+                    let dst = self.alloc_temp(RegisterType::from_data_type(&output_type).verified(
+                        "type inference above rejected every data type that has no register type",
+                    ));
                     self.emit(
                         InstructionKind::Inject {
                             dst,
@@ -1532,10 +1535,9 @@ impl Compiler {
                         args,
                         expr.span,
                     )?;
-                    let dst = self.alloc_temp(
-                        RegisterType::from_data_type(&output_type)
-                            .expect("validated aggregate output type must be supported"),
-                    );
+                    let dst = self.alloc_temp(RegisterType::from_data_type(&output_type).verified(
+                        "type inference above rejected every data type that has no register type",
+                    ));
                     self.emit(
                         InstructionKind::Inject {
                             dst,
@@ -1553,10 +1555,9 @@ impl Compiler {
                         .iter()
                         .map(|argument| self.compile_expr(argument))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let dst = self.alloc_temp(
-                        RegisterType::from_data_type(&output_type)
-                            .expect("validated UDF output type must be supported"),
-                    );
+                    let dst = self.alloc_temp(RegisterType::from_data_type(&output_type).verified(
+                        "type inference above rejected every data type that has no register type",
+                    ));
                     self.emit(
                         InstructionKind::Inject {
                             dst,
@@ -1715,7 +1716,8 @@ impl Compiler {
                 );
                 Ok(dst)
             } else {
-                compiler.compile_expr(result.expect("checked CASE result presence above"))
+                compiler
+                    .compile_expr(result.verified("the branch above returned for the absent case"))
             }
         })
     }
@@ -1762,7 +1764,7 @@ impl Compiler {
             .collect::<Result<Vec<_>, _>>()?;
         let output_type = builtin_signature(function, &arg_types, span)?;
         let output_type = RegisterType::from_data_type(&output_type)
-            .expect("validated builtin output type must be supported");
+            .verified("type inference above rejected every data type that has no register type");
         let compiled_args = args
             .iter()
             .map(|arg| self.compile_expr(arg))
@@ -2550,7 +2552,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
     for (field_ref, expr) in &program.inner.set {
         let field = output_schema
             .field_with_name(&field_ref.field)
-            .expect("SET target was validated against the output schema");
+            .verified("the SET targets were validated against this same output schema above");
         let field_sensitive = output_sensitivity.is_sensitive(field.name());
         compiler.validate_assignment_expr(
             field.name(),
@@ -2626,7 +2628,9 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         .writable_namespaces
         .iter()
         .next()
-        .expect("compiler requires one writable namespace")
+        .verified(
+            "the compiler is constructed with exactly one writable namespace for a SET program",
+        )
         .clone();
     let mut outputs = Vec::with_capacity(output_schema.fields().len());
     for (output_index, field) in output_schema.fields().iter().enumerate() {
@@ -2636,7 +2640,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
                 relay: output_namespace.clone(),
                 field: field.name().clone(),
             }))
-            .expect("output fields were installed in SET scope")
+            .verified("every output-schema field was installed as a column in the SET scope above")
             .clone();
         if binding.data_type != *field.data_type() {
             return Err(CompileError {
@@ -2956,9 +2960,10 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
 
         for input in &inputs {
             if input.space == RegisterSpace::Temp {
-                let physical_index = *active
-                    .get(input)
-                    .expect("temp register must be assigned before it is read");
+                let physical_index = *active.get(input).verified(
+                    "instructions are walked in order, so a temp input was written by an earlier \
+                     instruction",
+                );
                 rewrite_temp_input(instruction, *input, physical_index);
                 if last_uses.get(input) == Some(&inst_idx) {
                     if Some(*input) == logical_error_mask {
@@ -2971,9 +2976,9 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
         }
 
         for dead in dead_inputs {
-            let physical_index = active
-                .remove(&dead)
-                .expect("dead temp register must still be active");
+            let physical_index = active.remove(&dead).verified(
+                "a register is only recorded as dead while it is active, and it is released once",
+            );
             free.release(dead.ty, physical_index);
         }
 
@@ -2985,9 +2990,9 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
         }
 
         for dead in deferred_dead_inputs {
-            let physical_index = active
-                .remove(&dead)
-                .expect("dead error-mask temp register must still be active");
+            let physical_index = active.remove(&dead).verified(
+                "a register is only recorded as dead while it is active, and it is released once",
+            );
             free.release(dead.ty, physical_index);
         }
     }

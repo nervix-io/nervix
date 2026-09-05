@@ -32,7 +32,8 @@ type is recursive, so fixed and variable axes can be mixed, for example
 `VEC<ARRAY<F32, 6>>` and `ARRAY<VEC<STRING>, 4>`.
 
 `ARRAY` and `VEC` are distinct and are never implicitly converted. Every fixed
-axis must have a positive length, fixed arrays must contain exactly that many
+axis must have a positive length no greater than 2147483647, the largest length
+an Arrow `FixedSizeList` carries, fixed arrays must contain exactly that many
 elements at runtime, and dense multidimensional values must retain their nested
 shape. JSON and CBOR represent both with nested JSON-style arrays. AVRO uses
 nested array schemas with item types inferred recursively from the internal

@@ -79,6 +79,7 @@ jaq-fmts = { workspace = true }
 jaq-json = { workspace = true, features = ["serde"] }
 jaq-std = { workspace = true }
 lapin = { workspace = true }
+meticulous = { workspace = true }
 mongodb = { workspace = true }
 multer = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
@@ -330,6 +331,10 @@ leptos = { version = "0.8.19", features = ["csr"] }
 libc = "0.2"
 loom = "0.7"
 md5 = "0.8"
+# `disallow-todo-on-release` is not enabled: the published crate gates the `todo` method on the
+# trait implementations but not on the trait declarations, so the feature fails every release build
+# with E0046 rather than only the builds that call `todo()`.
+meticulous = "0.2.0-pre.2"
 # MongoDB 3.6 exposes an explicit AWS-LC backend; its TLS defaults select another provider.
 mongodb = { version = "3.6.0", default-features = false, features = [
   "compat-3-0-0",

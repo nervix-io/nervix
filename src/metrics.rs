@@ -7,6 +7,7 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use hdrhistogram::Histogram as HdrHistogram;
+use meticulous::ResultExt as _;
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{Domain, Identifier, ModelKind, Timestamp};
 use parking_lot::Mutex;
@@ -474,7 +475,10 @@ impl HistogramConfig {
 
     fn new_histogram(self) -> HdrHistogram<u64> {
         HdrHistogram::<u64>::new_with_max(self.highest_trackable_value, self.significant_figures)
-            .expect("valid internal histogram configuration")
+            .assured(
+                "for_buckets raises the maximum to at least 2 and HDR_HISTOGRAM_SIGFIG is within \
+                 the 0..=5 hdrhistogram accepts",
+            )
     }
 }
 
@@ -1257,7 +1261,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             PROMETHEUS_LABELS,
         )
-        .expect("valid messages_total prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let batches_total = IntCounterVec::new(
             Opts::new(
                 BATCHES_TOTAL,
@@ -1266,7 +1273,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             PROMETHEUS_LABELS,
         )
-        .expect("valid batches_total prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let bytes_total = IntCounterVec::new(
             Opts::new(
                 BYTES_TOTAL,
@@ -1275,7 +1285,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             PROMETHEUS_LABELS,
         )
-        .expect("valid bytes_total prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let messages_per_batch = HistogramVec::new(
             HistogramOpts::new(
                 MESSAGES_PER_BATCH,
@@ -1285,7 +1298,10 @@ impl PrometheusMetrics {
             .buckets(MESSAGE_BATCH_BUCKETS.to_vec()),
             PROMETHEUS_LABELS,
         )
-        .expect("valid messages_per_batch prometheus histogram");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let delivery_latency_seconds = HistogramVec::new(
             HistogramOpts::new(
                 DELIVERY_LATENCY_SECONDS,
@@ -1295,7 +1311,10 @@ impl PrometheusMetrics {
             .buckets(LATENCY_BUCKETS.to_vec()),
             PROMETHEUS_LABELS,
         )
-        .expect("valid delivery_latency_seconds prometheus histogram");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let relay_buffer_len = HistogramVec::new(
             HistogramOpts::new(
                 RELAY_BUFFER_LEN,
@@ -1305,7 +1324,10 @@ impl PrometheusMetrics {
             .buckets(RELAY_BUFFER_LEN_BUCKETS.to_vec()),
             PROMETHEUS_LABELS,
         )
-        .expect("valid relay_buffer_len prometheus histogram");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let branch_instances = IntGaugeVec::new(
             Opts::new(
                 BRANCH_INSTANCES,
@@ -1314,7 +1336,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             BRANCH_PROMETHEUS_LABELS,
         )
-        .expect("valid branch_instances prometheus gauge");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let branch_evictions_total = IntCounterVec::new(
             Opts::new(
                 BRANCH_EVICTIONS_TOTAL,
@@ -1323,7 +1348,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             BRANCH_EVICTION_PROMETHEUS_LABELS,
         )
-        .expect("valid branch_evictions_total prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_quiesce_buffered_records = IntGaugeVec::new(
             Opts::new(
                 INGESTOR_QUIESCE_BUFFERED_RECORDS,
@@ -1332,7 +1360,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             INGESTOR_QUIESCE_PROMETHEUS_LABELS,
         )
-        .expect("valid ingestor quiesce buffered records prometheus gauge");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_quiesce_buffered_bytes = IntGaugeVec::new(
             Opts::new(
                 INGESTOR_QUIESCE_BUFFERED_BYTES,
@@ -1341,7 +1372,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             INGESTOR_QUIESCE_PROMETHEUS_LABELS,
         )
-        .expect("valid ingestor quiesce buffered bytes prometheus gauge");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_quiesce_dropped_total = IntCounterVec::new(
             Opts::new(
                 INGESTOR_QUIESCE_DROPPED_TOTAL,
@@ -1350,7 +1384,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             INGESTOR_QUIESCE_PROMETHEUS_LABELS,
         )
-        .expect("valid ingestor quiesce dropped prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_quiesce_rejected_total = IntCounterVec::new(
             Opts::new(
                 INGESTOR_QUIESCE_REJECTED_TOTAL,
@@ -1359,47 +1396,80 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             INGESTOR_QUIESCE_PROMETHEUS_LABELS,
         )
-        .expect("valid ingestor quiesce rejected prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
 
-        registry
-            .register(Box::new(messages_total.clone()))
-            .expect("messages_total registered once");
-        registry
-            .register(Box::new(batches_total.clone()))
-            .expect("batches_total registered once");
-        registry
-            .register(Box::new(bytes_total.clone()))
-            .expect("bytes_total registered once");
+        registry.register(Box::new(messages_total.clone())).assured(
+            "this registry is built here and each metric is registered once under a distinct name",
+        );
+        registry.register(Box::new(batches_total.clone())).assured(
+            "this registry is built here and each metric is registered once under a distinct name",
+        );
+        registry.register(Box::new(bytes_total.clone())).assured(
+            "this registry is built here and each metric is registered once under a distinct name",
+        );
         registry
             .register(Box::new(messages_per_batch.clone()))
-            .expect("messages_per_batch registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(delivery_latency_seconds.clone()))
-            .expect("delivery_latency_seconds registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(relay_buffer_len.clone()))
-            .expect("relay_buffer_len registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(branch_instances.clone()))
-            .expect("branch_instances registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(branch_evictions_total.clone()))
-            .expect("branch_evictions_total registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(ingestor_quiesce_buffered_records.clone()))
-            .expect("ingestor_quiesce_buffered_records registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(ingestor_quiesce_buffered_bytes.clone()))
-            .expect("ingestor_quiesce_buffered_bytes registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(ingestor_quiesce_dropped_total.clone()))
-            .expect("ingestor_quiesce_dropped_total registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(ingestor_quiesce_rejected_total.clone()))
-            .expect("ingestor_quiesce_rejected_total registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(JemallocMetricsCollector::new()))
-            .expect("jemalloc metrics registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
 
         Self {
             registry,
@@ -1546,13 +1616,20 @@ impl JemallocMetricsCollector {
         );
 
         Self {
-            epoch: epoch::mib().expect("jemalloc epoch mib available"),
-            active: stats::active::mib().expect("jemalloc active stats mib available"),
-            allocated: stats::allocated::mib().expect("jemalloc allocated stats mib available"),
-            mapped: stats::mapped::mib().expect("jemalloc mapped stats mib available"),
-            metadata: stats::metadata::mib().expect("jemalloc metadata stats mib available"),
-            resident: stats::resident::mib().expect("jemalloc resident stats mib available"),
-            retained: stats::retained::mib().expect("jemalloc retained stats mib available"),
+            epoch: epoch::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            active: stats::active::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            allocated: stats::allocated::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            mapped: stats::mapped::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            metadata: stats::metadata::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            resident: stats::resident::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            retained: stats::retained::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
             active_gauge,
             allocated_gauge,
             mapped_gauge,
@@ -1570,30 +1647,38 @@ impl Collector for JemallocMetricsCollector {
     }
 
     fn collect(&self) -> Vec<MetricFamily> {
-        self.epoch.advance().expect("jemalloc epoch can advance");
-        self.active_gauge
-            .set(self.active.read().expect("jemalloc active stats readable") as f64);
+        self.epoch
+            .advance()
+            .verified("this MIB was resolved when the collector was built");
+        self.active_gauge.set(
+            self.active
+                .read()
+                .verified("this MIB was resolved when the collector was built") as f64,
+        );
         self.allocated_gauge.set(
             self.allocated
                 .read()
-                .expect("jemalloc allocated stats readable") as f64,
+                .verified("this MIB was resolved when the collector was built") as f64,
         );
-        self.mapped_gauge
-            .set(self.mapped.read().expect("jemalloc mapped stats readable") as f64);
+        self.mapped_gauge.set(
+            self.mapped
+                .read()
+                .verified("this MIB was resolved when the collector was built") as f64,
+        );
         self.metadata_gauge.set(
             self.metadata
                 .read()
-                .expect("jemalloc metadata stats readable") as f64,
+                .verified("this MIB was resolved when the collector was built") as f64,
         );
         self.resident_gauge.set(
             self.resident
                 .read()
-                .expect("jemalloc resident stats readable") as f64,
+                .verified("this MIB was resolved when the collector was built") as f64,
         );
         self.retained_gauge.set(
             self.retained
                 .read()
-                .expect("jemalloc retained stats readable") as f64,
+                .verified("this MIB was resolved when the collector was built") as f64,
         );
 
         let mut metric_families = Vec::with_capacity(self.descs.len());
@@ -1613,7 +1698,10 @@ fn jemalloc_gauge(name: &str, help: &str, descs: &mut Vec<Desc>) -> Gauge {
             .namespace("nervix")
             .subsystem(JEMALLOC_SUBSYSTEM),
     )
-    .expect("valid jemalloc prometheus gauge");
+    .assured(
+        "the metric name, help text and label names are constants that satisfy Prometheus naming \
+         rules",
+    );
     descs.extend(gauge.desc().into_iter().cloned());
     gauge
 }
@@ -3395,7 +3483,10 @@ fn oldest_bucket_start(current_start: i64, window: Duration, step: Duration) -> 
 }
 
 fn duration_nanos_i64(duration: Duration) -> i64 {
-    i64::try_from(duration.as_nanos()).expect("metric duration fits into i64 nanoseconds")
+    i64::try_from(duration.as_nanos()).assured(
+        "every caller passes a rolling-window constant of minutes, far inside the i64 nanosecond \
+         range",
+    )
 }
 
 fn format_counter_metric_line(prefix: &str, key: &MetricKey, summary: &CounterSummary) -> String {

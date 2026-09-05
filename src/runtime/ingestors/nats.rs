@@ -70,7 +70,9 @@ impl NatsIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled NATS ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);

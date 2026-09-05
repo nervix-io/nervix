@@ -17,6 +17,7 @@ use arrow_schema::{
 };
 use error_stack::{Report, ResultExt};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowInputSide,
     DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind, DataflowSchemaField,
@@ -573,7 +574,9 @@ impl Registry {
                 false,
             )?
             .planned
-            .expect("complete mutation planning must return a plan"))
+            .verified(
+                "this call disallows an incomplete candidate, and only that path returns no plan",
+            ))
     }
 
     fn plan_mutations_named_with_incomplete_candidate(
@@ -1811,7 +1814,7 @@ impl DomainState {
             };
             let source = *indices
                 .get(key)
-                .expect("graph node must exist for every model");
+                .verified("the pass above added a graph node for every model in this map");
 
             if let Some(branched_by) = model_branch_selection(model)
                 && let Some(branch_ref) = branched_by.branch_ref()
@@ -2288,7 +2291,10 @@ impl DomainState {
                             )?;
                             let client_model = models
                                 .get(&RegistryKey::new(ModelKind::Client, client.clone()))
-                                .expect("validated syslog client must exist");
+                                .verified(
+                                    "expect_kind above resolved this client reference against the \
+                                     same model set",
+                                );
                             if let Model::ClientSyslog(_) = client_model {
                             } else {
                                 return Err(Report::new(RegistryError::InvalidModel {
@@ -2297,8 +2303,9 @@ impl DomainState {
                                     reason: format!(
                                         "SYSLOG ingestor requires a SYSLOG client, found {} \
                                          client '{}'",
-                                        client_model.client_type_label().expect(
-                                            "validated client model must have a client type"
+                                        client_model.client_type_label().verified(
+                                            "this model was resolved as a client above, and every \
+                                             client model carries a type label"
                                         ),
                                         client.as_str(),
                                     ),
@@ -2325,8 +2332,9 @@ impl DomainState {
                         models,
                         &ingestor.decode_using_codec,
                     )?;
-                    let message_namespace = Identifier::parse(INGEST_MESSAGE_NAMESPACE)
-                        .expect("static namespace must be a valid identifier");
+                    let message_namespace = Identifier::parse(INGEST_MESSAGE_NAMESPACE).assured(
+                        "this is a constant literal that satisfies the identifier grammar",
+                    );
                     validate_ingestor_filter_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -3017,7 +3025,7 @@ impl DomainState {
                     let producer_schema = input_schemas
                         .first()
                         .map(|(_relay, schema)| *schema)
-                        .expect("validated emitter inputs must not be empty");
+                        .verified("the emitter inputs were validated as non-empty above");
                     for (relay, schema) in &input_schemas {
                         if schema.name != producer_schema.name {
                             return Err(Report::new(RegistryError::InvalidModel {
@@ -3082,7 +3090,10 @@ impl DomainState {
                     )?;
                     let client_model = models
                         .get(&RegistryKey::new(ModelKind::Client, client_name.clone()))
-                        .expect("validated emitter client must exist");
+                        .verified(
+                            "expect_kind above resolved this client reference against the same \
+                             model set",
+                        );
                     if !emitter.sink.accepts_client(client_model) {
                         return Err(Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
@@ -3091,9 +3102,10 @@ impl DomainState {
                                 "{} emitter requires a {} client, found {} client '{}'",
                                 emitter.sink.transport_label(),
                                 emitter.sink.expected_client_type(),
-                                client_model
-                                    .client_type_label()
-                                    .expect("validated client model must have a client type"),
+                                client_model.client_type_label().verified(
+                                    "this model was resolved as a client above, and every client \
+                                     model carries a type label"
+                                ),
                                 client_name.as_str(),
                             ),
                         }));
@@ -3114,7 +3126,10 @@ impl DomainState {
                                 ModelKind::Client,
                                 catalog_client_name.clone(),
                             ))
-                            .expect("validated Iceberg catalog client must exist");
+                            .verified(
+                                "expect_kind above resolved this client reference against the \
+                                 same model set",
+                            );
                         if let Model::ClientIcebergRest(_) = catalog_client_model {
                         } else {
                             return Err(Report::new(RegistryError::InvalidModel {
@@ -3123,8 +3138,9 @@ impl DomainState {
                                 reason: format!(
                                     "ICEBERG emitter requires an ICEBERG_REST catalog client, \
                                      found {} client '{}'",
-                                    catalog_client_model.client_type_label().expect(
-                                        "validated catalog client model must have a client type"
+                                    catalog_client_model.client_type_label().verified(
+                                        "this model was resolved as a client above, and every \
+                                         client model carries a type label"
                                     ),
                                     catalog_client_name.as_str(),
                                 ),
@@ -3360,17 +3376,16 @@ impl PlacementAnalysis {
                     placement.name.clone(),
                 ))
                 .copied()
-                .expect("placement graph node must exist");
+                .verified("the pass above added a graph node for every placement");
             let from = resolve_placement_members(domain, &placement, &placement.from, models)?;
             let to = resolve_placement_members(domain, &placement, &placement.to, models)?;
 
             let mut pinned = HashSet::default();
             for member in from.iter().chain(&to) {
                 if pinned.insert(member.pin.clone()) {
-                    let pin_index = indices
-                        .get(&member.pin)
-                        .copied()
-                        .expect("resolved placement member pin must exist");
+                    let pin_index = indices.get(&member.pin).copied().verified(
+                        "resolve_placement_members resolved every pin against this same index map",
+                    );
                     graph.add_edge(pin_index, placement_index, EdgeKind::RequiredBy);
                 }
             }
@@ -3387,7 +3402,10 @@ impl PlacementAnalysis {
                                 endpoint.corridor[left_index].clone(),
                                 endpoint.corridor[right_index].clone(),
                             )
-                            .expect("different corridor positions must form a pair");
+                            .verified(
+                                "the two indices address different corridor positions, so the \
+                                 members differ",
+                            );
                             if claimed_pairs.insert(pair.clone()) {
                                 claims_by_pair
                                     .entry(pair)
@@ -3416,7 +3434,7 @@ impl PlacementAnalysis {
                 .iter()
                 .map(|claim| placement_rank_key(claim.rank))
                 .min()
-                .expect("a claimed pair must have at least one claim");
+                .verified("a pair enters claims_by_pair only together with its first claim");
             let mut winners = claims
                 .iter()
                 .filter(|claim| placement_rank_key(claim.rank) == strongest)
@@ -3427,7 +3445,7 @@ impl PlacementAnalysis {
                 let first = winners
                     .iter()
                     .find(|claim| claim.policy == policy)
-                    .expect("first winning policy must have an owner");
+                    .verified("policy was read from winners[0], so at least that claim carries it");
                 return Err(Report::new(RegistryError::PlacementConflict {
                     domain: domain.as_str().to_string(),
                     left_rule: first.rule.as_str().to_string(),
@@ -3506,23 +3524,24 @@ impl PlacementAnalysis {
             .rules
             .iter()
             .map(|rule| {
-                let mut claims =
-                    rule.claimed_pairs
-                        .iter()
-                        .map(|pair| {
-                            let resolved = effective.pairs.get(pair).expect(
-                                "an explicit rule claim must remain effective or overridden",
-                            );
-                            let (left, right) = pair.runtime_nodes();
-                            PlacementRuleClaimPlan {
-                                left,
-                                right,
-                                effective: resolved.winning_rules.contains(&rule.model.name),
-                                effective_policy: resolved.policy,
-                                winning_rules: resolved.winning_rules.clone(),
-                            }
-                        })
-                        .collect::<Vec<_>>();
+                let mut claims = rule
+                    .claimed_pairs
+                    .iter()
+                    .map(|pair| {
+                        let resolved = effective.pairs.get(pair).verified(
+                            "every claimed pair of this rule was inserted into the effective map \
+                             above",
+                        );
+                        let (left, right) = pair.runtime_nodes();
+                        PlacementRuleClaimPlan {
+                            left,
+                            right,
+                            effective: resolved.winning_rules.contains(&rule.model.name),
+                            effective_policy: resolved.policy,
+                            winning_rules: resolved.winning_rules.clone(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 claims.sort_by(placement_rule_claim_cmp);
                 PlacementRulePlan {
                     name: rule.model.name.clone(),
@@ -3603,7 +3622,7 @@ impl PlacementTopology {
         for source in &placement_indices {
             let source_node = graph
                 .node_weight(*source)
-                .expect("placement source node must exist");
+                .verified("this endpoint comes from an edge of the same graph");
             let source_key = source_node.key();
             adjacency_sets.entry(source_key.clone()).or_default();
             let mut pending = graph
@@ -3619,7 +3638,7 @@ impl PlacementTopology {
                 if placement_indices.contains(&index) {
                     let target = graph
                         .node_weight(index)
-                        .expect("placement target node must exist")
+                        .verified("this endpoint comes from an edge of the same graph")
                         .key();
                     adjacency_sets
                         .entry(source_key.clone())
@@ -3764,9 +3783,9 @@ impl PlacementTopology {
                     let mut path = vec![end.clone()];
                     let mut cursor = end;
                     while cursor != start {
-                        cursor = previous
-                            .get(cursor)
-                            .expect("visited path node must have a predecessor");
+                        cursor = previous.get(cursor).verified(
+                            "the search records a predecessor for a node before it can be reached",
+                        );
                         path.push(cursor.clone());
                     }
                     path.reverse();
@@ -4070,7 +4089,7 @@ fn placement_find(
     let direct = parent
         .get(member)
         .cloned()
-        .expect("placement disjoint-set member must exist");
+        .verified("every member is inserted into the parent map before find runs over it");
     if direct == *member {
         return direct;
     }
@@ -4183,13 +4202,13 @@ impl ActiveGraph {
                 let from = self
                     .graph
                     .node_weight(edge.source())
-                    .expect("source node must exist")
+                    .verified("this endpoint comes from an edge of the same graph")
                     .identifier
                     .clone();
                 let to = self
                     .graph
                     .node_weight(edge.target())
-                    .expect("target node must exist")
+                    .verified("this endpoint comes from an edge of the same graph")
                     .identifier
                     .clone();
                 (from, to, *edge.weight())
@@ -4216,7 +4235,7 @@ impl ActiveGraph {
             let node = self
                 .graph
                 .node_weight(index)
-                .expect("visited graph node must exist");
+                .verified("this index came from the same graph, which is not modified here");
             if node.is_dataflow_node() {
                 affected.insert(RegistryEntity {
                     kind: node.kind,
@@ -4247,7 +4266,7 @@ impl ActiveGraph {
             let node = self
                 .graph
                 .node_weight(index)
-                .expect("visited graph node must exist");
+                .verified("this index came from the same graph, which is not modified here");
             if let Model::Schema(_)
             | Model::WireJsonSchema(_)
             | Model::WireCborSchema(_)
@@ -4256,8 +4275,10 @@ impl ActiveGraph {
                 schemas.push((
                     node.kind,
                     node.identifier.clone(),
-                    serde_json::to_vec(node.config.as_ref())
-                        .expect("validated schema models must serialize"),
+                    serde_json::to_vec(node.config.as_ref()).assured(
+                        "registry models are plain serde structures with string keys, which \
+                         serde_json always encodes",
+                    ),
                 ));
             }
             pending.extend(
@@ -4364,7 +4385,7 @@ impl ActiveGraph {
                 let node = self
                     .graph
                     .node_weight(index)
-                    .expect("graph node must exist for every index")
+                    .verified("this index came from the same graph, which is not modified here")
                     .clone();
                 let depth = schedulable_depth(&self.graph, index, &mut depth_cache);
                 (index, node, depth)
@@ -4419,7 +4440,7 @@ impl ActiveGraph {
                             index_by_key
                                 .get(member)
                                 .copied()
-                                .expect("placement group member must have a graph index")
+                                .verified("index_by_key was built from every node of this graph")
                         })
                         .collect::<Vec<_>>();
                     assignment_planner.for_group(members, &member_indices)
@@ -4494,14 +4515,14 @@ impl ActiveGraph {
             .filter(|index| {
                 self.graph
                     .node_weight(*index)
-                    .expect("dataflow graph node must exist")
+                    .verified("this index came from the same graph, which is not modified here")
                     .is_dataflow_node()
             })
             .flat_map(|source_index| {
                 let source = self
                     .graph
                     .node_weight(source_index)
-                    .expect("dataflow source node must exist");
+                    .verified("this endpoint comes from an edge of the same graph");
                 included_nodes.insert(source_index);
                 visible_dataflow_targets(&self.graph, source_index)
                     .into_iter()
@@ -4509,7 +4530,7 @@ impl ActiveGraph {
                         let target = self
                             .graph
                             .node_weight(target_index)
-                            .expect("dataflow target node must exist");
+                            .verified("this endpoint comes from an edge of the same graph");
                         included_nodes.insert(target_index);
                         source.dataflow_edge_to(target, dataflow_edge_kind(edge_kind))
                     })
@@ -4517,27 +4538,26 @@ impl ActiveGraph {
             })
             .collect::<Vec<_>>();
 
-        let schemas = self
-            .graph
-            .node_indices()
-            .filter_map(|index| {
-                let node = self
-                    .graph
-                    .node_weight(index)
-                    .expect("dataflow graph node must exist");
-                let Model::Schema(schema) = node.config.as_ref() else {
-                    return None;
-                };
-                Some((node.identifier.clone(), schema.clone()))
-            })
-            .collect::<HashMap<_, _>>();
+        let schemas =
+            self.graph
+                .node_indices()
+                .filter_map(|index| {
+                    let node = self.graph.node_weight(index).verified(
+                        "this index came from the same graph, which is not modified here",
+                    );
+                    let Model::Schema(schema) = node.config.as_ref() else {
+                        return None;
+                    };
+                    Some((node.identifier.clone(), schema.clone()))
+                })
+                .collect::<HashMap<_, _>>();
 
         let mut nodes = included_nodes
             .iter()
             .map(|index| {
                 self.graph
                     .node_weight(*index)
-                    .expect("dataflow graph node must exist")
+                    .verified("this index came from the same graph, which is not modified here")
                     .to_dataflow_node(&schemas)
             })
             .collect::<Vec<_>>();
@@ -4545,7 +4565,7 @@ impl ActiveGraph {
             let node = self
                 .graph
                 .node_weight(*index)
-                .expect("dataflow graph node must exist");
+                .verified("this index came from the same graph, which is not modified here");
             if let Some(client_node) = node.dataflow_source_client_node() {
                 edges.push(
                     DataflowEdge::data(
@@ -4612,7 +4632,7 @@ fn visible_dataflow_targets(
         }
         let node = graph
             .node_weight(index)
-            .expect("dataflow traversal node must exist");
+            .verified("this index came from the same graph, which is not modified here");
         if node.is_dataflow_node() {
             targets.push((index, edge_kind));
             continue;
@@ -4839,8 +4859,10 @@ impl ActiveNode {
             },
             ModelKind::Relay => DataflowNodeRole::Relay,
             kind => DataflowNodeRole::Processor {
-                processor: dataflow_processor_kind(kind)
-                    .expect("every dataflow processor kind must map to a drawn processor"),
+                processor: dataflow_processor_kind(kind).verified(
+                    "only nodes accepted by is_dataflow_node reach here, and the kinds left after \
+                     ingestor, emitter and relay all map to a processor",
+                ),
             },
         }
     }
@@ -5067,15 +5089,8 @@ fn validate_emitter_publishing_contract(
         ));
     }
     if let Some(timeout) = emitter.publishing_mode.ack_timeout() {
-        let timeout = humantime::parse_duration(timeout).map_err(|error| {
-            invalid(format!(
-                "invalid MODE ACK TIMEOUT '{}': {error}",
-                emitter
-                    .publishing_mode
-                    .ack_timeout()
-                    .expect("confirmation mode must retain its timeout")
-            ))
-        })?;
+        let timeout = humantime::parse_duration(timeout)
+            .map_err(|error| invalid(format!("invalid MODE ACK TIMEOUT '{timeout}': {error}")))?;
         if timeout.is_zero() {
             return Err(invalid(
                 "MODE ACK TIMEOUT must be greater than zero".to_string(),
@@ -5441,7 +5456,7 @@ fn schedulable_depth_inner(
         let source = edge.source();
         let source_node = graph
             .node_weight(source)
-            .expect("incoming source node must exist");
+            .verified("this endpoint comes from an edge of the same graph");
         let candidate_depth = if is_schedulable_model(source_node.config.as_ref()) {
             schedulable_depth_inner(graph, source, cache, visiting) + 1
         } else {
@@ -6176,7 +6191,7 @@ fn collect_locality_affinity(
         let source = edge.source();
         let source_node = graph
             .node_weight(source)
-            .expect("incoming source node must exist");
+            .verified("this endpoint comes from an edge of the same graph");
         if is_schedulable_model(source_node.config.as_ref()) {
             if let Some(node_ids) = assigned_by_key.get(&source_node.key()) {
                 for node_id in node_ids {
@@ -6641,7 +6656,7 @@ fn expect_kind(
 
     Ok(*indices
         .get(&referenced_key)
-        .expect("referenced model must have a graph node"))
+        .verified("the reference was resolved above, and every resolved model has an index"))
 }
 
 fn add_message_error_policy_edges(
@@ -9058,22 +9073,29 @@ fn ingest_source_supports_headers(source: &IngestSource) -> bool {
 fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSchema> {
     match source {
         IngestSource::Kafka { .. } => Some(CreateSchema {
-            name: Identifier::parse("ingestor_metadata").expect("valid metadata schema name"),
+            name: Identifier::parse("ingestor_metadata")
+                .assured("this is a constant literal that satisfies the identifier grammar"),
             fields: vec![
                 SchemaField {
-                    name: Identifier::parse("topic").expect("valid metadata field"),
+                    name: Identifier::parse("topic").assured(
+                        "this is a constant literal that satisfies the identifier grammar",
+                    ),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("partition").expect("valid metadata field"),
+                    name: Identifier::parse("partition").assured(
+                        "this is a constant literal that satisfies the identifier grammar",
+                    ),
                     ty: ParseAsType::I32,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("offset").expect("valid metadata field"),
+                    name: Identifier::parse("offset").assured(
+                        "this is a constant literal that satisfies the identifier grammar",
+                    ),
                     ty: ParseAsType::I64,
                     optional: true,
                     sensitive: false,
@@ -9081,9 +9103,11 @@ fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSc
             ],
         }),
         IngestSource::Syslog { .. } => Some(CreateSchema {
-            name: Identifier::parse("ingestor_metadata").expect("valid metadata schema name"),
+            name: Identifier::parse("ingestor_metadata")
+                .assured("this is a constant literal that satisfies the identifier grammar"),
             fields: vec![SchemaField {
-                name: Identifier::parse("peer_addr").expect("valid metadata field"),
+                name: Identifier::parse("peer_addr")
+                    .assured("this is a constant literal that satisfies the identifier grammar"),
                 ty: ParseAsType::String,
                 optional: true,
                 sensitive: false,
@@ -9171,7 +9195,10 @@ fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> ArrowDataType {
                 arrow_data_type_for_parse_as(element),
                 false,
             )),
-            i32::try_from(*len).expect("array length must fit Arrow fixed-size list"),
+            i32::try_from(*len).verified(
+                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
+                 list",
+            ),
         ),
         ParseAsType::Vec { element } => ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
             "item",
@@ -9900,7 +9927,7 @@ impl InferencerRegistrySchema for CreateInferencer {
             .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
         Ok(CreateSchema {
             name: Identifier::parse(INNER_OUTPUT_NAMESPACE)
-                .expect("public inferencer namespace must be a valid identifier"),
+                .assured("this is a constant literal that satisfies the identifier grammar"),
             fields,
         })
     }
@@ -10991,10 +11018,12 @@ fn assign_stream_branching(
 ) -> Result<bool, Report<RegistryError>> {
     let index = *indices
         .get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
-        .expect("stream node must exist in graph");
-    let node = graph
-        .node_weight_mut(index)
-        .expect("stream node must exist in graph");
+        .verified(
+            "the relay reference was validated above, and every validated relay has a graph node",
+        );
+    let node = graph.node_weight_mut(index).verified(
+        "the relay reference was validated above, and every validated relay has a graph node",
+    );
 
     match &node.effective_branching {
         None => {
@@ -11622,10 +11651,10 @@ fn has_required_by_cycle(graph: &DiGraph<ActiveNode, EdgeKind>) -> bool {
         }
         let source = *node_map
             .get(&edge.source())
-            .expect("required-by source node must exist");
+            .verified("this endpoint comes from an edge of the same graph");
         let target = *node_map
             .get(&edge.target())
-            .expect("required-by target node must exist");
+            .verified("this endpoint comes from an edge of the same graph");
         required_by_graph.add_edge(source, target, ());
     }
 
@@ -11652,7 +11681,7 @@ fn ensure_drop_targets_are_not_in_use(
                 let blocker = graph
                     .graph
                     .node_weight(blocker_index.target())
-                    .expect("outgoing blocker node must exist")
+                    .verified("this endpoint comes from an edge of the same graph")
                     .clone();
                 (!drops_in_batch.contains(&blocker.key())).then_some(blocker.identifier)
             })

@@ -10,7 +10,9 @@ workspace = true
 
 [dependencies]
 flatbuffers = { workspace = true }
+meticulous = { workspace = true }
 thiserror = { workspace = true }
 
 [build-dependencies]
 flatc-rust = { workspace = true }
+meticulous = { workspace = true }

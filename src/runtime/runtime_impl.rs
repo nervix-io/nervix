@@ -435,7 +435,7 @@ impl Runtime {
 
     pub fn with_test_hooks(hooks: RuntimeTestHooks) -> Self {
         Self::with_persistence(None, DEFAULT_STATE_SNAPSHOT_INTERVAL, hooks)
-            .expect("runtime without persistence should initialize")
+            .verified("the None persistence path has no fallible step")
     }
 
     pub fn with_persistence(
@@ -528,7 +528,7 @@ impl Runtime {
             replicated_branch_aggregated_states: Arc::new(DashMap::default()),
             wasm_runtime: Arc::new(
                 WasmRuntime::new(WasmRuntimeConfig::default())
-                    .expect("wasm runtime should initialize"),
+                    .assured("wasmtime accepts its own default configuration"),
             ),
             branch_instance_expiration_scan_interval: hooks
                 .branch_instance_expiration_scan_interval
@@ -2938,7 +2938,7 @@ impl Runtime {
             .get_or_try_create_with(batch.key.clone(), now, |_| {
                 Ok::<(), std::convert::Infallible>(())
             })
-            .expect("relay branch tracking is infallible");
+            .assured("the tracking closure's error type is Infallible");
         if let Some(capacity) = branches.capacity {
             for (evicted_key, _) in branches.instances.evict_lru_to_capacity(capacity) {
                 branches.registry.remove(&evicted_key);
@@ -4867,7 +4867,7 @@ impl Runtime {
             for (output_index, error, partial_output, materialized_state) in route_errors {
                 let acks = ack_queue
                     .pop_front()
-                    .expect("ack queue must match ingestor route outcomes");
+                    .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[output_index];
                 self.handle_structured_message_error(MessageErrorHandling {
                     domain,
@@ -4890,7 +4890,7 @@ impl Runtime {
             for (output_index, key, output_record) in route_outputs {
                 let acks = ack_queue
                     .pop_front()
-                    .expect("ack queue must match ingestor route outcomes");
+                    .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[output_index];
                 let relay = output.relay.clone();
                 output.branch.as_ref().ok_or_else(|| {
@@ -4939,7 +4939,7 @@ impl Runtime {
         for output in &output_routes.routes {
             let acks = ack_queue
                 .pop_front()
-                .expect("ack queue must match ingestor output routes");
+                .verified("the queue above was filled with one ACK entry per route");
             self.handle_structured_message_error(MessageErrorHandling {
                 domain,
                 node_kind: ModelKind::Ingestor.as_str(),
@@ -5915,11 +5915,10 @@ impl Runtime {
                         })?,
                         Some(schema.arrow_schema()),
                     )?;
-                    let state_task = if desired_node.executes_on(
-                        local_node_id
-                            .as_deref()
-                            .expect("validated local node id must remain available"),
-                    ) {
+                    let state_task = if desired_node.executes_on(local_node_id.as_deref().verified(
+                        "the resolution above returned an error unless the local node id is \
+                         present",
+                    )) {
                         Some(self.spawn_relay_state_task(
                             domain,
                             RelayStateTaskSpec {
@@ -7440,11 +7439,17 @@ impl Runtime {
                         RuntimeMaterializedRelaySpec::new(
                             relay_schemas
                                 .get(&node.identifier)
-                                .expect("inserted relay schema must exist")
+                                .verified(
+                                    "the schema was inserted under this identifier immediately \
+                                     above",
+                                )
                                 .arrow_schema(),
                             relay_schemas
                                 .get(&node.identifier)
-                                .expect("inserted relay schema must exist")
+                                .verified(
+                                    "the schema was inserted under this identifier immediately \
+                                     above",
+                                )
                                 .vm_sensitivity(),
                             node.effective_branching.clone().unwrap_or_default(),
                         ),
@@ -7738,14 +7743,12 @@ impl Runtime {
             if node.kind != ModelKind::Relay || !node.executes_on(local_node_id) {
                 continue;
             }
-            let services = relay_services
-                .get(&node.identifier)
-                .cloned()
-                .expect("scheduled relay services must exist");
-            let registry = relay_registries
-                .get(&node.identifier)
-                .cloned()
-                .expect("scheduled relay registry must exist");
+            let services = relay_services.get(&node.identifier).cloned().verified(
+                "these maps were built from the same scheduled relay nodes this loop walks",
+            );
+            let registry = relay_registries.get(&node.identifier).cloned().verified(
+                "these maps were built from the same scheduled relay nodes this loop walks",
+            );
             relay_owner_tasks.insert(
                 node.identifier.clone(),
                 self.spawn_relay_owner_task(
@@ -8500,7 +8503,7 @@ impl Runtime {
         let relay_registry = execution
             .relay_registries
             .get(relay)
-            .expect("checked above that relay exists");
+            .verified("the missing-relay branch above already returned");
         Ok(relay_registry.contains_key(key))
     }
 
@@ -9970,11 +9973,17 @@ impl Runtime {
                         RuntimeMaterializedRelaySpec::new(
                             relay_schemas
                                 .get(&node.identifier)
-                                .expect("inserted relay schema must exist")
+                                .verified(
+                                    "the schema was inserted under this identifier immediately \
+                                     above",
+                                )
                                 .arrow_schema(),
                             relay_schemas
                                 .get(&node.identifier)
-                                .expect("inserted relay schema must exist")
+                                .verified(
+                                    "the schema was inserted under this identifier immediately \
+                                     above",
+                                )
                                 .vm_sensitivity(),
                             node.effective_branching.clone().unwrap_or_default(),
                         ),
@@ -10135,10 +10144,10 @@ impl Runtime {
         let relay_owner_tasks = relay_services
             .iter()
             .map(|(relay, services)| {
-                let registry = relay_registries
-                    .get(relay)
-                    .cloned()
-                    .expect("relay registry must exist");
+                let registry = relay_registries.get(relay).cloned().verified(
+                    "the registries were built from the same relay set as the services this loop \
+                     walks",
+                );
                 (
                     relay.clone(),
                     self.spawn_relay_owner_task(
@@ -11091,7 +11100,10 @@ impl Runtime {
                                             }
                                             let materialized_state = materialized_state_snapshot
                                                 .as_ref()
-                                                .expect("generator state snapshot was set")
+                                                .verified(
+                                                    "the branch above takes the snapshot and \
+                                                     continues when it cannot",
+                                                )
                                                 .clone();
                                             let (acks, _completion) =
                                                 runtime.tracked_ack_root(&task_domain);
@@ -11110,9 +11122,9 @@ impl Runtime {
                                                                 0,
                                                                 source_metadata.clone(),
                                                             )
-                                                            .expect(
-                                                                "decoded generator source batch \
-                                                                 must contain one row",
+                                                            .verified(
+                                                                "the generator decodes one source \
+                                                                 row per tick before reaching here",
                                                             ),
                                                             acks,
                                                         },
@@ -12205,7 +12217,10 @@ impl Runtime {
                 Some(force_flush),
                 Some(quiesce_counters.clone()),
             )
-            .expect("validated reingestor input must build a relay interaction");
+            .verified(
+                "the registry validated this input, and a non-empty input list builds an \
+                 interaction",
+            );
             let mut compiled_from_where = None;
             loop {
                 tokio::task::consume_budget().await;
@@ -12481,7 +12496,7 @@ impl Runtime {
                             .unwrap_or_else(current_timestamp);
                         for (expired_key, _) in branches.instances.expire(
                             now,
-                            branch_ttl.expect("expiration wake requires relay branch ttl"),
+                            branch_ttl.verified("this select branch only arms while a branch TTL is configured"),
                         ) {
                             branches.registry.remove(&expired_key);
                             runtime.remove_stream_key_presence(&domain, &relay, &expired_key);
@@ -12553,7 +12568,10 @@ impl Runtime {
                 Some(force_flush),
                 Some(quiesce_counters),
             )
-            .expect("validated relay-state input must build a relay interaction");
+            .verified(
+                "the registry validated this input, and a non-empty input list builds an \
+                 interaction",
+            );
             let mut branch_instances = BranchInstanceRegistry::<Option<BranchKey>, ()>::new();
             let mut restored_branches = state
                 .entries
@@ -12646,7 +12664,7 @@ impl Runtime {
                     .get_or_try_create_with(branch_key.clone(), now, |_| {
                         Ok::<(), std::convert::Infallible>(())
                     })
-                    .expect("infallible materialized branch tracking must succeed");
+                    .assured("the tracking closure's error type is Infallible");
                 if let Some(branch_capacity) = branch_capacity {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {

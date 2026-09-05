@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use ahash::HashMap;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use meticulous::OptionExt as _;
 pub(crate) use nervix_interconnect::RuntimeStateKind;
 use nervix_models::{Domain, Identifier, ModelKind};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -141,7 +142,7 @@ impl RuntimeStatePlacement {
         self.branch_key
             .as_ref()
             .map(BranchKey::as_str)
-            .expect("concrete runtime state must carry a branch key")
+            .verified("concrete state is only built for a branch that has a key")
     }
 }
 

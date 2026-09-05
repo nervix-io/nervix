@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     CreateSignalingProtocol, CreateStatement, SignalingProtobufConfig, SignalingProtocolOnConnect,
     SignalingStep, SignalingWaitStep, SignalingWireFormat,
@@ -209,7 +210,7 @@ pub fn parse_create_signaling_protocol_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterRelay, AlterRelayOperation, CreateRelay, CreateStatement, MaterializedRelayState,
     RelayBranching, default_relay_buffer,
@@ -137,7 +138,7 @@ pub fn parse_create_stream_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -156,7 +157,7 @@ pub fn parse_alter_relay_tokens(tokens: &[Token]) -> Result<AlterRelay, Vec<Pars
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

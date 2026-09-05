@@ -31,6 +31,7 @@ use chrono::{TimeDelta, TimeZone, Utc};
 use dashmap::DashMap;
 use fjall::Database;
 use futures_util::stream::FuturesUnordered;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, RelayPayload, RelayPayloadKind, Transport,
     TransportMode as InterconnectTransportMode,
@@ -463,9 +464,10 @@ impl BufferedIngestPayload {
     }
 
     pub(crate) fn payload(&self) -> &[u8] {
-        self.payloads
-            .first()
-            .expect("buffered ingest payload must contain at least one source payload")
+        self.payloads.first().verified(
+            "both constructors take at least one payload with its metadata, and the batching \
+             caller skips an empty set",
+        )
     }
 
     /// The number of source payloads, which is the row count of the group this buffer opens.
@@ -477,7 +479,10 @@ impl BufferedIngestPayload {
     fn first_metadata_row(&self) -> IngestMetadataRow<'_> {
         self.metadata
             .first()
-            .expect("buffered ingest payload must carry metadata for its first payload")
+            .verified(
+                "both constructors take at least one payload with its metadata, and the batching \
+                 caller skips an empty set",
+            )
             .row()
     }
 
@@ -1906,10 +1911,10 @@ impl IngestRouteCollector {
             return Ok(None);
         }
         self.flush_at = None;
-        let context = self
-            .context
-            .take()
-            .expect("a non-empty ingest group must retain its execution context");
+        let context = self.context.take().verified(
+            "the empty check above already returned, and a group keeps its context while it holds \
+             rows",
+        );
         let pending = std::mem::replace(
             &mut self.pending,
             PendingIngestGroup::new(self.kind, self.row_bound),
@@ -2432,7 +2437,7 @@ impl IngestMetadataBuilders {
                 // address does not allocate a string per message.
                 use std::fmt::Write as _;
                 write!(peer_addr, "{source_peer_addr}")
-                    .expect("writing into an Arrow string builder cannot fail");
+                    .assured("fmt::Write over an in-memory string builder has no failure mode");
                 peer_addr.append_value("");
                 None
             }
@@ -2690,7 +2695,7 @@ struct RelayRuntimeFanIn {
 
 impl RelayConsumerFanout {
     fn with_capacity(capacity: NonZeroUsize) -> Self {
-        let dispatch_capacity = NonZeroUsize::new(1).expect("one is nonzero");
+        let dispatch_capacity = NonZeroUsize::MIN;
         Self {
             dispatch_gate: Arc::new(RelayDispatchGate::new()),
             owner_buffer: RwLock::new(None),
@@ -2715,7 +2720,7 @@ impl RelayConsumerFanout {
 
     fn activate_owner_buffer(&self) -> RelayRuntimeConsumerReceiver {
         let capacity = NonZeroUsize::new(self.owner_capacity.load(Ordering::Acquire))
-            .expect("validated relay capacity must remain nonzero");
+            .verified("relay capacity is validated as nonzero before it is stored");
         let buffer = Arc::new(RelayBroadcast::with_capacity(capacity));
         let receiver = buffer.new_receiver();
         *self.owner_buffer.write() = Some(buffer);
@@ -3169,7 +3174,7 @@ impl PendingMaterializedBatch {
         let batch = self
             .batch
             .take()
-            .expect("pending materialized batch must remain present until retry");
+            .verified("the pending entry holds its batch from construction until this take");
         (self.input_relay.clone(), batch)
     }
 }
@@ -7114,7 +7119,9 @@ impl RelayProcessorNode {
                     for timeout in due_timeouts {
                         let timeout_result = instance
                             .as_mut()
-                            .expect("WASM timeout instance was checked")
+                            .verified(
+                                "the let-else above returned unless this branch holds an instance",
+                            )
                             .on_timeout(timeout.handle)
                             .await;
                         let outputs = match timeout_result {
@@ -7224,7 +7231,7 @@ impl RelayProcessorNode {
             };
             let flush_result = instance
                 .as_mut()
-                .expect("WASM flush instance was checked")
+                .verified("the let-else above returned unless this branch holds an instance")
                 .flush()
                 .await;
             let outputs = match flush_result {
@@ -9556,7 +9563,7 @@ async fn run_processor_node_runtime(
         Some(quiesce_counters),
         command_rx,
     )
-    .expect("validated processor inputs must build a relay interaction");
+    .verified("the registry validated these processor inputs before the node was started");
     let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
     let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
 
@@ -9630,7 +9637,9 @@ async fn run_processor_node_runtime(
         let (event, work) = work.into_parts();
         match event {
             RelayInteractionEvent::Batch { relay, batch } => {
-                let work = work.expect("processor relay input must track quiesce work");
+                let work = work.verified(
+                    "a batch event always carries the quiesce work the interaction recorded for it",
+                );
                 dispatch_processor_node_input(
                     ProcessorNodeDispatchContext {
                         runtime_handle: &runtime_handle,
@@ -9933,7 +9942,7 @@ async fn run_processor_branch_task(
             snapshot_request = async {
                 snapshot.requests
                     .as_mut()
-                    .expect("enabled window snapshot receiver must exist")
+                    .verified("this select branch only runs while the snapshot receiver is present")
                     .recv()
                     .await
             }, if snapshot.requests.is_some() => {
@@ -10015,7 +10024,8 @@ async fn run_processor_branch_task(
     match stop_mode {
         Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
         Some(ProcessorBranchStopMode::Handoff(response)) => {
-            let restored_at = handoff_timestamp.expect("handoff timestamp must be captured");
+            let restored_at = handoff_timestamp
+                .verified("the handoff arm above captured the timestamp for this same stop mode");
             let pending_materialized = branch
                 .processors
                 .get_mut(&processor)
@@ -11780,7 +11790,8 @@ pub(crate) fn compile_sqs_fifo_group_program(
     else {
         return Ok(None);
     };
-    let field = Identifier::parse("fifo_group").expect("internal FIFO field name is valid");
+    let field = Identifier::parse("fifo_group")
+        .assured("this is a constant literal that satisfies the identifier grammar");
     let output_schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
         field.as_str(),
         ArrowDataType::Utf8,
@@ -12981,9 +12992,9 @@ fn correlator_output_batch_errors(
     acks.into_iter()
         .enumerate()
         .map(|(row, acks)| {
-            let source = matched
-                .source_message(row, acks)
-                .expect("validated correlator batch rows must remain aligned");
+            let source = matched.source_message(row, acks).verified(
+                "the correlator output batch is built row-aligned with the ACKs it was given",
+            );
             Err(Box::new(planned_structured_message_error(
                 source,
                 structured_message_error(
@@ -13157,10 +13168,10 @@ async fn evaluate_correlator_output_batch(
     for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         let acks = pending_acks[input_row]
             .take()
-            .expect("validated correlator selection must consume each ACK once");
-        let source = matched
-            .source_message(input_row, acks)
-            .expect("validated correlator rows must remain aligned");
+            .verified("the selection lists each input row at most once, so its ACK is taken once");
+        let source = matched.source_message(input_row, acks).verified(
+            "the correlator output batch is built row-aligned with the ACKs it was given",
+        );
         if let Some(side_error) = result.batch.errors().row(output_row).first() {
             outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
                 source,
@@ -13269,7 +13280,7 @@ async fn evaluate_correlator_output_batch(
 
     Ok(outcomes
         .into_iter()
-        .map(|outcome| outcome.expect("every correlator input row must produce an outcome"))
+        .map(|outcome| outcome.verified("the loops above assign an outcome to every input row"))
         .collect())
 }
 
@@ -13723,7 +13734,7 @@ pub(crate) async fn execute_filter_map_on_record(
     .await?
     .into_iter()
     .next()
-    .expect("filter-map returns one outcome per input record");
+    .verified("this call passes a single record, and filter-map answers one outcome per record");
     match outcome {
         SingleRecordFilterMapOutcome::Filtered => Ok(None),
         SingleRecordFilterMapOutcome::Output(record) => Ok(Some(record)),
@@ -15954,10 +15965,10 @@ impl WindowAggregateAccumulator {
                 counts: BTreeMap::new(),
             },
             WindowAggregateStorageKind::Histogram => {
-                let config = demand
-                    .linear_histogram
-                    .as_ref()
-                    .expect("linear histogram aggregate spec must carry histogram config");
+                let config = demand.linear_histogram.as_ref().verified(
+                    "the histogram storage kind is only chosen for a demand that carries the \
+                     histogram config",
+                );
                 Self::LinearHistogram {
                     buckets: vec![0; config.buckets],
                     total: 0,
@@ -16094,9 +16105,9 @@ impl WindowAggregateAccumulator {
             .front()
             .is_some_and(|removal| removal.expires_at <= now)
         {
-            let removal = delayed_removals
-                .pop_front()
-                .expect("front removal exists after is_some_and");
+            let removal = delayed_removals.pop_front().verified(
+                "the loop condition just observed a front entry and nothing else pops the queue",
+            );
             let Some(count) = buckets.get_mut(removal.bucket) else {
                 return Err("linear histogram delayed removal bucket is out of range".to_string());
             };
@@ -18440,7 +18451,7 @@ async fn flush_branch_wasm_processor(
     ack_map.extend(input_ack_map);
     let process_result = instance
         .as_mut()
-        .expect("WASM instance presence was checked")
+        .verified("the let-else above returned unless this branch holds an instance")
         .process_envelope(&envelope)
         .await;
     let outputs = match process_result {
@@ -20044,9 +20055,10 @@ async fn apply_wasm_sidecar_terminal_decisions(
     } = context;
     for message_error in &sidecar.message_errors {
         for token in &message_error.tokens {
-            let context = ack_map
-                .remove(&token.0)
-                .expect("message error token should have been validated");
+            let context = ack_map.remove(&token.0).verified(
+                "the guest output was validated against this ACK map above, and invalid output \
+                 returned early",
+            );
             let record = match context
                 .input_batch
                 .runtime_row(context.input_row, context.metadata.clone())
@@ -20091,17 +20103,19 @@ async fn apply_wasm_sidecar_terminal_decisions(
     }
     for acked in &sidecar.acked {
         for token in &acked.tokens {
-            let context = ack_map
-                .remove(&token.0)
-                .expect("terminal ACK token should have been validated");
+            let context = ack_map.remove(&token.0).verified(
+                "the guest output was validated against this ACK map above, and invalid output \
+                 returned early",
+            );
             context.acks.ack_success();
         }
     }
     for nacked in &sidecar.nacked {
         for token in &nacked.tokens {
-            let context = ack_map
-                .remove(&token.0)
-                .expect("terminal NACK token should have been validated");
+            let context = ack_map.remove(&token.0).verified(
+                "the guest output was validated against this ACK map above, and invalid output \
+                 returned early",
+            );
             context.acks.no_ack(nacked.reason.clone());
         }
     }
@@ -20169,19 +20183,22 @@ fn relay_batch_from_wasm_output(
         ));
         let mut row_ack_sets = Vec::with_capacity(row.tokens.len());
         for token in row.tokens {
-            let remaining_uses = token_use_counts
-                .get_mut(&token.0)
-                .expect("validated token use count should exist");
+            let remaining_uses = token_use_counts.get_mut(&token.0).verified(
+                "the use counts were built from this same validated output, which the ACK map \
+                 still backs",
+            );
             if *remaining_uses > 1 {
                 *remaining_uses -= 1;
-                let context = ack_map
-                    .get(&token.0)
-                    .expect("validated carried token should remain live");
+                let context = ack_map.get(&token.0).verified(
+                    "the use counts were built from this same validated output, which the ACK map \
+                     still backs",
+                );
                 row_ack_sets.push(context.acks.attached());
             } else {
-                let context = ack_map
-                    .remove(&token.0)
-                    .expect("last validated token use should remain live");
+                let context = ack_map.remove(&token.0).verified(
+                    "the use counts were built from this same validated output, which the ACK map \
+                     still backs",
+                );
                 row_ack_sets.push(context.acks);
             }
         }

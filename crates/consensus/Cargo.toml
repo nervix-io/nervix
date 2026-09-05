@@ -11,6 +11,7 @@ workspace = true
 ciborium = { workspace = true }
 fjall = { workspace = true }
 futures-util = { workspace = true }
+meticulous = { workspace = true }
 nervix-models = { workspace = true }
 openraft = { workspace = true }
 parking_lot = { workspace = true }
