@@ -1,3 +1,4 @@
+use nervix_models::{DomainName, IngestorName};
 use pulsar::{
     Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
     SubType as PulsarSubType, TlsOptions as PulsarTlsOptions, TokioExecutor,
@@ -25,7 +26,7 @@ impl IngestMessageHeaders for PulsarMessageProperties<'_> {
 impl PulsarIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientPulsar,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -928,8 +929,8 @@ impl PulsarIngestor {
 
     async fn decode_message(
         codec: Arc<CompiledCodec>,
-        domain: &Domain,
-        ingestor: &Identifier,
+        domain: &DomainName,
+        ingestor: &IngestorName,
         message: &PulsarMessage<Vec<u8>>,
     ) -> Result<RuntimeRecordBatch, CodecError> {
         let key = message.key().unwrap_or_default();
@@ -949,9 +950,9 @@ impl PulsarIngestor {
 
     async fn flush_no_ack_group(
         runtime: &Runtime,
-        domain: &Domain,
-        ingestor: &Identifier,
-        branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        branched_senders: &HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
         consumer: &mut PulsarConsumer<Vec<u8>, TokioExecutor>,
         collector: &mut IngestRouteCollector,
         messages: &mut Vec<PulsarMessage<Vec<u8>>>,

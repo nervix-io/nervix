@@ -1,3 +1,4 @@
+use nervix_models::{DomainName};
 use async_nats::Client as NatsClient;
 
 use super::super::*;
@@ -23,7 +24,7 @@ impl IngestMessageHeaders for NatsMessageHeaders<'_> {
 impl NatsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientNats,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

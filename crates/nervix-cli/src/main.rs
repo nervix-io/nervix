@@ -1,3 +1,4 @@
+use nervix_models::ClusterNodeName;
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -89,22 +90,22 @@ enum Command {
     /// Remove a node from the cluster membership
     RemoveNode {
         /// Node id to remove
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Prevent the scheduler from placing new tasks on a node
     CordonNode {
         /// Node id to cordon
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Allow the scheduler to place new tasks on a node
     UncordonNode {
         /// Node id to uncordon
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Move scheduled graph nodes away from a node and keep it cordoned
     DrainNode {
         /// Node id to drain
-        node_id: String,
+        node_id: ClusterNodeName,
     },
 }
 

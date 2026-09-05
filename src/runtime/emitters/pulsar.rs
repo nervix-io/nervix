@@ -1,3 +1,4 @@
+use nervix_models::{TopicName};
 use ::pulsar::{
     ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
     TlsOptions as PulsarTlsOptions, TokioExecutor,
@@ -23,7 +24,7 @@ impl PulsarEmitter {
     pub(super) async fn new(
         client: &CreateClientPulsar,
         resolved: Option<&ResolvedClientConfig>,
-        topic: &Identifier,
+        topic: &TopicName,
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
         let producer = Self::producer_from_config(

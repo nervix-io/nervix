@@ -8,7 +8,7 @@ use async_tar::{
     Archive as AsyncTarArchive, Builder as AsyncTarBuilder, EntryType, Header, HeaderMode,
 };
 use blake3::Hasher;
-use nervix_models::{ResourceId, ResourceVersion, Timestamp};
+use nervix_models::{ClusterNodeName, DomainName, ResourceId, ResourceVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
@@ -43,7 +43,7 @@ struct PendingInstall {
     install_root: PathBuf,
     staging_root: PathBuf,
     content_root: PathBuf,
-    created_by_node: String,
+    created_by_node: ClusterNodeName,
     created_at: Timestamp,
 }
 
@@ -94,7 +94,7 @@ impl ResourceStore {
         &self,
         id: ResourceId,
         source_dir: impl AsRef<Path>,
-        created_by_node: impl Into<String>,
+        created_by_node: ClusterNodeName,
         created_at: Timestamp,
     ) -> Result<ResourceManifest, ResourceStoreError> {
         let source_dir = source_dir.as_ref();
@@ -150,7 +150,7 @@ impl ResourceStore {
         id: ResourceId,
         archive_path: impl AsRef<Path>,
         root_checksum: String,
-        created_by_node: impl Into<String>,
+        created_by_node: ClusterNodeName,
         created_at: Timestamp,
     ) -> Result<ResourceManifest, ResourceStoreError> {
         let archive_path = archive_path.as_ref().to_path_buf();
@@ -222,7 +222,7 @@ impl ResourceStore {
     async fn prepare_install(
         &self,
         id: ResourceId,
-        created_by_node: String,
+        created_by_node: ClusterNodeName,
         created_at: Timestamp,
     ) -> Result<PendingInstall, ResourceStoreError> {
         let (install_root, staging_root, content_root) = self.prepare_install_paths(&id).await?;
@@ -524,15 +524,15 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{Domain, Identifier, ResourceId, Timestamp};
+    use nervix_models::{DomainName, ResourceId, Timestamp};
     use tempfile::{NamedTempFile, tempdir};
 
     use super::{ResourceEntryType, ResourceStore, ResourceStoreError};
 
     fn resource_id(domain: &str, identifier: &str, version: u64) -> ResourceId {
         ResourceId::new(
-            Domain::parse(domain).expect("valid domain"),
-            Identifier::parse(identifier).expect("valid identifier"),
+            DomainName::parse(domain).expect("valid domain"),
+            ResourceName::parse(identifier).expect("valid identifier"),
             version,
         )
     }

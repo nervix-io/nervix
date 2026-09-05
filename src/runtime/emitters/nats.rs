@@ -1,3 +1,4 @@
+use nervix_models::{SubjectName};
 use std::{future::Future, pin::Pin};
 
 use async_nats::{
@@ -34,7 +35,7 @@ impl NatsEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientNats,
         resolved: Option<&ResolvedClientConfig>,
-        subject: &Identifier,
+        subject: &SubjectName,
         mode: NatsPublishingMode,
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<Self> {

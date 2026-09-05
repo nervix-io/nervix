@@ -1,3 +1,4 @@
+use nervix_models::{ClusterNodeName};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::{HashMap, RandomState};
@@ -82,8 +83,8 @@ impl ReplicatedKafkaOffsetState {
 
     pub(super) fn new(
         placement: RuntimeStatePlacement,
-        primary_node: Option<String>,
-        replica_nodes: Vec<String>,
+        primary_node: Option<ClusterNodeName>,
+        replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
@@ -257,7 +258,7 @@ impl ReplicatedKafkaOffsetState {
         })
     }
 
-    pub(super) fn primary_node(&self) -> Option<String> {
+    pub(super) fn primary_node(&self) -> Option<ClusterNodeName> {
         self.roles.read().primary_node.clone()
     }
 
@@ -269,7 +270,7 @@ impl ReplicatedKafkaOffsetState {
         *self.roles.write() = roles;
     }
 
-    pub(super) fn mark_replica_progress(&self, node_id: &str, lsm: u64) {
+    pub(super) fn mark_replica_progress(&self, node_id: &ClusterNodeName, lsm: u64) {
         self.replica_progress.insert(node_id.to_string(), lsm);
         self.replication_notify.notify_waiters();
     }

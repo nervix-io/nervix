@@ -1,4 +1,11 @@
-use nervix_models::{DomainSchedule, DynamicModelUpdate, ModelKind, QuiesceLevel, ScheduledNode};
+use nervix_models::{
+    DomainName,
+    DomainSchedule,
+    DynamicModelUpdate,
+    ModelKind,
+    QuiesceLevel,
+    ScheduledNode,
+};
 use sorted_vec::SortedSet;
 
 use crate::registry::RegistryEntity;
@@ -146,9 +153,8 @@ impl ScheduleDelta {
 mod tests {
     use nervix_models::{
         AckMode, BranchSelection, CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement,
-        CreateRelay, Domain, DomainSchedule, DynamicModelUpdate, EmitSink, EmitterPublishingMode,
-        EndpointIngestMode, ErrorPolicies, Expression, GeneralErrorPolicy, Identifier,
-        IngestSource, Literal, Model, ModelKind, OutputBranch, OutputFlushPolicy, PlacementPolicy,
+        CreateRelay, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink, EmitterPublishingMode,
+        EndpointIngestMode, ErrorPolicies, Expression, GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, OutputBranch, OutputFlushPolicy, PlacementPolicy,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching, RetryPolicy,
         RouteConstruction, ScheduledNode,
     };
@@ -161,7 +167,7 @@ mod tests {
 
     fn schedule(capacity: usize) -> DomainSchedule {
         DomainSchedule {
-            domain: Domain::parse("testing").expect("valid domain"),
+            domain: DomainName::parse("testing").expect("valid domain"),
             nodes: vec![ScheduledNode {
                 identifier: identifier("events"),
                 kind: ModelKind::Relay,
@@ -185,7 +191,7 @@ mod tests {
 
     fn ingestor_schedule(endpoint: &str) -> DomainSchedule {
         DomainSchedule {
-            domain: Domain::parse("testing").expect("valid domain"),
+            domain: DomainName::parse("testing").expect("valid domain"),
             nodes: vec![ScheduledNode {
                 identifier: identifier("event_source"),
                 kind: ModelKind::Ingestor,
@@ -283,7 +289,7 @@ mod tests {
             materialized_state: Vec::new(),
         };
         let existing = DomainSchedule {
-            domain: Domain::parse("testing").expect("valid domain"),
+            domain: DomainName::parse("testing").expect("valid domain"),
             nodes: vec![ScheduledNode {
                 identifier: identifier("route_events"),
                 kind: ModelKind::Junction,
@@ -373,7 +379,7 @@ mod tests {
             materialized_state: Vec::new(),
         };
         let existing = DomainSchedule {
-            domain: Domain::parse("testing").expect("valid domain"),
+            domain: DomainName::parse("testing").expect("valid domain"),
             nodes: vec![ScheduledNode {
                 identifier: emitter.name.clone(),
                 kind: ModelKind::Emitter,

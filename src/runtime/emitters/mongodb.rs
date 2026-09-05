@@ -1,3 +1,4 @@
+use nervix_models::{CollectionName};
 use ::mongodb::{
     Client as MongoDbClient, Namespace as MongoDbNamespace,
     bson::{
@@ -313,7 +314,7 @@ impl MongoDbEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        collection: &Identifier,
+        collection: &CollectionName,
         values: &[MongoDbValueMapping],
         conflict_action: &MongoDbConflictAction,
         batch: &RelayRecordBatch,

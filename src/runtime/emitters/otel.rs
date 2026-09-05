@@ -1,3 +1,4 @@
+use nervix_models::{EmitterName};
 use std::{io::Write, str::FromStr};
 
 use arrow_array::{
@@ -105,7 +106,7 @@ enum OtelTransport {
 struct OtelClient {
     transport: OtelTransport,
     fault_injector: Arc<OtelClientFaultInjector>,
-    emitter: Identifier,
+    emitter: EmitterName,
 }
 
 enum OtelExportRequest {
@@ -1895,7 +1896,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_fault_injector_returns_retryable_unavailable_without_a_server() {
-        let emitter = Identifier::parse("otel_output").expect("valid emitter name");
+        let emitter = EmitterName::parse("otel_output").expect("valid emitter name");
         let fault_injector = Arc::new(OtelClientFaultInjector::default());
         fault_injector.fail_unavailable(emitter.as_str());
         let client = OtelClient {

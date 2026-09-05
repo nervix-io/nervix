@@ -4,7 +4,8 @@ use strum::{AsRefStr, IntoStaticStr};
 use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
-    Identifier, MessageErrorPolicy, Model, ModelKind, ProcessorInputs, ProcessorOutput,
+    EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, ProcessorInputs,
+    ProcessorOutput, RelayName,
     ProcessorOutputs,
 };
 
@@ -49,15 +50,15 @@ impl QuiesceLevel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DynamicModelUpdate {
     RelayCapacity {
-        relay: Identifier,
+        relay: RelayName,
         capacity: usize,
     },
     Processor {
         kind: ModelKind,
-        processor: Identifier,
+        processor: ModelName,
     },
     Emitter {
-        emitter: Identifier,
+        emitter: EmitterName,
         config: Box<CreateEmitter>,
     },
 }
@@ -463,7 +464,7 @@ impl Model {
             | (Self::ClientGcs(_), Self::ClientGcs(_))
             | (Self::ClientAzureBlob(_), Self::ClientAzureBlob(_))
             | (Self::ClientIcebergRest(_), Self::ClientIcebergRest(_)) => {
-                if self.identifier() == candidate.identifier() {
+                if self.name() == candidate.name() {
                     definition_change_aspect(ModelChangeAspect::ClientConfig)
                 } else {
                     ModelChangeAspects::replaced()
@@ -745,7 +746,7 @@ fn junction_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Junction,
-            processor: candidate_name.clone(),
+            processor: candidate_name.into(),
         });
     }
     changes
@@ -814,7 +815,7 @@ fn deduplicator_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Deduplicator,
-            processor: candidate_name.clone(),
+            processor: candidate_name.into(),
         });
     }
     changes
@@ -883,7 +884,7 @@ fn reorderer_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Reorderer,
-            processor: candidate_name.clone(),
+            processor: candidate_name.into(),
         });
     }
     changes
@@ -947,7 +948,7 @@ fn correlator_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Correlator,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -989,7 +990,7 @@ fn window_processor_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::WindowProcessor,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -1037,7 +1038,7 @@ fn inferencer_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Inferencer,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -1088,7 +1089,7 @@ fn wasm_processor_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::WasmProcessor,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -1290,7 +1291,7 @@ fn routes_are_permutation(base: &[ProcessorOutput], candidate: &[ProcessorOutput
     true
 }
 
-fn message_error_targets(routes: &[ProcessorOutput]) -> Vec<&Identifier> {
+fn message_error_targets(routes: &[ProcessorOutput]) -> Vec<&RelayName> {
     let mut targets = routes
         .iter()
         .filter_map(|route| match &route.message_error_policy {

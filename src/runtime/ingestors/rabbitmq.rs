@@ -1,3 +1,4 @@
+use nervix_models::{DomainName};
 use std::borrow::Cow;
 
 use lapin::{
@@ -34,7 +35,7 @@ impl IngestMessageHeaders for RabbitMqDeliveryHeaders<'_> {
 impl RabbitMqIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientRabbitMq,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

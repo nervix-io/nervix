@@ -89,8 +89,8 @@ impl Default for EmitterBufferedMessages {
 #[derive(Clone)]
 pub(in crate::runtime) struct EmitterSinkContext {
     runtime: Runtime,
-    domain: Domain,
-    emitter: Identifier,
+    domain: DomainName,
+    emitter: EmitterName,
     error_policies: ErrorPolicies,
     temp_dir: Arc<PathBuf>,
     events: broadcast::Sender<RuntimeEvent>,
@@ -181,8 +181,8 @@ struct EmitterPublishingSettings {
 
 impl EmitterPublishingSettings {
     fn parse(
-        domain: &Domain,
-        emitter: &Identifier,
+        domain: &DomainName,
+        emitter: &EmitterName,
         sink: &EmitSink,
         mode: &EmitterPublishingMode,
     ) -> Result<Self, RuntimeError> {
@@ -327,8 +327,8 @@ impl EmitterPublishingSettings {
     }
 
     fn invalid_setting(
-        domain: &Domain,
-        emitter: &Identifier,
+        domain: &DomainName,
+        emitter: &EmitterName,
         reason: impl Into<String>,
     ) -> RuntimeError {
         RuntimeError::BuildDomainExecution {
@@ -342,8 +342,8 @@ impl EmitterPublishingSettings {
     }
 
     fn parse_confirmation(
-        domain: &Domain,
-        emitter: &Identifier,
+        domain: &DomainName,
+        emitter: &EmitterName,
         window: &EmitterAckWindow,
         ack_timeout: &str,
     ) -> Result<(usize, Duration), RuntimeError> {
@@ -404,11 +404,11 @@ impl EmitterPublishingSettings {
 
 struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
-    domain: &'a Domain,
-    emitter: &'a Identifier,
-    metric_relay: Option<&'a Identifier>,
+    domain: &'a DomainName,
+    emitter: &'a EmitterName,
+    metric_relay: Option<&'a RelayName>,
     error_policies: &'a ErrorPolicies,
-    source_filters: &'a HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
+    source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     sqs_fifo_group: Option<&'a CompiledSqsFifoGroup>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
@@ -1062,8 +1062,8 @@ impl EmitterRetrySchedule {
 fn compile_sql_values_program(
     label: &'static str,
     namespace: &'static str,
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[ClickHouseValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1083,7 +1083,7 @@ fn compile_sql_values_program(
         .map(|(index, mapping)| {
             Ok(nervix_models::Assignment {
                 target: nervix_models::AssignmentTarget::bare(
-                    Identifier::parse(&format!("c{index}")).map_err(|error| error.to_string())?,
+                    FieldName::parse(&format!("c{index}")).map_err(|error| error.to_string())?,
                 ),
                 value: mapping.expression.clone(),
             })
@@ -1202,8 +1202,8 @@ fn compile_sql_values_program(
 }
 
 fn compile_clickhouse_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[ClickHouseValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1220,8 +1220,8 @@ fn compile_clickhouse_values_program(
 }
 
 fn compile_postgres_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[PostgresValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1238,8 +1238,8 @@ fn compile_postgres_values_program(
 }
 
 fn compile_mysql_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[MySqlValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1256,8 +1256,8 @@ fn compile_mysql_values_program(
 }
 
 fn compile_mongodb_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[MongoDbValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1274,8 +1274,8 @@ fn compile_mongodb_values_program(
 }
 
 fn compile_iceberg_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[IcebergValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -2722,7 +2722,7 @@ impl SinkEmitter {
                     .handle_structured_message_error(MessageErrorHandling {
                         domain: &context.domain,
                         node_kind: "emitter",
-                        node: &context.emitter,
+                        node: &ModelName::from(&context.emitter),
                         source_route: None,
                         policy: &context.error_policies.message,
                         message,
@@ -2759,7 +2759,7 @@ fn emitter_error_message(error: &Report<EmitterRuntimeError>) -> String {
 fn emitter_unavailable_reason(
     sink: &SinkEmitter,
     fault_injector: &EmitterFaultInjector,
-    emitter: &Identifier,
+    emitter: &EmitterName,
 ) -> Option<String> {
     sink.missing_reason().map(str::to_owned).or_else(|| {
         if let Some(EmitterFaultMode::Stall) = fault_injector.fault_mode(emitter) {
@@ -2995,7 +2995,7 @@ async fn finish_rejected_records(
                     .handle_structured_message_error(MessageErrorHandling {
                         domain: &context.domain,
                         node_kind: "emitter",
-                        node: &context.emitter,
+                        node: &ModelName::from(&context.emitter),
                         source_route: None,
                         policy: &context.error_policies.message,
                         message: RelayMessage { key, record, acks },
@@ -3066,7 +3066,7 @@ impl EmitterTask {
         runtime: &Runtime,
         build: EmitterTaskBuildDeps<'_>,
         emitter: CreateEmitter,
-        inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
+        inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     ) -> Result<ScheduledEmitterTask, RuntimeError> {
         let EmitterTaskBuildDeps {
             domain,
@@ -3142,7 +3142,7 @@ impl EmitterTask {
             let program = compile_scoped_filter_program(
                 RuntimeCompileTarget {
                     domain,
-                    identifier: &emitter.name,
+                    identifier: &ModelName::from(&emitter.name),
                 },
                 Some(&source_filter.where_clause),
                 RuntimeVmSchema {
@@ -3705,9 +3705,9 @@ impl EmitterTask {
                             .observe_global_node_received(NodeBatchObservation {
                                 domain: &task_domain,
                                 kind: ModelKind::Emitter,
-                                node: &task_emitter,
+                                node: &ModelName::from(&task_emitter),
                                 relay: &input_relay,
-                                physical_node_id: physical_node_id.as_deref(),
+                                physical_node_id: physical_node_id.as_ref(),
                                 messages: batch.message_count(),
                                 bytes: batch.estimated_bytes(),
                                 domain_timestamp: delivery_observation.domain_timestamp,
@@ -3724,9 +3724,9 @@ impl EmitterTask {
                                     NodeLatencyObservation {
                                         domain: &task_domain,
                                         kind: ModelKind::Emitter,
-                                        node: &task_emitter,
+                                        node: &ModelName::from(&task_emitter),
                                         relay: &input_relay,
-                                        physical_node_id: physical_node_id.as_deref(),
+                                        physical_node_id: physical_node_id.as_ref(),
                                         seconds,
                                         domain_timestamp: delivery_observation.domain_timestamp,
                                     },
@@ -3910,7 +3910,7 @@ impl EmitterTask {
 
 fn resolve_emitter_client(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     sink: &EmitSink,
     client: Option<&Model>,
 ) -> Result<Option<ResolvedClientConfig>, RuntimeError> {
@@ -4011,7 +4011,7 @@ fn resolve_emitter_client(
 
 fn resolve_emitter_catalog_client(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     sink: &EmitSink,
     client: Option<&Model>,
 ) -> Result<Option<ResolvedClientConfig>, RuntimeError> {
@@ -4050,7 +4050,7 @@ impl EmitterBatchContext<'_> {
                     kind: ModelKind::Emitter,
                     node: self.emitter,
                     relay,
-                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    physical_node_id: self.runtime.local_node_id.read().as_ref(),
                     messages: report.messages,
                     bytes: report.bytes,
                     domain_timestamp: Some(report.domain_timestamp),
@@ -4062,7 +4062,7 @@ impl EmitterBatchContext<'_> {
                     domain: self.domain,
                     kind: ModelKind::Emitter,
                     node: self.emitter,
-                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    physical_node_id: self.runtime.local_node_id.read().as_ref(),
                     messages: report.messages,
                     bytes: report.bytes,
                     domain_timestamp: Some(report.domain_timestamp),
@@ -4138,7 +4138,7 @@ impl EmitterBatchContext<'_> {
 
     async fn process(
         &self,
-        input_relay: &Identifier,
+        input_relay: &RelayName,
         batch: RelayRecordBatch,
         shutdown_rx: &mut watch::Receiver<bool>,
         wait_for_required_state: bool,
@@ -4316,7 +4316,7 @@ impl EmitterBatchContext<'_> {
 
     async fn filter_source_batch(
         &self,
-        input_relay: &Identifier,
+        input_relay: &RelayName,
         batch: RelayRecordBatch,
         side_inputs: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
@@ -4388,7 +4388,7 @@ mod publishing_mode_tests {
 
     #[test]
     fn parses_declared_emitter_retry_confirmation_window_and_timeout() {
-        let domain = Domain::try_from("test").expect("valid domain");
+        let domain = DomainName::try_from("test").expect("valid domain");
         let emitter = identifier("out");
         let settings = EmitterPublishingSettings::parse(
             &domain,
@@ -4415,7 +4415,7 @@ mod publishing_mode_tests {
 
     #[test]
     fn parses_transport_specific_mqtt_and_jetstream_confirmation_modes() {
-        let domain = Domain::try_from("test").expect("valid domain");
+        let domain = DomainName::try_from("test").expect("valid domain");
         let emitter = identifier("out");
         let mqtt = EmitterPublishingSettings::parse(
             &domain,
@@ -4464,7 +4464,7 @@ mod publishing_mode_tests {
 
     #[test]
     fn rejects_zero_window_foreign_mode_and_inverted_retry_bounds() {
-        let domain = Domain::try_from("test").expect("valid domain");
+        let domain = DomainName::try_from("test").expect("valid domain");
         let emitter = identifier("out");
         let zero_window = EmitterPublishingSettings::parse(
             &domain,
@@ -4696,7 +4696,16 @@ mod publishing_mode_tests {
 mod tests {
     use std::sync::OnceLock;
 
-    use nervix_models::{CreateSchema, ParseAsType};
+    use nervix_models::{
+    ClientName,
+    CreateSchema,
+    DomainName,
+    EmitterName,
+    ModelName,
+    ParseAsType,
+    RelayName,
+    SubjectName,
+};
 
     use super::*;
 
@@ -4706,7 +4715,7 @@ mod tests {
         SCHEMA
             .get_or_init(|| {
                 Arc::new(compile_schema(&CreateSchema {
-                    name: Identifier::parse("emitter_input").expect("valid schema name"),
+                    name: ModelName::parse("emitter_input").expect("valid schema name"),
                     fields: vec![nervix_models::SchemaField {
                         name: value,
                         ty: ParseAsType::I64,
@@ -4745,8 +4754,8 @@ mod tests {
         let (events, _) = broadcast::channel(4);
         EmitterSinkContext {
             runtime: Runtime::default(),
-            domain: Domain::parse("emitter_tests").expect("valid domain"),
-            emitter: Identifier::parse("output").expect("valid emitter name"),
+            domain: DomainName::parse("emitter_tests").expect("valid domain"),
+            emitter: EmitterName::parse("output").expect("valid emitter name"),
             error_policies: ErrorPolicies::handled_by_log(),
             temp_dir: Arc::new(PathBuf::new()),
             events,
@@ -4919,8 +4928,8 @@ mod tests {
         };
         let context = sink_context();
         let sink_config = EmitSink::Nats {
-            client: Identifier::parse("client").expect("valid client name"),
-            subject: Identifier::parse("subject").expect("valid subject name"),
+            client: ClientName::parse("client").expect("valid client name"),
+            subject: SubjectName::parse("subject").expect("valid subject name"),
         };
         let mut sink = SinkEmitter::Missing {
             reason: "test sink intentionally has no client".to_string(),
@@ -5161,8 +5170,8 @@ mod tests {
         };
         let context = sink_context();
         let sink_config = EmitSink::Nats {
-            client: Identifier::parse("client").expect("valid client name"),
-            subject: Identifier::parse("subject").expect("valid subject name"),
+            client: ClientName::parse("client").expect("valid client name"),
+            subject: SubjectName::parse("subject").expect("valid subject name"),
         };
         let mut sink = SinkEmitter::Missing {
             reason: "test sink intentionally has no client".to_string(),
@@ -5396,8 +5405,8 @@ mod tests {
             backoff: &mut backoff,
         };
         let context = sink_context();
-        let client = Identifier::parse("client").expect("valid client name");
-        let subject = Identifier::parse("subject").expect("valid subject name");
+        let client = ClientName::parse("client").expect("valid client name");
+        let subject = SubjectName::parse("subject").expect("valid subject name");
         let sink_config = EmitSink::Nats { client, subject };
         let mut sink = SinkEmitter::Missing {
             reason: "test sink intentionally has no client".to_string(),
@@ -5687,8 +5696,8 @@ mod tests {
 
     #[test]
     fn sql_value_compilers_reject_empty_mappings_before_compilation() {
-        let domain = Domain::parse("emitter_tests").expect("valid domain");
-        let emitter = Identifier::parse("output").expect("valid emitter name");
+        let domain = DomainName::parse("emitter_tests").expect("valid domain");
+        let emitter = EmitterName::parse("output").expect("valid emitter name");
         let schema = input_schema().arrow_schema();
 
         let errors = [

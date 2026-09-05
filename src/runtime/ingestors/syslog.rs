@@ -1,3 +1,4 @@
+use nervix_models::{DomainName, IngestorName};
 use std::net::SocketAddr;
 
 use thiserror::Error;
@@ -20,12 +21,12 @@ pub(in crate::runtime) struct SyslogIngestor;
 #[derive(Clone)]
 struct SyslogIngestContext {
     runtime: Runtime,
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     timestamp_source: Option<IngestTimestampSource>,
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
-    branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     codec: Arc<CompiledCodec>,
     quiesce: Arc<IngestorQuiesceControl>,
     events: broadcast::Sender<RuntimeEvent>,
@@ -99,7 +100,7 @@ enum SyslogFrameError {
 impl SyslogIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientSyslog,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

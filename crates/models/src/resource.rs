@@ -2,17 +2,17 @@ use serde::{Deserialize, Serialize};
 use sorted_vec::SortedVec;
 use strum::{AsRefStr, EnumString, IntoStaticStr};
 
-use crate::{Domain, Identifier, Timestamp};
+use crate::{ClusterNodeName, DomainName, ResourceName, Timestamp};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ResourceId {
-    pub domain: Domain,
-    pub identifier: Identifier,
+    pub domain: DomainName,
+    pub identifier: ResourceName,
     pub version: u64,
 }
 
 impl ResourceId {
-    pub fn new(domain: Domain, identifier: Identifier, version: u64) -> Self {
+    pub fn new(domain: DomainName, identifier: ResourceName, version: u64) -> Self {
         Self {
             domain,
             identifier,
@@ -29,18 +29,18 @@ pub struct ResourceVersion {
     pub file_count: u64,
     pub total_bytes: u64,
     pub created_at: Timestamp,
-    pub created_by_node: String,
+    pub created_by_node: ClusterNodeName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ResourceVersionKey {
-    pub domain: Domain,
-    pub identifier: Identifier,
+    pub domain: DomainName,
+    pub identifier: ResourceName,
     pub version: u64,
 }
 
 impl ResourceVersionKey {
-    pub fn new(domain: Domain, identifier: Identifier, version: u64) -> Self {
+    pub fn new(domain: DomainName, identifier: ResourceName, version: u64) -> Self {
         Self {
             domain,
             identifier,
@@ -77,18 +77,18 @@ pub enum ResourceNodeState {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ResourceReplicaKey {
-    pub domain: Domain,
-    pub identifier: Identifier,
+    pub domain: DomainName,
+    pub identifier: ResourceName,
     pub version: u64,
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
 }
 
 impl ResourceReplicaKey {
     pub fn new(
-        domain: Domain,
-        identifier: Identifier,
+        domain: DomainName,
+        identifier: ResourceName,
         version: u64,
-        node_id: impl Into<String>,
+        node_id: ClusterNodeName,
     ) -> Self {
         Self {
             domain,
@@ -109,13 +109,13 @@ pub struct ResourceNodeStatus {
     pub state: ResourceNodeState,
     pub root_checksum: Option<String>,
     pub last_verified_at: Option<Timestamp>,
-    pub source_node_id: Option<String>,
+    pub source_node_id: Option<ClusterNodeName>,
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResourceVersionStatus {
-    pub next_version_by_resource: SortedVec<(Domain, Identifier, u64)>,
+    pub next_version_by_resource: SortedVec<(DomainName, ResourceName, u64)>,
     pub versions: SortedVec<ResourceVersion>,
     pub replicas: SortedVec<ResourceNodeStatus>,
 }
@@ -124,7 +124,7 @@ impl ResourceVersionStatus {
     /// Returns the next version the named resource would receive in `domain`, which is `None`
     /// until the resource is declared there. Resources are domain-owned, so the same name in two
     /// domains is two independent resources with independent version sequences.
-    pub fn next_version(&self, domain: &Domain, identifier: &Identifier) -> Option<u64> {
+    pub fn next_version(&self, domain: &DomainName, identifier: &ResourceName) -> Option<u64> {
         self.next_version_by_resource.iter().find_map(
             |(known_domain, known_identifier, next_version)| {
                 (known_domain == domain && known_identifier == identifier).then_some(*next_version)
@@ -134,13 +134,13 @@ impl ResourceVersionStatus {
 
     /// Returns the highest installed version of the named resource in `domain`, which is `None`
     /// when the resource is declared but has no uploaded version yet.
-    pub fn latest_version(&self, domain: &Domain, identifier: &Identifier) -> Option<u64> {
+    pub fn latest_version(&self, domain: &DomainName, identifier: &ResourceName) -> Option<u64> {
         self.next_version(domain, identifier)
             .and_then(|next| next.checked_sub(1))
             .filter(|version| *version > 0)
     }
 
-    pub fn is_declared(&self, domain: &Domain, identifier: &Identifier) -> bool {
+    pub fn is_declared(&self, domain: &DomainName, identifier: &ResourceName) -> bool {
         self.next_version(domain, identifier).is_some()
     }
 }

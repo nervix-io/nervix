@@ -16,23 +16,93 @@ use arrow_schema::Schema as ArrowSchema;
 use fjall::Database;
 use nervix_interconnect::{EntityGatePurpose, RelayPayload, RelayPayloadKind};
 use nervix_models::{
-    AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchSelection,
-    ClientConfigEntry, ClusterSchedule, CodecWireFormat, CreateBranch, CreateClientHttp,
-    CreateClientMqtt, CreateClientPrometheus, CreateClientWebsockets, CreateClientZeroMq,
-    CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer,
-    CreateIngestor, CreateJsonWireSchema, CreateJunction, CreateLookup, CreateReingestor,
-    CreateRelay, CreateSchema, CreateWasmProcessor, CreateWindowProcessor, Domain, DomainConfig,
-    DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink,
-    EmitterPublishingMode, ErrorPolicies, Expression, FieldPath, FieldReference, FieldScope,
-    GeneralErrorPolicy, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, JsonType, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy,
-    ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, ResourceId, ResourceVersion,
-    ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField, SqsFifoGroup,
-    StructuredMessageError, Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
+    AckMode,
+    Assignment,
+    AssignmentTarget,
+    AssignmentTargetScope,
+    BranchSelection,
+    ClientConfigEntry,
+    ClusterSchedule,
+    CodecWireFormat,
+    CreateBranch,
+    CreateClientHttp,
+    CreateClientMqtt,
+    CreateClientPrometheus,
+    CreateClientWebsockets,
+    CreateClientZeroMq,
+    CreateCodec,
+    CreateDeduplicator,
+    CreateEmitter,
+    CreateGenerator,
+    CreateInferencer,
+    CreateIngestor,
+    CreateJsonWireSchema,
+    CreateJunction,
+    CreateLookup,
+    CreateReingestor,
+    CreateRelay,
+    CreateSchema,
+    CreateWasmProcessor,
+    CreateWindowProcessor,
+    DomainConfig,
+    DomainName,
+    DomainPace,
+    DomainSchedule,
+    DomainState,
+    DomainStatus,
+    DomainTick,
+    EmitSink,
+    EmitterPublishingMode,
+    ErrorPolicies,
+    Expression,
+    FieldName,
+    FieldPath,
+    FieldReference,
+    FieldScope,
+    GeneralErrorPolicy,
+    InferencerTensorDeclaration,
+    InferencerTensorDimension,
+    InferencerTensorElementType,
+    InferencerTensorMapping,
+    InferencerTensorRepresentation,
+    InferencerTensorSchema,
+    IngestQuiesceMode,
+    IngestQuiesceOverflow,
+    IngestSource,
+    IngestTimestampSource,
+    IngestorName,
+    JsonType,
+    MessageErrorCode,
+    MessageErrorOperation,
+    MessageErrorPolicy,
+    ModelKind,
+    ModelName,
+    MqttIngestMode,
+    MqttQos,
+    MqttSession,
+    OutputBranch,
+    ParseAsType,
+    ProcessorInputWhere,
+    ProcessorInputs,
+    ProcessorOutput,
+    ProcessorOutputs,
+    RelayBranching,
+    RelayName,
+    RemoteAckOutcome,
+    RemoteAckRegistration,
+    RemoteAckResolution,
+    ResourceId,
+    ResourceVersion,
+    ResourceVersionStatus,
+    RetryPolicy,
+    ScheduledNode,
+    SchemaField,
+    SqsFifoGroup,
+    StructuredMessageError,
+    Timestamp,
+    WindowBound,
+    WireSchemaField,
+    ZeroMqIngestMode,
 };
 use nervix_nspl::window_processor::aggregate::lower_window_assignments;
 use nervix_wasm::{
@@ -417,13 +487,13 @@ fn window_inputs(
         .collect()
 }
 
-fn branch_key(fields: impl IntoIterator<Item = (Identifier, RuntimeValue)>) -> Option<BranchKey> {
+fn branch_key(fields: impl IntoIterator<Item = (FieldName, RuntimeValue)>) -> Option<BranchKey> {
     BranchKey::from_fields(fields)
         .expect("test branch key must be non-empty")
         .into()
 }
 
-fn concrete_branch_key(fields: impl IntoIterator<Item = (Identifier, RuntimeValue)>) -> BranchKey {
+fn concrete_branch_key(fields: impl IntoIterator<Item = (FieldName, RuntimeValue)>) -> BranchKey {
     branch_key(fields).expect("test branch key must be concrete")
 }
 
@@ -444,8 +514,8 @@ fn key_label(key: &Option<BranchKey>) -> &str {
     key.as_ref().expect("test branch key must exist").as_str()
 }
 
-fn domain(raw: &str) -> Domain {
-    Domain::parse(raw).expect("valid domain")
+fn domain(raw: &str) -> DomainName {
+    DomainName::parse(raw).expect("valid domain")
 }
 
 const TWO_ITEM_TEST_CHANNEL_CAPACITY: usize = 2;
@@ -493,7 +563,7 @@ fn branch_model_tuple(
     schema: &str,
     relay: &str,
     _fields: &[&str],
-) -> (ModelKind, Identifier, nervix_models::Model) {
+) -> (ModelKind, ModelName, nervix_models::Model) {
     let branch = identifier(&format!("by_{relay}"));
     (
         ModelKind::Branch,
@@ -521,8 +591,8 @@ fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices> {
 
 fn test_ingestor_quiesce_control(
     runtime: &super::Runtime,
-    domain: &Domain,
-    ingestor: &Identifier,
+    domain: &DomainName,
+    ingestor: &IngestorName,
     mode: IngestQuiesceMode,
 ) -> Arc<super::IngestorQuiesceControl> {
     let metric_labels = runtime
@@ -2931,7 +3001,7 @@ async fn wasm_callback_validation_is_all_or_nothing_for_terminal_decisions() {
 
 fn scheduled_model(
     kind: ModelKind,
-    identifier: Identifier,
+    identifier: ModelName,
     model: nervix_models::Model,
 ) -> ScheduledNode {
     ScheduledNode {
@@ -5648,8 +5718,8 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
 #[tokio::test]
 async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("customer_id", ParseAsType::String)]);
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
@@ -5714,8 +5784,8 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
 #[tokio::test]
 async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
@@ -5765,8 +5835,8 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
 #[tokio::test]
 async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receivers() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
@@ -5826,8 +5896,8 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
 #[tokio::test]
 async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = super::RelayRegistry::new();
     let branch_collapse = Arc::new(super::BranchCollapseNode::with_capacity(nonzero_capacity(
@@ -6199,8 +6269,8 @@ fn relay_fanout_shares_arrow_columns_and_exposes_row_views() {
 #[tokio::test]
 async fn owner_ingress_touches_expiring_stream_state() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay_id = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay_id = RelayName::parse("notifications").expect("valid identifier");
     let expiring_state = runtime.expiring_stream_state(&domain, &relay_id);
     let registry = expiring_state.registry.clone();
     let services = test_relay_boundary_services();
@@ -7759,7 +7829,7 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
     let ca_path = source_root.path().join("ca.pem");
     std::fs::write(&ca_path, "test-ca").expect("ca file should be written");
 
-    let mount_domain = Domain::parse("tenant").expect("valid domain");
+    let mount_domain = DomainName::parse("tenant").expect("valid domain");
     let store = ResourceStore::open(store_root.path()).expect("resource store should open");
     store
         .install_from_directory(
@@ -7813,7 +7883,7 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
         "test-ca"
     );
 
-    let other_domain = Domain::parse("other").expect("valid domain");
+    let other_domain = DomainName::parse("other").expect("valid domain");
     let error = runtime
         .resolve_client_config(
             &other_domain,
@@ -7835,7 +7905,7 @@ fn client_resource_mounts_reject_unknown_placeholders() {
     let runtime = super::Runtime::new();
     let error = runtime
         .resolve_client_config(
-            &Domain::parse("tenant").expect("valid domain"),
+            &DomainName::parse("tenant").expect("valid domain"),
             None,
             &[ClientConfigEntry {
                 key: "tls_ca_file".to_string(),
@@ -7851,7 +7921,7 @@ fn client_config_instance_placeholder_renders_for_concrete_instance() {
     let runtime = super::Runtime::new();
     let resolved = runtime
         .resolve_client_config_with_instance(
-            &Domain::parse("tenant").expect("valid domain"),
+            &DomainName::parse("tenant").expect("valid domain"),
             None,
             &[ClientConfigEntry {
                 key: "client_id".to_string(),

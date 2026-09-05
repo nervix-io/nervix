@@ -21,22 +21,7 @@ use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowInputSide,
     DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind, DataflowSchemaField,
 };
-use nervix_models::{
-    AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
-    AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
-    AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchSelection, CborType,
-    ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction,
-    CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreatePlacement, CreateSchema,
-    CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule,
-    DropModel, EmitSink, EndpointType, Expression, Identifier, IngestSource, IngestTimestampSource,
-    JsonType, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-    ModelChangeAspect, ModelKind, MqttIngestMode, OtelAggregationTemporality, OtelMetricKind,
-    OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule,
-    PlacementPolicy, PlacementRuntimeNode, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
-    RouteConstruction, ScheduledNode, SchemaField, SignalingWireFormat, SqsFifoGroup,
-    WireSchemaDefinition,
-};
+use nervix_models::{AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement, AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchName, BranchSelection, CborType, ClientName, ClusterNodeName, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreatePlacement, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, DomainName, DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType, Expression, FieldName, IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, ModelName, MqttIngestMode, OtelAggregationTemporality, OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WireSchemaDefinition, WireSchemaName};
 use nervix_nspl::{
     vm_program::{
         CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
@@ -200,7 +185,7 @@ pub enum RegistryError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredModelRecord {
-    domain: Domain,
+    domain: DomainName,
     key: RegistryKey,
     model: Model,
 }
@@ -208,16 +193,21 @@ struct StoredModelRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RegistryKey {
     kind: ModelKind,
-    identifier: Identifier,
+    identifier: ModelName,
 }
 
 impl RegistryKey {
-    fn new(kind: ModelKind, identifier: Identifier) -> Self {
-        Self { kind, identifier }
+    /// A key for a model of `kind` named `identifier`. The name of any model widens into the
+    /// kind-erased [`ModelName`], so a caller holding a `RelayName` names the relay directly.
+    fn new(kind: ModelKind, identifier: impl Into<ModelName>) -> Self {
+        Self {
+            kind,
+            identifier: identifier.into(),
+        }
     }
 
     fn from_model(model: &Model) -> Self {
-        Self::new(model.kind(), model.identifier().clone())
+        Self::new(model.kind(), model.name())
     }
 }
 
@@ -229,7 +219,7 @@ pub struct Registry {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeChanges {
-    pub domain: Domain,
+    pub domain: DomainName,
     pub graph: Option<ActiveGraph>,
     pub changes: Vec<RuntimeChange>,
 }
@@ -237,7 +227,7 @@ pub struct RuntimeChanges {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RegistryEntity {
     pub kind: ModelKind,
-    pub identifier: Identifier,
+    pub identifier: ModelName,
 }
 
 impl Ord for RegistryEntity {
@@ -264,7 +254,7 @@ pub enum RuntimeChange {
         ingestor: Box<CreateIngestor>,
     },
     StopIngestor {
-        ingestor: Identifier,
+        ingestor: IngestorName,
     },
 }
 
@@ -365,7 +355,7 @@ impl Registry {
     #[cfg(test)]
     pub fn apply_batch(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         models: Vec<Model>,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutation_batch(
@@ -380,7 +370,7 @@ impl Registry {
     #[cfg(test)]
     pub fn drop_batch(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         drops: Vec<DropModel>,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutations(
@@ -393,7 +383,7 @@ impl Registry {
     #[cfg(test)]
     pub fn alter_relay(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         alter: AlterRelay,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutations(
@@ -406,7 +396,7 @@ impl Registry {
     #[cfg(test)]
     pub fn apply_mutation_batch(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: Vec<RegistryMutation>,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutations(domain, mutations, "mixed mutation batch")
@@ -469,7 +459,7 @@ impl Registry {
 
     fn synchronize_domain_models(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         models: HashMap<RegistryKey, Model>,
     ) -> Result<(), Report<RegistryError>> {
         let _commit_guard = self.commit_lock.lock();
@@ -525,7 +515,7 @@ impl Registry {
     #[cfg(test)]
     fn apply_mutations(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: Vec<RegistryMutation>,
         operation_name: &str,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
@@ -535,7 +525,7 @@ impl Registry {
 
     pub fn plan_mutations(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: &[RegistryMutation],
     ) -> Result<PlannedMutations, Report<RegistryError>> {
         self.plan_mutations_named(domain, mutations, "mixed mutation batch")
@@ -548,7 +538,7 @@ impl Registry {
     /// may repair them.
     pub fn preflight_transaction_mutations(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: &[RegistryMutation],
     ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
         self.plan_mutations_named_with_incomplete_candidate(
@@ -561,7 +551,7 @@ impl Registry {
 
     fn plan_mutations_named(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: &[RegistryMutation],
         operation_name: &str,
     ) -> Result<PlannedMutations, Report<RegistryError>> {
@@ -578,7 +568,7 @@ impl Registry {
 
     fn plan_mutations_named_with_incomplete_candidate(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: &[RegistryMutation],
         operation_name: &str,
         allow_incomplete_candidate: bool,
@@ -1279,10 +1269,11 @@ impl Registry {
 
     pub fn get(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> Result<Option<Model>, Report<RegistryError>> {
+        let identifier = identifier.into();
         self.storage
             .get(domain, kind, identifier)
             .change_context(RegistryError::LoadStoredModels)
@@ -1290,10 +1281,10 @@ impl Registry {
 
     pub fn list_identifiers(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
         prefix: &str,
-    ) -> Result<Vec<Identifier>, Report<RegistryError>> {
+    ) -> Result<Vec<ModelName>, Report<RegistryError>> {
         self.storage
             .list_identifiers(domain, kind, prefix)
             .change_context(RegistryError::LoadStoredModels)
@@ -1304,11 +1295,11 @@ impl Registry {
     /// configuration that does not yet resolve still reports the names it defines.
     pub fn resulting_identifiers(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
         prefix: &str,
         queued: &[RegistryMutation],
-    ) -> Result<Vec<Identifier>, Report<RegistryError>> {
+    ) -> Result<Vec<ModelName>, Report<RegistryError>> {
         let committed = self.list_identifiers(domain, kind, prefix)?;
         if queued.is_empty() {
             return Ok(committed);
@@ -1336,7 +1327,7 @@ impl Registry {
     /// configuration a client is still writing rather than a plan that will be persisted.
     pub fn resulting_models(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         queued: &[RegistryMutation],
     ) -> Result<Vec<Model>, Report<RegistryError>> {
         let mut models = self
@@ -1352,14 +1343,14 @@ impl Registry {
         Ok(models.into_values().collect())
     }
 
-    pub fn active_graph(&self, domain: &Domain) -> Option<ActiveGraph> {
+    pub fn active_graph(&self, domain: &DomainName) -> Option<ActiveGraph> {
         let state = self.state.read();
         state.domains.get(domain).map(|ns| ns.graph.clone())
     }
 
     pub fn placement_plan(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         default_policy: PlacementPolicy,
     ) -> Option<PlacementPlan> {
         let state = self.state.read();
@@ -1369,7 +1360,7 @@ impl Registry {
             .map(|domain_state| domain_state.graph.placement_plan(default_policy))
     }
 
-    pub fn active_graphs(&self) -> Vec<(Domain, ActiveGraph)> {
+    pub fn active_graphs(&self) -> Vec<(DomainName, ActiveGraph)> {
         let state = self.state.read();
         let mut graphs = state
             .domains
@@ -1380,7 +1371,7 @@ impl Registry {
         graphs
     }
 
-    pub fn active_domain_entities(&self, domain: &Domain) -> Vec<RegistryEntity> {
+    pub fn active_domain_entities(&self, domain: &DomainName) -> Vec<RegistryEntity> {
         let state = self.state.read();
         let Some(domain_state) = state.domains.get(domain) else {
             return Vec::new();
@@ -1406,13 +1397,13 @@ impl Registry {
 
     fn build_domain_state(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         models: &HashMap<RegistryKey, Model>,
     ) -> Result<DomainState, Report<RegistryError>> {
         DomainState::build(domain, models)
     }
 
-    fn active_graph_snapshot(&self, domain: &Domain) -> String {
+    fn active_graph_snapshot(&self, domain: &DomainName) -> String {
         self.active_graph(domain)
             .map(|graph| graph.describe())
             .unwrap_or_default()
@@ -1643,7 +1634,7 @@ enum RegistryPersistMutation {
 
 #[derive(Debug, Clone)]
 pub struct PlannedMutations {
-    domain: Domain,
+    domain: DomainName,
     batch_size: usize,
     operation_name: String,
     base_models: HashMap<RegistryKey, Model>,
@@ -1721,12 +1712,12 @@ impl PlannedMutations {
 
 #[derive(Debug, Clone)]
 struct RegistryState {
-    domains: HashMap<Domain, DomainState>,
+    domains: HashMap<DomainName, DomainState>,
 }
 
 impl RegistryState {
     fn from_records(records: Vec<StoredModelRecord>) -> Result<Self, Report<RegistryError>> {
-        let mut grouped = HashMap::<Domain, HashMap<RegistryKey, Model>>::new();
+        let mut grouped = HashMap::<DomainName, HashMap<RegistryKey, Model>>::new();
 
         for record in records {
             grouped
@@ -1753,7 +1744,7 @@ struct DomainState {
 
 impl DomainState {
     fn build(
-        domain: &Domain,
+        domain: &DomainName,
         models: &HashMap<RegistryKey, Model>,
     ) -> Result<Self, Report<RegistryError>> {
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
@@ -1769,7 +1760,7 @@ impl DomainState {
                                 domain,
                                 &key.identifier,
                                 models,
-                                &branch.schema,
+                                &BranchName::from(&branch.schema),
                             )?),
                             Some(branch.schema.clone()),
                         )
@@ -2325,13 +2316,13 @@ impl DomainState {
                         models,
                         &ingestor.decode_using_codec,
                     )?;
-                    let message_namespace = Identifier::parse(INGEST_MESSAGE_NAMESPACE)
+                    let message_namespace = FieldName::parse(INGEST_MESSAGE_NAMESPACE)
                         .expect("static namespace must be a valid identifier");
                     validate_ingestor_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&message_namespace, producer_schema)],
+                        &[(&SchemaName::from(&message_namespace), producer_schema)],
                         None,
                         ingestor.filter_where.as_ref(),
                         &ingestor.source,
@@ -3204,9 +3195,9 @@ pub struct PlacementPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementRulePlan {
-    pub name: Identifier,
-    pub from: Vec<Identifier>,
-    pub to: Vec<Identifier>,
+    pub name: ModelName,
+    pub from: Vec<ModelName>,
+    pub to: Vec<ModelName>,
     pub policy: PlacementPolicy,
     pub rank: Option<u64>,
     pub endpoint_pairs: Vec<PlacementEndpointPairPlan>,
@@ -3234,7 +3225,7 @@ pub struct PlacementRuleClaimPlan {
     pub right: PlacementRuntimeNode,
     pub effective: bool,
     pub effective_policy: PlacementPolicy,
-    pub winning_rules: Vec<Identifier>,
+    pub winning_rules: Vec<PlacementName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3242,7 +3233,7 @@ pub struct PlacementEffectivePair {
     pub left: PlacementRuntimeNode,
     pub right: PlacementRuntimeNode,
     pub policy: PlacementPolicy,
-    pub winning_rules: Vec<Identifier>,
+    pub winning_rules: Vec<PlacementName>,
     pub from_domain_default: bool,
 }
 
@@ -3298,7 +3289,7 @@ struct PlacementEndpointAnalysis {
 
 #[derive(Debug, Clone)]
 struct PlacementClaim {
-    rule: Identifier,
+    rule: PlacementName,
     policy: PlacementPolicy,
     rank: Option<u64>,
 }
@@ -3306,7 +3297,7 @@ struct PlacementClaim {
 #[derive(Debug, Clone)]
 struct ResolvedPlacementPair {
     policy: PlacementPolicy,
-    winning_rules: Vec<Identifier>,
+    winning_rules: Vec<PlacementName>,
     from_domain_default: bool,
 }
 
@@ -3329,7 +3320,7 @@ struct EffectivePlacementPlan {
 
 impl PlacementAnalysis {
     fn build(
-        domain: &Domain,
+        domain: &DomainName,
         models: &HashMap<RegistryKey, Model>,
         indices: &HashMap<RegistryKey, NodeIndex>,
         graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -3525,7 +3516,7 @@ impl PlacementAnalysis {
                         .collect::<Vec<_>>();
                 claims.sort_by(placement_rule_claim_cmp);
                 PlacementRulePlan {
-                    name: rule.model.name.clone(),
+                    name: ModelName::from(&rule.model.name),
                     from: rule.model.from.clone(),
                     to: rule.model.to.clone(),
                     policy: rule.model.policy,
@@ -3794,9 +3785,9 @@ impl PlacementTopology {
 }
 
 fn resolve_placement_members(
-    domain: &Domain,
+    domain: &DomainName,
     placement: &CreatePlacement,
-    members: &[Identifier],
+    members: &[ModelName],
     models: &HashMap<RegistryKey, Model>,
 ) -> Result<Vec<ResolvedPlacementMember>, Report<RegistryError>> {
     let mut resolved = Vec::new();
@@ -3811,9 +3802,9 @@ fn resolve_placement_members(
 }
 
 fn resolve_placement_member(
-    domain: &Domain,
+    domain: &DomainName,
     placement: &CreatePlacement,
-    member: &Identifier,
+    member: &ModelName,
     models: &HashMap<RegistryKey, Model>,
 ) -> Result<ResolvedPlacementMember, Report<RegistryError>> {
     let mut eligible = Vec::new();
@@ -3903,7 +3894,7 @@ fn is_placement_eligible_member_model(model: &Model) -> bool {
 }
 
 fn ensure_placement_member_shape_change_allowed(
-    domain: &Domain,
+    domain: &DomainName,
     before: &Model,
     after: &Model,
     candidate_models: &HashMap<RegistryKey, Model>,
@@ -3938,7 +3929,7 @@ fn ensure_placement_member_shape_change_allowed(
         identifier: member.as_str().to_string(),
         placements: placements
             .iter()
-            .map(Identifier::as_str)
+            .map(|name| name.as_str())
             .collect::<Vec<_>>()
             .join(", "),
     }))
@@ -3951,7 +3942,7 @@ fn is_placement_runtime_model(model: &Model) -> bool {
     }
 }
 
-fn placement_materialized_relays(model: &Model) -> Vec<&Identifier> {
+fn placement_materialized_relays(model: &Model) -> Vec<&ModelName> {
     let mut relays = model_materialized_state_dependencies(model)
         .iter()
         .map(|dependency| &dependency.relay)
@@ -4136,7 +4127,7 @@ impl ActiveGraph {
         self.placement.plan(default_policy)
     }
 
-    pub fn node(&self, kind: ModelKind, identifier: &Identifier) -> Option<&ActiveNode> {
+    pub fn node(&self, kind: ModelKind, identifier: &ModelName) -> Option<&ActiveNode> {
         self.indices
             .get(&RegistryKey::new(kind, identifier.clone()))
             .and_then(|index| self.graph.node_weight(*index))
@@ -4151,7 +4142,7 @@ impl ActiveGraph {
     }
 
     pub fn dataflow_graph_counts(&self) -> DataflowGraphCounts {
-        let mut nodes = HashSet::<String>::default();
+        let mut nodes = HashSet::<ClusterNodeName>::default();
         let mut relays = HashSet::<String>::default();
         for node in self
             .graph
@@ -4176,7 +4167,7 @@ impl ActiveGraph {
         }
     }
 
-    pub fn edges(&self) -> Vec<(Identifier, Identifier, EdgeKind)> {
+    pub fn edges(&self) -> Vec<(ModelName, ModelName, EdgeKind)> {
         self.graph
             .edge_references()
             .map(|edge| {
@@ -4287,7 +4278,7 @@ impl ActiveGraph {
         *hasher.finalize().as_bytes()
     }
 
-    pub fn schema_fingerprint(&self, kind: ModelKind, identifier: &Identifier) -> Option<[u8; 32]> {
+    pub fn schema_fingerprint(&self, kind: ModelKind, identifier: &ModelName) -> Option<[u8; 32]> {
         self.indices
             .get(&RegistryKey::new(kind, identifier.clone()))
             .map(|index| self.schema_fingerprint_for_index(*index))
@@ -4295,8 +4286,8 @@ impl ActiveGraph {
 
     pub fn schedule_for_domain(
         &self,
-        domain: &Domain,
-        cluster_nodes: &[String],
+        domain: &DomainName,
+        cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
         default_policy: PlacementPolicy,
     ) -> DomainSchedule {
@@ -4319,8 +4310,8 @@ impl ActiveGraph {
     #[cfg(feature = "testing")]
     pub(crate) fn schedule_for_domain_with_mode(
         &self,
-        domain: &Domain,
-        cluster_nodes: &[String],
+        domain: &DomainName,
+        cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
         default_policy: PlacementPolicy,
         scheduler_mode: SchedulerMode,
@@ -4336,8 +4327,8 @@ impl ActiveGraph {
 
     fn schedule_for_domain_inner(
         &self,
-        domain: &Domain,
-        cluster_nodes: &[String],
+        domain: &DomainName,
+        cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
         default_policy: PlacementPolicy,
         #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
@@ -4353,7 +4344,7 @@ impl ActiveGraph {
             *hasher.finalize().as_bytes()
         };
         let mut next_assignment = 0usize;
-        let mut node_load = HashMap::<String, usize>::new();
+        let mut node_load = HashMap::<ClusterNodeName, usize>::new();
         let mut assigned_by_key = HashMap::<RegistryKey, Vec<String>>::new();
         let mut group_assignments = HashMap::<usize, Vec<String>>::new();
         let mut depth_cache = HashMap::<NodeIndex, usize>::new();
@@ -4639,11 +4630,11 @@ const fn dataflow_edge_kind(kind: EdgeKind) -> DataflowEdgeKind {
 
 #[derive(Debug, Clone)]
 pub struct ActiveNode {
-    pub identifier: Identifier,
+    pub identifier: ModelName,
     pub kind: ModelKind,
     pub config: Arc<Model>,
-    pub effective_branching: Option<Vec<Identifier>>,
-    pub effective_branching_schema: Option<Identifier>,
+    pub effective_branching: Option<Vec<FieldName>>,
+    pub effective_branching_schema: Option<SchemaName>,
 }
 
 impl ActiveNode {
@@ -4690,7 +4681,7 @@ impl ActiveNode {
     fn dataflow_edge_to(&self, target: &Self, kind: DataflowEdgeKind) -> DataflowEdge {
         if kind == DataflowEdgeKind::Data
             && target.kind == ModelKind::Generator
-            && target.reads_materialized_state_from(&self.identifier)
+            && target.reads_materialized_state_from(&RelayName::from(&self.identifier))
         {
             return DataflowEdge::data(
                 self.dataflow_id(),
@@ -4700,7 +4691,7 @@ impl ActiveNode {
         }
         DataflowEdge::data(self.dataflow_id(), target.dataflow_id(), kind)
             .with_metric(self.dataflow_metric_for_target(target))
-            .with_input_side(target.correlator_input_side(&self.identifier))
+            .with_input_side(target.correlator_input_side(&RelayName::from(&self.identifier)))
             .with_routes(self.dataflow_routes_to(target, kind))
     }
 
@@ -4721,7 +4712,7 @@ impl ActiveNode {
             .collect()
     }
 
-    fn reads_materialized_state_from(&self, relay: &Identifier) -> bool {
+    fn reads_materialized_state_from(&self, relay: &RelayName) -> bool {
         self.config
             .materialized_state_relays()
             .into_iter()
@@ -4730,7 +4721,7 @@ impl ActiveNode {
 
     /// Which side of a correlator an input relay enters. Correlators are the only nodes whose
     /// inputs are distinguishable, and the console labels the two sides.
-    fn correlator_input_side(&self, source: &Identifier) -> Option<DataflowInputSide> {
+    fn correlator_input_side(&self, source: &RelayName) -> Option<DataflowInputSide> {
         let Model::Correlator(correlator) = self.config.as_ref() else {
             return None;
         };
@@ -4757,7 +4748,7 @@ impl ActiveNode {
         let routes = outputs
             .routes
             .iter()
-            .filter(|route| route.relay == target.identifier)
+            .filter(|route| route.relay == RelayName::from(&target.identifier))
             .count();
         u32::try_from(routes).unwrap_or(u32::MAX).max(1)
     }
@@ -4804,7 +4795,7 @@ impl ActiveNode {
         )
     }
 
-    fn to_dataflow_node(&self, schemas: &HashMap<Identifier, CreateSchema>) -> DataflowNode {
+    fn to_dataflow_node(&self, schemas: &HashMap<SchemaName, CreateSchema>) -> DataflowNode {
         let node = DataflowNode::new(
             self.dataflow_id(),
             self.identifier.as_str(),
@@ -4919,8 +4910,8 @@ fn parse_as_to_dataflow_label(ty: &ParseAsType) -> String {
 }
 
 fn validate_ingestor_source(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     ingestor: &CreateIngestor,
 ) -> Result<(), Report<RegistryError>> {
     let invalid = |reason: String| {
@@ -4996,8 +4987,8 @@ fn validate_ingestor_source(
 }
 
 fn validate_emitter_publishing_contract(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     emitter: &CreateEmitter,
 ) -> Result<(), Report<RegistryError>> {
@@ -5264,8 +5255,8 @@ fn validate_otel_mapping_contract(
 }
 
 fn validate_sqs_fifo_group_expression(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     emitter: &CreateEmitter,
     input_schema: &CreateSchema,
@@ -5278,7 +5269,7 @@ fn validate_sqs_fifo_group_expression(
         return Ok(());
     };
 
-    let target = Identifier::parse("fifo_group").map_err(|error| {
+    let target = FieldName::parse("fifo_group").map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -5286,7 +5277,13 @@ fn validate_sqs_fifo_group_expression(
         })
     })?;
     let output_schema = CreateSchema {
-        name: target.clone(),
+        name: SchemaName::parse("fifo_group").map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("invalid internal SQS FIFO group schema: {error}"),
+            })
+        })?,
         fields: vec![SchemaField {
             name: target.clone(),
             ty: ParseAsType::String,
@@ -5299,7 +5296,7 @@ fn validate_sqs_fifo_group_expression(
     let parsed = lower_transforming_route(
         &RouteConstruction {
             assignments: vec![Assignment {
-                target: AssignmentTarget::bare(target),
+                target: AssignmentTarget::bare(target.clone()),
                 value: expression.clone(),
             }],
             ..RouteConstruction::default()
@@ -5475,8 +5472,8 @@ fn is_schedulable_model(model: &Model) -> bool {
 }
 
 fn validate_branch_model(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
@@ -5494,8 +5491,8 @@ fn validate_branch_model(
 }
 
 fn parse_branch_ttl(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     ttl: &str,
 ) -> Result<Duration, Report<RegistryError>> {
     humantime::parse_duration(ttl).map_err(|error| {
@@ -5508,8 +5505,8 @@ fn parse_branch_ttl(
 }
 
 fn ensure_branch_schema_exists(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
@@ -5528,8 +5525,8 @@ fn ensure_branch_schema_exists(
 }
 
 fn ensure_schema_has_fields<T>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     fields: &[T],
     schema_kind: &str,
 ) -> Result<(), Report<RegistryError>> {
@@ -5544,16 +5541,16 @@ fn ensure_schema_has_fields<T>(
 }
 
 fn ensure_wire_schema_has_fields<T>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     schema: &CreateWireSchema<T>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_schema_has_fields(domain, identifier, &schema.fields, "wire schema")
 }
 
 fn ensure_signaling_protocol_is_valid(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     protocol: &CreateSignalingProtocol,
 ) -> Result<(), Report<RegistryError>> {
     let invalid = |reason: String| {
@@ -5646,8 +5643,8 @@ fn ensure_signaling_protocol_is_valid(
 }
 
 fn parse_window_bound_duration(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     bound_name: &str,
     duration: Option<&str>,
 ) -> Result<(), Report<RegistryError>> {
@@ -5667,8 +5664,8 @@ fn parse_window_bound_duration(
 
 #[derive(Clone, Copy)]
 struct ModelValidationContext<'location, 'models> {
-    domain: &'location Domain,
-    identifier: &'location Identifier,
+    domain: &'location DomainName,
+    identifier: &'location ModelName,
     models: &'models HashMap<RegistryKey, Model>,
 }
 
@@ -5679,7 +5676,7 @@ fn processor_input_schemas<'inputs, 'models>(
     source: NodeIndex,
     inputs: &'inputs nervix_models::ProcessorInputs,
     relation: &str,
-) -> Result<Vec<(&'inputs Identifier, &'models CreateSchema)>, Report<RegistryError>> {
+) -> Result<Vec<(&'inputs SchemaName, &'models CreateSchema)>, Report<RegistryError>> {
     let ModelValidationContext {
         domain,
         identifier,
@@ -5737,8 +5734,8 @@ fn processor_input_schemas<'inputs, 'models>(
 }
 
 fn ensure_input_collect_policy(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     policy: Option<&nervix_models::InputCollectPolicy>,
     relation: &str,
 ) -> Result<(), Report<RegistryError>> {
@@ -5784,8 +5781,8 @@ fn ensure_input_collect_policy(
 }
 
 fn validate_correlator_input_sides_do_not_overlap(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     correlator: &CreateCorrelator,
 ) -> Result<(), Report<RegistryError>> {
     let mut left = HashSet::new();
@@ -5808,11 +5805,11 @@ fn validate_correlator_input_sides_do_not_overlap(
 }
 
 fn processor_first_input_relay<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     inputs: &'a nervix_models::ProcessorInputs,
     relation: &str,
-) -> Result<&'a Identifier, Report<RegistryError>> {
+) -> Result<&'a RelayName, Report<RegistryError>> {
     inputs.from.first().ok_or_else(|| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -5823,11 +5820,11 @@ fn processor_first_input_relay<'a>(
 }
 
 fn ensure_window_processor_output_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     window_processor: &CreateWindowProcessor,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_processor_outputs_declared(domain, identifier, &window_processor.output_routes)?;
@@ -5847,11 +5844,11 @@ fn ensure_window_processor_output_schemas(
 }
 
 fn ensure_wasm_processor_output_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     processor: &nervix_models::CreateWasmProcessor,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_processor_outputs_declared(domain, identifier, &processor.output_routes)?;
@@ -5890,10 +5887,10 @@ fn ensure_wasm_processor_output_schemas(
 }
 
 fn effective_wasm_output_filter_map_schema(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -5978,12 +5975,12 @@ fn effective_wasm_output_filter_map_schema(
 }
 
 fn validate_window_processor_output(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     let aggregate = lower_window_assignments(&output.construction).map_err(|reason| {
@@ -6077,8 +6074,8 @@ fn validate_window_processor_output(
 }
 
 fn validate_window_route_where(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
@@ -6191,10 +6188,10 @@ fn collect_locality_affinity(
 
 struct AssignmentPlanner<'a> {
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
-    cluster_nodes: &'a [String],
+    cluster_nodes: &'a [ClusterNodeName],
     assigned_by_key: &'a HashMap<RegistryKey, Vec<String>>,
     placement_pairs: &'a HashMap<PlacementPair, ResolvedPlacementPair>,
-    node_load: &'a HashMap<String, usize>,
+    node_load: &'a HashMap<ClusterNodeName, usize>,
     next_assignment: &'a mut usize,
     replica_count: usize,
     #[cfg(feature = "testing")]
@@ -6415,9 +6412,9 @@ impl ModelStorage {
     #[cfg(test)]
     fn put(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: &ModelName,
         model: &Model,
     ) -> Result<(), Report<RegistryError>> {
         let key = encode_key(domain, kind, identifier)?;
@@ -6443,7 +6440,7 @@ impl ModelStorage {
 
     fn commit_batch(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         models_to_persist: &HashMap<RegistryKey, RegistryPersistMutation>,
         drops_in_batch: &HashSet<RegistryKey>,
     ) -> Result<(), Report<RegistryError>> {
@@ -6477,10 +6474,11 @@ impl ModelStorage {
 
     fn get(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> Result<Option<Model>, Report<RegistryError>> {
+        let identifier = identifier.into();
         let key = encode_key(domain, kind, identifier)?;
         let Some(raw) = self
             .index
@@ -6498,10 +6496,10 @@ impl ModelStorage {
 
     fn list_identifiers(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
         prefix: &str,
-    ) -> Result<Vec<Identifier>, Report<RegistryError>> {
+    ) -> Result<Vec<ModelName>, Report<RegistryError>> {
         let mut out = Vec::new();
         let prefix = prefix.to_ascii_lowercase();
 
@@ -6528,7 +6526,7 @@ impl ModelStorage {
 
     fn list_models(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
     ) -> Result<Vec<StoredModelRecord>, Report<RegistryError>> {
         self.list_records().map(|records| {
             records
@@ -6557,10 +6555,10 @@ impl ModelStorage {
             let model = Model::try_from(envelope).change_context(RegistryError::ModelConversion)?;
 
             let domain =
-                Domain::parse(&key.domain).change_context(RegistryError::ModelConversion)?;
+                DomainName::parse(&key.domain).change_context(RegistryError::ModelConversion)?;
             let kind = ModelKind::from_str(&key.kind)
                 .map_err(|_| Report::new(RegistryError::ModelConversion))?;
-            let identifier = Identifier::parse(&key.identifier)
+            let identifier = ModelName::parse(&key.identifier)
                 .change_context(RegistryError::ModelConversion)?;
 
             records.push(StoredModelRecord {
@@ -6589,10 +6587,11 @@ struct ModelKeyOwned {
 }
 
 fn encode_key(
-    domain: &Domain,
+    domain: &DomainName,
     kind: ModelKind,
-    identifier: &Identifier,
+    identifier: impl Into<ModelName>,
 ) -> Result<Vec<u8>, Report<RegistryError>> {
+    let identifier = identifier.into();
     storekey::serialize(&ModelKey {
         domain: domain.as_str(),
         kind: kind.as_str(),
@@ -6622,13 +6621,14 @@ fn deserialize_value(bytes: &[u8]) -> Result<StoredModelVersioned, Report<Regist
 }
 
 fn expect_kind(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
-    referenced: &Identifier,
+    referenced: impl Into<ModelName>,
     expected_kind: ModelKind,
 ) -> Result<NodeIndex, Report<RegistryError>> {
+    let referenced = referenced.into();
     let referenced_key = RegistryKey::new(expected_kind, referenced.clone());
     models.get(&referenced_key).ok_or_else(|| {
         Report::new(RegistryError::MissingReference {
@@ -6645,8 +6645,8 @@ fn expect_kind(
 }
 
 fn add_message_error_policy_edges(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -6672,14 +6672,14 @@ struct MessageErrorSchemas<'a> {
 }
 
 fn validate_model_message_error_policies(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     model: &Model,
 ) -> Result<(), Report<RegistryError>> {
     let validate_outputs = |outputs: &ProcessorOutputs,
                             schemas: MessageErrorSchemas<'_>,
-                            expected_branch: Option<&Identifier>| {
+                            expected_branch: Option<&BranchName>| {
         for output in outputs.outputs() {
             let partial_output = schema_for_ack_model(domain, identifier, models, &output.relay)?;
             validate_message_error_policy(
@@ -6859,8 +6859,8 @@ fn validate_model_message_error_policies(
 }
 
 fn validate_transforming_processor_message_errors(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     inputs: &nervix_models::ProcessorInputs,
     outputs: &ProcessorOutputs,
@@ -6892,12 +6892,12 @@ fn validate_transforming_processor_message_errors(
 }
 
 fn validate_message_error_policy(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     policy: &MessageErrorPolicy,
     schemas: MessageErrorSchemas<'_>,
-    expected_branch: Option<&Identifier>,
+    expected_branch: Option<&BranchName>,
 ) -> Result<(), Report<RegistryError>> {
     let MessageErrorPolicy::Dlq { relay, assignments } = policy else {
         return Ok(());
@@ -6910,8 +6910,8 @@ fn validate_message_error_policy(
             reason: format!(
                 "message-error relay '{}' uses branch {}, expected {}",
                 relay,
-                actual_branch.map_or("UNBRANCHED", Identifier::as_str),
-                expected_branch.map_or("UNBRANCHED", Identifier::as_str),
+                actual_branch.map_or("UNBRANCHED", BranchName::as_str),
+                expected_branch.map_or("UNBRANCHED", BranchName::as_str),
             ),
         }));
     }
@@ -7060,8 +7060,8 @@ fn model_materialized_state_dependencies(model: &Model) -> &[MaterializedStateDe
 }
 
 fn add_materialized_state_dependency_edges(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -7096,8 +7096,8 @@ fn add_materialized_state_dependency_edges(
 }
 
 fn validate_materialized_state_default(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     dependency: &MaterializedStateDependency,
 ) -> Result<(), Report<RegistryError>> {
@@ -7254,8 +7254,8 @@ fn expression_contains_nondeterministic_or_side_effect_call(
 }
 
 fn validate_declared_materialized_state_references(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     model: &Model,
     dependencies: &[MaterializedStateDependency],
 ) -> Result<(), Report<RegistryError>> {
@@ -7440,8 +7440,8 @@ fn visit_model_expressions(model: &Model, visitor: &mut impl FnMut(&Expression))
 }
 
 fn add_udf_dependency_edges(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     model: &Model,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -7468,8 +7468,8 @@ fn add_udf_dependency_edges(
 }
 
 fn add_output_message_error_policy_edges(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -7491,8 +7491,8 @@ fn add_output_message_error_policy_edges(
 }
 
 fn add_correlation_timeout_action_edges(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -7509,10 +7509,10 @@ fn add_correlation_timeout_action_edges(
 }
 
 fn expect_schema_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &'a HashMap<RegistryKey, Model>,
-    referenced: &Identifier,
+    referenced: &SchemaName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     match models.get(&RegistryKey::new(ModelKind::Schema, referenced.clone())) {
         Some(Model::Schema(schema)) => Ok(schema),
@@ -7533,12 +7533,13 @@ fn expect_schema_model<'a>(
 }
 
 fn expect_wire_schema_model(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     wire_format: &CodecWireFormat,
-    referenced: &Identifier,
+    referenced: impl Into<ModelName>,
 ) -> Result<WireSchemaDefinition, Report<RegistryError>> {
+    let referenced = referenced.into();
     let Some(kind) = wire_format.wire_schema_kind() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -7576,11 +7577,12 @@ fn expect_wire_schema_model(
 }
 
 fn expect_codec_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &'a HashMap<RegistryKey, Model>,
-    referenced: &Identifier,
+    referenced: impl Into<ModelName>,
 ) -> Result<&'a CreateCodec, Report<RegistryError>> {
+    let referenced = referenced.into();
     match models.get(&RegistryKey::new(ModelKind::Codec, referenced.clone())) {
         Some(Model::Codec(codec)) => Ok(codec),
         Some(model) => Err(Report::new(RegistryError::InvalidReferenceKind {
@@ -7600,8 +7602,8 @@ fn expect_codec_model<'a>(
 }
 
 fn ensure_codec_supports_decoding(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     codec: &CreateCodec,
 ) -> Result<(), Report<RegistryError>> {
     if codec.wire_format.supports_decoding() {
@@ -7620,8 +7622,8 @@ fn ensure_codec_supports_decoding(
 }
 
 fn ensure_codec_supports_encoding(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     codec: &CreateCodec,
     schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -7667,20 +7669,20 @@ fn ensure_codec_supports_encoding(
 }
 
 fn schema_for_codec_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &'a HashMap<RegistryKey, Model>,
-    codec_id: &Identifier,
+    codec_id: &CodecName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     let codec = expect_codec_model(domain, identifier, models, codec_id)?;
     expect_schema_model(domain, identifier, models, &codec.schema)
 }
 
 fn schema_for_ack_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &'a HashMap<RegistryKey, Model>,
-    relay_id: &Identifier,
+    relay_id: &RelayName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     let relay = match models.get(&RegistryKey::new(ModelKind::Relay, relay_id.clone())) {
         Some(Model::Relay(relay)) => relay,
@@ -7707,10 +7709,10 @@ fn schema_for_ack_model<'a>(
 }
 
 fn schema_for_lookup_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &'a HashMap<RegistryKey, Model>,
-    lookup_id: &Identifier,
+    lookup_id: &LookupName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     let lookup = match models.get(&RegistryKey::new(ModelKind::Lookup, lookup_id.clone())) {
         Some(Model::Lookup(lookup)) => lookup,
@@ -7745,8 +7747,8 @@ enum ProcessorOutputSchemaCompatibility {
 impl ProcessorOutputSchemaCompatibility {
     fn ensure(
         self,
-        domain: &Domain,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ModelName,
         effective_schema: &CreateSchema,
         output_schema: &CreateSchema,
         relation: &str,
@@ -7771,8 +7773,8 @@ impl ProcessorOutputSchemaCompatibility {
 }
 
 fn ensure_processor_outputs_declared(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     outputs: &ProcessorOutputs,
 ) -> Result<(), Report<RegistryError>> {
     if outputs.is_empty() {
@@ -7787,8 +7789,8 @@ fn ensure_processor_outputs_declared(
 }
 
 fn ensure_processor_output_flush_policies(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     outputs: &ProcessorOutputs,
 ) -> Result<(), Report<RegistryError>> {
     for output in outputs.outputs() {
@@ -7852,8 +7854,8 @@ fn ensure_processor_output_flush_policies(
 }
 
 fn add_processor_output_edges(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -7877,8 +7879,8 @@ fn add_processor_output_edges(
 }
 
 fn add_output_branch_dependency_edges(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -7903,10 +7905,10 @@ fn add_output_branch_dependency_edges(
 }
 
 fn validate_filter_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     filter_where: Option<&Expression>,
 ) -> Result<(), Report<RegistryError>> {
@@ -7928,10 +7930,10 @@ fn validate_filter_where_for_internal_schemas(
 }
 
 fn validate_ingestor_filter_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     filter_where: Option<&Expression>,
     source: &IngestSource,
@@ -7981,10 +7983,10 @@ fn validate_ingestor_filter_where_for_internal_schemas(
 }
 
 fn validate_from_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     from_where: &[nervix_models::ProcessorInputWhere],
 ) -> Result<(), Report<RegistryError>> {
@@ -8000,10 +8002,10 @@ fn validate_from_where_for_internal_schemas(
 }
 
 fn validate_scoped_from_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     from_where: &[nervix_models::ProcessorInputWhere],
     input_namespace: &'static str,
@@ -8022,7 +8024,7 @@ fn validate_scoped_from_where_for_internal_schemas(
         }
         let Some((relay, schema)) = input_schemas
             .iter()
-            .find(|(relay, _schema)| **relay == source_filter.relay)
+            .find(|(relay, _schema)| **relay == SchemaName::from(&source_filter.relay))
             .copied()
         else {
             return Err(Report::new(RegistryError::InvalidModel {
@@ -8053,7 +8055,7 @@ fn validate_scoped_from_where_for_internal_schemas(
 
 fn validate_where_program_for_internal_schemas(
     context: ModelValidationContext<'_, '_>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     where_program: &Expression,
     clause_name: &str,
@@ -8072,7 +8074,7 @@ fn validate_where_program_for_internal_schemas(
 
 fn validate_where_program_for_scoped_internal_schemas(
     context: ModelValidationContext<'_, '_>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     where_program: &Expression,
     clause_name: &str,
@@ -8156,10 +8158,10 @@ fn validate_where_program_for_scoped_internal_schemas(
 }
 
 fn effective_processor_output_filter_map_schema(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -8241,7 +8243,7 @@ fn effective_processor_output_filter_map_schema(
 fn ensure_processor_output_schemas(
     context: ModelValidationContext<'_, '_>,
     outputs: &ProcessorOutputs,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     relation: &str,
     compatibility: ProcessorOutputSchemaCompatibility,
@@ -8275,8 +8277,8 @@ fn ensure_processor_output_schemas(
 }
 
 fn effective_emitter_filter_map_schema(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     emitter: &nervix_models::CreateEmitter,
     input_schema: &CreateSchema,
@@ -8431,13 +8433,13 @@ type LookupHashMapRewriteResult = (
 );
 
 fn rewrite_lookup_hash_map_program(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     parsed: &nervix_nspl::vm_program::SpannedNode<Program>,
 ) -> Result<LookupHashMapRewriteResult, Report<RegistryError>> {
     let mut next_field = 0usize;
-    let mut calls = Vec::<(Identifier, String, Expr, String, ArrowDataType)>::new();
+    let mut calls = Vec::<(FieldName, String, Expr, String, ArrowDataType)>::new();
     let mut rewrite = |expr: &SpannedExpr| {
         rewrite_lookup_hash_map_expr(
             domain,
@@ -8487,11 +8489,11 @@ fn rewrite_lookup_hash_map_program(
 }
 
 fn rewrite_lookup_hash_map_expr(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     expr: &SpannedExpr,
-    calls: &mut Vec<(Identifier, String, Expr, String, ArrowDataType)>,
+    calls: &mut Vec<(FieldName, String, Expr, String, ArrowDataType)>,
     next_field: &mut usize,
 ) -> Result<SpannedExpr, Report<RegistryError>> {
     let inner = match &expr.inner {
@@ -8539,7 +8541,7 @@ fn rewrite_lookup_hash_map_expr(
                         reason,
                     })
                 })?;
-                let lookup = Identifier::parse(lookup_name).map_err(|error| {
+                let lookup = LookupName::parse(lookup_name).map_err(|error| {
                     Report::new(RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
                         identifier: identifier.as_str().to_string(),
@@ -8588,7 +8590,7 @@ fn rewrite_lookup_hash_map_expr(
                     let generated_field = format!("value_{}", *next_field);
                     *next_field += 1;
                     calls.push((
-                        lookup,
+                        FieldName::from(&lookup.clone().clone()),
                         lookup_field,
                         key,
                         generated_field.clone(),
@@ -8767,14 +8769,14 @@ fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec
 }
 
 fn referenced_materialized_stream_bindings(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
     excluded_namespaces: &HashSet<String>,
     program_label: &str,
 ) -> Result<Vec<CompileBinding>, Report<RegistryError>> {
-    let mut fields_by_stream = HashMap::<Identifier, HashSet<String>>::default();
+    let mut fields_by_stream = HashMap::<RelayName, HashSet<String>>::default();
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
         if excluded_namespaces.contains(&relay) || relay == "metadata" || relay == BRANCH_NAMESPACE
         {
@@ -8783,7 +8785,7 @@ fn referenced_materialized_stream_bindings(
         let Some(relay_name) = relay.strip_prefix("relay_state.") else {
             continue;
         };
-        let relay = Identifier::parse(relay_name).map_err(|error| {
+        let relay = RelayName::parse(relay_name).map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -8854,10 +8856,10 @@ fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
 }
 
 fn ensure_stream_is_materialized(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
-    relay: &Identifier,
+    relay: &RelayName,
 ) -> Result<(), Report<RegistryError>> {
     let Some(Model::Relay(ack_model)) =
         models.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
@@ -8882,8 +8884,8 @@ fn ensure_stream_is_materialized(
 }
 
 fn validate_generator_output(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     generator: &CreateGenerator,
     output: &ProcessorOutput,
@@ -8955,8 +8957,8 @@ fn validate_generator_output(
 }
 
 fn effective_ingestor_output_filter_map_schema(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     ingestor: &CreateIngestor,
     input_schema: &CreateSchema,
@@ -9058,22 +9060,22 @@ fn ingest_source_supports_headers(source: &IngestSource) -> bool {
 fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSchema> {
     match source {
         IngestSource::Kafka { .. } => Some(CreateSchema {
-            name: Identifier::parse("ingestor_metadata").expect("valid metadata schema name"),
+            name: SchemaName::from(&ModelName::parse("ingestor_metadata").expect("valid metadata schema name")),
             fields: vec![
                 SchemaField {
-                    name: Identifier::parse("topic").expect("valid metadata field"),
+                    name: FieldName::from(&ModelName::parse("topic").expect("valid metadata field").clone().clone()),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("partition").expect("valid metadata field"),
+                    name: FieldName::from(&ModelName::parse("partition").expect("valid metadata field").clone().clone()),
                     ty: ParseAsType::I32,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("offset").expect("valid metadata field"),
+                    name: FieldName::from(&ModelName::parse("offset").expect("valid metadata field").clone().clone()),
                     ty: ParseAsType::I64,
                     optional: true,
                     sensitive: false,
@@ -9081,9 +9083,9 @@ fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSc
             ],
         }),
         IngestSource::Syslog { .. } => Some(CreateSchema {
-            name: Identifier::parse("ingestor_metadata").expect("valid metadata schema name"),
+            name: SchemaName::from(&ModelName::parse("ingestor_metadata").expect("valid metadata schema name")),
             fields: vec![SchemaField {
-                name: Identifier::parse("peer_addr").expect("valid metadata field"),
+                name: FieldName::from(&ModelName::parse("peer_addr").expect("valid metadata field").clone().clone()),
                 ty: ParseAsType::String,
                 optional: true,
                 sensitive: false,
@@ -9182,8 +9184,8 @@ fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> ArrowDataType {
 }
 
 fn ensure_internal_schema_compatibility(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     producer: &CreateSchema,
     consumer: &CreateSchema,
     relation: &str,
@@ -9205,8 +9207,8 @@ enum SensitivityCompatibility {
 }
 
 fn ensure_internal_schema_compatibility_with_policy(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     producer: &CreateSchema,
     consumer: &CreateSchema,
     relation: &str,
@@ -9293,8 +9295,8 @@ fn ensure_internal_schema_compatibility_with_policy(
 }
 
 fn ensure_equal_internal_schema(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     left: &CreateSchema,
     right: &CreateSchema,
     relation: &str,
@@ -9315,11 +9317,11 @@ fn ensure_equal_internal_schema(
 }
 
 fn ensure_deduplicator_key_compiles(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     deduplicator: &CreateDeduplicator,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     let Some((_primary_relay, primary_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
@@ -9342,7 +9344,7 @@ fn ensure_deduplicator_key_compiles(
         .map(|(index, expression)| {
             Ok(Assignment {
                 target: AssignmentTarget::bare(
-                    Identifier::parse(&format!("deduplicate_key_{index}")).map_err(|error| {
+                    FieldName::parse(&format!("deduplicate_key_{index}")).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
                             identifier: identifier.as_str().to_string(),
@@ -9395,12 +9397,12 @@ fn ensure_deduplicator_key_compiles(
 }
 
 fn validate_correlator(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     correlator: &CreateCorrelator,
-    left_schemas: &[(&Identifier, &CreateSchema)],
-    right_schemas: &[(&Identifier, &CreateSchema)],
+    left_schemas: &[(&SchemaName, &CreateSchema)],
+    right_schemas: &[(&SchemaName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     humantime::parse_duration(&correlator.max_time).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -9456,12 +9458,12 @@ fn validate_correlator(
 }
 
 fn validate_correlate_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     correlator: &CreateCorrelator,
-    left_schemas: &[(&Identifier, &CreateSchema)],
-    right_schemas: &[(&Identifier, &CreateSchema)],
+    left_schemas: &[(&SchemaName, &CreateSchema)],
+    right_schemas: &[(&SchemaName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     let parsed = lower_route_construction(
         &RouteConstruction {
@@ -9519,8 +9521,8 @@ fn validate_correlate_where_for_internal_schemas(
 
 fn validate_correlator_output(
     context: ModelValidationContext<'_, '_>,
-    left_schemas: &[(&Identifier, &CreateSchema)],
-    right_schemas: &[(&Identifier, &CreateSchema)],
+    left_schemas: &[(&SchemaName, &CreateSchema)],
+    right_schemas: &[(&SchemaName, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -9689,8 +9691,8 @@ fn validate_correlator_output(
 }
 
 fn validate_correlator_timeout_action(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     input_schema: &CreateSchema,
     action: &CorrelationTimeoutAction,
@@ -9704,11 +9706,11 @@ fn validate_correlator_timeout_action(
 }
 
 fn ensure_inferencer_input_mappings(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     processor: &CreateInferencer,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&SchemaName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     let Some((_relay, input_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
@@ -9718,7 +9720,7 @@ fn ensure_inferencer_input_mappings(
         }));
     };
     for mapping in &processor.inputs {
-        let target = Identifier::parse("mapped_tensor").map_err(|error| {
+        let target = ModelName::parse("mapped_tensor").map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -9728,7 +9730,7 @@ fn ensure_inferencer_input_mappings(
         let parsed = lower_route_construction(
             &RouteConstruction {
                 assignments: vec![Assignment {
-                    target: AssignmentTarget::bare(target),
+                    target: AssignmentTarget::bare(FieldName::from(&target.clone().clone())),
                     value: mapping.expression.clone(),
                 }],
                 ..RouteConstruction::default()
@@ -9788,8 +9790,8 @@ fn ensure_inferencer_input_mappings(
 }
 
 fn validate_inferencer_output_filter_map(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
@@ -9865,22 +9867,22 @@ fn validate_inferencer_output_filter_map(
 trait InferencerRegistrySchema {
     fn inner_output_schema(
         &self,
-        domain: &Domain,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ModelName,
     ) -> Result<CreateSchema, Report<RegistryError>>;
 }
 
 impl InferencerRegistrySchema for CreateInferencer {
     fn inner_output_schema(
         &self,
-        domain: &Domain,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ModelName,
     ) -> Result<CreateSchema, Report<RegistryError>> {
         let fields = self
             .output_schema
             .iter()
             .map(|declaration| {
-                let name = Identifier::parse(&declaration.tensor).map_err(|error| {
+                let name = ModelName::parse(&declaration.tensor).map_err(|error| {
                     Report::new(RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
                         identifier: identifier.as_str().to_string(),
@@ -9891,7 +9893,7 @@ impl InferencerRegistrySchema for CreateInferencer {
                     })
                 })?;
                 Ok(SchemaField {
-                    name,
+                    FieldName::from(&name),
                     ty: declaration.schema.message_type(),
                     optional: false,
                     sensitive: false,
@@ -9899,7 +9901,7 @@ impl InferencerRegistrySchema for CreateInferencer {
             })
             .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
         Ok(CreateSchema {
-            name: Identifier::parse(INNER_OUTPUT_NAMESPACE)
+            name: ModelName::parse(INNER_OUTPUT_NAMESPACE)
                 .expect("public inferencer namespace must be a valid identifier"),
             fields,
         })
@@ -9907,8 +9909,8 @@ impl InferencerRegistrySchema for CreateInferencer {
 }
 
 fn ensure_lookup_key_field_exists(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     lookup: &CreateLookup,
     schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -9932,8 +9934,8 @@ fn ensure_lookup_key_field_exists(
 }
 
 fn ensure_ingestor_timestamp_source(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     ingestor: &CreateIngestor,
     schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -9974,11 +9976,11 @@ fn ensure_ingestor_timestamp_source(
 }
 
 fn relay_declared_branch<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &'a HashMap<RegistryKey, Model>,
-    relay: &Identifier,
-) -> Result<Option<&'a Identifier>, Report<RegistryError>> {
+    relay: &RelayName,
+) -> Result<Option<&'a BranchName>, Report<RegistryError>> {
     let Some(Model::Relay(relay_model)) =
         models.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
     else {
@@ -9993,10 +9995,10 @@ fn relay_declared_branch<'a>(
 }
 
 fn relay_declared_branch_schema<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &'a HashMap<RegistryKey, Model>,
-    relay: &Identifier,
+    relay: &RelayName,
 ) -> Result<Option<&'a CreateSchema>, Report<RegistryError>> {
     let Some(Model::Relay(relay_model)) =
         models.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
@@ -10026,13 +10028,13 @@ fn relay_declared_branch_schema<'a>(
 }
 
 fn ensure_output_branch(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     output: &ProcessorOutput,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
-    incoming_branch: Option<&Identifier>,
+    incoming_branch: Option<&BranchName>,
 ) -> Result<(), Report<RegistryError>> {
     let target_branch = relay_declared_branch(domain, identifier, models, &output.relay)?;
     let Some(branch_action) = output.branch.as_ref() else {
@@ -10074,7 +10076,7 @@ fn ensure_output_branch(
             reason: format!(
                 "TO output '{}' must use its exact declared branch '{}'",
                 output.relay.as_str(),
-                target_branch.map_or("UNBRANCHED", Identifier::as_str)
+                target_branch.map_or("UNBRANCHED", BranchName::as_str)
             ),
         }));
     }
@@ -10157,10 +10159,10 @@ fn ensure_output_branch(
 }
 
 fn validate_vhost_hostnames(
-    domain: &Domain,
+    domain: &DomainName,
     models: &HashMap<RegistryKey, Model>,
 ) -> Result<(), Report<RegistryError>> {
-    let mut owners = HashMap::<String, Identifier>::new();
+    let mut owners = HashMap::<String, VhostName>::new();
 
     for (key, model) in models {
         let Model::Vhost(vhost) = model else {
@@ -10179,7 +10181,7 @@ fn validate_vhost_hostnames(
                 }));
             }
 
-            if let Some(existing) = owners.insert(normalized, identifier.clone()) {
+            if let Some(existing) = owners.insert(normalized, VhostName::from(identifier)) {
                 return Err(Report::new(RegistryError::InvalidModel {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
@@ -10196,10 +10198,10 @@ fn validate_vhost_hostnames(
 }
 
 fn validate_endpoint_paths(
-    domain: &Domain,
+    domain: &DomainName,
     models: &HashMap<RegistryKey, Model>,
 ) -> Result<(), Report<RegistryError>> {
-    let mut routes = HashMap::<(Identifier, String), Identifier>::new();
+    let mut routes = HashMap::<(VhostName, String), EndpointName>::new();
 
     for (key, model) in models {
         let Model::Endpoint(endpoint) = model else {
@@ -10208,7 +10210,7 @@ fn validate_endpoint_paths(
         let identifier = &key.identifier;
 
         let key = (endpoint.on_vhost.clone(), endpoint.path.clone());
-        if let Some(existing) = routes.insert(key, identifier.clone()) {
+        if let Some(existing) = routes.insert(key, EndpointName::from(identifier)) {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -10226,7 +10228,7 @@ fn validate_endpoint_paths(
 }
 
 fn infer_stream_branchings(
-    domain: &Domain,
+    domain: &DomainName,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -10444,7 +10446,7 @@ fn infer_stream_branchings(
 }
 
 fn validate_processing_branch_selections(
-    domain: &Domain,
+    domain: &DomainName,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
@@ -10648,8 +10650,8 @@ fn validate_processing_branch_selections(
 }
 
 struct ProcessorBranchingCheck<'a> {
-    domain: &'a Domain,
-    identifier: &'a Identifier,
+    domain: &'a DomainName,
+    identifier: &'a ModelName,
     model_kind: &'a str,
     models: &'a HashMap<RegistryKey, Model>,
     indices: &'a HashMap<RegistryKey, NodeIndex>,
@@ -10671,7 +10673,7 @@ impl ProcessorBranchingCheck<'_> {
     fn matches_relay(
         &self,
         branched_by: &BranchSelection,
-        relay: &Identifier,
+        relay: &RelayName,
     ) -> Result<(), Report<RegistryError>> {
         let declared =
             resolved_branch_selection(self.domain, self.identifier, self.models, branched_by)?;
@@ -10743,10 +10745,10 @@ impl ProcessorBranchingCheck<'_> {
 }
 
 fn ensure_processing_source_branching(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     model_kind: &str,
-    relay: &Identifier,
+    relay: &RelayName,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<(), Report<RegistryError>> {
@@ -10783,11 +10785,11 @@ fn ensure_processing_source_branching(
 }
 
 fn ensure_relays_have_same_branch(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     context: &str,
-    left: &Identifier,
-    right: &Identifier,
+    left: &RelayName,
+    right: &RelayName,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<(), Report<RegistryError>> {
@@ -10815,7 +10817,7 @@ fn ensure_relays_have_same_branch(
 fn relay_branching(
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
-    relay: &Identifier,
+    relay: &RelayName,
 ) -> Option<ResolvedBranching> {
     let index = indices.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))?;
     let node = graph.node_weight(*index)?;
@@ -10831,9 +10833,9 @@ fn relay_branching(
 
 #[derive(Clone)]
 struct ResolvedBranching {
-    branch: Option<Identifier>,
-    schema: Option<Identifier>,
-    fields: Vec<Identifier>,
+    branch: Option<BranchName>,
+    schema: Option<SchemaName>,
+    fields: Vec<FieldName>,
 }
 
 impl ResolvedBranching {
@@ -10843,27 +10845,27 @@ impl ResolvedBranching {
 }
 
 trait BranchReference {
-    fn branch_ref(&self) -> Option<&Identifier>;
+    fn branch_ref(&self) -> Option<&BranchName>;
 }
 
 impl BranchReference for BranchSelection {
-    fn branch_ref(&self) -> Option<&Identifier> {
+    fn branch_ref(&self) -> Option<&BranchName> {
         self.branch()
     }
 }
 
 impl BranchReference for OutputBranch {
-    fn branch_ref(&self) -> Option<&Identifier> {
+    fn branch_ref(&self) -> Option<&BranchName> {
         self.branch()
     }
 }
 
 fn resolved_output_branches(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     outputs: &ProcessorOutputs,
-) -> Result<Vec<(Identifier, ResolvedBranching)>, Report<RegistryError>> {
+) -> Result<Vec<(BranchName, ResolvedBranching)>, Report<RegistryError>> {
     outputs
         .outputs()
         .map(|output| {
@@ -10886,8 +10888,8 @@ fn resolved_output_branches(
 }
 
 fn resolved_branch_selection(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     branched_by: &dyn BranchReference,
 ) -> Result<ResolvedBranching, Report<RegistryError>> {
@@ -10902,15 +10904,15 @@ fn resolved_branch_selection(
     Ok(ResolvedBranching {
         branch: Some(branch_ref.clone()),
         schema: Some(branch.schema.clone()),
-        fields: branching_schema_fields(domain, identifier, models, &branch.schema)?,
+        fields: branching_schema_fields(domain, identifier, models, &BranchName::from(&branch.schema))?,
     })
 }
 
 fn branch_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &'a HashMap<RegistryKey, Model>,
-    branch_ref: &Identifier,
+    branch_ref: &BranchName,
 ) -> Result<&'a CreateBranch, Report<RegistryError>> {
     let Some(Model::Branch(branch)) =
         models.get(&RegistryKey::new(ModelKind::Branch, branch_ref.clone()))
@@ -10926,10 +10928,10 @@ fn branch_model<'a>(
 }
 
 fn schema_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &'a HashMap<RegistryKey, Model>,
-    schema_ref: &Identifier,
+    schema_ref: &SchemaName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     let Some(Model::Schema(schema)) =
         models.get(&RegistryKey::new(ModelKind::Schema, schema_ref.clone()))
@@ -10959,11 +10961,11 @@ fn model_branch_selection(model: &Model) -> Option<&dyn BranchReference> {
 }
 
 fn branching_schema_fields(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
-    branch_schema: &Identifier,
-) -> Result<Vec<Identifier>, Report<RegistryError>> {
+    branch_schema: &BranchName,
+) -> Result<Vec<FieldName>, Report<RegistryError>> {
     let Some(Model::Schema(schema)) =
         models.get(&RegistryKey::new(ModelKind::Schema, branch_schema.clone()))
     else {
@@ -10982,9 +10984,9 @@ fn branching_schema_fields(
 }
 
 fn assign_stream_branching(
-    domain: &Domain,
-    producer: &Identifier,
-    relay: &Identifier,
+    domain: &DomainName,
+    producer: &ModelName,
+    relay: &RelayName,
     branching: ResolvedBranching,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
@@ -11041,25 +11043,25 @@ fn assign_stream_branching(
     }
 }
 
-fn format_branch_name(branch: Option<&Identifier>) -> &str {
-    branch.map(Identifier::as_str).unwrap_or("UNBRANCHED")
+fn format_branch_name(branch: Option<&BranchName>) -> &str {
+    branch.map(|name| name.as_str()).unwrap_or("UNBRANCHED")
 }
 
-fn format_branched_by(branched_by: &[Identifier]) -> String {
+fn format_branched_by(branched_by: &[FieldName]) -> String {
     if branched_by.is_empty() {
         "(none)".to_string()
     } else {
         branched_by
             .iter()
-            .map(Identifier::as_str)
+            .map(|name| name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     }
 }
 
 fn ensure_codec_schema_compatibility(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     wire_format: &CodecWireFormat,
     wire_schema: Option<&WireSchemaDefinition>,
     schema: &CreateSchema,
@@ -11255,8 +11257,8 @@ fn ensure_codec_schema_compatibility(
 }
 
 fn ensure_syslog_field_contract(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
     for field in &schema.fields {
@@ -11298,11 +11300,11 @@ fn ensure_syslog_field_contract(
 }
 
 fn ensure_supported_codec_encoding_rules(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     schema: &CreateSchema,
     encoding_rules: &[CodecEncodingRule],
-) -> Result<HashSet<Identifier>, Report<RegistryError>> {
+) -> Result<HashSet<FieldName>, Report<RegistryError>> {
     let mut rfc3339_fields = HashSet::new();
     for rule in encoding_rules {
         if rule.encoding != CodecEncoding::Rfc3339 {
@@ -11368,12 +11370,12 @@ enum WireTypeCompatibility {
 }
 
 fn ensure_wire_field_set_matches(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     wire_fields: &[WireFieldCompatibility<'_>],
     schema: &CreateSchema,
     wire_kind: &str,
-    rfc3339_fields: &HashSet<Identifier>,
+    rfc3339_fields: &HashSet<FieldName>,
 ) -> Result<(), Report<RegistryError>> {
     for schema_field in &schema.fields {
         let Some(wire_field) = wire_fields
@@ -11522,7 +11524,7 @@ fn parse_as_is_integer(ty: &ParseAsType) -> bool {
 }
 
 fn runtime_changes_for_domain(
-    domain: &Domain,
+    domain: &DomainName,
     graph: Option<ActiveGraph>,
     current_models: &HashMap<RegistryKey, Model>,
     candidate_models: &HashMap<RegistryKey, Model>,
@@ -11550,7 +11552,7 @@ fn runtime_changes_for_domain(
 
     for ingestor in &current_ingestor_ids {
         changes.push(RuntimeChange::StopIngestor {
-            ingestor: ingestor.clone(),
+            ingestor: IngestorName::from(ingestor),
         });
     }
 
@@ -11633,7 +11635,7 @@ fn has_required_by_cycle(graph: &DiGraph<ActiveNode, EdgeKind>) -> bool {
 }
 
 fn ensure_drop_targets_are_not_in_use(
-    domain: &Domain,
+    domain: &DomainName,
     graph: &ActiveGraph,
     drops_in_batch: &HashSet<RegistryKey>,
 ) -> Result<(), Report<RegistryError>> {
@@ -11666,7 +11668,7 @@ fn ensure_drop_targets_are_not_in_use(
                 identifier: key.identifier.as_str().to_string(),
                 blockers: blockers
                     .iter()
-                    .map(Identifier::as_str)
+                    .map(|name| name.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
             }));
@@ -11698,9 +11700,9 @@ mod tests {
         CreateClientHttp, CreateClientKafka, CreateClientSqs, CreateClientSyslog, CreateCodec,
         CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor,
         CreateJunction, CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
-        CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule,
+        CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DomainName, DomainSchedule,
         DropModel, EmitSink, EmitterAckWindow, EmitterPublishingMode, ErrorPolicies, Expression,
-        FieldReference, FieldScope, GeneralErrorPolicy, Identifier, IngestSource,
+        FieldReference, FieldScope, GeneralErrorPolicy, IngestSource,
         IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
         KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
         MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
@@ -11730,7 +11732,7 @@ mod tests {
 
     fn sample_transport_model(name: &str) -> Model {
         Model::ClientKafka(CreateClientKafka {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: ModelName::parse(name).expect("valid identifier"),
             mount: None,
             config: vec![KafkaConfigEntry {
                 key: "bootstrap.servers".to_string(),
@@ -11743,7 +11745,7 @@ mod tests {
         Identifier::parse(raw).expect("valid identifier")
     }
 
-    fn branch_name_for_relay(relay: &str) -> Identifier {
+    fn branch_name_for_relay(relay: &str) -> RelayName {
         identifier(&format!("by_{relay}"))
     }
 
@@ -11881,9 +11883,9 @@ mod tests {
 
     fn schema(name: &str) -> Model {
         Model::Schema(CreateSchema {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: ModelName::parse(name).expect("valid identifier"),
             fields: vec![SchemaField {
-                name: Identifier::parse("value").expect("valid identifier"),
+                name: ModelName::parse("value").expect("valid identifier"),
                 ty: nervix_models::ParseAsType::String,
                 optional: false,
                 sensitive: false,
@@ -11893,10 +11895,10 @@ mod tests {
 
     fn wire_schema(name: &str) -> Model {
         Model::WireJsonSchema(CreateWireSchema {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: ModelName::parse(name).expect("valid identifier"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
-                name: Identifier::parse("value").expect("valid identifier"),
+                name: ModelName::parse("value").expect("valid identifier"),
                 ty: JsonType::String,
                 optional: false,
             }],
@@ -11933,7 +11935,7 @@ mod tests {
 
     fn vhost(name: &str, hostnames: &[&str]) -> Model {
         Model::Vhost(CreateVhost {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: ModelName::parse(name).expect("valid identifier"),
             hostnames: hostnames
                 .iter()
                 .map(|hostname| (*hostname).to_string())
@@ -11949,8 +11951,8 @@ mod tests {
         endpoint_type: nervix_models::EndpointType,
     ) -> Model {
         Model::Endpoint(nervix_models::CreateEndpoint {
-            name: Identifier::parse(name).expect("valid identifier"),
-            on_vhost: Identifier::parse(vhost_name).expect("valid identifier"),
+            name: ModelName::parse(name).expect("valid identifier"),
+            on_vhost: VhostName::parse(vhost_name).expect("valid identifier"),
             path: path.to_string(),
             endpoint_type,
             signaling_protocol: None,
@@ -11959,10 +11961,10 @@ mod tests {
 
     fn codec(name: &str, schema: &str) -> Model {
         Model::Codec(CreateCodec {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: ModelName::parse(name).expect("valid identifier"),
             wire_format: CodecWireFormat::Json,
-            wire_schema: Some(Identifier::parse("event_wire").expect("valid identifier")),
-            schema: Identifier::parse(schema).expect("valid identifier"),
+            wire_schema: Some(WireSchemaName::parse("event_wire").expect("valid identifier")),
+            schema: SchemaName::parse(schema).expect("valid identifier"),
             encoding_rules: Vec::new(),
         })
     }
@@ -12105,8 +12107,8 @@ mod tests {
             decode_using_codec: identifier(codec),
             timestamp_source: None,
             source: IngestSource::Kafka {
-                client: Identifier::parse(client).expect("valid identifier"),
-                topic: Identifier::parse("notifications").expect("valid identifier"),
+                client: ClientName::parse(client).expect("valid identifier"),
+                topic: TopicName::parse("notifications").expect("valid identifier"),
                 offset_mode: KafkaOffsetMode::ConsumerGroup(
                     Identifier::parse("cg").expect("valid identifier"),
                 ),
@@ -12128,8 +12130,8 @@ mod tests {
 
     fn relay(name: &str, schema: &str) -> Model {
         Model::Relay(CreateRelay {
-            name: Identifier::parse(name).expect("valid identifier"),
-            schema: Identifier::parse(schema).expect("valid identifier"),
+            name: ModelName::parse(name).expect("valid identifier"),
+            schema: SchemaName::parse(schema).expect("valid identifier"),
             buffer: 1,
             branching: RelayBranching::unbranched(),
             materialized_state: None,
@@ -12162,8 +12164,8 @@ mod tests {
 
     fn materialized_relay(name: &str, schema: &str) -> Model {
         Model::Relay(CreateRelay {
-            name: Identifier::parse(name).expect("valid identifier"),
-            schema: Identifier::parse(schema).expect("valid identifier"),
+            name: ModelName::parse(name).expect("valid identifier"),
+            schema: SchemaName::parse(schema).expect("valid identifier"),
             buffer: 1,
             branching: RelayBranching::branched_by(branch_name_for_relay(name)),
             materialized_state: Some(MaterializedRelayState::LastByTimestamp),
@@ -12252,12 +12254,12 @@ mod tests {
         construction: &str,
     ) -> Model {
         let mut output_routes =
-            ProcessorOutputs::single(Identifier::parse(into_relay).expect("valid identifier"));
+            ProcessorOutputs::single(RelayName::parse(into_relay).expect("valid identifier"));
         output_routes.routes[0].construction = nervix_nspl::parse_route_construction(construction)
             .expect("window route construction must parse");
         Model::WindowProcessor(CreateWindowProcessor {
-            name: Identifier::parse(name).expect("valid identifier"),
-            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
+            name: ModelName::parse(name).expect("valid identifier"),
+            from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
             output_routes,
             branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
             width: WindowBound {
@@ -12276,16 +12278,16 @@ mod tests {
 
     fn junction(name: &str, from_relays: &[&str], into_relay: &str) -> Model {
         Model::Junction(CreateJunction {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: ModelName::parse(name).expect("valid identifier"),
             from: ProcessorInputs::new(
                 from_relays
                     .iter()
-                    .map(|stream| Identifier::parse(stream).expect("valid identifier"))
+                    .map(|stream| RelayName::parse(stream).expect("valid identifier"))
                     .collect(),
                 Vec::new(),
             ),
             output_routes: with_inherit_all(ProcessorOutputs::single(
-                Identifier::parse(into_relay).expect("valid identifier"),
+                RelayName::parse(into_relay).expect("valid identifier"),
             ))
             .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
             branched_by: BranchSelection::branched_by(branch_name_for_relay(
@@ -12307,10 +12309,10 @@ mod tests {
         max_time: &str,
     ) -> Model {
         Model::Deduplicator(CreateDeduplicator {
-            name: Identifier::parse(name).expect("valid identifier"),
-            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
+            name: ModelName::parse(name).expect("valid identifier"),
+            from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
             output_routes: with_inherit_all(ProcessorOutputs::single(
-                Identifier::parse(into_relay).expect("valid identifier"),
+                RelayName::parse(into_relay).expect("valid identifier"),
             ))
             .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
             branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
@@ -12332,11 +12334,11 @@ mod tests {
             branched_by(into_relay, params)
         };
         Model::Reingestor(CreateReingestor {
-            name: Identifier::parse(name).expect("valid identifier"),
-            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
+            name: ModelName::parse(name).expect("valid identifier"),
+            from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
             output_routes: with_output_branch(
                 with_inherit_all(ProcessorOutputs::single(
-                    Identifier::parse(into_relay).expect("valid identifier"),
+                    RelayName::parse(into_relay).expect("valid identifier"),
                 ))
                 .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branch,
@@ -12349,12 +12351,12 @@ mod tests {
 
     fn emitter(name: &str, from_relay: &str, codec: &str, client: &str) -> Model {
         Model::Emitter(CreateEmitter {
-            name: Identifier::parse(name).expect("valid identifier"),
-            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
-            encode_using_codec: Some(Identifier::parse(codec).expect("valid identifier")),
+            name: ModelName::parse(name).expect("valid identifier"),
+            from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
+            encode_using_codec: Some(CodecName::parse(codec).expect("valid identifier")),
             sink: Box::new(EmitSink::Kafka {
-                client: Identifier::parse(client).expect("valid identifier"),
-                topic: Identifier::parse("topic").expect("valid topic identifier"),
+                client: ClientName::parse(client).expect("valid identifier"),
+                topic: TopicName::parse("topic").expect("valid topic identifier"),
             }),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -12401,7 +12403,7 @@ mod tests {
     fn validate_signaling_protocol(
         protocol: &CreateSignalingProtocol,
     ) -> Result<(), Report<RegistryError>> {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         ensure_signaling_protocol_is_valid(&domain, &protocol.name, protocol)
     }
 
@@ -12508,7 +12510,7 @@ mod tests {
 
     #[test]
     fn emitter_publishing_contract_rejects_model_level_bypasses() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
@@ -12614,7 +12616,7 @@ mod tests {
 
     #[test]
     fn otel_mapping_contract_validates_signal_keys_before_runtime() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
@@ -12708,7 +12710,7 @@ mod tests {
     fn sqs_fifo_group_is_validated_at_emitter_creation() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -12818,7 +12820,7 @@ mod tests {
 
     #[test]
     fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let schema = CreateSchema {
             name: identifier("event_schema"),
             fields: vec![SchemaField {
@@ -12946,10 +12948,10 @@ mod tests {
         )
     }
 
-    fn example_graph_models(name: &str, source: &str) -> (Domain, Vec<nervix_models::Model>) {
+    fn example_graph_models(name: &str, source: &str) -> (DomainName, Vec<nervix_models::Model>) {
         let statements = nervix_nspl::client_statement::parse_client_statement_sources(source)
             .unwrap_or_else(|error| panic!("{name} example should parse: {error:?}"));
-        let mut domain = Domain::parse("default").expect("valid domain");
+        let mut domain = DomainName::parse("default").expect("valid domain");
         let mut models = Vec::new();
 
         for parsed in statements {
@@ -13028,7 +13030,7 @@ mod tests {
     fn create_fails_when_model_already_exists() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let ns = Domain::parse("default").expect("valid domain");
+        let ns = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&ns, vec![sample_transport_model("kafka_main")])
@@ -13049,7 +13051,7 @@ mod tests {
     fn create_allows_same_identifier_for_different_kinds() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let ns = Domain::parse("default").expect("valid domain");
+        let ns = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -13089,7 +13091,7 @@ mod tests {
             .open()
             .expect("database should open");
         let storage = ModelStorage::from_database(db).expect("storage should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let schema = schema("event_schema");
         let wire_schema = wire_schema("event_wire");
         let relay = relay("raw_events", "event_schema");
@@ -13129,7 +13131,7 @@ mod tests {
     fn list_identifiers_filters_by_kind_and_prefix() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let ns = Domain::parse("default").expect("valid domain");
+        let ns = DomainName::parse("default").expect("valid domain");
 
         registry
             .storage
@@ -13147,7 +13149,7 @@ mod tests {
         assert_eq!(
             transports
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["kafka_main"]
         );
@@ -13159,7 +13161,7 @@ mod tests {
     fn get_roundtrip_returns_stored_model() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let ns = Domain::parse("default").expect("valid domain");
+        let ns = DomainName::parse("default").expect("valid domain");
         let id = Identifier::parse("kafka_main").expect("valid identifier");
         let model = sample_transport_model("kafka_main");
 
@@ -13181,7 +13183,7 @@ mod tests {
     fn synchronized_domain_schedule_persists_models_for_restart() {
         let source_path = temp_db_path();
         let source = Registry::open(&source_path).expect("source registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let mut models = full_graph_batch();
         let Model::Relay(notifications) = models
             .iter_mut()
@@ -13242,7 +13244,7 @@ mod tests {
     fn apply_batch_accepts_partial_graphs() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -13264,7 +13266,7 @@ mod tests {
     fn alter_relay_set_capacity_updates_stored_model_and_active_graph() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -13318,7 +13320,7 @@ mod tests {
     fn mutation_plan_classifies_no_op_and_relay_capacity_from_the_model_diff() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13368,7 +13370,7 @@ mod tests {
     fn transaction_preflight_classifies_each_mutation_against_its_prefix() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13422,7 +13424,7 @@ mod tests {
     fn junction_alter_is_applied_before_diff_based_quiesce_classification() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13480,7 +13482,7 @@ mod tests {
     fn emitter_alter_is_applied_before_diff_based_quiesce_classification() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13537,7 +13539,7 @@ mod tests {
     fn relay_drop_create_same_key_is_classified_as_a_model_change() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13578,7 +13580,7 @@ mod tests {
     fn referenced_codec_drop_create_same_key_is_classified_as_domain_pause() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(Model::WireJsonSchema(CreateWireSchema {
             name: identifier("event_wire_v2"),
@@ -13626,7 +13628,7 @@ mod tests {
     fn alter_relay_rejects_missing_relay_without_persisting() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.alter_relay(
             &domain,
@@ -13655,7 +13657,7 @@ mod tests {
     fn apply_batch_accepts_unbranched_ingestor_without_branch_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -14174,7 +14176,7 @@ mod tests {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain =
-            Domain::parse("unconditional_processor_output_route").expect("domain should parse");
+            DomainName::parse("unconditional_processor_output_route").expect("domain should parse");
 
         registry
             .apply_batch(
@@ -14229,7 +14231,7 @@ mod tests {
         for (index, (collect_policy, expected)) in cases.into_iter().enumerate() {
             let path = temp_db_path();
             let registry = Registry::open(&path).expect("registry should open");
-            let domain = Domain::parse(&format!("invalid_input_collection_{index}"))
+            let domain = DomainName::parse(&format!("invalid_input_collection_{index}"))
                 .expect("domain should parse");
             let mut inputs = ProcessorInputs::single(identifier("raw_events"));
             inputs.collect_policy = Some(collect_policy);
@@ -14267,8 +14269,8 @@ mod tests {
     fn apply_batch_rejects_empty_schemas() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let schema_domain = Domain::parse("empty_schema").expect("valid domain");
-        let wire_schema_domain = Domain::parse("empty_wire_schema").expect("valid domain");
+        let schema_domain = DomainName::parse("empty_schema").expect("valid domain");
+        let wire_schema_domain = DomainName::parse("empty_wire_schema").expect("valid domain");
 
         let result = registry.apply_batch(
             &schema_domain,
@@ -14306,7 +14308,7 @@ mod tests {
     fn placement_corridor_claims_every_runtime_pair_and_reports_witnesses() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_corridor").expect("valid domain");
+        let domain = DomainName::parse("placement_corridor").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(placement(
             "critical_path",
@@ -14366,7 +14368,7 @@ mod tests {
     fn placement_disconnected_endpoint_pair_is_valid_with_empty_coverage() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_disconnected").expect("valid domain");
+        let domain = DomainName::parse("placement_disconnected").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             client_model("other_broker"),
@@ -14401,7 +14403,7 @@ mod tests {
     fn placement_stronger_rank_overrides_weaker_policy_without_conflict() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_rank").expect("valid domain");
+        let domain = DomainName::parse("placement_rank").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             placement(
@@ -14455,7 +14457,7 @@ mod tests {
     fn placement_equal_rank_different_policies_are_an_activation_conflict() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_conflict").expect("valid domain");
+        let domain = DomainName::parse("placement_conflict").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             placement(
@@ -14505,7 +14507,7 @@ mod tests {
     fn placement_materialized_relay_member_uses_state_delivery_dependency() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_materialized_state").expect("valid domain");
+        let domain = DomainName::parse("placement_materialized_state").expect("valid domain");
         let mut models = full_graph_batch();
         let Model::Relay(mut profiles) =
             relay_branched_like("profiles", "event_schema", "notifications")
@@ -14561,7 +14563,7 @@ mod tests {
     fn placement_accepts_relay_and_rejects_cluster_wide_ingestor_members() {
         let relay_path = temp_db_path();
         let relay_registry = Registry::open(&relay_path).expect("registry should open");
-        let relay_domain = Domain::parse("placement_plain_relay").expect("valid domain");
+        let relay_domain = DomainName::parse("placement_plain_relay").expect("valid domain");
         let mut relay_models = full_graph_batch();
         relay_models.push(placement(
             "plain_relay",
@@ -14584,7 +14586,7 @@ mod tests {
 
         let endpoint_path = temp_db_path();
         let endpoint_registry = Registry::open(&endpoint_path).expect("registry should open");
-        let endpoint_domain = Domain::parse("placement_endpoint_ingestor").expect("valid domain");
+        let endpoint_domain = DomainName::parse("placement_endpoint_ingestor").expect("valid domain");
         let mut endpoint_models = full_graph_batch();
         let ingestor = endpoint_models
             .iter_mut()
@@ -14627,7 +14629,7 @@ mod tests {
 
         let syslog_path = temp_db_path();
         let syslog_registry = Registry::open(&syslog_path).expect("registry should open");
-        let syslog_domain = Domain::parse("placement_syslog_ingestor").expect("valid domain");
+        let syslog_domain = DomainName::parse("placement_syslog_ingestor").expect("valid domain");
         let mut syslog_models = full_graph_batch();
         let ingestor = syslog_models
             .iter_mut()
@@ -14668,7 +14670,7 @@ mod tests {
     fn placement_members_are_pinned_by_every_referencing_rule() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_pins").expect("valid domain");
+        let domain = DomainName::parse("placement_pins").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             placement(
@@ -14711,7 +14713,7 @@ mod tests {
     fn placement_alter_then_member_drop_uses_ordered_candidate_graph() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_ordered_drop").expect("valid domain");
+        let domain = DomainName::parse("placement_ordered_drop").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(placement(
             "pin_ing",
@@ -14754,7 +14756,7 @@ mod tests {
     fn placement_non_placeable_alter_names_every_pinning_rule() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_pinned_alter").expect("valid domain");
+        let domain = DomainName::parse("placement_pinned_alter").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             vhost("public", &["events.example.com"]),
@@ -14818,7 +14820,7 @@ mod tests {
     fn placement_default_require_forms_a_connected_component_from_per_hop_claims() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_default_require").expect("valid domain");
+        let domain = DomainName::parse("placement_default_require").expect("valid domain");
         registry
             .apply_batch(&domain, full_graph_batch())
             .expect("graph should validate");
@@ -14869,7 +14871,7 @@ mod tests {
     fn placement_require_binds_the_random_test_scheduler() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_random_require").expect("valid domain");
+        let domain = DomainName::parse("placement_random_require").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(placement(
             "critical_path",
@@ -14918,7 +14920,7 @@ mod tests {
         assert_eq!(schedule.placement_groups.len(), 1);
         assert_eq!(schedule.placement_groups[0].members.len(), 5);
         assert_eq!(
-            schedule.placement_groups[0].primary_node.as_deref(),
+            schedule.placement_groups[0].primary_node.as_ref(),
             Some(owner)
         );
 
@@ -14929,7 +14931,7 @@ mod tests {
     fn placement_suggest_separation_outranks_upstream_locality() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_suggest").expect("valid domain");
+        let domain = DomainName::parse("placement_suggest").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(placement(
             "spread",
@@ -14963,7 +14965,7 @@ mod tests {
     fn placement_prefer_colocation_outranks_majority_upstream_locality() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_prefer").expect("valid domain");
+        let domain = DomainName::parse("placement_prefer").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -15082,7 +15084,7 @@ mod tests {
     fn schedule_spreads_independent_ingestors_before_locality_applies() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -15127,7 +15129,7 @@ mod tests {
     fn schedule_prefers_upstream_locality_for_dedicated_chain() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -15169,7 +15171,7 @@ mod tests {
     #[cfg(feature = "testing")]
     #[test]
     fn random_test_scheduler_preserves_singleton_seed_and_assignment() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let mut domain_hasher = blake3::Hasher::new();
         domain_hasher.update(b"nervix/test-random-scheduler/domain");
         domain_hasher.update(&[0]);
@@ -15230,7 +15232,7 @@ mod tests {
     fn random_test_schedule_is_stable_for_unchanged_inputs() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -15272,7 +15274,7 @@ mod tests {
     fn syslog_server_ingestor_is_assigned_to_every_cluster_node() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("syslog_cluster_wide").expect("valid domain");
+        let domain = DomainName::parse("syslog_cluster_wide").expect("valid domain");
         let mut models = full_graph_batch();
         let ingestor = models
             .iter_mut()
@@ -15313,7 +15315,7 @@ mod tests {
     fn random_test_schedule_ignores_upstream_locality_across_domains() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -15329,7 +15331,7 @@ mod tests {
         ];
         let observed_cross_node_path = (0..32).any(|suffix| {
             let scheduled_domain =
-                Domain::parse(&format!("test_{suffix}")).expect("valid test domain");
+                DomainName::parse(&format!("test_{suffix}")).expect("valid test domain");
             let schedule = graph.schedule_for_domain_with_mode(
                 &scheduled_domain,
                 &cluster_nodes,
@@ -15358,7 +15360,7 @@ mod tests {
     fn schedule_prefers_majority_upstream_locality_for_shared_downstream() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -15432,7 +15434,7 @@ mod tests {
     fn schedule_places_server_side_ingestors_on_all_live_nodes() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -15450,13 +15452,13 @@ mod tests {
                     ),
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
-                        name: Identifier::parse("http_ing").expect("valid identifier"),
+                        name: ModelName::parse("http_ing").expect("valid identifier"),
                         output_routes: unbranched_transforming_outputs("notifications"),
-                        decode_using_codec: Identifier::parse("event_codec")
+                        decode_using_codec: CodecName::parse("event_codec")
                             .expect("valid identifier"),
                         timestamp_source: None,
                         source: IngestSource::Endpoint {
-                            endpoint: Identifier::parse("ingest_http").expect("valid identifier"),
+                            endpoint: EndpointName::parse("ingest_http").expect("valid identifier"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
                             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                 max_size: "1MiB".to_string(),
@@ -15500,7 +15502,7 @@ mod tests {
     fn mqtt_instances_greater_than_one_are_valid() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.apply_batch(
             &domain,
@@ -15511,12 +15513,12 @@ mod tests {
                 client_model("mqtt_main"),
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
-                    name: Identifier::parse("mqtt_ing").expect("valid identifier"),
+                    name: ModelName::parse("mqtt_ing").expect("valid identifier"),
                     output_routes: unbranched_transforming_outputs("notifications"),
-                    decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
+                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: None,
                     source: IngestSource::Mqtt {
-                        client: Identifier::parse("mqtt_main").expect("valid identifier"),
+                        client: ClientName::parse("mqtt_main").expect("valid identifier"),
                         topic: "notifications".to_string(),
                         instances: 2,
                         mode: MqttIngestMode::NoAckSequential {
@@ -15540,22 +15542,22 @@ mod tests {
     fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.apply_batch(
             &domain,
             vec![
                 Model::Schema(CreateSchema {
-                    name: Identifier::parse("event_schema").expect("valid identifier"),
+                    name: ModelName::parse("event_schema").expect("valid identifier"),
                     fields: vec![
                         SchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: ModelName::parse("value").expect("valid identifier"),
                             ty: ParseAsType::String,
                             optional: false,
                             sensitive: false,
                         },
                         SchemaField {
-                            name: Identifier::parse("occurred_at").expect("valid identifier"),
+                            name: ModelName::parse("occurred_at").expect("valid identifier"),
                             ty: ParseAsType::String,
                             optional: false,
                             sensitive: false,
@@ -15563,16 +15565,16 @@ mod tests {
                     ],
                 }),
                 Model::WireJsonSchema(CreateWireSchema {
-                    name: Identifier::parse("event_wire").expect("valid identifier"),
+                    name: ModelName::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![
                         WireSchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: ModelName::parse("value").expect("valid identifier"),
                             ty: JsonType::String,
                             optional: false,
                         },
                         WireSchemaField {
-                            name: Identifier::parse("occurred_at").expect("valid identifier"),
+                            name: ModelName::parse("occurred_at").expect("valid identifier"),
                             ty: JsonType::String,
                             optional: false,
                         },
@@ -15582,15 +15584,15 @@ mod tests {
                 client_model("broker"),
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
-                    name: Identifier::parse("ing").expect("valid identifier"),
+                    name: ModelName::parse("ing").expect("valid identifier"),
                     output_routes: unbranched_transforming_outputs("notifications"),
-                    decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
+                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: Some(IngestTimestampSource::At(
                         Identifier::parse("occurred_at").expect("valid identifier"),
                     )),
                     source: IngestSource::Kafka {
-                        client: Identifier::parse("broker").expect("valid identifier"),
-                        topic: Identifier::parse("notifications").expect("valid identifier"),
+                        client: ClientName::parse("broker").expect("valid identifier"),
+                        topic: TopicName::parse("notifications").expect("valid identifier"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(
                             Identifier::parse("cg").expect("valid identifier"),
                         ),
@@ -15618,29 +15620,29 @@ mod tests {
     fn ingestor_route_validation_accepts_explicit_projection() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("raw").expect("valid identifier"),
+                                name: ModelName::parse("raw").expect("valid identifier"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -15648,16 +15650,16 @@ mod tests {
                         ],
                     }),
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("transformed_schema").expect("valid identifier"),
+                        name: ModelName::parse("transformed_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("total").expect("valid identifier"),
+                                name: ModelName::parse("total").expect("valid identifier"),
                                 ty: ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
@@ -15665,21 +15667,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: ModelName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("raw").expect("valid identifier"),
+                                name: ModelName::parse("raw").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -15691,9 +15693,9 @@ mod tests {
                     branch_schema("tenant_branch", &["tenant"]),
                     branch_for_relay("notifications", "tenant_branch"),
                     Model::Ingestor(CreateIngestor {
-                        name: Identifier::parse("ing").expect("valid identifier"),
+                        name: ModelName::parse("ing").expect("valid identifier"),
                         output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
-                            relay: Identifier::parse("notifications").expect("valid identifier"),
+                            relay: RelayName::parse("notifications").expect("valid identifier"),
                             construction: nervix_nspl::parse_route_construction(
                                 "SET total = input.value, tenant = input.tenant",
                             )
@@ -15703,12 +15705,12 @@ mod tests {
                             branch: Some(branched_by("notifications", &["tenant"])),
                         }]))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                        decode_using_codec: Identifier::parse("event_codec")
+                        decode_using_codec: CodecName::parse("event_codec")
                             .expect("valid identifier"),
                         timestamp_source: None,
                         source: IngestSource::Kafka {
-                            client: Identifier::parse("broker").expect("valid identifier"),
-                            topic: Identifier::parse("notifications").expect("valid identifier"),
+                            client: ClientName::parse("broker").expect("valid identifier"),
+                            topic: TopicName::parse("notifications").expect("valid identifier"),
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
                                 Identifier::parse("cg").expect("valid identifier"),
                             ),
@@ -15730,34 +15732,34 @@ mod tests {
     fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.apply_batch(
             &domain,
             vec![
                 Model::Schema(CreateSchema {
-                    name: Identifier::parse("event_schema").expect("valid identifier"),
+                    name: ModelName::parse("event_schema").expect("valid identifier"),
                     fields: vec![SchemaField {
-                        name: Identifier::parse("value").expect("valid identifier"),
+                        name: ModelName::parse("value").expect("valid identifier"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
                     }],
                 }),
                 Model::Schema(CreateSchema {
-                    name: Identifier::parse("transformed_schema").expect("valid identifier"),
+                    name: ModelName::parse("transformed_schema").expect("valid identifier"),
                     fields: vec![SchemaField {
-                        name: Identifier::parse("total").expect("valid identifier"),
+                        name: ModelName::parse("total").expect("valid identifier"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
                     }],
                 }),
                 Model::WireJsonSchema(CreateWireSchema {
-                    name: Identifier::parse("event_wire").expect("valid identifier"),
+                    name: ModelName::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![WireSchemaField {
-                        name: Identifier::parse("value").expect("valid identifier"),
+                        name: ModelName::parse("value").expect("valid identifier"),
                         ty: JsonType::Integer,
                         optional: false,
                     }],
@@ -15766,9 +15768,9 @@ mod tests {
                 client_model("broker"),
                 relay("notifications", "transformed_schema"),
                 Model::Ingestor(CreateIngestor {
-                    name: Identifier::parse("ing").expect("valid identifier"),
+                    name: ModelName::parse("ing").expect("valid identifier"),
                     output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
-                        relay: Identifier::parse("notifications").expect("valid identifier"),
+                        relay: RelayName::parse("notifications").expect("valid identifier"),
                         construction: nervix_nspl::parse_route_construction(
                             "SET total = input.missing + 1",
                         )
@@ -15778,11 +15780,11 @@ mod tests {
                         branch: Some(OutputBranch::Unbranched),
                     }]))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
+                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
-                        client: Identifier::parse("broker").expect("valid identifier"),
-                        topic: Identifier::parse("notifications").expect("valid identifier"),
+                        client: ClientName::parse("broker").expect("valid identifier"),
+                        topic: TopicName::parse("notifications").expect("valid identifier"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(
                             Identifier::parse("cg").expect("valid identifier"),
                         ),
@@ -15810,22 +15812,22 @@ mod tests {
     fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.apply_batch(
             &domain,
             vec![
                 Model::Schema(CreateSchema {
-                    name: Identifier::parse("event_schema").expect("valid identifier"),
+                    name: ModelName::parse("event_schema").expect("valid identifier"),
                     fields: vec![
                         SchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: ModelName::parse("value").expect("valid identifier"),
                             ty: ParseAsType::I64,
                             optional: false,
                             sensitive: false,
                         },
                         SchemaField {
-                            name: Identifier::parse("tenant").expect("valid identifier"),
+                            name: ModelName::parse("tenant").expect("valid identifier"),
                             ty: ParseAsType::String,
                             optional: false,
                             sensitive: false,
@@ -15833,16 +15835,16 @@ mod tests {
                     ],
                 }),
                 Model::WireJsonSchema(CreateWireSchema {
-                    name: Identifier::parse("event_wire").expect("valid identifier"),
+                    name: ModelName::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![
                         WireSchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: ModelName::parse("value").expect("valid identifier"),
                             ty: JsonType::Integer,
                             optional: false,
                         },
                         WireSchemaField {
-                            name: Identifier::parse("tenant").expect("valid identifier"),
+                            name: ModelName::parse("tenant").expect("valid identifier"),
                             ty: JsonType::String,
                             optional: false,
                         },
@@ -15852,9 +15854,9 @@ mod tests {
                 client_model("broker"),
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
-                    name: Identifier::parse("ing").expect("valid identifier"),
+                    name: ModelName::parse("ing").expect("valid identifier"),
                     output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
-                        relay: Identifier::parse("notifications").expect("valid identifier"),
+                        relay: RelayName::parse("notifications").expect("valid identifier"),
                         construction: nervix_nspl::parse_route_construction(
                             "INHERIT ALL EXCEPT value",
                         )
@@ -15864,11 +15866,11 @@ mod tests {
                         branch: Some(OutputBranch::Unbranched),
                     }]))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
+                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
-                        client: Identifier::parse("broker").expect("valid identifier"),
-                        topic: Identifier::parse("notifications").expect("valid identifier"),
+                        client: ClientName::parse("broker").expect("valid identifier"),
+                        topic: TopicName::parse("notifications").expect("valid identifier"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(
                             Identifier::parse("cg").expect("valid identifier"),
                         ),
@@ -15896,7 +15898,7 @@ mod tests {
     fn schedule_removes_server_side_ingestor_placements_for_missing_nodes() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -15914,13 +15916,13 @@ mod tests {
                     ),
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
-                        name: Identifier::parse("ws_ing").expect("valid identifier"),
+                        name: ModelName::parse("ws_ing").expect("valid identifier"),
                         output_routes: unbranched_transforming_outputs("notifications"),
-                        decode_using_codec: Identifier::parse("event_codec")
+                        decode_using_codec: CodecName::parse("event_codec")
                             .expect("valid identifier"),
                         timestamp_source: None,
                         source: IngestSource::Endpoint {
-                            endpoint: Identifier::parse("ingest_ws").expect("valid identifier"),
+                            endpoint: EndpointName::parse("ingest_ws").expect("valid identifier"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
                             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                 max_size: "1MiB".to_string(),
@@ -15974,7 +15976,7 @@ mod tests {
     fn startup_runtime_changes_include_graph_only_domains() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -16011,7 +16013,7 @@ mod tests {
     fn adding_second_ingestor_restarts_existing_ingestor_and_starts_new_one() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -16068,7 +16070,7 @@ mod tests {
     fn apply_batch_rejects_missing_references_without_persisting() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16104,7 +16106,7 @@ mod tests {
     fn ingestor_rejects_codec_without_decode_capability() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let error = registry
             .apply_batch(
@@ -16134,7 +16136,7 @@ mod tests {
     fn emitter_rejects_codec_without_encode_capability() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let error = registry
             .apply_batch(
@@ -16164,7 +16166,7 @@ mod tests {
     fn emitter_accepts_same_schema_inputs_from_different_named_branches() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "source_a", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
@@ -16236,7 +16238,7 @@ mod tests {
     fn emitter_rejects_inputs_with_different_declared_schema_names() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "source_a", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
@@ -16277,7 +16279,7 @@ mod tests {
     fn emitter_materialized_state_must_match_every_input_branch() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "source_a", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
@@ -16330,7 +16332,7 @@ mod tests {
     fn sentry_emitter_rejects_http_client() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut sentry_emitter) =
             emitter("emit", "notifications", "event_codec", "sentry_main")
         else {
@@ -16381,16 +16383,16 @@ mod tests {
     fn apply_batch_rejects_incompatible_codec_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: ModelName::parse("value").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::U32,
                             optional: false,
                             sensitive: false,
@@ -16414,7 +16416,7 @@ mod tests {
     fn syslog_codec_accepts_an_exact_subset_of_its_field_contract() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -16484,7 +16486,7 @@ mod tests {
         ] {
             let path = temp_db_path();
             let registry = Registry::open(&path).expect("registry should open");
-            let domain = Domain::parse("default").expect("valid domain");
+            let domain = DomainName::parse("default").expect("valid domain");
             let error = registry
                 .apply_batch(
                     &domain,
@@ -16509,7 +16511,7 @@ mod tests {
     fn syslog_emitter_requires_priority_and_message_fields() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "events", "syslog_codec", "syslog_out")
         else {
             unreachable!("emitter helper must build an emitter")
@@ -16551,7 +16553,7 @@ mod tests {
     fn apply_batch_requires_explicit_rfc3339_encoding_for_json_string_datetime() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16584,7 +16586,7 @@ mod tests {
     fn apply_batch_accepts_explicit_rfc3339_encoding_for_json_string_datetime() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -16612,7 +16614,7 @@ mod tests {
     fn apply_batch_rejects_rfc3339_encoding_for_unknown_field() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16650,7 +16652,7 @@ mod tests {
     fn apply_batch_rejects_rfc3339_encoding_for_non_datetime_field() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16683,7 +16685,7 @@ mod tests {
     fn apply_batch_rejects_rfc3339_encoding_without_json_string_wire_datetime() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16716,7 +16718,7 @@ mod tests {
     fn apply_batch_accepts_json_integer_shape_for_internal_integer_widths() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -16744,7 +16746,7 @@ mod tests {
     fn apply_batch_accepts_json_number_shape_for_internal_f32() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -16772,7 +16774,7 @@ mod tests {
     fn apply_batch_rejects_avro_long_internal_width_coercion() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16805,7 +16807,7 @@ mod tests {
     fn apply_batch_rejects_branching_value_type_mismatch() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16865,26 +16867,26 @@ mod tests {
     fn apply_batch_rejects_wire_and_internal_optionality_mismatch() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: ModelName::parse("value").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::String,
                             optional: false,
                             sensitive: false,
                         }],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: ModelName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![WireSchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: ModelName::parse("value").expect("valid identifier"),
                             ty: JsonType::String,
                             optional: true,
                         }],
@@ -16906,7 +16908,7 @@ mod tests {
     fn apply_batch_rejects_incompatible_deduplicator_stream_schemas() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16914,16 +16916,16 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("wide_schema").expect("valid identifier"),
+                        name: ModelName::parse("wide_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("extra").expect("valid identifier"),
+                                name: ModelName::parse("extra").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -16951,7 +16953,7 @@ mod tests {
     fn apply_batch_rejects_multiple_deduplicator_inputs_with_different_schemas() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17013,7 +17015,7 @@ mod tests {
     fn apply_batch_rejects_sensitive_passthrough_to_non_sensitive_field() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17080,7 +17082,7 @@ mod tests {
     fn apply_batch_rejects_incompatible_junction_stream_schemas() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17088,16 +17090,16 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("wide_schema").expect("valid identifier"),
+                        name: ModelName::parse("wide_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("extra").expect("valid identifier"),
+                                name: ModelName::parse("extra").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -17130,16 +17132,16 @@ mod tests {
     fn apply_batch_rejects_incompatible_array_lengths() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("short_schema").expect("valid identifier"),
+                        name: ModelName::parse("short_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
-                            name: Identifier::parse("window").expect("valid identifier"),
+                            name: ModelName::parse("window").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::Array {
                                 element: Box::new(nervix_models::ParseAsType::F32),
                                 len: 2,
@@ -17149,9 +17151,9 @@ mod tests {
                         }],
                     }),
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("long_schema").expect("valid identifier"),
+                        name: ModelName::parse("long_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
-                            name: Identifier::parse("window").expect("valid identifier"),
+                            name: ModelName::parse("window").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::Array {
                                 element: Box::new(nervix_models::ParseAsType::F32),
                                 len: 3,
@@ -17186,7 +17188,7 @@ mod tests {
     fn apply_batch_rejects_deduplicator_field_missing_from_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17491,7 +17493,7 @@ mod tests {
     fn apply_batch_rejects_window_message_target() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17528,7 +17530,7 @@ mod tests {
     fn apply_batch_rejects_window_aggregate_argument_outside_input() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17565,7 +17567,7 @@ mod tests {
     fn apply_batch_rejects_branched_by_fields_missing_from_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17605,29 +17607,29 @@ mod tests {
     fn apply_batch_rejects_incomplete_ingestor_branch_construction() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -17635,21 +17637,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: ModelName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -17732,7 +17734,7 @@ mod tests {
     fn apply_batch_rejects_ingestor_branch_name_mismatch_with_same_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Ingestor(mut ingestor) = ingestor_with_params(
             "ing",
             "notifications",
@@ -17784,7 +17786,7 @@ mod tests {
     fn apply_batch_rejects_processor_crossing_same_schema_branch_names() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Deduplicator(mut processor) = processor("project", "input", "output") else {
             unreachable!("processor helper must build a deduplicator model")
         };
@@ -17823,7 +17825,7 @@ mod tests {
     fn apply_batch_rejects_generator_crossing_same_schema_branch_names() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Relay(mut input) = relay_branched_by("input", "event_schema", "branch_a") else {
             unreachable!("relay helper must build a relay model")
         };
@@ -17881,7 +17883,7 @@ mod tests {
     fn apply_batch_rejects_duplicate_vhost_hostnames() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17909,29 +17911,29 @@ mod tests {
     fn apply_batch_infers_stream_branching_through_deduplicator_chain() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -17939,21 +17941,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: ModelName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -17999,7 +18001,7 @@ mod tests {
                 .as_ref()
                 .expect("projected relay should be branched")
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tenant", "user_id"]
         );
@@ -18011,29 +18013,29 @@ mod tests {
     fn apply_batch_infers_stream_branching_through_reingestor_outputs() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18041,21 +18043,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: ModelName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18133,7 +18135,7 @@ mod tests {
             let relay = graph
                 .node(
                     ModelKind::Relay,
-                    &Identifier::parse(relay_name).expect("valid identifier"),
+                    &RelayName::parse(relay_name).expect("valid identifier"),
                 )
                 .expect("routed relay should exist");
 
@@ -18143,7 +18145,7 @@ mod tests {
                     .as_ref()
                     .expect("routed relay should be branched")
                     .iter()
-                    .map(Identifier::as_str)
+                    .map(|name| name.as_str())
                     .collect::<Vec<_>>(),
                 vec!["tenant", "user_id"]
             );
@@ -18156,23 +18158,23 @@ mod tests {
     fn apply_batch_rejects_output_predicate_missing_from_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18180,16 +18182,16 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: ModelName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18257,7 +18259,7 @@ mod tests {
     fn apply_batch_rejects_deduplicator_without_explicit_upstream_branching_alias() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -18291,23 +18293,23 @@ mod tests {
     fn apply_batch_infers_stream_branching_through_deduplicators() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let changes = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("notification").expect("valid identifier"),
+                        name: ModelName::parse("notification").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("transaction_id")
+                                name: ModelName::parse("transaction_id")
                                     .expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
@@ -18316,16 +18318,16 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: ModelName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("transaction_id")
+                                name: ModelName::parse("transaction_id")
                                     .expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
@@ -18378,7 +18380,7 @@ mod tests {
     fn apply_batch_rejects_deduplicator_without_explicit_upstream_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -18418,29 +18420,29 @@ mod tests {
     fn apply_batch_constructs_reingestor_target_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18448,21 +18450,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: ModelName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18515,7 +18517,7 @@ mod tests {
                 .as_ref()
                 .expect("target relay should be branched")
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tenant"]
         );
@@ -18523,7 +18525,7 @@ mod tests {
             target
                 .effective_branching_schema
                 .as_ref()
-                .map(Identifier::as_str),
+                .map(|name| name.as_str()),
             Some("tenant_branch")
         );
 
@@ -18554,23 +18556,23 @@ mod tests {
     fn apply_batch_accepts_reingestor_from_unbranched_source_to_branched_target() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::U32,
                                 optional: false,
                                 sensitive: false,
@@ -18609,7 +18611,7 @@ mod tests {
                 .as_ref()
                 .expect("target relay should be branched")
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tenant"]
         );
@@ -18617,7 +18619,7 @@ mod tests {
             target
                 .effective_branching_schema
                 .as_ref()
-                .map(Identifier::as_str),
+                .map(|name| name.as_str()),
             Some("tenant_branch")
         );
 
@@ -18628,7 +18630,7 @@ mod tests {
     fn apply_batch_rejects_junction_without_explicit_upstream_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -18662,29 +18664,29 @@ mod tests {
     fn apply_batch_rejects_incompatible_branches_for_one_relay() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: ModelName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18692,21 +18694,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: ModelName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: ModelName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: ModelName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: ModelName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18756,7 +18758,7 @@ mod tests {
 
     #[test]
     fn apply_batch_is_order_independent() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let path_a = temp_db_path();
         let registry_a = Registry::open(&path_a).expect("registry should open");
@@ -18810,7 +18812,7 @@ mod tests {
     fn failed_batch_does_not_mutate_registry_state() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -18871,7 +18873,7 @@ mod tests {
     fn planned_schema_alters_do_not_mutate_until_committed() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -18940,7 +18942,7 @@ mod tests {
     fn failed_mixed_schema_alter_batch_applies_nothing() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(&domain, vec![schema("event_schema")])
             .expect("create should succeed");
@@ -18996,7 +18998,7 @@ mod tests {
     fn schema_alter_revalidates_dependent_codec() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -19041,7 +19043,7 @@ mod tests {
     fn deduplicator_dependencies_participate_in_candidate_graph_validation() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -19072,7 +19074,7 @@ mod tests {
     fn apply_batch_builds_full_graph_in_single_batch() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -19091,7 +19093,7 @@ mod tests {
     fn dataflow_graph_includes_deduplicator_between_two_relays() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19189,7 +19191,7 @@ mod tests {
     fn dataflow_graph_includes_wasm_processor_between_two_relays() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19251,7 +19253,7 @@ mod tests {
     fn dataflow_graph_keeps_reused_ingest_and_emit_client_nodes_separate() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19315,7 +19317,7 @@ mod tests {
     fn dataflow_graph_includes_correlator_between_input_and_output_relays() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19492,7 +19494,7 @@ mod tests {
         Registry::open(&valid_path)
             .expect("registry should open")
             .apply_batch(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 models_with_policy("coalesce(partial_output.value, 'missing')"),
             )
             .expect("structured correlator error construction should validate");
@@ -19502,7 +19504,7 @@ mod tests {
         let error = Registry::open(&invalid_path)
             .expect("registry should open")
             .apply_batch(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 models_with_policy("input.value"),
             )
             .expect_err("correlator error construction must not expose input");
@@ -19533,7 +19535,7 @@ mod tests {
         let error = Registry::open(&path)
             .expect("registry should open")
             .apply_batch(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 vec![
                     schema("event_schema"),
                     schema("error_schema"),
@@ -19560,7 +19562,7 @@ mod tests {
     fn dataflow_graph_represents_materialized_state_with_the_relay_node() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19622,7 +19624,7 @@ mod tests {
     fn drop_batch_removes_unused_model() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19635,7 +19637,7 @@ mod tests {
                 &domain,
                 vec![DropModel {
                     kind: ModelKind::Client,
-                    name: Identifier::parse("broker_in").expect("valid identifier"),
+                    name: ModelName::parse("broker_in").expect("valid identifier"),
                 }],
             )
             .expect("drop should succeed");
@@ -19663,7 +19665,7 @@ mod tests {
     fn drop_batch_rejects_delete_when_model_is_in_use() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -19674,7 +19676,7 @@ mod tests {
                 &domain,
                 vec![DropModel {
                     kind: ModelKind::Schema,
-                    name: Identifier::parse("event_schema").expect("valid identifier"),
+                    name: ModelName::parse("event_schema").expect("valid identifier"),
                 }],
             )
             .expect_err("drop should be rejected while schema is in use");
@@ -19701,7 +19703,7 @@ mod tests {
     fn drop_batch_allows_delete_of_emitter() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -19712,7 +19714,7 @@ mod tests {
                 &domain,
                 vec![DropModel {
                     kind: ModelKind::Emitter,
-                    name: Identifier::parse("emit").expect("valid identifier"),
+                    name: ModelName::parse("emit").expect("valid identifier"),
                 }],
             )
             .expect("emitter should be droppable");
@@ -19735,7 +19737,7 @@ mod tests {
     fn drop_batch_rejects_delete_of_deduplicator_output_stream() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19760,7 +19762,7 @@ mod tests {
                 &domain,
                 vec![DropModel {
                     kind: ModelKind::Relay,
-                    name: Identifier::parse("output").expect("valid identifier"),
+                    name: ModelName::parse("output").expect("valid identifier"),
                 }],
             )
             .expect_err("deduplicator output relay should be blocked");
@@ -19777,7 +19779,7 @@ mod tests {
     fn ingestor_rejects_protobuf_codec_without_decode_capability() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let error = registry
             .apply_batch(
@@ -19807,7 +19809,7 @@ mod tests {
     fn emitter_rejects_protobuf_codec_without_encode_capability() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let error = registry
             .apply_batch(

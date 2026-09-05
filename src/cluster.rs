@@ -1,3 +1,4 @@
+use nervix_models::{ClusterNodeName};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, io,
@@ -147,7 +148,7 @@ impl FromStr for HostPort {
 #[derive(Debug, Clone)]
 pub struct ClusterSettings {
     pub cluster_id: String,
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
     pub cluster_listen_addr: SocketAddr,
     pub cluster_advertise_addr: HostPort,
     pub grpc_listen_addr: SocketAddr,
@@ -426,7 +427,7 @@ impl ClusterHandle {
         }
     }
 
-    pub async fn live_node_ids(&self) -> Vec<String> {
+    pub async fn live_node_ids(&self) -> Vec<ClusterNodeName> {
         self.gossip_state()
             .await
             .live_nodes
@@ -443,7 +444,7 @@ impl ClusterHandle {
             .set(KEY_RUNTIME_REVISION_READY, revision.to_string());
     }
 
-    pub async fn nodes_ready_for_runtime_revision(&self, revision: u64) -> BTreeSet<String> {
+    pub async fn nodes_ready_for_runtime_revision(&self, revision: u64) -> BTreeSet<ClusterNodeName> {
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
@@ -515,7 +516,7 @@ impl ClusterHandle {
         interested
     }
 
-    pub fn record_interconnect_connected(&self, node_id: &str, target_addr: String) {
+    pub fn record_interconnect_connected(&self, node_id: &ClusterNodeName, target_addr: String) {
         let mut peers = self.interconnect_state.write();
         let entry = peers
             .entry(node_id.to_string())
@@ -531,19 +532,19 @@ impl ClusterHandle {
         entry.unavailable_since = None;
 
         if !was_connected {
-            info!(node_id, target_addr, "interconnect connection established");
+            info!(%node_id, target_addr, "interconnect connection established");
             let _ = self.events.send(format!(
                 "interconnect connection established: {node_id}@{target_addr}"
             ));
         } else if was_unavailable {
-            info!(node_id, target_addr, "interconnect connection restored");
+            info!(%node_id, target_addr, "interconnect connection restored");
             let _ = self.events.send(format!(
                 "interconnect connection restored: {node_id}@{target_addr}"
             ));
         }
     }
 
-    pub fn record_interconnect_failure(&self, node_id: &str, target_addr: Option<String>) {
+    pub fn record_interconnect_failure(&self, node_id: &ClusterNodeName, target_addr: Option<String>) {
         let mut peers = self.interconnect_state.write();
         let entry = peers
             .entry(node_id.to_string())
@@ -563,14 +564,14 @@ impl ClusterHandle {
         }
         if was_connected || !was_unavailable {
             error!(
-                node_id,
+                %node_id,
                 target_addr = entry.target_addr.as_deref().unwrap_or("<unknown>"),
                 "interconnect connection establishment failed"
             );
         }
     }
 
-    pub fn retain_interconnect_live_set(&self, live_node_ids: &BTreeSet<String>) {
+    pub fn retain_interconnect_live_set(&self, live_node_ids: &BTreeSet<ClusterNodeName>) {
         self.interconnect_state
             .write()
             .retain(|node_id, _| live_node_ids.contains(node_id));
@@ -606,7 +607,7 @@ impl ClusterHandle {
             .collect()
     }
 
-    fn unavailable_interconnect_nodes(&self) -> BTreeSet<String> {
+    fn unavailable_interconnect_nodes(&self) -> BTreeSet<ClusterNodeName> {
         let peers = self.interconnect_state.read();
         let now = Instant::now();
         peers
@@ -619,7 +620,7 @@ impl ClusterHandle {
             .collect()
     }
 
-    pub fn is_interconnect_unavailable(&self, node_id: &str) -> bool {
+    pub fn is_interconnect_unavailable(&self, node_id: &ClusterNodeName) -> bool {
         self.unavailable_interconnect_nodes().contains(node_id)
     }
 }

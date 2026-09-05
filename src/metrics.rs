@@ -8,7 +8,7 @@ use std::{
 use dashmap::{DashMap, mapref::entry::Entry};
 use hdrhistogram::Histogram as HdrHistogram;
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
-use nervix_models::{Domain, Identifier, ModelKind, Timestamp};
+use nervix_models::{BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName, Timestamp};
 use parking_lot::Mutex;
 use prometheus::{
     Encoder, Gauge, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry,
@@ -94,9 +94,9 @@ struct MetricKey {
 
 impl MetricKey {
     fn relay(
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
         metric: &'static str,
     ) -> Self {
@@ -104,7 +104,7 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: "RELAY".to_string(),
             target: relay.as_str().to_string(),
-            physical_node_id: physical_node_id.unwrap_or("-").to_string(),
+            physical_node_id: physical_node_id.map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
             relay: relay.as_str().to_string(),
             peer_kind: String::new(),
             peer: String::new(),
@@ -114,11 +114,11 @@ impl MetricKey {
     }
 
     fn node(
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        node: &Identifier,
-        physical_node_id: Option<&str>,
-        relay: &Identifier,
+        node: &ModelName,
+        physical_node_id: Option<&ClusterNodeName>,
+        relay: &RelayName,
         direction: &'static str,
         metric: &'static str,
     ) -> Self {
@@ -126,7 +126,7 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: kind.as_str().to_ascii_uppercase(),
             target: node.as_str().to_string(),
-            physical_node_id: physical_node_id.unwrap_or("-").to_string(),
+            physical_node_id: physical_node_id.map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
             relay: relay.as_str().to_string(),
             peer_kind: "RELAY".to_string(),
             peer: relay.as_str().to_string(),
@@ -136,10 +136,10 @@ impl MetricKey {
     }
 
     fn node_without_stream(
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        node: &Identifier,
-        physical_node_id: Option<&str>,
+        node: &ModelName,
+        physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
         metric: &'static str,
     ) -> Self {
@@ -147,7 +147,7 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: kind.as_str().to_ascii_uppercase(),
             target: node.as_str().to_string(),
-            physical_node_id: physical_node_id.unwrap_or("-").to_string(),
+            physical_node_id: physical_node_id.map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
             relay: "-".to_string(),
             peer_kind: String::new(),
             peer: String::new(),
@@ -156,7 +156,7 @@ impl MetricKey {
         }
     }
 
-    fn matches_dataflow_metric_ref(&self, domain: &Domain, metric: &DataflowMetricRef) -> bool {
+    fn matches_dataflow_metric_ref(&self, domain: &DomainName, metric: &DataflowMetricRef) -> bool {
         self.domain == domain.as_str()
             && self.target_kind.eq_ignore_ascii_case(&metric.target_kind)
             && self.target == metric.target
@@ -168,7 +168,7 @@ impl MetricKey {
         self.metric == RELAY_BUFFER_LEN
     }
 
-    fn belongs_to_relay(&self, domain: &Domain, relay: &Identifier) -> bool {
+    fn belongs_to_relay(&self, domain: &DomainName, relay: &RelayName) -> bool {
         self.domain == domain.as_str()
             && self.target_kind == "RELAY"
             && self.target == relay.as_str()
@@ -1664,11 +1664,11 @@ struct MetricHistogramSnapshot {
 
 #[derive(Debug, Clone, Copy)]
 pub struct NodeBatchObservation<'a> {
-    pub domain: &'a Domain,
+    pub domain: &'a DomainName,
     pub kind: ModelKind,
-    pub node: &'a Identifier,
-    pub relay: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub node: &'a ModelName,
+    pub relay: &'a RelayName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub messages: u64,
     pub bytes: u64,
     pub domain_timestamp: Option<Timestamp>,
@@ -1676,10 +1676,10 @@ pub struct NodeBatchObservation<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct NodeWithoutRelayObservation<'a> {
-    pub domain: &'a Domain,
+    pub domain: &'a DomainName,
     pub kind: ModelKind,
-    pub node: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub node: &'a ModelName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub messages: u64,
     pub bytes: u64,
     pub domain_timestamp: Option<Timestamp>,
@@ -1687,9 +1687,9 @@ pub struct NodeWithoutRelayObservation<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct RelayBatchObservation<'a> {
-    pub domain: &'a Domain,
-    pub relay: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub domain: &'a DomainName,
+    pub relay: &'a RelayName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub messages: u64,
     pub bytes: u64,
     pub domain_timestamp: Option<Timestamp>,
@@ -1697,9 +1697,9 @@ pub struct RelayBatchObservation<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct RelayBufferObservation<'a> {
-    pub domain: &'a Domain,
-    pub relay: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub domain: &'a DomainName,
+    pub relay: &'a RelayName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub direction: &'static str,
     pub len: usize,
     pub capacity: usize,
@@ -1707,11 +1707,11 @@ pub struct RelayBufferObservation<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct NodeLatencyObservation<'a> {
-    pub domain: &'a Domain,
+    pub domain: &'a DomainName,
     pub kind: ModelKind,
-    pub node: &'a Identifier,
-    pub relay: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub node: &'a ModelName,
+    pub relay: &'a RelayName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub seconds: f64,
     pub domain_timestamp: Option<Timestamp>,
 }
@@ -1719,14 +1719,14 @@ pub struct NodeLatencyObservation<'a> {
 impl RuntimeMetrics {
     pub(crate) fn register_ingestor_quiesce(
         &self,
-        domain: &Domain,
-        ingestor: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        physical_node_id: Option<&ClusterNodeName>,
     ) -> IngestorQuiesceMetricLabels {
         let labels = IngestorQuiesceMetricLabels {
             domain: domain.as_str().to_string(),
             ingestor: ingestor.as_str().to_string(),
-            physical_node_id: physical_node_id.unwrap_or("-").to_string(),
+            physical_node_id: physical_node_id.map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
         };
         let values = labels.values();
         self.prometheus
@@ -1787,11 +1787,11 @@ impl RuntimeMetrics {
 
     pub(crate) fn register_branch(
         &self,
-        domain: &Domain,
-        branch: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
     ) {
-        let physical_node_id = physical_node_id.unwrap_or("-");
+        let physical_node_id = physical_node_id.map_or("-", ClusterNodeName::as_str);
         self.prometheus.branch_instances.with_label_values(&[
             domain.as_str(),
             branch.as_str(),
@@ -1809,12 +1809,12 @@ impl RuntimeMetrics {
 
     pub(crate) fn observe_branch_instance_created(
         &self,
-        domain: &Domain,
-        branch: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
         concrete_key: &str,
     ) {
-        let physical_node_id = physical_node_id.unwrap_or("-");
+        let physical_node_id = physical_node_id.map_or("-", ClusterNodeName::as_str);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
@@ -1842,13 +1842,13 @@ impl RuntimeMetrics {
 
     pub(crate) fn observe_branch_instance_removed(
         &self,
-        domain: &Domain,
-        branch: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
         concrete_key: &str,
         reason: BranchEvictionReason,
     ) {
-        let physical_node_id = physical_node_id.unwrap_or("-");
+        let physical_node_id = physical_node_id.map_or("-", ClusterNodeName::as_str);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
@@ -1893,12 +1893,12 @@ impl RuntimeMetrics {
 
     pub(crate) fn observe_branch_instance_detached(
         &self,
-        domain: &Domain,
-        branch: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
         concrete_key: &str,
     ) {
-        let physical_node_id = physical_node_id.unwrap_or("-");
+        let physical_node_id = physical_node_id.map_or("-", ClusterNodeName::as_str);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
@@ -1926,10 +1926,10 @@ impl RuntimeMetrics {
 
     pub fn register_global_node(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        node: &Identifier,
-        physical_node_id: Option<&str>,
+        node: &ModelName,
+        physical_node_id: Option<&ClusterNodeName>,
     ) {
         self.register_counter(MetricKey::node_without_stream(
             domain,
@@ -1951,9 +1951,9 @@ impl RuntimeMetrics {
 
     pub fn register_global_stream(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
     ) {
         self.register_counter(MetricKey::relay(
             domain,
@@ -1964,7 +1964,7 @@ impl RuntimeMetrics {
         ));
     }
 
-    pub(crate) fn remove_relay(&self, domain: &Domain, relay: &Identifier) {
+    pub(crate) fn remove_relay(&self, domain: &DomainName, relay: &RelayName) {
         let counter_keys = self
             .counters
             .iter()
@@ -1993,9 +1993,9 @@ impl RuntimeMetrics {
 
     pub fn observe_global_stream_received(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
         messages: u64,
         bytes: u64,
         domain_timestamp: Option<Timestamp>,
@@ -2119,11 +2119,11 @@ impl RuntimeMetrics {
 
     pub fn observe_global_delivery_latency(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        node: &Identifier,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        node: &ModelName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
         seconds: f64,
     ) {
         let key = MetricKey::node(
@@ -2289,10 +2289,10 @@ impl RuntimeMetrics {
 
     pub fn snapshot_global_target(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
-        physical_node_id: &str,
+        target: &ModelName,
+        physical_node_id: &ClusterNodeName,
     ) -> RuntimeMetricsSnapshot {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let mut counters = self
@@ -2322,10 +2322,10 @@ impl RuntimeMetrics {
     pub fn snapshot_branch_target(
         &self,
         branch_key: &str,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
-        physical_node_id: &str,
+        target: &ModelName,
+        physical_node_id: &ClusterNodeName,
     ) -> RuntimeMetricsSnapshot {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let mut counters = self
@@ -2368,10 +2368,10 @@ impl RuntimeMetrics {
 
     pub fn apply_global_target_snapshot(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
-        physical_node_id: &str,
+        target: &ModelName,
+        physical_node_id: &ClusterNodeName,
         snapshot: RuntimeMetricsSnapshot,
     ) {
         let target_kind = kind.as_str().to_ascii_uppercase();
@@ -2416,10 +2416,11 @@ impl RuntimeMetrics {
 
     pub fn has_global_target_measurements(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
+        target: impl Into<ModelName>,
     ) -> bool {
+        let target = target.into();
         let target_kind = kind.as_str().to_ascii_uppercase();
         self.counters.iter().any(|entry| {
             let key = entry.key();
@@ -2459,10 +2460,10 @@ impl RuntimeMetrics {
     pub fn apply_branch_target_snapshot(
         &self,
         branch_key: &str,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
-        physical_node_id: &str,
+        target: &ModelName,
+        physical_node_id: &ClusterNodeName,
         snapshot: RuntimeMetricsSnapshot,
     ) {
         let target_kind = kind.as_str().to_ascii_uppercase();
@@ -2531,10 +2532,11 @@ impl RuntimeMetrics {
 
     pub fn describe_global_target(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: &str,
-        target: &Identifier,
+        target: impl Into<ModelName>,
     ) -> Vec<String> {
+        let target = target.into();
         let mut lines = Vec::new();
         let mut counters = self
             .counters
@@ -2633,7 +2635,7 @@ impl RuntimeMetrics {
         lines
     }
 
-    pub fn describe_domain_statistics(&self, domain: &Domain) -> Vec<String> {
+    pub fn describe_domain_statistics(&self, domain: &DomainName) -> Vec<String> {
         let mut input_output =
             self.aggregate_domain_counters(domain, DomainMetricScope::InputOutput);
         let mut processed = self.aggregate_domain_counters(domain, DomainMetricScope::Processed);
@@ -2680,15 +2682,15 @@ impl RuntimeMetrics {
         lines
     }
 
-    pub fn dataflow_domain_statistics(&self, domain: &Domain) -> DataflowStatistics {
+    pub fn dataflow_domain_statistics(&self, domain: &DomainName) -> DataflowStatistics {
         self.dataflow_statistics_for_global_keys(|key| key.domain == domain.as_str())
     }
 
     pub fn dataflow_node_statistics(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: &str,
-        target: &Identifier,
+        target: &ModelName,
     ) -> DataflowStatistics {
         self.dataflow_statistics_for_global_keys(|key| {
             key.domain == domain.as_str()
@@ -2699,7 +2701,7 @@ impl RuntimeMetrics {
 
     pub fn dataflow_edge_statistics(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         metric: &DataflowMetricRef,
     ) -> DataflowStatistics {
         self.dataflow_statistics_for_global_keys(|key| {
@@ -2709,8 +2711,8 @@ impl RuntimeMetrics {
 
     pub fn dataflow_relay_buffer_statistics(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
     ) -> DataflowStatistics {
         self.dataflow_statistics_for_global_keys(|key| {
             key.domain == domain.as_str()
@@ -2722,9 +2724,9 @@ impl RuntimeMetrics {
 
     pub fn dataflow_branch_statistics(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: &str,
-        target: &Identifier,
+        target: &ModelName,
     ) -> Vec<DataflowBranchStatistics> {
         let mut branches = Vec::<(String, DataflowStatistics)>::new();
         for entry in self.branch_counters.iter() {
@@ -2780,7 +2782,7 @@ impl RuntimeMetrics {
 
     pub fn dataflow_edge_branch_statistics(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         metric: &DataflowMetricRef,
     ) -> Vec<DataflowBranchStatistics> {
         let mut branches = Vec::<(String, DataflowStatistics)>::new();
@@ -2859,7 +2861,7 @@ impl RuntimeMetrics {
 
     fn aggregate_domain_counters(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         scope: DomainMetricScope,
     ) -> Vec<(MetricKey, AggregatedCounterSummary)> {
         let mut counters = Vec::<(MetricKey, AggregatedCounterSummary)>::new();
@@ -2895,7 +2897,7 @@ impl RuntimeMetrics {
 
     fn aggregate_domain_histograms(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         scope: DomainMetricScope,
     ) -> Vec<(MetricKey, HistogramSummary)> {
         let mut histograms = Vec::<(MetricKey, AggregatedRollingHistograms)>::new();
@@ -3174,15 +3176,15 @@ fn with_metric(key: &MetricKey, metric: &'static str) -> MetricKey {
 
 fn key_matches_target(
     key: &MetricKey,
-    domain: &Domain,
+    domain: &DomainName,
     target_kind: &str,
-    target: &Identifier,
-    physical_node_id: &str,
+    target: &ModelName,
+    physical_node_id: &ClusterNodeName,
 ) -> bool {
     key.domain == domain.as_str()
         && key.target_kind == target_kind
         && key.target == target.as_str()
-        && key.physical_node_id == physical_node_id
+        && key.physical_node_id == physical_node_id.as_str()
 }
 
 fn metric_name_to_static(metric: &str) -> Option<&'static str> {
@@ -3680,9 +3682,9 @@ mod tests {
     #[test]
     fn local_summary_reports_rates_and_percentiles() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("input").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("input").expect("valid identifier");
 
         metrics.observe_global_node_received(NodeBatchObservation {
             domain: &domain,
@@ -3725,9 +3727,9 @@ mod tests {
     #[test]
     fn dataflow_statistics_include_domain_node_and_branch_counters() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("input").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("input").expect("valid identifier");
 
         metrics.observe_global_node_received(NodeBatchObservation {
             domain: &domain,
@@ -3784,8 +3786,8 @@ mod tests {
     #[test]
     fn client_to_ingestor_edge_statistics_do_not_create_batches() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let ingestor = Identifier::parse("ing").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let ingestor = IngestorName::parse("ing").expect("valid identifier");
 
         metrics.observe_global_node_without_stream_received(NodeWithoutRelayObservation {
             domain: &domain,
@@ -3856,9 +3858,9 @@ mod tests {
     #[test]
     fn messages_per_batch_percentiles_follow_observed_values_not_bucket_boundaries() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
         for _ in 0..100 {
             metrics.observe_global_node_received(NodeBatchObservation {
@@ -3911,8 +3913,8 @@ mod tests {
     #[test]
     fn relay_buffer_len_reports_capacity_and_dataflow_statistics() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
         metrics.observe_global_relay_buffer_len(RelayBufferObservation {
             domain: &domain,
@@ -3994,9 +3996,9 @@ mod tests {
     #[test]
     fn describe_renders_expired_one_minute_histogram_percentiles_as_absent() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("events").expect("valid identifier");
         let key = MetricKey::node(
             &domain,
             ModelKind::Deduplicator,
@@ -4129,8 +4131,8 @@ mod tests {
     #[test]
     fn prometheus_export_uses_shared_labels_and_raw_counts() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
         metrics.observe_global_stream_received(&domain, &relay, Some("node-1"), 2, 64, None);
 
@@ -4146,8 +4148,8 @@ mod tests {
     #[test]
     fn relinquishing_relay_ownership_removes_its_local_metrics() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
         metrics.observe_global_stream_received(&domain, &relay, Some("node-1"), 2, 64, None);
         metrics.observe_branch_stream_received(
             r#"{"tenant":"acme"}"#,
@@ -4201,8 +4203,8 @@ mod tests {
     #[test]
     fn branch_lifecycle_metrics_count_concrete_keys_once_per_node() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let branch = Identifier::parse("by_tenant").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let branch = BranchName::parse("by_tenant").expect("valid identifier");
         let concrete_key = r#"{"tenant":"acme"}"#;
         let has_sample = |rendered: &str, metric: &str, label_fragments: &[&str], value: u64| {
             let expected_suffix = format!(" {value}");
@@ -4319,9 +4321,9 @@ mod tests {
     #[test]
     fn prometheus_histograms_are_not_internal_snapshot_storage() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
         metrics.observe_global_node_received(NodeBatchObservation {
             domain: &domain,
@@ -4374,8 +4376,8 @@ mod tests {
     #[test]
     fn prometheus_export_uses_global_metrics_only() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
         metrics.observe_branch_stream_received(
             r#"{"tenant":"acme"}"#,
@@ -4397,8 +4399,8 @@ mod tests {
     #[test]
     fn global_snapshot_uses_global_metrics_only() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
         metrics.observe_branch_stream_received(
             r#"{"tenant":"acme"}"#,
             RelayBatchObservation {
@@ -4426,8 +4428,8 @@ mod tests {
     #[test]
     fn branch_snapshot_roundtrips_separately_from_global_metrics() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
         metrics.observe_branch_stream_received(
             r#"{"tenant":"acme"}"#,
             RelayBatchObservation {

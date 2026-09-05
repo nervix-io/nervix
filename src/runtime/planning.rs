@@ -1,7 +1,4 @@
-use nervix_models::{
-    CreateBranch, OutputBranch, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
-};
+use nervix_models::{BranchName, CreateBranch, ModelName, OutputBranch, ProcessorInputWhere, ProcessorInputs, ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs, SchemaName};
 
 use super::*;
 
@@ -29,7 +26,7 @@ fn branched_outputs(outputs: &ModelProcessorOutputs) -> BranchedProcessorOutputs
 
 pub(in crate::runtime) fn processor_input_where_by_relay(
     from_where: &[ProcessorInputWhere],
-) -> HashMap<Identifier, nervix_models::Expression> {
+) -> HashMap<RelayName, nervix_models::Expression> {
     from_where
         .iter()
         .map(|source_filter| {
@@ -43,13 +40,13 @@ pub(in crate::runtime) fn processor_input_where_by_relay(
 
 fn processor_input_where_by_inputs(
     inputs: &ProcessorInputs,
-) -> HashMap<Identifier, nervix_models::Expression> {
+) -> HashMap<RelayName, nervix_models::Expression> {
     processor_input_where_by_relay(inputs.where_clauses())
 }
 
 fn processor_input_collect_policies(
     inputs: &ProcessorInputs,
-) -> HashMap<Identifier, nervix_models::InputCollectPolicy> {
+) -> HashMap<RelayName, nervix_models::InputCollectPolicy> {
     let Some(policy) = inputs.collect_policy.as_ref() else {
         return HashMap::default();
     };
@@ -62,15 +59,15 @@ fn processor_input_collect_policies(
 }
 
 struct BranchEntrypoint {
-    branch: Option<Identifier>,
+    branch: Option<BranchName>,
     ttl: Option<String>,
     max_instances: Option<u64>,
 }
 
 fn branch_policy(
-    branch_ref: Option<&Identifier>,
-    branches: &HashMap<Identifier, CreateBranch>,
-) -> (Option<Identifier>, Option<String>, Option<u64>) {
+    branch_ref: Option<&BranchName>,
+    branches: &HashMap<BranchName, CreateBranch>,
+) -> (Option<SchemaName>, Option<String>, Option<u64>) {
     let Some(branch_ref) = branch_ref else {
         return (None, None, None);
     };
@@ -78,7 +75,7 @@ fn branch_policy(
         .get(branch_ref)
         .expect("branch references must be validated before runtime planning");
     (
-        Some(branch_ref.clone()),
+        Some(SchemaName::from(branch_ref)),
         Some(branch.ttl.clone()),
         branch
             .eviction
@@ -89,7 +86,7 @@ fn branch_policy(
 
 fn branch_entrypoint(
     branch_action: &OutputBranch,
-    branches: &HashMap<Identifier, CreateBranch>,
+    branches: &HashMap<BranchName, CreateBranch>,
 ) -> BranchEntrypoint {
     let (branch, ttl, max_instances) = branch_policy(branch_action.branch(), branches);
     BranchEntrypoint {
@@ -102,7 +99,7 @@ fn branch_entrypoint(
 fn processor_node_spec(
     spec: BranchedProcessorSpec,
     branched_by: &nervix_models::BranchSelection,
-    branches: &HashMap<Identifier, CreateBranch>,
+    branches: &HashMap<BranchName, CreateBranch>,
 ) -> BranchedProcessorNodeSpec {
     let (branch, branch_ttl, branch_max_instances) = branch_policy(branched_by.branch(), branches);
     BranchedProcessorNodeSpec {
@@ -135,7 +132,7 @@ pub(in crate::runtime) fn branched_node_specs_from_active_graph(
 }
 
 pub(in crate::runtime) fn branched_node_specs_from_models(
-    nodes: impl Iterator<Item = (ModelKind, Identifier, Model)>,
+    nodes: impl Iterator<Item = (ModelKind, ModelName, Model)>,
 ) -> BranchedNodeSpecs {
     let nodes = nodes.collect::<Vec<_>>();
     let branches = nodes
@@ -446,7 +443,7 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
 }
 
 fn parse_optional_window_duration(
-    processor: &Identifier,
+    processor: &ModelName,
     setting: &str,
     value: Option<&str>,
 ) -> Result<Option<Duration>, String> {
@@ -501,10 +498,11 @@ fn materialize_outputs(
 
 fn parse_branch_flush_policy(
     kind: &str,
-    processor: &Identifier,
+    processor: impl Into<ModelName>,
     value: &str,
     max_batch_size: Option<&str>,
 ) -> Result<RuntimeFlushPolicy, String> {
+    let processor = processor.into();
     if value.eq_ignore_ascii_case("IMMEDIATE") {
         return Ok(RuntimeFlushPolicy::Immediate);
     }
@@ -541,7 +539,7 @@ fn parse_branch_flush_policy(
 
 pub(in crate::runtime) fn parse_input_collect_policy(
     kind: &str,
-    processor: &Identifier,
+    processor: &ModelName,
     policy: &nervix_models::InputCollectPolicy,
 ) -> Result<RuntimeInputCollectPolicy, String> {
     let interval = humantime::parse_duration(&policy.collect_for).map_err(|error| {
@@ -579,7 +577,7 @@ pub(in crate::runtime) fn parse_input_collect_policy(
 
 fn materialize_nodes(
     nodes: &[BranchedProcessorSpec],
-    relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
+    relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     udfs: Option<&UdfExecutor>,
 ) -> Result<Vec<RelayProcessorTemplate>, String> {
     let mut out = Vec::new();
@@ -790,8 +788,8 @@ fn materialize_nodes(
 pub(in crate::runtime) fn processor_template_for_graph_node(
     graph: &ActiveGraph,
     kind: ModelKind,
-    processor: &Identifier,
-    relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
+    processor: &ModelName,
+    relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     udfs: Option<&UdfExecutor>,
 ) -> Result<RelayProcessorTemplate, String> {
     let specs = branched_node_specs_from_active_graph(graph);
@@ -816,7 +814,7 @@ pub(in crate::runtime) fn processor_template_for_graph_node(
 fn parse_branch_ttl_setting(
     ttl: Option<&str>,
     kind: ModelKind,
-    identifier: &Identifier,
+    identifier: &ModelName,
 ) -> Result<Option<Duration>, String> {
     ttl.map(|ttl| {
         humantime::parse_duration(ttl).map_err(|error| {
@@ -835,7 +833,7 @@ fn parse_branch_ttl_setting(
 fn parse_branch_max_instances_setting(
     max_instances: Option<u64>,
     kind: ModelKind,
-    identifier: &Identifier,
+    identifier: &ModelName,
 ) -> Result<Option<usize>, String> {
     max_instances
         .map(|max_instances| {
@@ -859,21 +857,21 @@ fn parse_branch_max_instances_setting(
 }
 
 fn resolve_branch_relay_templates(
-    branch_relay_ids: HashSet<Identifier>,
-    model_index: &HashMap<(ModelKind, Identifier), Model>,
-    relay_registries: &HashMap<Identifier, RelayRegistry>,
-    relay_services: &HashMap<Identifier, Arc<RelayBoundaryServices>>,
+    branch_relay_ids: HashSet<RelayName>,
+    model_index: &HashMap<(ModelKind, ModelName), Model>,
+    relay_registries: &HashMap<RelayName, RelayRegistry>,
+    relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> Result<
     (
-        HashMap<Identifier, RelayProcessorRelayTemplate>,
-        HashSet<Identifier>,
+        HashMap<RelayName, RelayProcessorRelayTemplate>,
+        HashSet<RelayName>,
     ),
     String,
 > {
     let materialized_streams = branch_relay_ids
         .iter()
         .filter_map(
-            |relay| match model_index.get(&(ModelKind::Relay, relay.clone())) {
+            |relay| match model_index.get(&(ModelKind::Relay, ModelName::from(relay))) {
                 Some(Model::Relay(model)) if model.materialized_state.is_some() => {
                     Some(relay.clone())
                 }
@@ -884,7 +882,7 @@ fn resolve_branch_relay_templates(
     let relays = branch_relay_ids
         .into_iter()
         .map(|relay| {
-            match model_index.get(&(ModelKind::Relay, relay.clone())) {
+            match model_index.get(&(ModelKind::Relay, ModelName::from(&relay))) {
                 Some(Model::Relay(_)) => {}
                 Some(model) => {
                     return Err(format!(
@@ -913,9 +911,9 @@ fn resolve_branch_relay_templates(
 
 pub(in crate::runtime) fn materialize_ingestor_route_template(
     spec: &BranchedIngestorSpec,
-    model_index: &HashMap<(ModelKind, Identifier), Model>,
-    relay_registries: &HashMap<Identifier, RelayRegistry>,
-    relay_services: &HashMap<Identifier, Arc<RelayBoundaryServices>>,
+    model_index: &HashMap<(ModelKind, ModelName), Model>,
+    relay_registries: &HashMap<RelayName, RelayRegistry>,
+    relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> Result<IngestorRouteTemplate, String> {
     let mut branch_relay_ids = HashSet::default();
     branch_relay_ids.insert(spec.root_relay.clone());
@@ -928,7 +926,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
     Ok(IngestorRouteTemplate {
         branch: BranchInstanceTemplate {
             source_kind: spec.kind,
-            source: spec.identifier.clone(),
+            source: RelayName::from(&spec.identifier),
             root_relay: spec.root_relay.clone(),
             branch: spec.branch.clone(),
             branch_ttl: parse_branch_ttl_setting(
@@ -958,10 +956,10 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
 
 pub(in crate::runtime) fn materialize_processor_instance_template(
     node: &BranchedProcessorNodeSpec,
-    model_index: &HashMap<(ModelKind, Identifier), Model>,
-    relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
-    relay_registries: &HashMap<Identifier, RelayRegistry>,
-    relay_services: &HashMap<Identifier, Arc<RelayBoundaryServices>>,
+    model_index: &HashMap<(ModelKind, ModelName), Model>,
+    relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
+    relay_registries: &HashMap<RelayName, RelayRegistry>,
+    relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
     udfs: Option<&UdfExecutor>,
 ) -> Result<BranchInstanceTemplate, String> {
     let spec = &node.spec;
@@ -985,7 +983,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     processors.insert(spec.processor.clone(), template);
     Ok(BranchInstanceTemplate {
         source_kind: spec.kind,
-        source: spec.processor.clone(),
+        source: RelayName::from(&spec.processor),
         root_relay,
         branch: node.branch.clone(),
         branch_ttl: parse_branch_ttl_setting(
@@ -1005,7 +1003,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     })
 }
 
-pub(in crate::runtime) fn format_branched_by(branched_by: &[Identifier]) -> String {
+pub(in crate::runtime) fn format_branched_by(branched_by: &[FieldName]) -> String {
     if branched_by.is_empty() {
         "()".to_string()
     } else {

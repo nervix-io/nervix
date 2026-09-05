@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use chumsky::prelude::*;
 use nervix_models::{
-    CanonicalNsplError, CreateSubscription, DeleteSubscription, Domain, Statement, UploadResource,
+    CanonicalNsplError, CreateSubscription, DeleteSubscription, DomainName, Statement, UploadResource,
 };
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientStatement {
-    UseDomain(Domain),
+    UseDomain(DomainName),
     ListDomains,
     BeginTransaction,
     CommitTransaction,
@@ -91,7 +91,7 @@ impl ParsedClientStatement {
 }
 
 pub fn use_domain_parser<'src>()
--> impl Parser<'src, &'src [Token], Domain, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], DomainName, extra::Err<ParseError<'src>>> + Clone {
     kw(Keyword::Use)
         .ignore_then(domain_name())
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -140,7 +140,7 @@ pub fn client_command_parser<'src>()
     ))
 }
 
-pub fn parse_use_domain(input: &str) -> Result<Domain, ParseFromSourceError> {
+pub fn parse_use_domain(input: &str) -> Result<DomainName, ParseFromSourceError> {
     let (source, spanned_tokens, tokens) = lex_input(input)?;
     let out = use_domain_parser()
         .then_ignore(end())
@@ -343,11 +343,11 @@ mod tests {
     fn parses_use_domain() {
         assert_eq!(
             parse_use_domain("USE prod;").expect("parse should succeed"),
-            Domain::try_from("prod").expect("valid domain")
+            DomainName::try_from("prod").expect("valid domain")
         );
         assert_eq!(
             parse_use_domain(" use tenant_a ; ").expect("parse should succeed"),
-            Domain::try_from("tenant_a").expect("valid domain")
+            DomainName::try_from("tenant_a").expect("valid domain")
         );
         assert!(parse_use_domain("USE two words;").is_err());
     }

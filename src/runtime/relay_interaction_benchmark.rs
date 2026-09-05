@@ -5,7 +5,13 @@
 
 use std::{num::NonZeroUsize, sync::OnceLock};
 
-use nervix_models::{CreateSchema, Identifier, ParseAsType, Timestamp};
+use nervix_models::{
+    CreateSchema,
+    ModelName,
+    ParseAsType,
+    RelayName,
+    Timestamp,
+};
 use tokio::{
     sync::{mpsc, watch},
     time::Instant,
@@ -91,7 +97,7 @@ impl RelayInteractionBenchmark {
         let mut inputs = Vec::with_capacity(source_count);
         let mut sources = Vec::with_capacity(source_count);
         for source in 0..source_count {
-            let relay = Identifier::parse(&format!("benchmark_source_{source}"))
+            let relay = RelayName::parse(&format!("benchmark_source_{source}"))
                 .expect("benchmark relay name must be valid");
             let broadcast = RelayBroadcast::with_capacity(capacity);
             let receiver = RelayRuntimeFanIn::new(broadcast.new_receiver());
@@ -197,10 +203,10 @@ fn benchmark_schema() -> triomphe::Arc<CompiledSchema> {
     SCHEMA
         .get_or_init(|| {
             triomphe::Arc::new(compile_schema(&CreateSchema {
-                name: Identifier::parse("relay_interaction_benchmark")
+                name: ModelName::parse("relay_interaction_benchmark")
                     .expect("benchmark schema name must be valid"),
                 fields: vec![nervix_models::SchemaField {
-                    name: Identifier::parse("value").expect("benchmark field name must be valid"),
+                    name: ModelName::parse("value").expect("benchmark field name must be valid"),
                     ty: ParseAsType::I64,
                     optional: false,
                     sensitive: false,

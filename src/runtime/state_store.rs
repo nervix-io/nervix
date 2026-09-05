@@ -3,7 +3,7 @@ use std::str::FromStr;
 use ahash::HashMap;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 pub(crate) use nervix_interconnect::RuntimeStateKind;
-use nervix_models::{Domain, Identifier, ModelKind};
+use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
 
@@ -11,10 +11,10 @@ use super::BranchKey;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
-    pub(crate) domain: Domain,
+    pub(crate) domain: DomainName,
     pub(crate) state: RuntimeStateKind,
     pub(crate) kind: ModelKind,
-    pub(crate) identifier: Identifier,
+    pub(crate) identifier: ModelName,
     pub(crate) schema_fingerprint: [u8; 32],
     pub(crate) branch_key: Option<BranchKey>,
 }
@@ -24,15 +24,15 @@ pub(crate) struct RuntimeStatePlacement {
 /// than as a construction-time constant.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StateReplicationRoles {
-    pub(crate) primary_node: Option<String>,
-    pub(crate) replica_nodes: Vec<String>,
+    pub(crate) primary_node: Option<ClusterNodeName>,
+    pub(crate) replica_nodes: Vec<ClusterNodeName>,
     pub(crate) required_replica_acks: usize,
 }
 
 impl StateReplicationRoles {
     pub(crate) fn new(
-        primary_node: Option<String>,
-        replica_nodes: Vec<String>,
+        primary_node: Option<ClusterNodeName>,
+        replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
     ) -> Self {
         Self {
@@ -42,7 +42,7 @@ impl StateReplicationRoles {
         }
     }
 
-    pub(crate) fn owned_by(primary_node: Option<String>) -> Self {
+    pub(crate) fn owned_by(primary_node: Option<ClusterNodeName>) -> Self {
         Self {
             primary_node,
             replica_nodes: Vec::new(),
@@ -215,7 +215,7 @@ impl RuntimeStateStore {
         }))
     }
 
-    pub fn purge_domain(&self, domain: &Domain) -> Result<(), RuntimePersistenceError> {
+    pub fn purge_domain(&self, domain: &DomainName) -> Result<(), RuntimePersistenceError> {
         let mut domain_prefix = domain.as_str().as_bytes().to_vec();
         domain_prefix.push(0);
         let latest_keys = self
@@ -254,11 +254,12 @@ impl RuntimeStateStore {
 
     pub fn purge_entity(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         state: RuntimeStateKind,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> Result<(), RuntimePersistenceError> {
+        let identifier = identifier.into();
         let mut prefix = domain.as_str().as_bytes().to_vec();
         prefix.push(0);
         prefix.push(state as u8);
@@ -308,8 +309,8 @@ impl RuntimeStateStore {
 
     pub fn purge_stale_schema_fingerprints(
         &self,
-        domain: &Domain,
-        current: &HashMap<(ModelKind, Identifier), [u8; 32]>,
+        domain: &DomainName,
+        current: &HashMap<(ModelKind, ModelName), [u8; 32]>,
     ) -> Result<(), RuntimePersistenceError> {
         let mut domain_prefix = domain.as_str().as_bytes().to_vec();
         domain_prefix.push(0);
@@ -379,7 +380,7 @@ impl RuntimeStateStore {
 
 fn stored_placement_schema(
     key: &[u8],
-) -> Result<(RuntimeStateKind, ModelKind, Identifier, [u8; 32]), RuntimePersistenceError> {
+) -> Result<(RuntimeStateKind, ModelKind, ModelName, [u8; 32]), RuntimePersistenceError> {
     let domain_end = key.iter().position(|byte| *byte == 0).ok_or_else(|| {
         RuntimePersistenceError::DecodeState(
             "runtime state key has no domain separator".to_string(),
@@ -434,7 +435,7 @@ fn stored_placement_schema(
         })?;
     let identifier = std::str::from_utf8(&key[identifier_start..identifier_end])
         .ok()
-        .and_then(|identifier| Identifier::parse(identifier).ok())
+        .and_then(|identifier| ModelName::parse(identifier).ok())
         .ok_or_else(|| {
             RuntimePersistenceError::DecodeState(
                 "runtime state key has an invalid identifier".to_string(),

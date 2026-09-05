@@ -622,7 +622,13 @@ pub(super) fn build_stream_record_batch_preserving_acks(
 mod tests {
     use std::{cell::Cell, sync::Arc as StdArc};
 
-    use nervix_models::{CreateSchema, Identifier, ParseAsType, SchemaField, Timestamp};
+    use nervix_models::{
+    CreateSchema,
+    ModelName,
+    ParseAsType,
+    SchemaField,
+    Timestamp,
+};
     use triomphe::Arc;
 
     use super::{RelayMessage, RelayRecordBatch, delivery_observation_from_timestamps};
@@ -635,9 +641,9 @@ mod tests {
 
     fn test_schema() -> Arc<CompiledSchema> {
         Arc::new(compile_schema(&CreateSchema {
-            name: Identifier::parse("relay_batch_test").expect("valid schema name"),
+            name: ModelName::parse("relay_batch_test").expect("valid schema name"),
             fields: vec![SchemaField {
-                name: Identifier::parse("value").expect("valid field name"),
+                name: ModelName::parse("value").expect("valid field name"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,

@@ -20,16 +20,19 @@ use crate::{
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DomainPace, DomainStartPoint, EmitSink,
     EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType, Expression,
-    FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    FieldName, FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
     KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelName, MongoDbConfigEntry,
+    MongoDbConflictAction,
     MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
     NatsConfigEntry, NatsIngestMode, OtelConfigEntry, OtelMetricKind, OtelSignal, OutputBranch,
     ParseAsType, PlacementPolicy, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere,
     ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
+    QueueName, RelayName, ResourceName,
     RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
+    SignalingProtocolName, TopicName,
     RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
     SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup,
     SqsIngestMode, Statement, SubscriptionLiteral, UnaryOperator, WebsocketsConfigEntry,
@@ -381,7 +384,7 @@ fn route_construction_clauses(
                 "INHERIT ALL EXCEPT {}",
                 fields
                     .iter()
-                    .map(Identifier::as_str)
+                    .map(FieldName::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -536,8 +539,8 @@ impl AlterPlacement {
                 AlterPlacementOperation::DropRank => "DROP RANK".to_string(),
                 AlterPlacementOperation::SetMembers { from, to } => format!(
                     "SET FROM {} TO {}",
-                    identifier_list(from),
-                    identifier_list(to)
+                    model_name_list(from),
+                    model_name_list(to)
                 ),
                 AlterPlacementOperation::RenameTo { name } => {
                     format!("RENAME TO {}", name.as_str())
@@ -552,10 +555,10 @@ impl AlterPlacement {
     }
 }
 
-fn identifier_list(names: &[Identifier]) -> String {
+fn model_name_list(names: &[ModelName]) -> String {
     names
         .iter()
-        .map(Identifier::as_str)
+        .map(ModelName::as_str)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -844,12 +847,12 @@ impl CreatePlacement {
             self.name.as_str(),
             self.from
                 .iter()
-                .map(Identifier::as_str)
+                .map(ModelName::as_str)
                 .collect::<Vec<_>>()
                 .join(", "),
             self.to
                 .iter()
-                .map(Identifier::as_str)
+                .map(ModelName::as_str)
                 .collect::<Vec<_>>()
                 .join(", "),
             self.policy,
@@ -1571,13 +1574,13 @@ impl CreateClientMongoDb {
     }
 }
 
-fn client_mount_clause(mount: Option<&Identifier>) -> String {
+fn client_mount_clause(mount: Option<&ResourceName>) -> String {
     mount
         .map(|mount| format!(" MOUNT {}", mount.as_str()))
         .unwrap_or_default()
 }
 
-fn signaling_protocol_clause(signaling_protocol: Option<&Identifier>) -> String {
+fn signaling_protocol_clause(signaling_protocol: Option<&SignalingProtocolName>) -> String {
     signaling_protocol
         .map(|protocol| format!(" WITH SIGNALING PROTOCOL {}", protocol.as_str()))
         .unwrap_or_default()
@@ -2480,7 +2483,7 @@ fn inference_output_schema_items(
 }
 
 fn from_relay_to_nspl(
-    relay: &Identifier,
+    relay: &RelayName,
     from_where: &[ProcessorInputWhere],
 ) -> Result<String, CanonicalNsplError> {
     let where_suffix = from_where
@@ -3319,7 +3322,7 @@ fn mqtt_delivery_to_nspl(session: MqttSession, qos: MqttQos) -> String {
 }
 
 fn mqtt_topic_to_nspl(topic: &str) -> String {
-    if Identifier::parse(topic).is_ok() {
+    if TopicName::parse(topic).is_ok() {
         topic.to_string()
     } else {
         string_literal(topic)
@@ -3665,7 +3668,7 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             queue,
             fifo_group,
         } => {
-            let queue = if Identifier::try_from(queue.as_str()).is_ok() {
+            let queue = if QueueName::parse(queue.as_str()).is_ok() {
                 queue.clone()
             } else {
                 string_literal(queue)

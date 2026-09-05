@@ -1,3 +1,4 @@
+use nervix_models::{TableName};
 use ::clickhouse::{Client as ClickHouseClient, error::Error as ClickHouseError};
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
@@ -211,7 +212,7 @@ impl ClickHouseEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        table: &Identifier,
+        table: &TableName,
         values: &[ClickHouseValueMapping],
         batch: &RelayRecordBatch,
         pending_chunks: &[Vec<usize>],

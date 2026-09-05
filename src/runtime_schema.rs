@@ -27,10 +27,24 @@ use arrow_select::{
 };
 use chrono::{DateTime, FixedOffset};
 use nervix_models::{
-    AvroType, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
-    CreateWireSchema, Identifier, JsonType, ParseAsType, RemoteRuntimeElementValue,
-    RemoteRuntimeField, RemoteRuntimeRecord, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
-    Timestamp, WireSchemaDefinition, WireSchemaField, WireSchemaStrictness,
+    AvroType,
+    CodecJaqTransformations,
+    CodecWireFormat,
+    CreateCodec,
+    CreateSchema,
+    CreateWireSchema,
+    JsonType,
+    ModelName,
+    ParseAsType,
+    RemoteRuntimeElementValue,
+    RemoteRuntimeField,
+    RemoteRuntimeRecord,
+    RemoteRuntimeRecordMetadata,
+    RemoteRuntimeValue,
+    Timestamp,
+    WireSchemaDefinition,
+    WireSchemaField,
+    WireSchemaStrictness,
 };
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
@@ -67,7 +81,7 @@ pub(crate) struct CompiledSchemaField {
 
 #[derive(Debug, Clone)]
 pub struct CompiledCodec {
-    pub name: Identifier,
+    pub name: ModelName,
     schema: Arc<CompiledSchema>,
     wire_schema: CompiledWireSchema,
 }
@@ -1926,7 +1940,7 @@ pub fn compile_codec_with_protobuf(
     };
 
     Ok(Arc::new(CompiledCodec {
-        name: codec.name.clone(),
+        name: ModelName::from(\&codec.name),
         schema,
         wire_schema,
     }))
@@ -3486,7 +3500,7 @@ mod tests {
     use chrono::{DateTime, Datelike, Utc};
     use nervix_models::{
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema,
-        CreateWireSchema, Identifier, SchemaField,
+        CreateWireSchema, SchemaField,
     };
 
     use super::*;

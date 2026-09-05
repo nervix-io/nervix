@@ -7,7 +7,12 @@ use std::{
 };
 
 use nervix_expiry_map::ExpiryMap;
-use nervix_models::{Expression, Identifier, Timestamp};
+use nervix_models::{
+    Expression,
+    ModelName,
+    RelayName,
+    Timestamp,
+};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
 use ordered_float::OrderedFloat;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -113,8 +118,8 @@ impl From<DeduplicatorKeySnapshot> for DeduplicatorKey {
 }
 
 pub(super) fn compile_deduplicator_key_program(
-    processor: &Identifier,
-    input_relays: &[Identifier],
+    processor: &ModelName,
+    input_relays: &[RelayName],
     deduplicate_on: &[Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,

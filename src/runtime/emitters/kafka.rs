@@ -1,3 +1,4 @@
+use nervix_models::{TopicName};
 use futures_util::FutureExt;
 use rdkafka::{
     config::ClientConfig,
@@ -49,7 +50,7 @@ impl KafkaEmitter {
 
     pub(super) async fn publish(
         &self,
-        topic: &Identifier,
+        topic: &TopicName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -122,7 +123,7 @@ impl KafkaEmitter {
 
     fn enqueue(
         producer: &FutureProducer,
-        topic: &Identifier,
+        topic: &TopicName,
         message: &EncodedBrokerRecord,
     ) -> Result<DeliveryFuture, KafkaError> {
         let mut record =

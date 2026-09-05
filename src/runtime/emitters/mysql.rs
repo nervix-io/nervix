@@ -1,3 +1,4 @@
+use nervix_models::{TableName};
 use mysql_async::{
     Opts as MySqlOpts, OptsBuilder as MySqlOptsBuilder, Params as MySqlParams, Pool as MySqlPool,
     SslOpts as MySqlSslOpts, Value as MySqlValue, prelude::Queryable as MySqlQueryable,
@@ -169,7 +170,7 @@ impl MySqlEmitter {
 
     async fn publish_rows(
         client: &MySqlEmitterClient,
-        table: &Identifier,
+        table: &TableName,
         mappings: &[MySqlValueMapping],
         conflict_action: &MySqlConflictAction,
         rows: &[&[serde_json::Value]],
@@ -261,7 +262,7 @@ impl MySqlEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        table: &Identifier,
+        table: &TableName,
         values: &[MySqlValueMapping],
         conflict_action: &MySqlConflictAction,
         batch: &RelayRecordBatch,

@@ -1,3 +1,4 @@
+use nervix_models::{TopicName};
 use std::{future::Future, pin::Pin};
 
 use futures_util::FutureExt;
@@ -29,7 +30,7 @@ impl MqttEmitter {
     pub(in crate::runtime) fn new(
         client: &CreateClientMqtt,
         resolved: Option<&ResolvedClientConfig>,
-        topic: &Identifier,
+        topic: &TopicName,
         context: &EmitterSinkContext,
         mode: MqttPublishingMode,
         retry_policy: ParsedRetryPolicy,
@@ -197,7 +198,7 @@ impl MqttEmitter {
 
     pub(super) async fn publish_records(
         &self,
-        topic: &Identifier,
+        topic: &TopicName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();

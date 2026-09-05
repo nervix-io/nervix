@@ -1,3 +1,4 @@
+use nervix_models::{DomainName};
 use std::borrow::Cow;
 
 use aws_config::BehaviorVersion;
@@ -31,7 +32,7 @@ impl IngestMessageHeaders for SqsMessageAttributes<'_> {
 impl SqsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientSqs,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

@@ -40,12 +40,12 @@ pub fn lower_transforming_route(
             initialized.insert(inherited.field.clone());
             let input = ModelExpression::Field(FieldReference::scoped(
                 FieldScope::Input,
-                nervix_models::Identifier::parse(&inherited.field)
+                nervix_models::FieldName::parse(&inherited.field)
                     .map_err(|error| error.to_string())?,
             ));
             let value = if inherited.leak_sensitive {
                 ModelExpression::Call {
-                    function: nervix_models::Identifier::parse("leak_sensitive")
+                    function: nervix_models::BuiltinFunctionName::parse("leak_sensitive")
                         .map_err(|error| error.to_string())?,
                     arguments: vec![input],
                 }
@@ -55,7 +55,7 @@ pub fn lower_transforming_route(
             normalized.assignments.push(Assignment {
                 target: AssignmentTarget {
                     scope: AssignmentTargetScope::Output,
-                    field: nervix_models::Identifier::parse(&inherited.field)
+                    field: nervix_models::FieldName::parse(&inherited.field)
                         .map_err(|error| error.to_string())?,
                 },
                 value,

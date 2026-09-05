@@ -16,6 +16,7 @@ server = []
 ahash-compile-time = { workspace = true }
 arrow-schema = { workspace = true }
 chumsky = { workspace = true }
+error-stack = { workspace = true }
 humantime = { workspace = true }
 nervix-models = { workspace = true }
 sorted-vec = { workspace = true }

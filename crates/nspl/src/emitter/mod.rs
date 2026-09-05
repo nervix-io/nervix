@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use nervix_models::{
-    AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CreateEmitter,
+    AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CodecName, CreateEmitter,
     CreateStatement, EmitSink, EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend,
     IcebergValueMapping, MongoDbConflictAction, MySqlConflictAction, OtelAggregationTemporality,
     OtelMetric, OtelMetricKind, OtelScope, OtelSignal, PostgresConflictAction, SqsFifoGroup,
@@ -17,7 +17,8 @@ use crate::{
         general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
         lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
         render_vm_program_tokens, retry_policy, route_construction, string_lit, suggest_from,
-        table_ref, tok, topic_ref, where_expression, where_only_route_construction, word_raw,
+        collection_ref, subject_ref, table_ref, tok, topic_ref, where_expression,
+        where_only_route_construction, word_raw,
     },
 };
 
@@ -189,7 +190,7 @@ fn nats_emit_sink_parser<'src>()
     kw(Identifier::Nats)
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Subject))
-        .then(topic_ref())
+        .then(subject_ref())
         .map(|(client, subject)| EmitSink::Nats { client, subject })
 }
 
@@ -772,7 +773,7 @@ fn mongodb_emit_sink_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw_phrase2(Identifier::Insert, Identifier::To))
         .then_ignore(kw(Identifier::Collection))
-        .then(table_ref())
+        .then(collection_ref())
         .then_ignore(kw(Identifier::Values))
         .then(clickhouse_values())
         .then(mongodb_conflict_action())
@@ -886,8 +887,7 @@ fn iceberg_commit_each<'src>()
 /// at `TO` which sinks are still reachable, and offers sinks that can never complete. This also
 /// matches ingestors, which already read `FROM <source> DECODE USING <codec>`.
 fn encode_using_clause<'src>()
--> impl Parser<'src, &'src [Token], nervix_models::Identifier, extra::Err<ParseError<'src>>> + Clone
-{
+-> impl Parser<'src, &'src [Token], CodecName, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase2(Identifier::Encode, Identifier::Using)
         .ignore_then(codec_ref())
         .boxed()
@@ -934,7 +934,7 @@ fn codec_free_sink<'src>(
 type ParsedSink = (
     EmitSink,
     EmitterPublishingMode,
-    Option<nervix_models::Identifier>,
+    Option<CodecName>,
     Option<nervix_models::RouteConstruction>,
 );
 

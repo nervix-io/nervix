@@ -5,10 +5,7 @@
 //! replicas, cluster liveness, and execution belong to the command that consumes this plan.
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use nervix_models::{
-    Identifier, Model, PlacementPolicy, PlacementRuntimeNode, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-};
+use nervix_models::{ClusterNodeName, Model, PlacementName, PlacementPolicy, PlacementRuntimeNode, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection};
 use strum::AsRefStr;
 use thiserror::Error;
 
@@ -54,7 +51,7 @@ pub struct RelocationPreference {
     pub policy: PlacementPolicy,
     pub left: PlacementRuntimeNode,
     pub right: PlacementRuntimeNode,
-    pub winning_rules: Vec<Identifier>,
+    pub winning_rules: Vec<PlacementName>,
     pub from_domain_default: bool,
 }
 
@@ -86,7 +83,7 @@ pub enum RelocationPlanError {
     #[error("relocation covers no runtime node: no FROM/TO pair is connected")]
     DisconnectedCorridor,
     #[error("conflicting preference strategies for hard group [{members}]")]
-    ConflictingGroupStrategies { members: String },
+    ConflictingGroupStrategies { members: ClusterNodeName },
     #[error("{kind} '{name}' is not part of the relocation")]
     OverrideOutsideUnit { kind: &'static str, name: String },
 }
@@ -104,7 +101,7 @@ impl ActiveGraph {
     /// currently active graph.
     pub fn relocation_unit(
         &self,
-        domain: &nervix_models::Domain,
+        domain: &nervix_models::DomainName,
         default_policy: PlacementPolicy,
         selection: &RelocationSelection,
         default_strategy: RelocationPreferenceStrategy,
@@ -226,7 +223,7 @@ impl ActiveGraph {
     /// Resolves one kind-qualified member against the active graph.
     fn resolve_relocation_member(
         &self,
-        domain: &nervix_models::Domain,
+        domain: &nervix_models::DomainName,
         member: &RelocationMember,
     ) -> Result<RegistryKey, RelocationPlanError> {
         let key = RegistryKey::new(member.kind, member.name.clone());
@@ -250,7 +247,7 @@ impl ActiveGraph {
     /// Covers each `FROM`/`TO` pair with the path-gated coverage placement rules use.
     fn relocation_corridor_selection(
         &self,
-        domain: &nervix_models::Domain,
+        domain: &nervix_models::DomainName,
         from: &[RelocationMember],
         to: &[RelocationMember],
     ) -> Result<(Vec<RegistryKey>, Vec<RelocationCoverage>), RelocationPlanError> {

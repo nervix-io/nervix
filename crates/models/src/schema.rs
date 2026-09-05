@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 use thiserror::Error;
 
-use crate::Identifier;
+use crate::{FieldName, SchemaName, WireSchemaName};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireSchemaDefinition {
@@ -14,29 +14,29 @@ pub enum WireSchemaDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSchema {
-    pub name: Identifier,
+    pub name: SchemaName,
     pub fields: Vec<SchemaField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlterSchema {
-    pub schema: Identifier,
+    pub schema: SchemaName,
     pub operations: Vec<AlterSchemaOperation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterSchemaOperation {
     AddField { field: SchemaField },
-    DropField { field: Identifier },
-    RenameField { field: Identifier, to: Identifier },
-    SetFieldType { field: Identifier, ty: ParseAsType },
-    SetFieldOptional { field: Identifier, optional: bool },
-    SetFieldSensitive { field: Identifier, sensitive: bool },
+    DropField { field: FieldName },
+    RenameField { field: FieldName, to: FieldName },
+    SetFieldType { field: FieldName, ty: ParseAsType },
+    SetFieldOptional { field: FieldName, optional: bool },
+    SetFieldSensitive { field: FieldName, sensitive: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaField {
-    pub name: Identifier,
+    pub name: FieldName,
     pub ty: ParseAsType,
     #[serde(default)]
     pub optional: bool,
@@ -46,7 +46,7 @@ pub struct SchemaField {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWireSchema<T> {
-    pub name: Identifier,
+    pub name: WireSchemaName,
     #[serde(default)]
     pub strictness: WireSchemaStrictness,
     pub fields: Vec<WireSchemaField<T>>,
@@ -54,7 +54,7 @@ pub struct CreateWireSchema<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlterWireSchema<T> {
-    pub schema: Identifier,
+    pub schema: WireSchemaName,
     pub operations: Vec<AlterWireSchemaOperation<T>>,
 }
 
@@ -62,15 +62,15 @@ pub struct AlterWireSchema<T> {
 pub enum AlterWireSchemaOperation<T> {
     SetMode { mode: WireSchemaStrictness },
     AddField { field: WireSchemaField<T> },
-    DropField { field: Identifier },
-    RenameField { field: Identifier, to: Identifier },
-    SetFieldType { field: Identifier, ty: T },
-    SetFieldOptional { field: Identifier, optional: bool },
+    DropField { field: FieldName },
+    RenameField { field: FieldName, to: FieldName },
+    SetFieldType { field: FieldName, ty: T },
+    SetFieldOptional { field: FieldName, optional: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireSchemaField<T> {
-    pub name: Identifier,
+    pub name: FieldName,
     pub ty: T,
     #[serde(default)]
     pub optional: bool,
@@ -84,15 +84,32 @@ pub type CreateAvroWireSchema = CreateWireSchema<AvroType>;
 pub enum AlterSchemaError {
     #[error("ALTER targets schema `{requested}`, but the stored schema is `{stored}`")]
     SchemaNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: SchemaName,
+        requested: SchemaName,
     },
     #[error("field `{field}` already exists")]
-    FieldAlreadyExists { field: Identifier },
+    FieldAlreadyExists { field: FieldName },
     #[error("field `{field}` does not exist")]
-    FieldNotFound { field: Identifier },
+    FieldNotFound { field: FieldName },
     #[error("cannot rename field to `{field}` because that field already exists")]
-    RenameTargetAlreadyExists { field: Identifier },
+    RenameTargetAlreadyExists { field: FieldName },
+    #[error("a schema must retain at least one field")]
+    CannotDropLastField,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AlterWireSchemaError {
+    #[error("ALTER targets wire schema `{requested}`, but the stored wire schema is `{stored}`")]
+    SchemaNameMismatch {
+        stored: WireSchemaName,
+        requested: WireSchemaName,
+    },
+    #[error("field `{field}` already exists")]
+    FieldAlreadyExists { field: FieldName },
+    #[error("field `{field}` does not exist")]
+    FieldNotFound { field: FieldName },
+    #[error("cannot rename field to `{field}` because that field already exists")]
+    RenameTargetAlreadyExists { field: FieldName },
     #[error("a schema must retain at least one field")]
     CannotDropLastField,
 }
@@ -151,7 +168,7 @@ impl CreateSchema {
         Ok(())
     }
 
-    fn field_index(&self, field: &Identifier) -> Result<usize, AlterSchemaError> {
+    fn field_index(&self, field: &FieldName) -> Result<usize, AlterSchemaError> {
         self.fields
             .iter()
             .position(|candidate| candidate.name == *field)
@@ -160,7 +177,7 @@ impl CreateSchema {
             })
     }
 
-    fn ensure_field_absent(&self, field: &Identifier) -> Result<(), AlterSchemaError> {
+    fn ensure_field_absent(&self, field: &FieldName) -> Result<(), AlterSchemaError> {
         if self.fields.iter().any(|candidate| candidate.name == *field) {
             return Err(AlterSchemaError::FieldAlreadyExists {
                 field: field.clone(),
@@ -171,8 +188,8 @@ impl CreateSchema {
 
     fn ensure_rename_target_absent(
         &self,
-        source: &Identifier,
-        target: &Identifier,
+        source: &FieldName,
+        target: &FieldName,
     ) -> Result<(), AlterSchemaError> {
         if source != target
             && self
@@ -192,9 +209,9 @@ impl<T> CreateWireSchema<T>
 where
     T: Clone,
 {
-    pub fn apply_alter(&mut self, alter: &AlterWireSchema<T>) -> Result<(), AlterSchemaError> {
+    pub fn apply_alter(&mut self, alter: &AlterWireSchema<T>) -> Result<(), AlterWireSchemaError> {
         if self.name != alter.schema {
-            return Err(AlterSchemaError::SchemaNameMismatch {
+            return Err(AlterWireSchemaError::SchemaNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.schema.clone(),
             });
@@ -211,7 +228,7 @@ where
     fn apply_alter_operation(
         &mut self,
         operation: &AlterWireSchemaOperation<T>,
-    ) -> Result<(), AlterSchemaError> {
+    ) -> Result<(), AlterWireSchemaError> {
         match operation {
             AlterWireSchemaOperation::SetMode { mode } => {
                 self.strictness = *mode;
@@ -223,7 +240,7 @@ where
             AlterWireSchemaOperation::DropField { field } => {
                 let index = self.field_index(field)?;
                 if self.fields.len() == 1 {
-                    return Err(AlterSchemaError::CannotDropLastField);
+                    return Err(AlterWireSchemaError::CannotDropLastField);
                 }
                 self.fields.remove(index);
             }
@@ -244,18 +261,18 @@ where
         Ok(())
     }
 
-    fn field_index(&self, field: &Identifier) -> Result<usize, AlterSchemaError> {
+    fn field_index(&self, field: &FieldName) -> Result<usize, AlterWireSchemaError> {
         self.fields
             .iter()
             .position(|candidate| candidate.name == *field)
-            .ok_or_else(|| AlterSchemaError::FieldNotFound {
+            .ok_or_else(|| AlterWireSchemaError::FieldNotFound {
                 field: field.clone(),
             })
     }
 
-    fn ensure_field_absent(&self, field: &Identifier) -> Result<(), AlterSchemaError> {
+    fn ensure_field_absent(&self, field: &FieldName) -> Result<(), AlterWireSchemaError> {
         if self.fields.iter().any(|candidate| candidate.name == *field) {
-            return Err(AlterSchemaError::FieldAlreadyExists {
+            return Err(AlterWireSchemaError::FieldAlreadyExists {
                 field: field.clone(),
             });
         }
@@ -264,16 +281,16 @@ where
 
     fn ensure_rename_target_absent(
         &self,
-        source: &Identifier,
-        target: &Identifier,
-    ) -> Result<(), AlterSchemaError> {
+        source: &FieldName,
+        target: &FieldName,
+    ) -> Result<(), AlterWireSchemaError> {
         if source != target
             && self
                 .fields
                 .iter()
                 .any(|candidate| candidate.name == *target)
         {
-            return Err(AlterSchemaError::RenameTargetAlreadyExists {
+            return Err(AlterWireSchemaError::RenameTargetAlreadyExists {
                 field: target.clone(),
             });
         }
@@ -401,8 +418,8 @@ impl std::fmt::Display for ParseAsType {
 mod tests {
     use super::*;
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::try_from(raw).expect("valid identifier")
+    fn field(raw: &str) -> FieldName {
+        FieldName::try_from(raw).expect("valid field name")
     }
 
     #[test]

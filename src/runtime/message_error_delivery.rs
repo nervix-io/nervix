@@ -1,14 +1,15 @@
+use nervix_models::{DomainName, ModelName};
 use dashmap::mapref::entry::Entry as DashMapEntry;
 
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MessageErrorRouteKey {
-    pub(super) domain: Domain,
+    pub(super) domain: DomainName,
     pub(super) node_kind: String,
-    pub(super) node: Identifier,
-    pub(super) source_route: Option<Identifier>,
-    pub(super) error_relay: Identifier,
+    pub(super) node: ModelName,
+    pub(super) source_route: Option<RelayName>,
+    pub(super) error_relay: RelayName,
 }
 
 #[derive(Clone)]
@@ -64,8 +65,8 @@ struct MessageErrorRouteTask {
 
 pub(super) fn matching_message_error_output<'a>(
     outputs: &'a nervix_models::ProcessorOutputs,
-    source_route: Option<&Identifier>,
-    error_relay: &Identifier,
+    source_route: Option<&RelayName>,
+    error_relay: &RelayName,
     assignments: &[Assignment],
 ) -> Option<&'a ProcessorOutput> {
     source_route
@@ -367,7 +368,7 @@ impl Runtime {
             })
     }
 
-    pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &Domain) {
+    pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &DomainName) {
         let keys = self
             .message_error_routes
             .iter()
@@ -414,7 +415,7 @@ mod tests {
         let task = MessageErrorRouteTask {
             runtime: Runtime::default(),
             route: MessageErrorRouteKey {
-                domain: Domain::try_from("test").expect("valid domain"),
+                domain: DomainName::try_from("test").expect("valid domain"),
                 node_kind: "emitter".to_string(),
                 node: identifier("notifications"),
                 source_route: None,

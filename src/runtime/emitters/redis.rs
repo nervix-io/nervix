@@ -1,3 +1,4 @@
+use nervix_models::{ChannelName};
 use ::redis::{
     AsyncCommands, Client as RedisClient, ClientTlsConfig, ErrorKind as RedisErrorKind,
     ServerErrorKind, TlsCertificates as RedisTlsCertificates,
@@ -76,7 +77,7 @@ impl RedisEmitter {
 
     pub(in crate::runtime) async fn publish_records(
         &mut self,
-        channel: &Identifier,
+        channel: &ChannelName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();

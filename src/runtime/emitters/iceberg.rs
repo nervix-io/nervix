@@ -1,3 +1,4 @@
+use nervix_models::{DomainName, TableName};
 use std::{
     collections::VecDeque,
     fs::File,
@@ -276,7 +277,7 @@ struct IcebergEmitterClientInit<'a> {
     catalog_client: &'a CreateClientIcebergRest,
     catalog_config: &'a [nervix_models::ClientConfigEntry],
     context: &'a EmitterSinkContext,
-    table: &'a Identifier,
+    table: &'a TableName,
     location: &'a str,
     catalog: &'a IcebergCatalog,
 }
@@ -293,7 +294,7 @@ pub(in crate::runtime::emitters) struct IcebergEmitterInit<'a> {
     pub(in crate::runtime::emitters) catalog_client: &'a CreateClientIcebergRest,
     pub(in crate::runtime::emitters) catalog_resolved: Option<&'a ResolvedClientConfig>,
     pub(in crate::runtime::emitters) context: &'a EmitterSinkContext,
-    pub(in crate::runtime::emitters) table: &'a Identifier,
+    pub(in crate::runtime::emitters) table: &'a TableName,
     pub(in crate::runtime::emitters) values: &'a [IcebergValueMapping],
     pub(in crate::runtime::emitters) location: &'a str,
     pub(in crate::runtime::emitters) catalog: &'a IcebergCatalog,
@@ -1745,8 +1746,8 @@ mod tests {
                 .expect("valid VALUES expression"),
         }];
         let program = compile_iceberg_values_program(
-            &Domain::parse("test").expect("valid domain"),
-            &Identifier::parse("iceberg_values").expect("valid emitter"),
+            &DomainName::parse("test").expect("valid domain"),
+            &EmitterName::parse("iceberg_values").expect("valid emitter"),
             &values,
             input_schema,
             None,

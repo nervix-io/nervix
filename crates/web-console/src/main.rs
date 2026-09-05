@@ -15,7 +15,7 @@ use nervix_dataflow_graph::{
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
     DataflowStatistics,
 };
-use nervix_models::Statement;
+use nervix_models::{ClusterNodeName, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
@@ -175,7 +175,7 @@ struct ResourceVersionView {
     manifest_checksum: Option<String>,
     file_count: Option<String>,
     total_bytes: Option<String>,
-    created_by_node: Option<String>,
+    created_by_node: Option<ClusterNodeName>,
     created_at: Option<String>,
     files: Vec<ResourceFileView>,
 }

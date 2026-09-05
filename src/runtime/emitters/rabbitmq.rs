@@ -1,3 +1,4 @@
+use nervix_models::{QueueName};
 use futures_util::FutureExt;
 use lapin::{
     Confirmation, Connection, ConnectionProperties, PublisherConfirm,
@@ -25,7 +26,7 @@ impl RabbitMqEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientRabbitMq,
         resolved: Option<&ResolvedClientConfig>,
-        queue: &Identifier,
+        queue: &QueueName,
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
         let channel = Self::channel_from_config(
@@ -143,7 +144,7 @@ impl RabbitMqEmitter {
 
     pub(super) async fn publish_records(
         &self,
-        queue: &Identifier,
+        queue: &QueueName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();

@@ -5,12 +5,20 @@ use chumsky::{
     prelude::*,
 };
 use nervix_models::{
-    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchSelection, ClientConfigEntry,
-    Domain, EmitterAckWindow, Expression, GeneralErrorPolicy, Identifier as ModelIdentifier,
-    InputCollectPolicy, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy,
-    OutputBranch, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, RetryPolicy, RouteConstruction,
+    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchName, BranchSelection,
+    ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CollectionName,
+    ConsumerGroupName,
+    CorrelatorName, DeduplicatorName, DomainName, EmitterAckWindow, EmitterName, EndpointName,
+    Expression, FieldName, GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName,
+    InputCollectPolicy, JunctionName, LookupName, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError, OutputBranch,
+    OutputFlushPolicy, PlacementName, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, PulsarSubscriptionName, QueueGroupName, QueueName, RelayName, ReingestorName,
+    ReordererName, ResourceName, RetryPolicy, RouteConstruction, SchemaName, SubjectName,
+    SignalingProtocolName, SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName,
+    WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
+use error_stack::Report;
 use sorted_vec::SortedSet;
 
 use crate::lexer::{Identifier, SpannedToken, Token, Word, lex};
@@ -320,28 +328,27 @@ pub fn u64_value<'src>()
 }
 
 pub fn schema_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:schema")
+-> impl Parser<'src, &'src [Token], SchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:schema", SchemaName::parse)
 }
 
 pub fn placement_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("placement_name")
+-> impl Parser<'src, &'src [Token], PlacementName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("placement_name", PlacementName::parse)
 }
 
 pub fn placement_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:placement")
+-> impl Parser<'src, &'src [Token], PlacementName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:placement", PlacementName::parse)
 }
 
 pub fn runtime_node_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:runtime_node")
+-> impl Parser<'src, &'src [Token], ModelName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:runtime_node", ModelName::parse)
 }
 
 pub fn branch_definition_header<'src>()
--> impl Parser<'src, &'src [Token], (ModelIdentifier, String), extra::Err<ParseError<'src>>> + Clone
-{
+-> impl Parser<'src, &'src [Token], (SchemaName, String), extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Schema)
         .ignore_then(schema_ref())
         .then_ignore(kw(Identifier::Ttl))
@@ -460,167 +467,168 @@ pub fn materialized_state_dependencies<'src>()
 }
 
 pub fn domain_name<'src>()
--> impl Parser<'src, &'src [Token], Domain, extra::Err<ParseError<'src>>> + Clone {
-    parse_domain("domain_name")
+-> impl Parser<'src, &'src [Token], DomainName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("domain_name", DomainName::parse)
 }
 
 pub fn user_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("user_name")
+-> impl Parser<'src, &'src [Token], UserName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("user_name", UserName::parse)
 }
 
 pub fn schema_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("schema_name")
+-> impl Parser<'src, &'src [Token], SchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("schema_name", SchemaName::parse)
 }
 
 pub fn wire_json_schema_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wire_json_schema")
+-> impl Parser<'src, &'src [Token], WireSchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:wire_json_schema", WireSchemaName::parse)
 }
 
 pub fn wire_cbor_schema_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wire_cbor_schema")
+-> impl Parser<'src, &'src [Token], WireSchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:wire_cbor_schema", WireSchemaName::parse)
 }
 
 pub fn wire_avro_schema_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wire_avro_schema")
+-> impl Parser<'src, &'src [Token], WireSchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:wire_avro_schema", WireSchemaName::parse)
 }
 
 pub fn wire_schema_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("wire_schema_name")
+-> impl Parser<'src, &'src [Token], WireSchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("wire_schema_name", WireSchemaName::parse)
 }
 
 pub fn codec_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:codec")
+-> impl Parser<'src, &'src [Token], CodecName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:codec", CodecName::parse)
 }
 
 pub fn codec_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("codec_name")
+-> impl Parser<'src, &'src [Token], CodecName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("codec_name", CodecName::parse)
 }
 
 pub fn field_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("field_name")
+-> impl Parser<'src, &'src [Token], FieldName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("field_name", FieldName::parse)
 }
 
 pub fn relay_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch])
+-> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch], RelayName::parse)
 }
 
 pub fn message_error_relay_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch])
+-> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch], RelayName::parse)
 }
 
 pub fn resource_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:resource")
+-> impl Parser<'src, &'src [Token], ResourceName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:resource", ResourceName::parse)
 }
 
 pub fn relay_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier_excluding_reserved("relay_name", &[Identifier::Message, Identifier::Branch])
+-> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name_excluding_reserved("relay_name", &[Identifier::Message, Identifier::Branch], RelayName::parse)
 }
 
 pub fn junction_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:junction")
+-> impl Parser<'src, &'src [Token], JunctionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:junction", JunctionName::parse)
 }
 
 pub fn junction_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("junction_name")
+-> impl Parser<'src, &'src [Token], JunctionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("junction_name", JunctionName::parse)
 }
 
 pub fn deduplicator_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:deduplicator")
+-> impl Parser<'src, &'src [Token], DeduplicatorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:deduplicator", DeduplicatorName::parse)
 }
 
 pub fn deduplicator_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("deduplicator_name")
+-> impl Parser<'src, &'src [Token], DeduplicatorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("deduplicator_name", DeduplicatorName::parse)
 }
 
 pub fn correlator_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:correlator")
+-> impl Parser<'src, &'src [Token], CorrelatorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:correlator", CorrelatorName::parse)
 }
 
 pub fn correlator_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("correlator_name")
+-> impl Parser<'src, &'src [Token], CorrelatorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("correlator_name", CorrelatorName::parse)
 }
 
 pub fn window_processor_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("window_processor_name")
+-> impl Parser<'src, &'src [Token], WindowProcessorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("window_processor_name", WindowProcessorName::parse)
 }
 
 pub fn window_processor_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:window_processor")
+-> impl Parser<'src, &'src [Token], WindowProcessorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:window_processor", WindowProcessorName::parse)
 }
 
 pub fn client_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:client")
+-> impl Parser<'src, &'src [Token], ClientName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:client", ClientName::parse)
 }
 
 pub fn client_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("client_name")
+-> impl Parser<'src, &'src [Token], ClientName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("client_name", ClientName::parse)
 }
 
 pub fn vhost_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:vhost")
+-> impl Parser<'src, &'src [Token], VhostName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:vhost", VhostName::parse)
 }
 
 pub fn vhost_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("vhost_name")
+-> impl Parser<'src, &'src [Token], VhostName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("vhost_name", VhostName::parse)
 }
 
 pub fn branch_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:branch")
+-> impl Parser<'src, &'src [Token], BranchName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:branch", BranchName::parse)
 }
 
 pub fn branch_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("branch_name")
+-> impl Parser<'src, &'src [Token], BranchName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("branch_name", BranchName::parse)
 }
 
 pub fn endpoint_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:endpoint")
+-> impl Parser<'src, &'src [Token], EndpointName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:endpoint", EndpointName::parse)
 }
 
 pub fn endpoint_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("endpoint_name")
+-> impl Parser<'src, &'src [Token], EndpointName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("endpoint_name", EndpointName::parse)
 }
 
 pub fn signaling_protocol_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:signaling_protocol")
+-> impl Parser<'src, &'src [Token], SignalingProtocolName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:signaling_protocol", SignalingProtocolName::parse)
 }
 
 pub fn signaling_protocol_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("signaling_protocol_name")
+-> impl Parser<'src, &'src [Token], SignalingProtocolName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("signaling_protocol_name", SignalingProtocolName::parse)
 }
 
 pub fn signaling_protocol_clause<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], SignalingProtocolName, extra::Err<ParseError<'src>>> + Clone
+{
     kw_phrase3(
         Identifier::With,
         Identifier::Signaling,
@@ -654,146 +662,156 @@ pub fn config_entries_block<'src>()
 }
 
 pub fn generator_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("generator_name")
+-> impl Parser<'src, &'src [Token], GeneratorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("generator_name", GeneratorName::parse)
 }
 
 pub fn generator_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:generator")
+-> impl Parser<'src, &'src [Token], GeneratorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:generator", GeneratorName::parse)
 }
 
 pub fn inferencer_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("inferencer_name")
+-> impl Parser<'src, &'src [Token], InferencerName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("inferencer_name", InferencerName::parse)
 }
 
 pub fn wasm_processor_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("wasm_processor_name")
+-> impl Parser<'src, &'src [Token], WasmProcessorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("wasm_processor_name", WasmProcessorName::parse)
 }
 
 pub fn wasm_processor_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wasm_processor")
+-> impl Parser<'src, &'src [Token], WasmProcessorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:wasm_processor", WasmProcessorName::parse)
 }
 
 pub fn udf_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("udf_name")
+-> impl Parser<'src, &'src [Token], UdfName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("udf_name", UdfName::parse)
 }
 
 pub fn udf_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:udf")
+-> impl Parser<'src, &'src [Token], UdfName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:udf", UdfName::parse)
 }
 
 pub fn inferencer_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:inferencer")
+-> impl Parser<'src, &'src [Token], InferencerName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:inferencer", InferencerName::parse)
 }
 
 pub fn ingestor_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:ingestor")
+-> impl Parser<'src, &'src [Token], IngestorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:ingestor", IngestorName::parse)
 }
 
 pub fn ingestor_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ingestor_name")
+-> impl Parser<'src, &'src [Token], IngestorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ingestor_name", IngestorName::parse)
 }
 
 pub fn reingestor_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:reingestor")
+-> impl Parser<'src, &'src [Token], ReingestorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:reingestor", ReingestorName::parse)
 }
 
 pub fn lookup_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:lookup")
+-> impl Parser<'src, &'src [Token], LookupName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:lookup", LookupName::parse)
 }
 
 pub fn lookup_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("lookup_name")
+-> impl Parser<'src, &'src [Token], LookupName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("lookup_name", LookupName::parse)
 }
 
 pub fn reingestor_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("reingestor_name")
+-> impl Parser<'src, &'src [Token], ReingestorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("reingestor_name", ReingestorName::parse)
 }
 
 pub fn reorderer_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("reorderer_name")
+-> impl Parser<'src, &'src [Token], ReordererName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("reorderer_name", ReordererName::parse)
 }
 
 pub fn reorderer_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:reorderer")
+-> impl Parser<'src, &'src [Token], ReordererName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:reorderer", ReordererName::parse)
 }
 
 pub fn emitter_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:emitter")
+-> impl Parser<'src, &'src [Token], EmitterName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:emitter", EmitterName::parse)
 }
 
 pub fn emitter_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("emitter_name")
+-> impl Parser<'src, &'src [Token], EmitterName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("emitter_name", EmitterName::parse)
 }
 
 pub fn topic_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("topic_name")
+-> impl Parser<'src, &'src [Token], TopicName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("topic_name", TopicName::parse)
 }
 
 pub fn mqtt_topic_filter<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     choice((
         string_lit(),
-        parse_identifier("mqtt_topic_filter").map(|topic| topic.as_str().to_string()),
+        parse_name("mqtt_topic_filter", TopicName::parse).map(|topic| topic.as_str().to_string()),
     ))
 }
 
+pub fn subject_ref<'src>()
+-> impl Parser<'src, &'src [Token], SubjectName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("subject_name", SubjectName::parse)
+}
+
+pub fn collection_ref<'src>()
+-> impl Parser<'src, &'src [Token], CollectionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("collection_name", CollectionName::parse)
+}
+
 pub fn queue_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("queue_name")
+-> impl Parser<'src, &'src [Token], QueueName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("queue_name", QueueName::parse)
 }
 
 pub fn nats_queue_group_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("queue_group")
+-> impl Parser<'src, &'src [Token], QueueGroupName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("queue_group", QueueGroupName::parse)
 }
 
 pub fn channel_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("channel_name")
+-> impl Parser<'src, &'src [Token], ChannelName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("channel_name", ChannelName::parse)
 }
 
 pub fn table_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("table_name")
+-> impl Parser<'src, &'src [Token], TableName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("table_name", TableName::parse)
 }
 
 pub fn consumer_group_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("consumer_group")
+-> impl Parser<'src, &'src [Token], ConsumerGroupName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("consumer_group", ConsumerGroupName::parse)
 }
 
 pub fn subscription_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("subscription_name")
+-> impl Parser<'src, &'src [Token], PulsarSubscriptionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("subscription_name", PulsarSubscriptionName::parse)
 }
 
 pub fn session_subscription_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("session_subscription_name")
+-> impl Parser<'src, &'src [Token], SubscriptionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("session_subscription_name", SubscriptionName::parse)
 }
 
 pub fn session_subscription_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:session_subscription")
+-> impl Parser<'src, &'src [Token], SubscriptionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:session_subscription", SubscriptionName::parse)
 }
 
 pub fn string_lit<'src>()
@@ -1457,7 +1475,7 @@ pub fn from_relay_clause_with_boundary<'src>(
 ) -> impl Parser<
     'src,
     &'src [Token],
-    (ModelIdentifier, Vec<ProcessorInputWhere>),
+    (RelayName, Vec<ProcessorInputWhere>),
     extra::Err<ParseError<'src>>,
 > + Clone {
     relay_ref()
@@ -1478,7 +1496,7 @@ pub fn from_relay_clause_with_boundary<'src>(
 pub fn from_relay_clause<'src>() -> impl Parser<
     'src,
     &'src [Token],
-    (ModelIdentifier, Vec<ProcessorInputWhere>),
+    (RelayName, Vec<ProcessorInputWhere>),
     extra::Err<ParseError<'src>>,
 > + Clone {
     from_relay_clause_with_boundary(from_where_boundary_token)
@@ -1704,29 +1722,40 @@ pub fn hostname_lit<'src>()
         .labelled("hostname")
 }
 
-pub fn node_id<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    hostname_lit().labelled("node_id")
+pub fn cluster_node_name<'src>()
+-> impl Parser<'src, &'src [Token], ClusterNodeName, extra::Err<ParseError<'src>>> + Clone {
+    hostname_lit()
+        .try_map(|raw: String, span| {
+            ClusterNodeName::parse(raw.as_str())
+                .map_err(|err| Rich::custom(span, format!("invalid node_id: {err}")))
+        })
+        .labelled("node_id")
 }
 
-fn parse_identifier<'src>(
+/// Parse one word as the named concept `N`, validated by the name type itself.
+///
+/// `parse` is the name type's own constructor, so the grammar never restates what a name of that
+/// kind may contain; it only says which kind of name this position holds.
+fn parse_name<'src, N: Clone + 'static>(
     label: &'static str,
-) -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse: fn(&str) -> Result<N, Report<NameError>>,
+) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
     word_raw()
-        .try_map(move |raw, span| {
-            ModelIdentifier::try_from(raw.as_str())
-                .map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
+        .try_map(move |raw: String, span| {
+            parse(raw.as_str()).map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
         })
         .labelled(label)
         .boxed()
 }
 
-fn parse_identifier_excluding_reserved<'src>(
+/// Parse one word as the named concept `N`, rejecting words the surrounding grammar reserves.
+fn parse_name_excluding_reserved<'src, N: Clone + 'static>(
     label: &'static str,
     reserved: &'static [Identifier],
-) -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse: fn(&str) -> Result<N, Report<NameError>>,
+) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
     word_raw()
-        .try_map(move |raw, span| {
+        .try_map(move |raw: String, span| {
             if reserved
                 .iter()
                 .any(|reserved| raw.eq_ignore_ascii_case((*reserved).into()))
@@ -1736,20 +1765,7 @@ fn parse_identifier_excluding_reserved<'src>(
                     format!("invalid {label}: '{raw}' is reserved"),
                 ));
             }
-            ModelIdentifier::try_from(raw.as_str())
-                .map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
-        })
-        .labelled(label)
-        .boxed()
-}
-
-fn parse_domain<'src>(
-    label: &'static str,
-) -> impl Parser<'src, &'src [Token], Domain, extra::Err<ParseError<'src>>> + Clone {
-    word_raw()
-        .try_map(move |raw, span| {
-            Domain::try_from(raw.as_str())
-                .map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
+            parse(raw.as_str()).map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
         })
         .labelled(label)
         .boxed()

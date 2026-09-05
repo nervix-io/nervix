@@ -1,3 +1,4 @@
+use nervix_models::ClusterNodeName;
 use std::{
     collections::BTreeMap,
     fs, io,
@@ -39,7 +40,7 @@ pub struct BatchTargetMetrics {
     pub domain: String,
     pub target_kind: String,
     pub target: String,
-    pub physical_node_id: String,
+    pub physical_node_id: ClusterNodeName,
     pub direction: String,
     pub relay: String,
     pub messages_total: u64,
@@ -70,7 +71,7 @@ impl BatchTargetMetrics {
 pub struct RelayBufferMetrics {
     pub domain: String,
     pub relay: String,
-    pub physical_node_id: String,
+    pub physical_node_id: ClusterNodeName,
     pub direction: String,
     pub observations: u64,
     pub p50: f64,
@@ -164,7 +165,7 @@ struct SeriesKey {
     domain: String,
     target_kind: String,
     target: String,
-    physical_node_id: String,
+    physical_node_id: ClusterNodeName,
     direction: String,
     relay: String,
     peer_kind: String,

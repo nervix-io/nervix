@@ -1,12 +1,14 @@
 use ahash_compile_time::{HashSet, HashSetExt};
+use error_stack::Report;
 use chumsky::{
     input::{Stream, ValueInput},
     prelude::*,
 };
 use nervix_models::{
-    Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
-    FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField, Invocation, Literal,
-    ParseAsType, RouteConstruction, UnaryOperator,
+    Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, BuiltinFunctionName,
+    CaseBranch, Expression, FieldName, FieldReference, FieldScope, Float64Literal, Inheritance,
+    InheritedField, Invocation, Literal, NameError, ParseAsType, RelayName, RouteConstruction,
+    UdfName, UnaryOperator,
 };
 
 use crate::vm_program::{Diagnostic, ParseFromSourceError, SpannedToken, Token, lex};
@@ -28,15 +30,17 @@ where
     select! { Token::Identifier(name) => name }.labelled("identifier")
 }
 
-fn identifier<'src, I>()
--> impl Parser<'src, I, nervix_models::Identifier, extra::Err<ParseError<'src>>> + Clone
+/// Parse one word as the named concept `N`, validated by the name type's own constructor.
+fn name<'src, I, N: Clone + 'static>(
+    parse: fn(&str) -> Result<N, Report<NameError>>,
+) -> impl Parser<'src, I, N, extra::Err<ParseError<'src>>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    raw_identifier().try_map(|name, span| {
-        nervix_models::Identifier::parse(&name)
-            .map_err(|error| Rich::custom(span, error.to_string()))
-    })
+    raw_identifier()
+        .try_map(move |raw: String, span| {
+            parse(&raw).map_err(|error| Rich::custom(span, error.to_string()))
+        })
 }
 
 fn parse_scope<'src>(name: &str, span: Span) -> Result<FieldScope, Rich<'src, Token>> {
@@ -64,13 +68,17 @@ where
 {
     let scoped = raw_identifier()
         .then_ignore(keyword(Token::Dot))
-        .then(identifier())
-        .then(keyword(Token::Dot).ignore_then(identifier()).or_not())
+        .then(raw_identifier())
+        .then(keyword(Token::Dot).ignore_then(name(FieldName::parse)).or_not())
         .try_map(|((scope, second), third), span| match third {
-            Some(field) if scope.eq_ignore_ascii_case("relay_state") => Ok(FieldReference::scoped(
-                FieldScope::RelayState { relay: second },
-                field,
-            )),
+            Some(field) if scope.eq_ignore_ascii_case("relay_state") => {
+                let relay = RelayName::try_from(second.as_str())
+                    .map_err(|error| Rich::custom(span, error.to_string()))?;
+                Ok(FieldReference::scoped(
+                    FieldScope::RelayState { relay },
+                    field,
+                ))
+            }
             Some(_) => Err(Rich::custom(
                 span,
                 "only relay_state.<relay>.<field> may contain three field path segments",
@@ -79,9 +87,13 @@ where
                 span,
                 "relay_state references require relay_state.<relay>.<field>",
             )),
-            None => parse_scope(&scope, span).map(|scope| FieldReference::scoped(scope, second)),
+            None => {
+                let field = FieldName::try_from(second.as_str())
+                    .map_err(|error| Rich::custom(span, error.to_string()))?;
+                parse_scope(&scope, span).map(|scope| FieldReference::scoped(scope, field))
+            }
         });
-    let bare = identifier().map(FieldReference::bare);
+    let bare = name(FieldName::parse).map(FieldReference::bare);
 
     choice((scoped, bare)).boxed()
 }
@@ -132,14 +144,14 @@ where
             .delimited_by(keyword(Token::LParen), keyword(Token::RParen));
         let udf_call = keyword(Token::Udf)
             .then_ignore(keyword(Token::DoubleColon))
-            .then(identifier())
+            .then(name(UdfName::parse))
             .then(arguments.clone())
             .map(|(((), function), arguments)| Expression::UdfCall {
                 function,
                 arguments,
             });
         let function_call =
-            identifier()
+            name(BuiltinFunctionName::parse)
                 .then(arguments)
                 .map(|(function, arguments)| Expression::Call {
                     function,
@@ -319,9 +331,9 @@ where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     raw_identifier()
-        .then(keyword(Token::Dot).ignore_then(identifier()).or_not())
+        .then(keyword(Token::Dot).ignore_then(name(FieldName::parse)).or_not())
         .try_map(|(first, field), span| match field {
-            None => nervix_models::Identifier::parse(&first)
+            None => FieldName::try_from(first.as_str())
                 .map(AssignmentTarget::bare)
                 .map_err(|error| Rich::custom(span, error.to_string())),
             Some(field) => {
@@ -350,7 +362,7 @@ where
         .ignore_then(
             keyword(Token::Except)
                 .ignore_then(
-                    identifier()
+                    name(FieldName::parse)
                         .separated_by(keyword(Token::Comma))
                         .at_least(1)
                         .collect::<Vec<_>>(),
@@ -365,7 +377,7 @@ where
                 Ok(Inheritance::All)
             }
         });
-    let explicit = identifier()
+    let explicit = name(FieldName::parse)
         .then(
             keyword(Token::Leak)
                 .ignore_then(keyword(Token::Sensitive))
@@ -392,7 +404,7 @@ where
 }
 
 fn reject_duplicate_identifiers<'src>(
-    fields: &[nervix_models::Identifier],
+    fields: &[FieldName],
     span: Span,
 ) -> Result<(), Rich<'src, Token>> {
     let mut seen = HashSet::new();
@@ -421,7 +433,7 @@ where
             .at_least(1)
             .collect::<Vec<_>>(),
     );
-    let invocation = identifier()
+    let invocation = name(BuiltinFunctionName::parse)
         .then(
             expression()
                 .separated_by(keyword(Token::Comma))

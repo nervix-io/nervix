@@ -1,18 +1,18 @@
 use chumsky::prelude::*;
 use nervix_models::{
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    ClientName, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
     CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateStatement, KafkaConfigEntry,
+    CreateClientWebsockets, CreateClientZeroMq, CreateStatement, KafkaConfigEntry, ResourceName,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, client_name, if_not_exists_clause, into_parse_error, kw, lex_input,
-        signaling_protocol_clause, string_lit, suggest_from, tok, word_raw,
+        resource_ref, signaling_protocol_clause, string_lit, suggest_from, tok, word_raw,
     },
     schema::ParseFromSourceError,
 };
@@ -45,20 +45,15 @@ fn config_entry<'src>()
 }
 
 fn client_mount<'src>()
--> impl Parser<'src, &'src [Token], Option<nervix_models::Identifier>, extra::Err<ParseError<'src>>>
-+ Clone {
+-> impl Parser<'src, &'src [Token], Option<ResourceName>, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Mount)
-        .ignore_then(client_name().labelled("resource_name"))
+        .ignore_then(resource_ref().labelled("resource_name"))
         .or_not()
 }
 
 fn create_client_parser<'src, T>(
     client_type: Identifier,
-    build: impl Fn(
-        nervix_models::Identifier,
-        Option<nervix_models::Identifier>,
-        Vec<KafkaConfigEntry>,
-    ) -> T
+    build: impl Fn(ClientName, Option<ResourceName>, Vec<KafkaConfigEntry>) -> T
     + Clone
     + 'src,
 ) -> impl Parser<'src, &'src [Token], CreateStatement<T>, extra::Err<ParseError<'src>>> + Clone {

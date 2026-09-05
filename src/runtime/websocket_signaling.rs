@@ -553,9 +553,14 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use nervix_models::{
-        Identifier, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-        SignalingWaitStep, SignalingWireFormat,
-    };
+    ModelName,
+    ResourceName,
+    SignalingProtobufConfig,
+    SignalingProtocolOnConnect,
+    SignalingStep,
+    SignalingWaitStep,
+    SignalingWireFormat,
+};
     use parking_lot::Mutex;
     use serde_json::json;
     use tokio_tungstenite::tungstenite::protocol::Role;
@@ -567,7 +572,7 @@ mod tests {
         on_connect: SignalingProtocolOnConnect,
     ) -> CreateSignalingProtocol {
         CreateSignalingProtocol {
-            name: Identifier::parse("handshake").expect("valid identifier"),
+            name: ModelName::parse("handshake").expect("valid identifier"),
             format,
             on_connect,
         }
@@ -680,7 +685,7 @@ mod tests {
         let error = CompiledSignalingProtocol::compile(
             &protocol(
                 SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                    resource: Identifier::parse("proto_bundle").expect("valid identifier"),
+                    resource: ResourceName::parse("proto_bundle").expect("valid identifier"),
                     resource_version: None,
                     config: Vec::new(),
                     send_message: "nervix.test.Subscribe".to_string(),

@@ -16,7 +16,8 @@ use crate::{
         flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
         into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
         parallel_ack_window, queue_ref, relay_ref, retry_policy, sequential_ack_window, string_lit,
-        subscription_ref, suggest_from, tok, topic_ref, u64_value, where_expression,
+        subject_ref, subscription_ref, suggest_from, tok, topic_ref, u64_value,
+        where_expression,
     },
 };
 
@@ -613,7 +614,7 @@ fn nats_ingest_source_parser<'src>()
     kw(Identifier::Nats)
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Subject))
-        .then(topic_ref())
+        .then(subject_ref())
         .then_ignore(kw_phrase2(Identifier::Queue, Identifier::Group))
         .then(nats_queue_group_ref())
         .then_ignore(kw(Identifier::Instances))
