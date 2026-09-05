@@ -172,6 +172,8 @@ pub fn statement_parser<'src>()
         crate::node_control::cordon_node_parser().map(Statement::CordonNode),
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
+        crate::relocation::relocate_parser().map(Statement::Relocate),
+        crate::relocation::describe_relocation_parser().map(Statement::DescribeRelocation),
         crate::drop_stmt::drop_node_parser().map(Statement::DropNode),
         crate::drop_stmt::drop_parser().map(Statement::Drop),
         crate::show_cluster_status::show_cluster_status_parser().map(Statement::ShowClusterStatus),
@@ -246,6 +248,12 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
             && !normalized.contains(" RANK ")
         {
             vec![";".to_string(), "RANK".to_string()]
+        } else if open
+            && (normalized.starts_with("RELOCATE ")
+                || normalized.starts_with("DESCRIBE RELOCATION "))
+            && normalized.ends_with(" PREFERENCES")
+        {
+            vec![";".to_string(), "FOR".to_string()]
         } else {
             Vec::new()
         };

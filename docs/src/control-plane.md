@@ -23,6 +23,7 @@ In practice, the control plane covers:
 - explicit node removal with `DROP NODE <node_id>`
 - node cordon and uncordon with `CORDON NODE <node_id>` and `UNCORDON NODE <node_id>`
 - node drain with `DRAIN NODE <node_id>`, which cordons the node and moves scheduled graph nodes away one at a time
+- explicit relocation with `RELOCATE <selection> ONTO NODE <node_id>`, which moves a selected subgraph onto a named cluster node, and `DESCRIBE RELOCATION`, which shows the plan without executing it
 - primary and replica assignment
 - Kafka `OFFSET BY DOMAIN` partition-to-instance assignment and rebalance
 - domain `START` and `STOP`
@@ -77,7 +78,7 @@ same user, are offered committed configuration alone.
 Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
 and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
 Session subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership operations (`CORDON`,
-`UNCORDON`, `DRAIN`, and `DROP NODE`) are also immediate, non-transaction content. Run those
+`UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate, non-transaction content. Run those
 statements outside `BEGIN`/`COMMIT`.
 
 Queue admission is not a blind append. The leader replays the replicated transaction prefix into a
@@ -209,7 +210,9 @@ operator `PAUSE` or `RESUME` statement.
   relays, asks the guest to release what it buffers, snapshots it, and restores that snapshot into
   the replacement instance.
 - A schedule change that only adjusts replica roles is `DYNAMIC`. A planned primary-owner change
-  uses `ENTITY_PAUSE`, even when no model changed. Both reach every live node as narrow activations:
+  uses `ENTITY_PAUSE`, even when no model changed. `RELOCATE` is classified this way: it reports
+  `ENTITY_PAUSE` when it moves at least one runtime node in a running domain, and `DYNAMIC` when it
+  moves nothing or the domain is stopped. Both reach every live node as narrow activations:
   a runtime node whose primary owner and replica set stay fixed does not stop, restart, restore a
   snapshot, or reopen an external session. Its in-flight batches, retained `REQUIRED WAIT` work,
   branch instances, branch-local state, and ingestor session continue. Producers and materialized
@@ -231,7 +234,8 @@ dependent node cannot observe a half-applied change through its input relay.
 
 ## Planned Ownership Handoffs And Failover
 
-Node drain, graceful-shutdown drain, and placement consolidation are planned ownership handoffs.
+Node drain, graceful-shutdown drain, placement consolidation, and `RELOCATE` are planned ownership
+handoffs.
 Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
 the affected subgraph boundary on every live node, stops new intake for each moved ingestor, and
 drains work already admitted to the moved unit. Ownership-handoff intake does not consult `ON
@@ -255,6 +259,17 @@ absent. They do not block the handoff; destroying the old task negatively acknow
 attached work. Replicated state is available immediately when the destination was already a replica.
 Otherwise the state kind starts from its normal empty or local recovery boundary. When the schedule
 has a replica slot, the live former owner is the first replica candidate after the new primary.
+
+`RELOCATE` differs from the others in one respect: it holds and commits its whole unit at once,
+because the unit is the plan the operator inspected and approved. A hold that cannot complete
+leaves the domain on its previous schedule and moves nothing. It holds the domain's exclusive
+alteration lock from planning through release, so it and a concurrent model change, placement
+change, or `DRAIN NODE` of the same domain are mutually exclusive. `RELOCATE` is immediate,
+non-transaction content, like `CORDON`, `UNCORDON`, `DRAIN`, and `DROP NODE`, because its plan
+depends on live cluster state that a queued transaction cannot pin. `DESCRIBE RELOCATION` is
+read-only content served by any cluster node. See
+[Placement Policies](placement.md#relocating-runtime-nodes) for the statements, the selection
+forms, and the plan output.
 
 `DRAIN NODE` cordons first, visits domains and schedule units in canonical order, and continues with
 independent units after one times out. Its result lists every successful move and failure. Any failed

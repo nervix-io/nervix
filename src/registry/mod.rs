@@ -1,3 +1,4 @@
+mod relocation;
 mod stored;
 
 use std::{
@@ -55,6 +56,7 @@ use parking_lot::{Mutex, RwLock};
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
 };
+pub use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 pub use stored::StoredModelVersioned;
@@ -3313,6 +3315,9 @@ struct PlacementAnalysis {
     rules: Vec<PlacementRuleAnalysis>,
     explicit_pairs: HashMap<PlacementPair, ResolvedPlacementPair>,
     direct_pairs: HashSet<PlacementPair>,
+    /// Retained so a relocation corridor can be covered between endpoints no placement rule
+    /// names, using the same path-gated coverage the rules use.
+    topology: PlacementTopology,
 }
 
 #[derive(Debug, Clone)]
@@ -3452,6 +3457,7 @@ impl PlacementAnalysis {
             rules,
             explicit_pairs,
             direct_pairs: topology.direct_pairs(),
+            topology,
         })
     }
 

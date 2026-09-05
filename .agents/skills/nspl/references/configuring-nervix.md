@@ -197,10 +197,16 @@ relay. Do not use them to scan across branches.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
 - Model-alteration entity holds, domain pauses, and memory-pressure quiescing consult the
-  ingestor's mode. Planned drain, graceful-shutdown drain, and placement relocation ignore that
-  mode: they stop new intake only for moved ingestors, drain already admitted ACK work, then switch
-  ownership. Stop and drop terminate the source session; unexpected owner loss uses immediate
-  failover. Do not emit `PAUSE` or `RESUME` syntax.
+  ingestor's mode. Planned drain, graceful-shutdown drain, placement relocation, and explicit
+  `RELOCATE` ignore that mode: they stop new intake only for moved ingestors, drain already
+  admitted ACK work, then switch ownership. Stop and drop terminate the source session; unexpected
+  owner loss uses immediate failover. Do not emit `PAUSE` or `RESUME` syntax.
+- `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES [FOR <kind>
+  <name> ...];` moves a selected subgraph onto a named cluster node as one atomic gated handoff.
+  The selection is a kind-qualified list or a `FROM ... TO ...` corridor, `REQUIRE COLOCATION`
+  groups always move whole, and the statement is immediate, non-transaction content that is
+  mutually exclusive with model changes and `DRAIN NODE` in the same domain. It is a one-time move,
+  not a pin.
 - External entities and resource contents are provisioned before the graph is started.
 
 ## Verification and troubleshooting
@@ -224,6 +230,9 @@ Choose checks relevant to the configured graph:
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and
   `DESCRIBE DOMAIN` inspect placement coverage, precedence, effective colocation groups, hosts, and
   the domain default.
+- `DESCRIBE RELOCATION ...;` shows the unit, quiesce level, gated relays, corridor coverage, and
+  unsatisfied preferences a `RELOCATE` with the same clauses would execute, without moving
+  anything.
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.

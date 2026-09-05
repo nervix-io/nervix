@@ -669,6 +669,11 @@ impl Statement {
             Self::CordonNode(node) => Ok(format!("CORDON NODE {};", node.node_id)),
             Self::UncordonNode(node) => Ok(format!("UNCORDON NODE {};", node.node_id)),
             Self::DrainNode(node) => Ok(format!("DRAIN NODE {};", node.node_id)),
+            Self::Relocate(relocation) => Ok(format!("RELOCATE {};", relocation.to_nspl_clauses())),
+            Self::DescribeRelocation(relocation) => Ok(format!(
+                "DESCRIBE RELOCATION {};",
+                relocation.to_nspl_clauses()
+            )),
             Self::DescribeRelay(describe) => {
                 let bindings = if describe.bindings.is_empty() {
                     String::new()

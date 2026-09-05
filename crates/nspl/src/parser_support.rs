@@ -1661,7 +1661,13 @@ pub fn flushed_ingestor_outputs<'src>()
 
 pub fn hostname_lit<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    let atom = choice((select! { Token::NumberLiteral(value) => value }, word_raw()));
+    // Each alternative carries the label, because chumsky only rewrites an alternative error whose
+    // position matches the start of the labelled parser. Without it, a hostname continued after
+    // `-` or `.` reports raw token expectations and completion has nothing to offer there.
+    let atom = choice((
+        select! { Token::NumberLiteral(value) => value }.labelled("hostname_label"),
+        word_raw().labelled("hostname_label"),
+    ));
     let label = atom
         .clone()
         .then(

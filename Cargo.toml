@@ -162,6 +162,7 @@ serde_json = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
 storekey = { workspace = true }
+strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }

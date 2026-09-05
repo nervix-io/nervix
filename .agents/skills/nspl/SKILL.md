@@ -136,7 +136,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   separate runtime-node kind. All relays are valid placement members and corridor hops.
 - Treat Endpoint and Syslog ingestors as cluster-wide listeners. Every client-source ingestor,
   including an outbound WebSocket client, is single-owner and keeps its live assignment across
-  ordinary schedule recomputation; use drain or a hard colocation requirement when it must move.
+  ordinary schedule recomputation; use drain, `RELOCATE`, or a hard colocation requirement when it
+  must move.
+- Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
+  chosen work onto a named cluster node. The selection is a kind-qualified list or a
+  `FROM ... TO ...` corridor, hard colocation groups always move whole, and the whole unit moves in
+  one gated handoff or not at all. It is a one-time move, not pinning.
 - An emitter may list multiple `FROM <relay> [WHERE <expr>]` inputs when every relay declares the
   same payload schema. Unlike ordinary processors, those inputs may use differently named
   branches. Keep collection separate per source relay and concrete branch, and remember that one
@@ -213,7 +218,10 @@ reports no replicas. Use `DESCRIBE JUNCTION <junction>;` when the verification s
 routing contract, scheduled placement, and local edge metrics.
 
 Use `SHOW PLACEMENTS;`, `DESCRIBE PLACEMENT <placement>;`, and `DESCRIBE DOMAIN;` to verify rule
-coverage, effective claims, colocation groups, and the domain default.
+coverage, effective claims, colocation groups, and the domain default. Use
+`DESCRIBE RELOCATION ...;` with the clauses of a planned `RELOCATE` to inspect the unit it would
+move, its quiesce level, the relays its hold would gate, and the preferences it would leave
+unsatisfied.
 
 Before returning the configuration, trace every reference to its declaration and check schema,
 branch, construction, flush, error, sensitivity, transaction, and external-provisioning contracts.
