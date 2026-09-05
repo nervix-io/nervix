@@ -14,7 +14,7 @@ use arrow_array::{Array, ArrayRef, Int32Array, RecordBatch, StringArray};
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
 use fjall::Database;
-use nervix_interconnect::{RelayPayload, RelayPayloadKind};
+use nervix_interconnect::{EntityGatePurpose, RelayPayload, RelayPayloadKind};
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchSelection,
     ClientConfigEntry, ClusterSchedule, CodecWireFormat, CreateBranch, CreateClientHttp,
@@ -65,7 +65,7 @@ use super::{
 use crate::{
     metrics::RuntimeMetrics,
     resource::ResourceStore,
-    runtime_ack::{AckOutcome, AckSet},
+    runtime_ack::{AckOutcome, AckRootTracker, AckSet},
     runtime_schema::{
         RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue, compile_schema,
         test_runtime_row,
@@ -240,7 +240,12 @@ fn domain_drain_status_reports_structured_emitter_publishing_state() {
     })
     .collect::<Vec<_>>();
     let entity_status = runtime
-        .entity_drain_status(&domain, &[], &affected_emitters)
+        .entity_drain_status(
+            &domain,
+            &[],
+            &affected_emitters,
+            EntityGatePurpose::ModelAlteration,
+        )
         .emitter_publishing;
     assert_eq!(entity_status.len(), status.emitter_publishing.len());
     for (entity, domain) in entity_status.iter().zip(&status.emitter_publishing) {
@@ -528,6 +533,35 @@ fn test_ingestor_quiesce_control(
         runtime.metrics.clone(),
         metric_labels,
     ))
+}
+
+#[test]
+fn ownership_handoff_stops_new_intake_and_dispatches_already_admitted_payloads() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let ingestor = identifier("source");
+    let control =
+        test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Drop);
+    control.engage(super::IngestorQuiesceCause::OwnershipHandoff);
+
+    assert!(control.should_skip_poll());
+    assert!(control.should_suspend_intake());
+    assert_eq!(control.endpoint_admission(), Err(None));
+    assert!(matches!(
+        control.intake(
+            0,
+            super::BufferedIngestPayload::new(
+                b"admitted",
+                super::BufferedIngestMetadata::without_headers(),
+            ),
+            false,
+        ),
+        super::IngestorQuiesceIntake::Dispatch(_)
+    ));
+    assert_eq!(control.counters().dropped_total, 0);
+
+    control.release(super::IngestorQuiesceCause::OwnershipHandoff);
+    assert!(!control.should_skip_poll());
 }
 
 #[test]
@@ -3033,8 +3067,11 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
             &domain,
             std::slice::from_ref(&relay),
             std::slice::from_ref(&affected),
-            Instant::now() + Duration::from_secs(5),
-            "quiesce regression",
+            EntityGatePurpose::ModelAlteration,
+            super::EntityGateLease {
+                deadline: Instant::now() + Duration::from_secs(5),
+                reason: "quiesce regression",
+            },
         )
         .await
         .expect("entity hold should engage");
@@ -3071,6 +3108,45 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
         .stop_ingestor(&domain, &ingestor)
         .await
         .expect("test ingestor should stop");
+}
+
+#[tokio::test]
+async fn entity_gate_operation_releases_when_its_lease_deadline_expires() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let relay = identifier("events");
+    let operation_id = 42;
+    let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+    let gate = fanout.dispatch_gate();
+    runtime
+        .relay_boundary_fanouts
+        .insert((domain.clone(), relay.clone()), fanout);
+
+    runtime
+        .engage_entity_gate_operation(
+            operation_id,
+            &domain,
+            std::slice::from_ref(&relay),
+            &[],
+            EntityGatePurpose::OwnershipHandoff,
+            super::EntityGateLease {
+                deadline: Instant::now() + Duration::from_millis(25),
+                reason: "deadline regression",
+            },
+        )
+        .await
+        .expect("entity hold should engage");
+    assert!(gate.is_closed());
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while runtime.entity_gate_operation_is_held(operation_id, &domain) {
+            tokio::task::consume_budget().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("entity hold should release at its deadline");
+    assert!(!gate.is_closed());
 }
 
 #[tokio::test]
@@ -3701,6 +3777,48 @@ fn emitter_entity_pause_gates_every_input_relay() {
     }
 }
 
+#[test]
+fn ownership_handoff_keeps_internal_moved_group_relays_open() {
+    let junction = |name: &str, input: &str, output: &str| {
+        scheduled_model(
+            ModelKind::Junction,
+            identifier(name),
+            nervix_models::Model::Junction(CreateJunction {
+                name: identifier(name),
+                from: ProcessorInputs::single(identifier(input)),
+                output_routes: (ProcessorOutputs::single(identifier(output)))
+                    .with_flush_policy("IMMEDIATE".to_string(), None),
+                branched_by: BranchSelection::unbranched(),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            }),
+        )
+    };
+    let schedule = DomainSchedule {
+        domain: domain("testing"),
+        nodes: vec![
+            junction("corridor_source", "inbound", "corridor_stage"),
+            junction("corridor_sink", "corridor_stage", "outbound"),
+        ],
+        placement_groups: Vec::new(),
+    };
+    let affected =
+        ["corridor_source", "corridor_sink"].map(|name| crate::registry::RegistryEntity {
+            kind: ModelKind::Junction,
+            identifier: identifier(name),
+        });
+
+    assert_eq!(
+        super::Runtime::entity_pause_relays_for_schedule(&schedule, &affected),
+        vec![identifier("corridor_stage"), identifier("inbound")]
+    );
+    assert_eq!(
+        super::Runtime::ownership_handoff_relays_for_schedule(&schedule, &affected),
+        vec![identifier("inbound")]
+    );
+}
+
 #[tokio::test]
 async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     let runtime = super::Runtime::default();
@@ -4216,13 +4334,17 @@ fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
         .get_mut(&processor)
         .expect("junction processor should exist")
         .pending_materialized
-        .push_back((input_relay, quiesce_test_batch()));
+        .push_back(super::PendingMaterializedBatch::new(
+            input_relay,
+            quiesce_test_batch(),
+        ));
     let counters = runtime.node_quiesce_counters(&domain, &processor);
     let mut gauges = super::BranchQuiesceGauges::new(counters.clone());
 
     gauges.observe(&branch, &processor);
 
-    assert_eq!(counters.collected_inputs.load(Ordering::Acquire), 1);
+    assert_eq!(counters.collected_inputs.load(Ordering::Acquire), 0);
+    assert_eq!(counters.pending_materialized.load(Ordering::Acquire), 1);
     let status = runtime.entity_drain_status(
         &domain,
         &[],
@@ -4230,12 +4352,116 @@ fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
             kind: ModelKind::Junction,
             identifier: processor.clone(),
         }],
+        EntityGatePurpose::ModelAlteration,
     );
     assert_eq!(status.node_work_items, 1);
     assert!(!status.is_drained());
 
+    let handoff_status = runtime.entity_drain_status(
+        &domain,
+        &[],
+        &[crate::registry::RegistryEntity {
+            kind: ModelKind::Junction,
+            identifier: processor,
+        }],
+        EntityGatePurpose::OwnershipHandoff,
+    );
+    assert_eq!(handoff_status.node_work_items, 0);
+    assert!(handoff_status.is_drained());
+
     drop(gauges);
     assert_eq!(counters.outstanding_work(), 0);
+}
+
+#[test]
+fn blocking_materialized_wait_is_excluded_only_from_ownership_handoff_work() {
+    let counters = Arc::new(super::NodeQuiesceCounters::default());
+    let mut work = super::NodeQuiesceWorkGuard::begin(counters.clone());
+
+    assert_eq!(
+        counters.outstanding_work_for(EntityGatePurpose::ModelAlteration),
+        1
+    );
+    assert_eq!(
+        counters.outstanding_work_for(EntityGatePurpose::OwnershipHandoff),
+        1
+    );
+
+    work.park_for_required_materialized_state();
+    assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 0);
+    assert_eq!(counters.pending_materialized.load(Ordering::Acquire), 1);
+    assert_eq!(
+        counters.outstanding_work_for(EntityGatePurpose::ModelAlteration),
+        1
+    );
+    assert_eq!(
+        counters.outstanding_work_for(EntityGatePurpose::OwnershipHandoff),
+        0
+    );
+
+    work.resume_from_required_materialized_state();
+    assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 1);
+    assert_eq!(counters.pending_materialized.load(Ordering::Acquire), 0);
+    drop(work);
+    assert_eq!(counters.outstanding_work(), 0);
+}
+
+#[tokio::test]
+async fn dropping_pending_materialized_batch_nacks_its_ack_root() {
+    let tracker = Arc::new(AckRootTracker::default());
+    let (acks, completion) = AckSet::tracked_root(tracker.clone());
+    let pending = super::PendingMaterializedBatch::new(
+        identifier("orders"),
+        super::RelayRecordBatch::single(
+            test_schema(&[("value", ParseAsType::I64)]),
+            None,
+            test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]),
+            acks,
+        )
+        .expect("pending materialized test batch should build"),
+    );
+
+    assert_eq!(tracker.outstanding(), 1);
+    assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+    drop(pending);
+
+    assert_eq!(
+        completion.wait().await,
+        AckOutcome::NoAck(
+            "node stopped while waiting for required materialized state at relay 'orders'"
+                .to_string()
+        )
+    );
+    assert_eq!(tracker.outstanding(), 0);
+    assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+}
+
+#[test]
+fn required_wait_ack_does_not_block_ownership_handoff_drain_status() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let ingestor = identifier("orders_source");
+    let tracker = Arc::new(AckRootTracker::default());
+    runtime.in_flight_by_ingestor.insert(
+        super::RuntimeKey::new(domain.clone(), ingestor.clone()),
+        tracker.clone(),
+    );
+    let (acks, _completion) = AckSet::tracked_root(tracker);
+    let _required_wait = acks.required_wait_guard();
+    let affected = [crate::registry::RegistryEntity {
+        kind: ModelKind::Ingestor,
+        identifier: ingestor,
+    }];
+
+    let alteration =
+        runtime.entity_drain_status(&domain, &[], &affected, EntityGatePurpose::ModelAlteration);
+    assert_eq!(alteration.outstanding_acks, 1);
+    assert!(!alteration.is_drained());
+
+    let handoff =
+        runtime.entity_drain_status(&domain, &[], &affected, EntityGatePurpose::OwnershipHandoff);
+    assert_eq!(handoff.outstanding_acks, 0);
+    assert!(handoff.is_drained());
 }
 
 #[tokio::test]
@@ -4259,7 +4485,12 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
         .await
         .expect("the relay owner buffer should admit the batch");
 
-    let status = runtime.entity_drain_status(&domain, std::slice::from_ref(&relay), &[]);
+    let status = runtime.entity_drain_status(
+        &domain,
+        std::slice::from_ref(&relay),
+        &[],
+        EntityGatePurpose::ModelAlteration,
+    );
 
     assert_eq!(status.buffered_relay_batches, 1);
     assert!(!status.is_drained());
@@ -11987,8 +12218,11 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
         &input_relay,
         &dependencies,
         retained,
-        &mut shutdown_rx,
-        true,
+        super::MaterializedBatchWaitContext {
+            shutdown_rx: &mut shutdown_rx,
+            wait_for_required_state: true,
+            quiesce_work: None,
+        },
     );
     tokio::pin!(resolution);
     assert!(
@@ -12033,8 +12267,11 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
                     policy: nervix_models::MaterializedStatePolicy::RequiredWait,
                 }],
                 retained,
-                &mut shutdown_rx,
-                false,
+                super::MaterializedBatchWaitContext {
+                    shutdown_rx: &mut shutdown_rx,
+                    wait_for_required_state: false,
+                    quiesce_work: None,
+                },
             )
             .await
             .expect("terminal drain must resolve retained materialized work")

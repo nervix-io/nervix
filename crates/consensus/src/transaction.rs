@@ -45,6 +45,7 @@ pub struct TransactionStepResult {
     pub first_statement: usize,
     pub statement_count: usize,
     pub quiesce_level: Option<QuiesceLevel>,
+    pub planned_relocations: Option<usize>,
     pub result: TransactionCommandResult,
 }
 

@@ -777,7 +777,9 @@ impl MqttIngestor {
         };
         loop {
             tokio::task::consume_budget().await;
-            let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
+            let (acks, completion) = context
+                .runtime
+                .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
             // One acknowledged message is one group.
             let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
             let dispatch_result = Self::dispatch_entry(
@@ -895,7 +897,9 @@ impl MqttIngestor {
 
             for record in records {
                 tokio::task::consume_budget().await;
-                let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
+                let (acks, completion) = context
+                    .runtime
+                    .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
                 let dispatched = Self::dispatch_entry(
                     context,
                     record,

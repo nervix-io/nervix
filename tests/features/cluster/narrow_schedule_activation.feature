@@ -1,5 +1,6 @@
 Feature: Narrow schedule activation on ownership change
 
+  @planned-unaffected-continuity
   Scenario: Deduplicator state on an unaffected runtime node survives a drain
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -642,6 +643,7 @@ Feature: Narrow schedule activation on ownership change
       {"sample_count":4,"tenant":"acme","total_latency":100}
       """
 
+  @planned-group-handoff
   Scenario: Moving a REQUIRE COLOCATION group restarts only its members
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -797,7 +799,15 @@ Feature: Narrow schedule activation on ownership change
       """
       ALTER PLACEMENT keep_corridor_local SET POLICY REQUIRE COLOCATION;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    Then the last command output contains
+      """
+      quiesce level: ENTITY_PAUSE
+      """
+    And the last command output contains
+      """
+      planned relocations: 2
+      """
+    When these NSPL commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """

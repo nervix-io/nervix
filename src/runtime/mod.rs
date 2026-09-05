@@ -32,7 +32,8 @@ use dashmap::DashMap;
 use fjall::Database;
 use futures_util::stream::FuturesUnordered;
 use nervix_interconnect::{
-    Envelope, RelayPayload, RelayPayloadKind, Transport, TransportMode as InterconnectTransportMode,
+    EntityGatePurpose, Envelope, RelayPayload, RelayPayloadKind, Transport,
+    TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
     AckMode, Assignment, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule,
@@ -116,7 +117,9 @@ use crate::{
     },
     registry::{ActiveGraph, RegistryEntity, RuntimeChange, RuntimeChanges},
     resource::ResourceStore,
-    runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckRootTracker, AckSet},
+    runtime_ack::{
+        AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
+    },
     runtime_schema::{
         CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool, RuntimeRecordBatch,
         RuntimeRecordMetadata, RuntimeRow, RuntimeValue, compile_codec_with_protobuf,
@@ -366,6 +369,7 @@ enum IngestorRuntime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IngestorQuiesceCause {
     EntityHold,
+    OwnershipHandoff,
     DomainPause,
     MemoryPressure,
 }
@@ -374,6 +378,7 @@ impl IngestorQuiesceCause {
     fn as_str(self) -> &'static str {
         match self {
             Self::EntityHold => "entity hold",
+            Self::OwnershipHandoff => "ownership handoff",
             Self::DomainPause => "domain pause",
             Self::MemoryPressure => "memory pressure",
         }
@@ -383,13 +388,16 @@ impl IngestorQuiesceCause {
 #[derive(Debug, Default)]
 struct IngestorQuiesceReasons {
     entity_holds: usize,
+    ownership_handoffs: usize,
     domain_pause: bool,
     memory_pressure: bool,
 }
 
 impl IngestorQuiesceReasons {
     fn active(&self) -> Option<IngestorQuiesceCause> {
-        if self.memory_pressure {
+        if self.ownership_handoffs > 0 {
+            Some(IngestorQuiesceCause::OwnershipHandoff)
+        } else if self.memory_pressure {
             Some(IngestorQuiesceCause::MemoryPressure)
         } else if self.domain_pause {
             Some(IngestorQuiesceCause::DomainPause)
@@ -582,6 +590,9 @@ impl IngestorQuiesceControl {
             IngestorQuiesceCause::EntityHold => {
                 reasons.entity_holds = reasons.entity_holds.saturating_add(1);
             }
+            IngestorQuiesceCause::OwnershipHandoff => {
+                reasons.ownership_handoffs = reasons.ownership_handoffs.saturating_add(1);
+            }
             IngestorQuiesceCause::DomainPause => reasons.domain_pause = true,
             IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = true,
         }
@@ -595,6 +606,9 @@ impl IngestorQuiesceControl {
             match cause {
                 IngestorQuiesceCause::EntityHold => {
                     reasons.entity_holds = reasons.entity_holds.saturating_sub(1);
+                }
+                IngestorQuiesceCause::OwnershipHandoff => {
+                    reasons.ownership_handoffs = reasons.ownership_handoffs.saturating_sub(1);
                 }
                 IngestorQuiesceCause::DomainPause => reasons.domain_pause = false,
                 IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = false,
@@ -628,13 +642,18 @@ impl IngestorQuiesceControl {
     }
 
     pub(crate) fn should_suspend_intake(&self) -> bool {
-        self.is_quiesced()
-            && (!self.active_mode_is_supported()
-                || matches!(self.mode(), IngestQuiesceMode::Suspend))
+        if self.cause() == Some(IngestorQuiesceCause::OwnershipHandoff) {
+            true
+        } else {
+            self.is_quiesced()
+                && (!self.active_mode_is_supported()
+                    || matches!(self.mode(), IngestQuiesceMode::Suspend))
+        }
     }
 
     pub(crate) fn should_skip_poll(&self) -> bool {
         match self.cause() {
+            Some(IngestorQuiesceCause::OwnershipHandoff) => true,
             Some(IngestorQuiesceCause::MemoryPressure) => true,
             Some(_) if !self.active_mode_is_supported() => true,
             Some(_) => matches!(self.mode(), IngestQuiesceMode::Suspend),
@@ -668,6 +687,9 @@ impl IngestorQuiesceControl {
         let Some(cause) = self.cause() else {
             return IngestorQuiesceIntake::Dispatch(payload);
         };
+        if cause == IngestorQuiesceCause::OwnershipHandoff {
+            return IngestorQuiesceIntake::Dispatch(payload);
+        }
         let mode = self.mode();
         if !self.active_mode_is_supported() {
             if endpoint {
@@ -763,6 +785,10 @@ impl IngestorQuiesceControl {
         let Some(cause) = self.cause() else {
             return Ok(());
         };
+        if cause == IngestorQuiesceCause::OwnershipHandoff {
+            self.record_rejected(1);
+            return Err(None);
+        }
         let mode = self.mode();
         if !self.active_mode_is_supported() {
             self.record_rejected(1);
@@ -1017,17 +1043,19 @@ pub struct DomainDrainStatus {
 pub struct EntityDrainStatus {
     pub buffered_relay_batches: usize,
     pub node_work_items: usize,
+    pub outstanding_acks: usize,
     pub emitter_publishing: Vec<EmitterPublishingDrainStatus>,
 }
 
 impl EntityDrainStatus {
     pub fn is_drained(&self) -> bool {
-        self.buffered_relay_batches == 0 && self.node_work_items == 0
+        self.buffered_relay_batches == 0 && self.node_work_items == 0 && self.outstanding_acks == 0
     }
 
     pub fn outstanding_work(&self) -> usize {
         self.buffered_relay_batches
             .saturating_add(self.node_work_items)
+            .saturating_add(self.outstanding_acks)
     }
 }
 
@@ -1035,15 +1063,22 @@ pub struct EntityGateHold {
     gates: Vec<RelayDispatchGateLease>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct EntityGateLease<'a> {
+    pub(crate) deadline: Instant,
+    pub(crate) reason: &'a str,
+}
+
 struct EntityAlterHold {
     gates: EntityGateHold,
-    quiesced_ingestors: Vec<Identifier>,
+    quiesced_ingestors: Vec<(Identifier, IngestorQuiesceCause)>,
 }
 
 #[derive(Debug, Default)]
 struct NodeQuiesceCounters {
     mailbox_and_in_flight: AtomicUsize,
     collected_inputs: AtomicUsize,
+    pending_materialized: AtomicUsize,
     output_buffers: AtomicUsize,
     force_flushes: AtomicUsize,
 }
@@ -1053,13 +1088,24 @@ impl NodeQuiesceCounters {
         self.mailbox_and_in_flight
             .load(Ordering::Acquire)
             .saturating_add(self.collected_inputs.load(Ordering::Acquire))
+            .saturating_add(self.pending_materialized.load(Ordering::Acquire))
             .saturating_add(self.output_buffers.load(Ordering::Acquire))
             .saturating_add(self.force_flushes.load(Ordering::Acquire))
+    }
+
+    fn outstanding_work_for(&self, purpose: EntityGatePurpose) -> usize {
+        let outstanding = self.outstanding_work();
+        if purpose == EntityGatePurpose::OwnershipHandoff {
+            outstanding.saturating_sub(self.pending_materialized.load(Ordering::Acquire))
+        } else {
+            outstanding
+        }
     }
 }
 
 struct NodeQuiesceWorkGuard {
     counters: Arc<NodeQuiesceCounters>,
+    required_materialized_wait: bool,
 }
 
 impl NodeQuiesceWorkGuard {
@@ -1067,21 +1113,54 @@ impl NodeQuiesceWorkGuard {
         counters
             .mailbox_and_in_flight
             .fetch_add(1, Ordering::AcqRel);
-        Self { counters }
+        Self {
+            counters,
+            required_materialized_wait: false,
+        }
+    }
+
+    fn park_for_required_materialized_state(&mut self) {
+        if self.required_materialized_wait {
+            return;
+        }
+        self.counters
+            .pending_materialized
+            .fetch_add(1, Ordering::AcqRel);
+        self.counters
+            .mailbox_and_in_flight
+            .fetch_sub(1, Ordering::AcqRel);
+        self.required_materialized_wait = true;
+    }
+
+    fn resume_from_required_materialized_state(&mut self) {
+        if !self.required_materialized_wait {
+            return;
+        }
+        self.counters
+            .mailbox_and_in_flight
+            .fetch_add(1, Ordering::AcqRel);
+        self.counters
+            .pending_materialized
+            .fetch_sub(1, Ordering::AcqRel);
+        self.required_materialized_wait = false;
     }
 }
 
 impl Drop for NodeQuiesceWorkGuard {
     fn drop(&mut self) {
-        self.counters
-            .mailbox_and_in_flight
-            .fetch_sub(1, Ordering::AcqRel);
+        let counter = if self.required_materialized_wait {
+            &self.counters.pending_materialized
+        } else {
+            &self.counters.mailbox_and_in_flight
+        };
+        counter.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
 struct BranchQuiesceGauges {
     counters: Arc<NodeQuiesceCounters>,
     collected_inputs: usize,
+    pending_materialized: usize,
     output_buffers: usize,
 }
 
@@ -1090,12 +1169,13 @@ impl BranchQuiesceGauges {
         Self {
             counters,
             collected_inputs: 0,
+            pending_materialized: 0,
             output_buffers: 0,
         }
     }
 
     fn observe(&mut self, branch: &BranchRuntime, processor: &Identifier) {
-        let (collected_inputs, output_buffers) = branch
+        let (collected_inputs, pending_materialized, output_buffers) = branch
             .processors
             .get(processor)
             .map(|processor| {
@@ -1104,7 +1184,8 @@ impl BranchQuiesceGauges {
                         .input_collectors
                         .values()
                         .map(|collector| collector.pending.len())
-                        .fold(processor.pending_materialized.len(), usize::saturating_add),
+                        .sum(),
+                    processor.pending_materialized.len(),
                     processor
                         .operation
                         .output_routes()
@@ -1119,6 +1200,11 @@ impl BranchQuiesceGauges {
             &self.counters.collected_inputs,
             &mut self.collected_inputs,
             collected_inputs,
+        );
+        Self::replace_gauge(
+            &self.counters.pending_materialized,
+            &mut self.pending_materialized,
+            pending_materialized,
         );
         Self::replace_gauge(
             &self.counters.output_buffers,
@@ -1142,6 +1228,9 @@ impl Drop for BranchQuiesceGauges {
         self.counters
             .collected_inputs
             .fetch_sub(self.collected_inputs, Ordering::AcqRel);
+        self.counters
+            .pending_materialized
+            .fetch_sub(self.pending_materialized, Ordering::AcqRel);
         self.counters
             .output_buffers
             .fetch_sub(self.output_buffers, Ordering::AcqRel);
@@ -3052,6 +3141,53 @@ struct BranchRuntime {
     processors: HashMap<Identifier, RelayProcessorNode>,
 }
 
+#[derive(Debug)]
+struct PendingMaterializedBatch {
+    input_relay: Identifier,
+    batch: Option<RelayRecordBatch>,
+    required_wait: Option<AckRequiredWaitGuard>,
+}
+
+struct MaterializedBatchWaitContext<'a> {
+    shutdown_rx: &'a mut watch::Receiver<bool>,
+    wait_for_required_state: bool,
+    quiesce_work: Option<&'a mut NodeQuiesceWorkGuard>,
+}
+
+impl PendingMaterializedBatch {
+    fn new(input_relay: Identifier, batch: RelayRecordBatch) -> Self {
+        let required_wait = AckRequiredWaitGuard::new(batch.acks.iter());
+        Self {
+            input_relay,
+            batch: Some(batch),
+            required_wait: Some(required_wait),
+        }
+    }
+
+    fn into_parts(mut self) -> (Identifier, RelayRecordBatch) {
+        drop(self.required_wait.take());
+        let batch = self
+            .batch
+            .take()
+            .expect("pending materialized batch must remain present until retry");
+        (self.input_relay.clone(), batch)
+    }
+}
+
+impl Drop for PendingMaterializedBatch {
+    fn drop(&mut self) {
+        if let Some(batch) = &self.batch {
+            let reason = format!(
+                "node stopped while waiting for required materialized state at relay '{}'",
+                self.input_relay
+            );
+            for ack in &batch.acks {
+                ack.no_ack(reason.clone());
+            }
+        }
+    }
+}
+
 fn output_error_policies(
     policy: &MessageErrorPolicy,
     general: GeneralErrorPolicy,
@@ -3966,6 +4102,7 @@ pub struct Runtime {
     domains: Arc<DashMap<Domain, RuntimeDomainState, RandomState>>,
     domain_status_changed: watch::Sender<u64>,
     in_flight_by_domain: Arc<DashMap<Domain, Arc<AckRootTracker>, RandomState>>,
+    in_flight_by_ingestor: Arc<DashMap<RuntimeKey, Arc<AckRootTracker>, RandomState>>,
     generator_activity_by_domain: Arc<DashMap<Domain, Arc<AtomicUsize>, RandomState>>,
     emitter_buffers: Arc<DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>>,
     force_flush_by_domain: Arc<DashMap<Domain, Arc<DomainForceFlush>, RandomState>>,
@@ -5494,7 +5631,7 @@ impl RelayProcessorNode {
                 }
                 Ok(MaterializedDependencyResolution::Wait) => {
                     self.pending_materialized
-                        .push_back((incoming_relay.clone(), batch));
+                        .push_back(PendingMaterializedBatch::new(incoming_relay.clone(), batch));
                     return;
                 }
                 Err(error) => {
@@ -7790,9 +7927,10 @@ impl BranchRuntime {
         };
         let pending_count = processor.pending_materialized.len();
         for _ in 0..pending_count {
-            let Some((incoming_relay, batch)) = processor.pending_materialized.pop_front() else {
+            let Some(pending) = processor.pending_materialized.pop_front() else {
                 break;
             };
+            let (incoming_relay, batch) = pending.into_parts();
             processor.execute(graph, self, &incoming_relay, batch).await;
         }
         self.processors.insert(processor_id.clone(), processor);
@@ -7821,10 +7959,10 @@ impl BranchRuntime {
             };
             let pending_count = processor.pending_materialized.len();
             for _ in 0..pending_count {
-                let Some((incoming_relay, batch)) = processor.pending_materialized.pop_front()
-                else {
+                let Some(pending) = processor.pending_materialized.pop_front() else {
                     break;
                 };
+                let (incoming_relay, batch) = pending.into_parts();
                 processor.execute(graph, self, &incoming_relay, batch).await;
             }
             self.processors.insert(processor_id, processor);
@@ -9043,7 +9181,7 @@ struct ProcessorSnapshotTask {
 struct ProcessorBranchHandoff {
     key: Option<BranchKey>,
     restored_at: Timestamp,
-    pending_materialized: VecDeque<(Identifier, RelayRecordBatch)>,
+    pending_materialized: VecDeque<PendingMaterializedBatch>,
 }
 
 enum ProcessorNodeCommand {
@@ -9675,7 +9813,7 @@ fn spawn_processor_branch_task(
     context: ProcessorRuntimeContext,
     template: &BranchInstanceTemplate,
     key: Option<BranchKey>,
-    pending_materialized: VecDeque<(Identifier, RelayRecordBatch)>,
+    pending_materialized: VecDeque<PendingMaterializedBatch>,
 ) -> Result<ProcessorBranchTask, String> {
     let mut branch = template
         .instantiate(&context.runtime_handle, &context.domain, key)?
@@ -9822,7 +9960,12 @@ async fn run_processor_branch_task(
                     }
                 }
             }
-            _ = runtime_handle.materialized_state_changed.notified(), if has_pending_materialized => {
+            _ = async {
+                tokio::select! {
+                    _ = runtime_handle.materialized_state_changed.notified() => {}
+                    _ = sleep(runtime_handle.state_replication_poll_interval) => {}
+                }
+            }, if has_pending_materialized => {
                 branch
                     .retry_processor_pending_materialized(&graph, &processor)
                     .await;

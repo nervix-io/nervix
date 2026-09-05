@@ -439,8 +439,11 @@ impl PulsarIngestor {
 
                                             loop {
                                                 tokio::task::consume_budget().await;
-                                                let (acks, completion) =
-                                                    task_runtime.tracked_ack_root(&task_domain);
+                                                let (acks, completion) = task_runtime
+                                                    .tracked_ingestor_ack_root(
+                                                        &task_domain,
+                                                        &task_ingestor,
+                                                    );
                                                 // One acknowledged message is one group.
                                                 let mut collector = IngestRouteCollector::new(
                                                     IngestMetadataKind::Headers,
@@ -667,8 +670,11 @@ impl PulsarIngestor {
                                                 let mut dispatch_acks = Vec::with_capacity(records.len());
                                                 for record in records {
                                                     tokio::task::consume_budget().await;
-                                                    let (acks, completion) =
-                                                        task_runtime.tracked_ack_root(&task_domain);
+                                                    let (acks, completion) = task_runtime
+                                                        .tracked_ingestor_ack_root(
+                                                            &task_domain,
+                                                            &task_ingestor,
+                                                        );
                                                     dispatch_acks.push(
                                                         if !task_branched_senders.is_empty() {
                                                             acks.attached()

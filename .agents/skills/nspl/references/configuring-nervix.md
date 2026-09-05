@@ -192,13 +192,15 @@ relay. Do not use them to scan across branches.
 - Transactions queue only the bound domain's replicated configuration statements. Commit progress
   survives leader failover, while only consecutive model-mutation runs receive atomic
   candidate-graph validation and persistence; `CREATE DOMAIN`, `CREATE USER`, read-only, and
-  session/client-local commands remain outside.
+  session/client-local commands remain outside. Placement changes that move running owners use an
+  effective `ENTITY_PAUSE`, and `COMMIT` also reports the total planned relocations.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
-- Entity holds, domain pauses, and memory-pressure quiescing automatically consult the ingestor's
-  mode. Stop, drop, drain/cordon relocation, failover, and shutdown terminate the source session,
-  and a relocation terminates only the ingestors it actually moved. Do not emit `PAUSE` or `RESUME`
-  syntax.
+- Model-alteration entity holds, domain pauses, and memory-pressure quiescing consult the
+  ingestor's mode. Planned drain, graceful-shutdown drain, and placement relocation ignore that
+  mode: they stop new intake only for moved ingestors, drain already admitted ACK work, then switch
+  ownership. Stop and drop terminate the source session; unexpected owner loss uses immediate
+  failover. Do not emit `PAUSE` or `RESUME` syntax.
 - External entities and resource contents are provisioned before the graph is started.
 
 ## Verification and troubleshooting

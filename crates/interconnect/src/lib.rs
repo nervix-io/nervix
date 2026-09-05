@@ -344,6 +344,21 @@ pub struct EntityReference {
     pub identifier: Identifier,
 }
 
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EntityGatePurpose {
+    ModelAlteration,
+    OwnershipHandoff,
+}
+
+impl EntityGatePurpose {
+    pub const fn operation_name(self) -> &'static str {
+        match self {
+            Self::ModelAlteration => "model alteration",
+            Self::OwnershipHandoff => "ownership handoff",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateRequest {
     pub correlation_id: u64,
@@ -351,6 +366,7 @@ pub struct EntityGateRequest {
     pub domain: Domain,
     pub relays: Vec<Identifier>,
     pub affected_entities: Vec<EntityReference>,
+    pub purpose: EntityGatePurpose,
     pub deadline_millis: u64,
     pub reason: String,
 }
@@ -365,6 +381,7 @@ pub struct EntityGateResponse {
 pub struct EntityDrainStatusEnvelope {
     pub buffered_relay_batches: u64,
     pub node_work_items: u64,
+    pub outstanding_acks: u64,
     pub emitter_publishing: Vec<EmitterPublishingDrainStatusEnvelope>,
 }
 
@@ -374,6 +391,7 @@ pub struct EntityDrainStatusRequest {
     pub domain: Domain,
     pub relays: Vec<Identifier>,
     pub affected_entities: Vec<EntityReference>,
+    pub purpose: EntityGatePurpose,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

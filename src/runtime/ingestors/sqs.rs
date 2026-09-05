@@ -197,8 +197,11 @@ impl SqsIngestor {
                                                         let metadata = [IngestMetadataRow::Headers {
                                                             headers: &headers,
                                                         }];
-                                                        let (acks, completion) =
-                                                            task_runtime.tracked_ack_root(&task_domain);
+                                                        let (acks, completion) = task_runtime
+                                                            .tracked_ingestor_ack_root(
+                                                                &task_domain,
+                                                                &task_ingestor,
+                                                            );
                                                         let dispatch_result = task_runtime
                                                             .dispatch_ingested_records(IngestGroupDispatch {
                                                                 collector: &mut collector,

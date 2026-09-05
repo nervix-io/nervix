@@ -227,8 +227,12 @@ node.
 
 When a new `REQUIRE COLOCATION` relationship becomes effective, Nervix consolidates the complete
 colocation group onto one eligible cluster node. Existing assignments are preserved only when
-they satisfy the hard requirement. The command response reports the number of planned
-relocations.
+they satisfy the hard requirement. On a running domain, Nervix plans every relocation before
+holding the graph, gates all moved groups together, drains their admitted work, and publishes the
+placement model and assignments in one schedule update. A timeout leaves both the placement model
+and schedule unchanged. The immediate command, or the aggregate `COMMIT` result for a transaction,
+reports `quiesce level: ENTITY_PAUSE` and the number of planned relocations. A change with no owner
+move reports `DYNAMIC`.
 
 `PREFER COLOCATION` and `SUGGEST SEPARATION` affect new placement decisions, including newly
 created runtime nodes and targets selected during failover or drain. They never move an existing
@@ -236,17 +240,19 @@ assignment merely to improve a preference. `NEUTRAL` contributes no placement sc
 hard requirement also does not spread runtime nodes that are already on the same cluster node.
 
 Failover and drain relocate a hard colocation group as one unit, so an executing assignment never
-violates `REQUIRE COLOCATION`. A cordoned cluster node is not considered for a new assignment or a
-group relocation. See [Control Plane](control-plane.md) for the surrounding drain, failover, and
-activation behavior.
+violates `REQUIRE COLOCATION`. A cordoned cluster node is not considered for a new primary or
+ordinary replica assignment. During a successful planned move, however, a live former primary is
+kept as the first replica when the configured replica count provides a slot. See
+[Control Plane](control-plane.md#planned-ownership-handoffs-and-failover) for the gate, drain,
+failure, and activation behavior.
 
-Failover, drain, and colocation consolidation restart only the runtime nodes whose assignment
-changed. A runtime node that keeps its primary owner and replica set keeps its buffered work,
-retained `REQUIRED WAIT` messages, branch-local state, or external source session. Its neighbors
-re-point to the new owner without restarting. A planned relay move gates producers, drains the
-owner buffer and dispatch slots, then starts one owner on the target. An unplanned owner loss drops
-that volatile relay state. Draining a cluster node that hosts several runtime nodes moves them one
-at a time, and each moved runtime node restarts exactly once.
+Drain and colocation consolidation use a planned handoff and restart only runtime nodes whose
+primary owner changed. A runtime node that keeps its assignment continues on every cluster node,
+including the former and new owners of a moved neighbor: it keeps buffered work, retained
+`REQUIRED WAIT` messages, branch-local state, and external source sessions. Its neighbors re-point
+at the committed revision. Draining a host moves hard groups and independent nodes one at a time in
+canonical kind/name order. Failover uses immediate termination because the former owner is already
+unavailable.
 
 Placement constrains primary owners. It does not control replica count or replica placement. An
 ordinary relay has no replicas; a materialized relay's replicas contain only materialized state.

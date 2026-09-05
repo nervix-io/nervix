@@ -28,11 +28,11 @@ use triomphe::Arc;
 
 use super::{
     BranchRuntime, CompiledBranchProgram, CompiledDeduplicatorKeyProgram,
-    CompiledProgramWithMaterializedInterest, RelayBoundaryServices, RelayMessage, RelayRecordBatch,
-    RelayRegistry, ReplicatedDeduplicatorState, ReplicatedWasmProcessorState,
-    ReplicatedWindowProcessorState, RuntimeFlushPolicy, RuntimeInputCollectPolicy,
-    SharedActiveGraph, WindowProcessorState, inferencer::OnnxInferencerSession,
-    relay_batch::RelayRecordBatchReorderError,
+    CompiledProgramWithMaterializedInterest, PendingMaterializedBatch, RelayBoundaryServices,
+    RelayMessage, RelayRecordBatch, RelayRegistry, ReplicatedDeduplicatorState,
+    ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
+    RuntimeInputCollectPolicy, SharedActiveGraph, WindowProcessorState,
+    inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchReorderError,
 };
 use crate::{
     registry::ActiveGraph,
@@ -330,7 +330,7 @@ pub(super) struct RelayProcessorNode {
     pub(super) compiled_from_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     pub(super) filter_where: Option<nervix_models::Expression>,
     pub(super) materialized_state: Vec<nervix_models::MaterializedStateDependency>,
-    pub(super) pending_materialized: VecDeque<(Identifier, RelayRecordBatch)>,
+    pub(super) pending_materialized: VecDeque<PendingMaterializedBatch>,
     pub(super) compiled_filter_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,
     pub(super) last_graph: Option<StdArc<ActiveGraph>>,
