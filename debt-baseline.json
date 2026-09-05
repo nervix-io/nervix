@@ -1,0 +1,11 @@
+{
+  "as_casts": 368,
+  "bare_error_signatures": 922,
+  "bare_unwrap_and_expect": 503,
+  "files_over_3000_lines": 18,
+  "model_matches_in_data_plane": 184,
+  "parser_imports_outside_edges": 61,
+  "result_string_errors": 535,
+  "string_node_ids": 115,
+  "testing_feature_struct_fields": 9
+}

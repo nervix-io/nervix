@@ -238,6 +238,10 @@ lint: build-web-console lint-inner proto-lint
 audit:
     cargo audit
 
+# Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
+ratchet *args:
+    python3 scripts/ratchet.py {{ args }}
+
 validate: fmt lint validate-skill validate-nspl-docs
 
 validate-ci: fmt-check lint validate-skill validate-nspl-docs
