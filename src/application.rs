@@ -182,6 +182,8 @@ const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const OBSERVABILITY_LIVEZ_PATH: &str = "/livez";
 const OBSERVABILITY_READYZ_PATH: &str = "/readyz";
 const OBSERVABILITY_METRICS_PATH: &str = "/metrics";
+mod relocation;
+
 const WEB_CONSOLE_INDEX: &[u8] = include_bytes!("../crates/web-console/dist/index.html");
 const WEB_CONSOLE_CSS: &[u8] = include_bytes!("../crates/web-console/dist/console.css");
 const WEB_CONSOLE_JS: &[u8] = include_bytes!("../crates/web-console/dist/nervix-web-console.js");
@@ -6228,6 +6230,21 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Cluster nodes the cluster considers usable: gossip peers that are not marked unavailable.
+    ///
+    /// Scheduling and failover read liveness this way, so every leader-orchestrated hold must too.
+    /// A node marked unavailable cannot answer a gate request, and contacting it only spends the
+    /// request deadline before the hold fails.
+    async fn available_node_ids(&self) -> Vec<String> {
+        let gossip = self.cluster.gossip_state().await;
+        gossip
+            .live_nodes
+            .into_iter()
+            .map(|node| node.node_id)
+            .filter(|node_id| !gossip.dead_node_ids.contains(node_id))
+            .collect()
+    }
+
     async fn engage_cluster_entity_gates(
         &self,
         domain: &Domain,
@@ -6236,7 +6253,7 @@ impl SessionServiceImpl {
         purpose: EntityGatePurpose,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
-        let mut nodes = self.cluster.live_node_ids().await;
+        let mut nodes = self.available_node_ids().await;
         if !nodes
             .iter()
             .any(|node| node == self.consensus.local_node_id())
@@ -6291,8 +6308,7 @@ impl SessionServiceImpl {
             return Ok(None);
         }
         let live_nodes = self
-            .cluster
-            .live_node_ids()
+            .available_node_ids()
             .await
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -6430,8 +6446,7 @@ impl SessionServiceImpl {
             polling.tick().await;
             if !required_live_nodes.is_empty() {
                 let live_nodes = self
-                    .cluster
-                    .live_node_ids()
+                    .available_node_ids()
                     .await
                     .into_iter()
                     .collect::<BTreeSet<_>>();
@@ -10162,6 +10177,14 @@ impl SessionServiceImpl {
                 self.set_node_cordoned(uncordon.node_id, false).await
             }
             Statement::DrainNode(drain) => self.drain_node(drain.node_id).await,
+            Statement::Relocate(relocation) => {
+                let domain = domain.as_ref().expect("domain required");
+                self.relocate(domain, relocation).await
+            }
+            Statement::DescribeRelocation(relocation) => {
+                let domain = domain.as_ref().expect("domain required");
+                self.describe_relocation(domain, relocation).await
+            }
             Statement::DescribeRelay(describe) => {
                 let domain = domain.as_ref().expect("domain required");
                 self.describe_stream(domain, describe).await
@@ -15305,6 +15328,7 @@ fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribeWasmProcessor(_)
             | Statement::DescribeWindowProcessor(_)
             | Statement::DescribePlacement(_)
+            | Statement::DescribeRelocation(_)
             | Statement::LookupQuery(_)
             | Statement::ShowCreate(_)
             | Statement::ShowUdfs(_)
@@ -15721,6 +15745,7 @@ fn transaction_statement_label(statement: &Statement) -> &'static str {
         Statement::CordonNode(_) => "CORDON",
         Statement::UncordonNode(_) => "UNCORDON",
         Statement::DrainNode(_) => "DRAIN",
+        Statement::Relocate(_) => "RELOCATE",
         Statement::LookupQuery(_) => "LOOKUP",
         Statement::ShowCreate(_)
         | Statement::ShowUdfs(_)
@@ -15743,7 +15768,8 @@ fn transaction_statement_label(statement: &Statement) -> &'static str {
         | Statement::DescribeWindowProcessor(_)
         | Statement::DescribeWasmProcessor(_)
         | Statement::DescribeUdf(_)
-        | Statement::DescribePlacement(_) => "DESCRIBE",
+        | Statement::DescribePlacement(_)
+        | Statement::DescribeRelocation(_) => "DESCRIBE",
         _ => "statement",
     }
 }

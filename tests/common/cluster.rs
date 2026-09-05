@@ -698,6 +698,17 @@ impl Cluster {
         handle.stop().await
     }
 
+    /// Signals a node to exit without waiting for the process. Scenarios that observe a
+    /// transient reaction to owner loss must start observing while the node is still on its way
+    /// down, because the leader reacts as soon as it sees the node go.
+    pub(crate) fn begin_stopping_node(&mut self, node_id: &str) {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.request_stop();
+    }
+
     pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         for node_id in &node_ids {

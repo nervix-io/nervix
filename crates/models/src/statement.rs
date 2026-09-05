@@ -41,6 +41,8 @@ pub enum Statement {
     CordonNode(CordonNode),
     UncordonNode(UncordonNode),
     DrainNode(DrainNode),
+    Relocate(Relocation),
+    DescribeRelocation(Relocation),
     DescribeRelay(DescribeRelay),
     DescribeDomain(DescribeDomain),
     DescribeIngestor(DescribeIngestor),
@@ -95,6 +97,8 @@ impl Statement {
             | Self::CordonNode(_)
             | Self::UncordonNode(_)
             | Self::DrainNode(_)
+            | Self::Relocate(_)
+            | Self::DescribeRelocation(_)
             | Self::DescribeRelay(_)
             | Self::DescribeDomain(_)
             | Self::DescribeIngestor(_)
@@ -454,6 +458,127 @@ pub struct UncordonNode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DrainNode {
     pub node_id: String,
+}
+
+/// One kind-qualified runtime node named by a relocation selection or `FOR` override.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RelocationMember {
+    pub kind: ModelKind,
+    pub name: Identifier,
+}
+
+impl RelocationMember {
+    pub fn new(kind: ModelKind, name: Identifier) -> Self {
+        Self { kind, name }
+    }
+
+    /// The `<kind> <name>` spelling used in canonical NSPL and in diagnostics.
+    pub fn to_nspl(&self) -> String {
+        format!("{} {}", self.kind.keyword_phrase(), self.name.as_str())
+    }
+}
+
+/// How a relocation selects the runtime nodes it moves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelocationSelection {
+    /// The listed runtime nodes, which need not be connected.
+    List(Vec<RelocationMember>),
+    /// Every runtime node covered by a directed corridor between the endpoints.
+    Corridor {
+        from: Vec<RelocationMember>,
+        to: Vec<RelocationMember>,
+    },
+}
+
+impl RelocationSelection {
+    /// Every member written in the statement, in written order.
+    pub fn members(&self) -> Vec<&RelocationMember> {
+        match self {
+            Self::List(members) => members.iter().collect(),
+            Self::Corridor { from, to } => from.iter().chain(to).collect(),
+        }
+    }
+
+    fn to_nspl(&self) -> String {
+        match self {
+            Self::List(members) => format_relocation_members(members),
+            Self::Corridor { from, to } => format!(
+                "FROM {} TO {}",
+                format_relocation_members(from),
+                format_relocation_members(to)
+            ),
+        }
+    }
+}
+
+/// Whether a hard group's soft preferences shape the relocation plan.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, AsRefStr, EnumProperty,
+)]
+#[strum(serialize_all = "lowercase")]
+pub enum RelocationPreferenceStrategy {
+    #[strum(props(keyword = "FOLLOW PREFERENCES"))]
+    Follow,
+    #[strum(props(keyword = "IGNORE PREFERENCES"))]
+    Ignore,
+}
+
+impl RelocationPreferenceStrategy {
+    /// The composed NSPL keyword phrase that spells this strategy.
+    pub fn keyword_phrase(self) -> &'static str {
+        self.get_str("keyword")
+            .expect("every relocation strategy must define a keyword phrase")
+    }
+
+    pub fn follows_preferences(self) -> bool {
+        matches!(self, Self::Follow)
+    }
+}
+
+/// A `FOR <kind> <name> FOLLOW|IGNORE PREFERENCES` clause, which sets the strategy of the named
+/// runtime node's whole hard group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelocationPreferenceOverride {
+    pub member: RelocationMember,
+    pub strategy: RelocationPreferenceStrategy,
+}
+
+/// The relocation both `RELOCATE` and `DESCRIBE RELOCATION` describe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Relocation {
+    pub selection: RelocationSelection,
+    pub destination: String,
+    pub strategy: RelocationPreferenceStrategy,
+    pub overrides: Vec<RelocationPreferenceOverride>,
+}
+
+impl Relocation {
+    /// Renders the clauses shared by both statements, with the default strategy before any
+    /// `FOR` override and members in written order.
+    pub fn to_nspl_clauses(&self) -> String {
+        let mut rendered = format!(
+            "{} ONTO NODE {} {}",
+            self.selection.to_nspl(),
+            self.destination,
+            self.strategy.keyword_phrase()
+        );
+        for override_clause in &self.overrides {
+            rendered.push_str(&format!(
+                " FOR {} {}",
+                override_clause.member.to_nspl(),
+                override_clause.strategy.keyword_phrase()
+            ));
+        }
+        rendered
+    }
+}
+
+fn format_relocation_members(members: &[RelocationMember]) -> String {
+    members
+        .iter()
+        .map(RelocationMember::to_nspl)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(

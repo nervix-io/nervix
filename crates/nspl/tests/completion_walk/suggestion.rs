@@ -39,6 +39,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("duration_literal", "100ms"),
     ("endpoint_path", "'/nx/path'"),
     ("hostname", "nx-host"),
+    ("hostname_label", "nx"),
     ("iceberg_location", "'s3://nx/table'"),
     ("jaq_capture", "'{captured: .}'"),
     ("jaq_matcher", "'. == null'"),

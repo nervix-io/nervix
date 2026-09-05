@@ -146,7 +146,8 @@ and memory-pressure shedding. `STOP` and `DROP INGESTOR` terminate the source se
 owner loss also terminates it immediately; volatile quiesce buffers and in-memory ACK state do not
 survive, so recovery depends on the external source's retention and redelivery contract.
 
-Node drain, graceful-shutdown drain, and placement relocation use a planned ownership handoff.
+Node drain, graceful-shutdown drain, placement relocation, and explicit relocation with
+`RELOCATE` use a planned ownership handoff.
 That hold deliberately ignores `ON QUIESCE`: polling and new endpoint admission stop, an already
 admitted payload continues through its routes, and connected-source policy does not buffer or drop
 new work on behalf of the move. Nervix waits for the moved ingestor's admitted ACK roots to resolve
@@ -645,8 +646,9 @@ A WebSocket-client ingestor is a single-owner ingestor. It keeps its existing pr
 assignment through schedule recomputation while every assigned cluster node remains live, just
 like Kafka, MQTT, and the other client sources. Creating or changing another runtime node, a
 cluster node joining or being uncordoned, and a soft placement-policy change do not move its
-outbound session. Failover, draining its owner, or a newly effective `REQUIRE COLOCATION` group can
-move it; a real move closes the former owner's session and opens a new session on the new owner.
+outbound session. Failover, draining its owner, an explicit `RELOCATE`, or a newly effective
+`REQUIRE COLOCATION` group can move it; a real move closes the former owner's session and opens a
+new session on the new owner.
 Endpoint and Syslog ingestors are different because their listeners execute on every live cluster
 node.
 

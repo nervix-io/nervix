@@ -108,6 +108,9 @@ struct ScenarioWorld {
     last_subscription_payload: Option<String>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
+    /// The plan block `DESCRIBE RELOCATION` returned, so the executing `RELOCATE` can be compared
+    /// against it verbatim.
+    saved_relocation_plan: Option<String>,
     last_server_error: Option<String>,
     last_auth_attempts_elapsed: Option<Duration>,
     broker_observer: Option<BrokerObserver>,
@@ -2909,6 +2912,12 @@ async fn when_node_is_stopped(world: &mut ScenarioWorld, node_id: String) {
         .expect("failed to stop node");
 }
 
+#[when(expr = "node {string} begins stopping")]
+async fn when_node_begins_stopping(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.cluster_mut().begin_stopping_node(&node_id);
+}
+
 #[when(expr = "node {string} is gracefully stopped")]
 async fn when_node_is_gracefully_stopped(world: &mut ScenarioWorld, node_id: String) {
     assert!(
@@ -5022,6 +5031,45 @@ async fn when_these_nspl_commands_fail_with(
     }
 }
 
+#[when(expr = "within {string} these NSPL commands on node {string} eventually fail with {string}")]
+#[then(expr = "within {string} these NSPL commands on node {string} eventually fail with {string}")]
+async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
+    world: &mut ScenarioWorld,
+    within: String,
+    node_id: String,
+    expected_error: String,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_server_error = None;
+
+    let timeout = humantime::parse_duration(&within).expect("within must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let expected_error = expand_placeholders(world, &expected_error);
+    let commands = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + timeout;
+    let mut last_outcome;
+    loop {
+        match run_nspl_commands_on_node(world, &node_id, &commands).await {
+            Ok(output) => last_outcome = format!("command succeeded: {output}"),
+            Err(error) => {
+                if error.contains(&expected_error) {
+                    world.last_command_error = Some(error);
+                    return;
+                }
+                last_outcome = error;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected an error containing {expected_error:?} within {within}, last outcome: \
+             {last_outcome}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[when("these NSPL commands fail")]
 async fn when_these_nspl_commands_fail(world: &mut ScenarioWorld, #[step] step: &Step) {
     world.last_command_error = None;
@@ -5233,6 +5281,32 @@ async fn then_last_command_output_contains(world: &mut ScenarioWorld, #[step] st
         output.contains(expected.trim()),
         "expected command output fragment {} in output, got: {output}",
         expected.trim()
+    );
+}
+
+#[then("the last command output is saved as the relocation plan")]
+async fn then_last_command_output_is_saved_as_the_relocation_plan(world: &mut ScenarioWorld) {
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("a relocation plan must exist before it can be saved");
+    world.saved_relocation_plan = Some(output.trim().to_string());
+}
+
+#[then("the last command output contains the saved relocation plan")]
+async fn then_last_command_output_contains_the_saved_relocation_plan(world: &mut ScenarioWorld) {
+    let expected = world
+        .saved_relocation_plan
+        .as_deref()
+        .expect("a relocation plan must be saved before assertion");
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("a command output must exist before assertion");
+    assert!(
+        output.contains(expected),
+        "expected the executed relocation output to contain the described plan\n{expected}\ngot: \
+         {output}"
     );
 }
 
@@ -8846,6 +8920,49 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
             world.last_command_error
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
+    expr = "for {string} node {string} keeps reporting scheduled {string} {string} owner equal to \
+            placeholder {string}"
+)]
+async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeholder(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    placeholder: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let expected = world
+        .placeholders
+        .get(&placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{placeholder}' must be saved before assertion"))
+        .clone();
+    let deadline = Instant::now() + duration;
+
+    while Instant::now() < deadline {
+        tokio::task::consume_budget().await;
+        let output = run_nspl_commands_on_node(world, &node_id, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("cluster status must be readable while observing assignment stability");
+        world.last_command_output = Some(output.clone());
+        let owner = scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
+            .map(|(owner, _)| owner.to_string())
+            .unwrap_or_else(|| {
+                panic!("scheduled {kind} {name} must remain in the schedule, got: {output}")
+            });
+        assert_eq!(
+            owner, expected,
+            "scheduled {kind} {name} must keep owner '{expected}', got: {output}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 

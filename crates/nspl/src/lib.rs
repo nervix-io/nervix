@@ -38,6 +38,7 @@ mod semantic_program;
 pub use semantic_program::{parse_expression, parse_expression_list, parse_route_construction};
 pub mod reingestor;
 pub mod relay;
+pub mod relocation;
 pub mod reorderer;
 pub mod schema;
 #[cfg(feature = "server")]

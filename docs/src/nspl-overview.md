@@ -657,6 +657,9 @@ DESCRIBE REORDERER <reorderer>;
 DESCRIBE WINDOW PROCESSOR <window_processor>;
 DESCRIBE HASH MAP <hash_map>;
 DESCRIBE PLACEMENT <placement>;
+DESCRIBE RELOCATION <selection> ONTO NODE <node_id>
+  FOLLOW PREFERENCES | IGNORE PREFERENCES
+  [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
 DESCRIBE DOMAIN;
 LOOKUP <hash_map> KEY '<key>';
 ```
@@ -672,7 +675,13 @@ DROP NODE <node_id>;
 CORDON NODE <node_id>;
 UNCORDON NODE <node_id>;
 DRAIN NODE <node_id>;
+RELOCATE <selection> ONTO NODE <node_id>
+  FOLLOW PREFERENCES | IGNORE PREFERENCES
+  [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
 ```
+
+A relocation `<selection>` is a kind-qualified list, `<kind> <name>[, ...]`, or a directed corridor,
+`FROM <kind> <name>[, ...] TO <kind> <name>[, ...]`.
 
 For a wire schema, `<kind>` is the exact multi-word kind: `WIRE JSON SCHEMA`, `WIRE CBOR SCHEMA`,
 or `WIRE AVRO SCHEMA`. The same exact kind is required by `DROP`.

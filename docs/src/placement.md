@@ -246,8 +246,12 @@ kept as the first replica when the configured replica count provides a slot. See
 [Control Plane](control-plane.md#planned-ownership-handoffs-and-failover) for the gate, drain,
 failure, and activation behavior.
 
-Drain and colocation consolidation use a planned handoff and restart only runtime nodes whose
-primary owner changed. A runtime node that keeps its assignment continues on every cluster node,
+Explicit relocation with `RELOCATE` is the third planned ownership change: it moves a selected
+subgraph onto a cluster node you name, through the same handoff, and leaves every runtime node
+outside its unit untouched.
+
+Drain, colocation consolidation, and explicit relocation use a planned handoff and restart only
+runtime nodes whose primary owner changed. A runtime node that keeps its assignment continues on every cluster node,
 including the former and new owners of a moved neighbor: it keeps buffered work, retained
 `REQUIRED WAIT` messages, branch-local state, and external source sessions. Its neighbors re-point
 at the committed revision. Draining a host moves hard groups and independent nodes one at a time in
@@ -258,6 +262,152 @@ Placement constrains primary owners. It does not control replica count or replic
 ordinary relay has no replicas; a materialized relay's replicas contain only materialized state.
 Branches also have no separate placement dimension: every concrete relay branch is owned by its
 relay owner, and every processor branch executes within that processor's assignment.
+
+## Relocating Runtime Nodes
+
+Placement rules constrain where the scheduler puts work. `RELOCATE` moves chosen work onto a
+cluster node you name, and `DESCRIBE RELOCATION` shows the plan a statement would execute without
+executing it:
+
+```nspl,ignore
+RELOCATE <selection>
+  ONTO NODE <node_id>
+  FOLLOW PREFERENCES | IGNORE PREFERENCES
+  [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
+
+DESCRIBE RELOCATION <selection>
+  ONTO NODE <node_id>
+  FOLLOW PREFERENCES | IGNORE PREFERENCES
+  [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
+```
+
+`DESCRIBE RELOCATION` accepts exactly the clauses of `RELOCATE` after the verb, so a plan can be
+inspected and then executed by changing one word.
+
+### Selecting The Subgraph
+
+A selection is either an explicit list or a directed corridor, using the same path-gated coverage
+named placement rules use:
+
+```nspl
+RELOCATE JUNCTION risk_scorer ONTO NODE node-2 FOLLOW PREFERENCES;
+```
+
+```nspl
+RELOCATE FROM JUNCTION feature_normalizer TO JUNCTION risk_scorer
+  ONTO NODE node-2
+  FOLLOW PREFERENCES
+  FOR DEDUPLICATOR dedup_txns IGNORE PREFERENCES;
+```
+
+Every member is kind-qualified, because a name is unique only within its kind. The kind uses the
+same spelling as `SHOW CREATE <kind> <name>`:
+
+| `<kind>` | Runtime node |
+| --- | --- |
+| `INGESTOR` | An ingestor other than an endpoint or Syslog source. |
+| `REINGESTOR`, `GENERATOR` | The named reingestor or generator. |
+| `JUNCTION`, `DEDUPLICATOR`, `CORRELATOR`, `REORDERER`, `WINDOW PROCESSOR` | The named processor. |
+| `INFERENCER`, `WASM PROCESSOR` | The named processor. |
+| `EMITTER` | The named emitter. |
+| `HASH MAP` | The named lookup; reported as kind `lookup` in schedule output. |
+| `RELAY` | The named relay, materialized or not. |
+
+Any other kind keyword is a parse error. Names resolve in the session's active domain, duplicate
+members collapse, and an ingestor with several `INSTANCES` is one runtime node whose instances move
+together. A corridor whose every endpoint pair is disconnected is rejected; a partially connected
+corridor is valid and the plan reports each pair's connectivity. The destination must be a Raft
+voter that is live and not cordoned.
+
+### Building The Unit
+
+The set of hard groups a statement moves is its unit. `REQUIRE COLOCATION` is not a preference: a
+selected runtime node always moves with its whole hard group. Soft preferences are shaped by the
+strategy:
+
+- `FOLLOW PREFERENCES` moves each `PREFER COLOCATION` partner of the group along and holds each
+  `SUGGEST SEPARATION` partner out of the unit.
+- `IGNORE PREFERENCES` moves the group and lets its preferences shape nothing: its partners are
+  neither captured nor held back by it.
+
+The strategy after `ONTO NODE` is mandatory and applies to every hard group. A `FOR` clause names
+one runtime node and sets the strategy of that runtime node's whole hard group, because a group
+cannot be moved in pieces and its preferences are one set. Two `FOR` clauses that disagree within
+one hard group are rejected, and a `FOR` clause naming a runtime node outside the plan is rejected.
+
+Capture is transitive and follows the statement default. A captured group inherits that default, so
+`FOLLOW PREFERENCES` closes the unit over `PREFER COLOCATION` relationships until a
+`FOR ... IGNORE PREFERENCES` cuts the chain, while `IGNORE PREFERENCES` with a
+`FOR ... FOLLOW PREFERENCES` opens capture at one group only. Under a `PREFER COLOCATION` domain
+default, a `FOLLOW PREFERENCES` relocation therefore moves the whole connected component reachable
+from the selection. Soft preferences never cause a rejection on their own; the plan reports every
+preference the move leaves unsatisfied.
+
+### Reading The Plan
+
+Both statements return the same block, and `RELOCATE` prefixes it with the executed outcome and
+appends the hold duration:
+
+```plain
+relocation onto node 'node-2'
+quiesce level: ENTITY_PAUSE
+gated relays: normalized_features, scored_events
+coverage:
+- junction feature_normalizer -> junction risk_scorer connected=yes covered=2
+unit:
+- kind=junction name=feature_normalizer group=1 strategy=follow reason=selected owner=node-1 moves=yes replicas=node-1 promoted_replica=no
+- kind=junction name=risk_scorer group=1 strategy=follow reason=selected owner=node-1 moves=yes replicas=node-1 promoted_replica=no
+- kind=deduplicator name=dedup_txns group=2 strategy=ignore reason=preferred owner=node-2 moves=no replicas=node-3
+unsatisfied preferences: 1
+- suggest separation risk_scorer <-> archive_transform (spread_archive)
+```
+
+`coverage:` appears for the corridor form only. `gated relays:` lists the relays the hold gates, or
+`-` for a `DYNAMIC` plan. `group` numbers the hard groups in the unit and `reason` is `selected`,
+`required` for a hard-group mate, or `preferred` for a captured partner. `owner` is the current
+owner; a member that moves also reports its new replicas and whether the destination was already a
+replica. `unsatisfied preferences` counts, after the move, every `PREFER COLOCATION` relationship
+touching the unit whose two owners differ and every `SUGGEST SEPARATION` relationship touching the
+unit whose two owners are the same, naming the winning rule or `domain default`.
+
+`kind` and `name` use the schedule spelling shown by `SHOW CLUSTER STATUS`, so a `HASH MAP` member
+appears as `kind=lookup` and a `RELAY` member as `kind=relay`.
+
+### Executing The Move
+
+A relocation in a running domain that moves at least one runtime node is a planned ownership change
+and executes as one unit, one hold, one commit: the hold gates exactly the relays the plan lists,
+every moved runtime node drains its admitted work, one schedule write assigns the whole unit to the
+destination, and the gates open once the destination has activated the revision. The unit is
+atomic, because the plan is what you inspected and approved; a unit containing a runtime node that
+cannot drain is excluded with a narrower selection or `IGNORE PREFERENCES`, or the stall is
+resolved and the statement retried. See
+[Control Plane](control-plane.md#planned-ownership-handoffs-and-failover) for the shared hold,
+drain, and failure behavior.
+
+The reported quiesce level is `ENTITY_PAUSE` when the plan moves at least one runtime node in a
+running domain, and `DYNAMIC` when the plan moves nothing or the domain is stopped. A stopped
+domain keeps its schedule, so its runtime nodes are relocated without a hold and execute on the
+destination when the domain starts. A unit member whose owner is already the destination is
+retained in the plan and left untouched; a unit member whose owner is unavailable is rejected until
+failover has given it a live owner.
+
+For each moved member the primary assignment becomes the destination, and replicas are recomputed
+against the configured replica count: the former owner first when it is a live schedulable voter,
+then the member's existing replicas other than the destination, then the cluster nodes the
+scheduler would choose. A relay without materialized state has no replicas regardless of the count.
+Kafka `OFFSET BY DOMAIN` partition-to-instance assignments are preserved verbatim, and the host of
+a moved hard group becomes the destination.
+
+`RELOCATE` is a leader operation that holds the domain's exclusive alteration lock from planning
+through release, so a model change, a placement change, another `RELOCATE`, or a `DRAIN NODE` of
+the same domain is rejected with the concurrent-alteration diagnostic rather than queued.
+`DESCRIBE RELOCATION` is read-only and is served by any cluster node.
+
+A relocation records no affinity. It is a one-time move, not a pin: a later failover, drain, or
+newly effective `REQUIRE COLOCATION` consolidation may move the runtime node again, and Nervix does
+not move it back when its former owner returns. A preference left unsatisfied by a relocation stays
+unsatisfied, because Nervix never moves an existing assignment to improve a preference.
 
 ## Altering And Dropping Rules
 
@@ -411,6 +561,11 @@ Placement policies do not provide:
 - cluster-node labels, availability zones, or pinning to a named cluster node;
 - per-branch placement; or
 - replica-count or replica-placement control.
+
+`RELOCATE` moves work onto a named cluster node once. It is not pinning: nothing keeps the moved
+runtime node there, and a later failover, drain, or hard-group consolidation may move it again. It
+also does not relocate endpoint or Syslog ingestors, an individual replica, an individual branch, or
+a unit spanning domains, and it never applies a unit in part.
 
 Use `SUGGEST SEPARATION` as a performance hint only. Security, tenant isolation, and failure-domain
 requirements need controls outside placement policies.
