@@ -2995,6 +2995,7 @@ mod tests {
                 first_statement: 0,
                 statement_count: 1,
                 quiesce_level: None,
+                planned_relocations: None,
                 result: TransactionCommandResult {
                     success: true,
                     message: "started".to_string(),
@@ -3045,6 +3046,7 @@ mod tests {
                     first_statement: 1,
                     statement_count: 1,
                     quiesce_level: None,
+                    planned_relocations: None,
                     result: TransactionCommandResult {
                         success: false,
                         message: "validation failed".to_string(),

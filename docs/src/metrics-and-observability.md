@@ -206,9 +206,18 @@ the relay owner is their sole authority, and buffer, traffic, concrete-presence,
 relay summaries are neither persisted nor replicated.
 
 `DESCRIBE RELAY` and `DESCRIBE RELAY ... WHERE (...)` are routed to that authority. A planned move
-drains before cutover, while an unplanned owner loss starts fresh relay metrics on the new owner.
-Materialized state replication never carries relay metrics.
+fences the moved subgraph, drains admitted work, and activates the committed revision before the
+gate opens. Relay metrics start fresh on the new owner because they do not travel with materialized
+state. When a state-replica slot exists, a live former primary becomes the first replica candidate
+after the move.
+
+Only moved runtime nodes cross that boundary. Internal `DESCRIBE` and edge metrics for unaffected
+nodes and concrete branches remain continuous during drain, graceful-shutdown drain, and placement
+consolidation. A timed-out precommit handoff leaves the schedule and metric authority unchanged.
+Unexpected owner loss continues through failover immediately and starts fresh relay metrics on the
+new owner.
 
 Prometheus export is a separate, live process-local registry. Traffic metrics ignore branch
 identity, while lifecycle metrics retain only the bounded declared branch name. Prometheus
-registry values are not snapshotted into Nervix internal metric state.
+registry values are not snapshotted into Nervix internal metric state and do not migrate during a
+planned handoff or failover.

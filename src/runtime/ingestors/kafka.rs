@@ -687,8 +687,11 @@ impl KafkaIngestor {
 
                                             loop {
                                             tokio::task::consume_budget().await;
-                                                let (acks, completion) =
-                                                    task_runtime.tracked_ack_root(&task_domain);
+                                                let (acks, completion) = task_runtime
+                                                    .tracked_ingestor_ack_root(
+                                                        &task_domain,
+                                                        &task_ingestor,
+                                                    );
                                                 // One acknowledged message is one group.
                                                 let mut collector =
                                                     IngestRouteCollector::new(IngestMetadataKind::Kafka, 1);
@@ -964,8 +967,11 @@ impl KafkaIngestor {
                                                 let mut dispatch_acks = Vec::with_capacity(messages.len());
                                                 for record in decoded {
                                                     tokio::task::consume_budget().await;
-                                                    let (acks, completion) =
-                                                        task_runtime.tracked_ack_root(&task_domain);
+                                                    let (acks, completion) = task_runtime
+                                                        .tracked_ingestor_ack_root(
+                                                            &task_domain,
+                                                            &task_ingestor,
+                                                        );
                                                     dispatch_acks.push(
                                                         if !task_branched_senders.is_empty() {
                                                             acks.attached()

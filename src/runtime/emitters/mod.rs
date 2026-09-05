@@ -3333,7 +3333,7 @@ impl EmitterTask {
                         continue;
                     }
                 };
-                let (input_event, _work) = work.into_parts();
+                let (input_event, mut work) = work.into_parts();
                 match input_event {
                     RelayInteractionEvent::Command(EmitterTaskCommand::Reconfigure {
                         config,
@@ -3739,6 +3739,7 @@ impl EmitterTask {
                                 batch,
                                 &mut work_cancel_rx,
                                 wait_for_required_state,
+                                work.as_mut(),
                             )
                             .await
                         {
@@ -4141,6 +4142,7 @@ impl EmitterBatchContext<'_> {
         batch: RelayRecordBatch,
         shutdown_rx: &mut watch::Receiver<bool>,
         wait_for_required_state: bool,
+        quiesce_work: Option<&mut NodeQuiesceWorkGuard>,
     ) -> Option<EmitterPublishBatch> {
         let dependency_error_acks = batch.acks.clone();
         let batch = match self
@@ -4150,8 +4152,11 @@ impl EmitterBatchContext<'_> {
                 input_relay,
                 self.materialized_state,
                 batch,
-                shutdown_rx,
-                wait_for_required_state,
+                MaterializedBatchWaitContext {
+                    shutdown_rx,
+                    wait_for_required_state,
+                    quiesce_work,
+                },
             )
             .await
         {

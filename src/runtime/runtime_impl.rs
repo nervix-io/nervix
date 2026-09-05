@@ -482,6 +482,7 @@ impl Runtime {
             domains: Arc::new(DashMap::default()),
             domain_status_changed,
             in_flight_by_domain: Arc::new(DashMap::default()),
+            in_flight_by_ingestor: Arc::new(DashMap::default()),
             generator_activity_by_domain: Arc::new(DashMap::default()),
             emitter_buffers: Arc::new(DashMap::default()),
             force_flush_by_domain: Arc::new(DashMap::default()),
@@ -569,7 +570,7 @@ impl Runtime {
         Self::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
     }
 
-    pub(in crate::runtime) fn entity_pause_relays_for_schedule(
+    pub(crate) fn entity_pause_relays_for_schedule(
         schedule: &DomainSchedule,
         affected_entities: &[RegistryEntity],
     ) -> Vec<Identifier> {
@@ -604,6 +605,45 @@ impl Runtime {
         relays
     }
 
+    pub(crate) fn ownership_handoff_relays_for_schedule(
+        schedule: &DomainSchedule,
+        affected_entities: &[RegistryEntity],
+    ) -> Vec<Identifier> {
+        let mut relays = Self::entity_pause_relays_for_schedule(schedule, affected_entities);
+        let affected = affected_entities.iter().cloned().collect::<HashSet<_>>();
+        let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
+        relays.retain(|relay| {
+            let producers = schedule.nodes.iter().filter(|node| {
+                if let Some(processor) = processor_specs.processor(node.kind, &node.identifier) {
+                    return processor.spec.output_relays().contains(relay);
+                }
+                match node.config.as_ref() {
+                    Model::Ingestor(ingestor) => {
+                        ingestor.output_routes.relays().any(|out| out == relay)
+                    }
+                    Model::Reingestor(reingestor) => {
+                        reingestor.output_routes.relays().any(|out| out == relay)
+                    }
+                    Model::Generator(generator) => {
+                        generator.output_routes.relays().any(|out| out == relay)
+                    }
+                    _ => false,
+                }
+            });
+            let mut producer_count = 0usize;
+            let all_producers_move = producers.fold(true, |all_move, node| {
+                producer_count = producer_count.saturating_add(1);
+                all_move
+                    && affected.contains(&RegistryEntity {
+                        kind: node.kind,
+                        identifier: node.identifier.clone(),
+                    })
+            });
+            producer_count == 0 || !all_producers_move
+        });
+        relays
+    }
+
     pub fn engage_entity_gates(
         &self,
         domain: &Domain,
@@ -623,15 +663,16 @@ impl Runtime {
         EntityGateHold { gates }
     }
 
-    pub async fn engage_entity_gate_operation(
+    pub(crate) async fn engage_entity_gate_operation(
         &self,
         operation_id: u64,
         domain: &Domain,
         relays: &[Identifier],
         affected_entities: &[RegistryEntity],
-        deadline: Instant,
-        reason: &str,
+        purpose: EntityGatePurpose,
+        lease: EntityGateLease<'_>,
     ) -> Result<(), String> {
+        let EntityGateLease { deadline, reason } = lease;
         let hold_key = (domain.clone(), operation_id);
         if self.entity_gate_holds.contains_key(&hold_key) {
             return Ok(());
@@ -660,19 +701,59 @@ impl Runtime {
             .filter(|entity| entity.kind == ModelKind::Ingestor)
             .map(|entity| entity.identifier.clone())
             .collect::<Vec<_>>();
+        let quiesce_cause = match purpose {
+            EntityGatePurpose::ModelAlteration => IngestorQuiesceCause::EntityHold,
+            EntityGatePurpose::OwnershipHandoff => IngestorQuiesceCause::OwnershipHandoff,
+        };
         for ingestor in &ingestors {
             tokio::task::consume_budget().await;
             let key = RuntimeKey::new(domain.clone(), ingestor.clone());
             if !self.ingestors.contains_key(&key) {
                 continue;
             }
-            if self.engage_ingestor_quiesce(domain, ingestor, IngestorQuiesceCause::EntityHold)
+            if self.engage_ingestor_quiesce(domain, ingestor, quiesce_cause)
                 && let Some(mut hold) = self.entity_gate_holds.get_mut(&hold_key)
             {
-                hold.quiesced_ingestors.push(ingestor.clone());
+                hold.quiesced_ingestors
+                    .push((ingestor.clone(), quiesce_cause));
             }
         }
         self.force_flush_domain(domain);
+        if Instant::now() >= deadline {
+            self.release_entity_gate_operation(operation_id, domain)
+                .await?;
+            return Err(format!(
+                "entity gate for domain '{}' expired while it was being engaged",
+                domain.as_str()
+            ));
+        }
+        let entity_gate_holds = self.entity_gate_holds.clone();
+        let ingestors = self.ingestors.clone();
+        let ingestor_quiescence = self.ingestor_quiescence.clone();
+        let domain = domain.clone();
+        drop(tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            if entity_gate_holds.contains_key(&(domain.clone(), operation_id)) {
+                debug!(
+                    domain = domain.as_str(),
+                    operation_id, "entity gate lease reached its deadline"
+                );
+                if let Err(error) = Self::release_entity_gate_operation_from_state(
+                    &entity_gate_holds,
+                    &ingestors,
+                    &ingestor_quiescence,
+                    operation_id,
+                    &domain,
+                )
+                .await
+                {
+                    warn!(
+                        domain = domain.as_str(),
+                        operation_id, error, "failed to release expired entity gate lease"
+                    );
+                }
+            }
+        }));
         Ok(())
     }
 
@@ -681,25 +762,49 @@ impl Runtime {
         operation_id: u64,
         domain: &Domain,
     ) -> Result<(), String> {
+        Self::release_entity_gate_operation_from_state(
+            &self.entity_gate_holds,
+            &self.ingestors,
+            &self.ingestor_quiescence,
+            operation_id,
+            domain,
+        )
+        .await
+    }
+
+    async fn release_entity_gate_operation_from_state(
+        entity_gate_holds: &DashMap<(Domain, u64), EntityAlterHold, RandomState>,
+        ingestors: &DashMap<RuntimeKey, IngestorRuntime, RandomState>,
+        ingestor_quiescence: &DashMap<RuntimeKey, Arc<IngestorQuiesceControl>, RandomState>,
+        operation_id: u64,
+        domain: &Domain,
+    ) -> Result<(), String> {
         let hold_key = (domain.clone(), operation_id);
-        let Some(quiesced_ingestors) = self
-            .entity_gate_holds
+        let Some(quiesced_ingestors) = entity_gate_holds
             .get(&hold_key)
             .map(|hold| hold.quiesced_ingestors.clone())
         else {
             return Ok(());
         };
-        for ingestor in &quiesced_ingestors {
+        for (ingestor, cause) in &quiesced_ingestors {
             tokio::task::consume_budget().await;
-            self.release_ingestor_quiesce(domain, ingestor, IngestorQuiesceCause::EntityHold);
-            if !self
-                .ingestors
-                .contains_key(&RuntimeKey::new(domain.clone(), ingestor.clone()))
+            let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+            if let Some(control) = ingestor_quiescence.get(&key).map(|control| control.clone()) {
+                control.release(*cause);
+                info!(
+                    domain = domain.as_str(),
+                    ingestor = ingestor.as_str(),
+                    cause = cause.as_str(),
+                    "ingestor left quiesce"
+                );
+            }
+            if !ingestors.contains_key(&key)
+                && let Some((_, control)) = ingestor_quiescence.remove(&key)
             {
-                self.remove_ingestor_quiescence(domain, ingestor);
+                control.terminate();
             }
         }
-        if let Some((_, hold)) = self.entity_gate_holds.remove(&hold_key) {
+        if let Some((_, hold)) = entity_gate_holds.remove(&hold_key) {
             hold.gates.release();
         }
         Ok(())
@@ -716,6 +821,7 @@ impl Runtime {
         domain: &Domain,
         relays: &[Identifier],
         affected_entities: &[RegistryEntity],
+        purpose: EntityGatePurpose,
     ) -> EntityDrainStatus {
         let buffered_relay_batches = relays
             .iter()
@@ -731,7 +837,7 @@ impl Runtime {
                 let quiesce_work = self
                     .node_quiesce_counters
                     .get(&RuntimeKey::new(domain.clone(), entity.identifier.clone()))
-                    .map(|counters| counters.outstanding_work())
+                    .map(|counters| counters.outstanding_work_for(purpose))
                     .unwrap_or(0);
                 let emitter_work = if entity.kind == ModelKind::Emitter {
                     self.emitter_buffers
@@ -742,6 +848,21 @@ impl Runtime {
                     0
                 };
                 quiesce_work.saturating_add(emitter_work)
+            })
+            .sum();
+        let outstanding_acks = affected_entities
+            .iter()
+            .filter(|entity| entity.kind == ModelKind::Ingestor)
+            .filter_map(|entity| {
+                self.in_flight_by_ingestor
+                    .get(&RuntimeKey::new(domain.clone(), entity.identifier.clone()))
+                    .map(|tracker| {
+                        if purpose == EntityGatePurpose::OwnershipHandoff {
+                            tracker.outstanding_for_ownership_handoff()
+                        } else {
+                            tracker.outstanding()
+                        }
+                    })
             })
             .sum();
         let mut emitter_publishing = affected_entities
@@ -758,6 +879,7 @@ impl Runtime {
         EntityDrainStatus {
             buffered_relay_batches,
             node_work_items,
+            outstanding_acks,
             emitter_publishing,
         }
     }
@@ -2523,6 +2645,8 @@ impl Runtime {
                 self.domains.remove(&domain);
                 self.domain_instantiation_errors.remove(&domain);
                 self.in_flight_by_domain.remove(&domain);
+                self.in_flight_by_ingestor
+                    .retain(|key, _| key.domain != domain);
                 self.generator_activity_by_domain.remove(&domain);
                 if let Some((_, force_flush)) = self.force_flush_by_domain.remove(&domain) {
                     force_flush.close();
@@ -2562,6 +2686,24 @@ impl Runtime {
             .or_insert_with(|| Arc::new(AckRootTracker::default()))
             .clone();
         AckSet::tracked_root(tracker)
+    }
+
+    pub(in crate::runtime) fn tracked_ingestor_ack_root(
+        &self,
+        domain: &Domain,
+        ingestor: &Identifier,
+    ) -> (AckSet, AckCompletion) {
+        let domain_tracker = self
+            .in_flight_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone();
+        let ingestor_tracker = self
+            .in_flight_by_ingestor
+            .entry(RuntimeKey::new(domain.clone(), ingestor.clone()))
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone();
+        AckSet::tracked_roots(vec![domain_tracker, ingestor_tracker])
     }
 
     pub fn domain_outstanding_work(&self, domain: &Domain) -> usize {
@@ -4408,7 +4550,7 @@ impl Runtime {
         // resolution to land on. Those completions are deliberately never observed.
         let mut _unobserved_completions = Vec::new();
         for slot in rows.acks.iter_mut().filter(|slot| slot.is_empty()) {
-            let (tracked, completion) = self.tracked_ack_root(domain);
+            let (tracked, completion) = self.tracked_ingestor_ack_root(domain, ingestor);
             *slot = tracked;
             _unobserved_completions.push(completion);
         }
@@ -9339,9 +9481,14 @@ impl Runtime {
         input_relay: &Identifier,
         dependencies: &[nervix_models::MaterializedStateDependency],
         batch: RelayRecordBatch,
-        shutdown_rx: &mut watch::Receiver<bool>,
-        wait_for_required_state: bool,
+        wait: MaterializedBatchWaitContext<'_>,
     ) -> Result<Option<(RelayRecordBatch, HashMap<String, RuntimeValue>)>, String> {
+        let MaterializedBatchWaitContext {
+            shutdown_rx,
+            wait_for_required_state,
+            mut quiesce_work,
+        } = wait;
+        let mut required_wait = None;
         loop {
             tokio::task::consume_budget().await;
             let changed = self.materialized_state_changed.notified();
@@ -9350,15 +9497,29 @@ impl Runtime {
                 .await?
             {
                 MaterializedDependencyResolution::Ready(values) => {
+                    if let Some(work) = quiesce_work.as_deref_mut() {
+                        work.resume_from_required_materialized_state();
+                    }
+                    drop(required_wait.take());
                     return Ok(Some((batch, values)));
                 }
                 MaterializedDependencyResolution::Skip => {
+                    if let Some(work) = quiesce_work.as_deref_mut() {
+                        work.resume_from_required_materialized_state();
+                    }
+                    drop(required_wait.take());
                     for ack in batch.acks.iter() {
                         ack.ack_success();
                     }
                     return Ok(None);
                 }
                 MaterializedDependencyResolution::Wait => {
+                    if required_wait.is_none() {
+                        required_wait = Some(AckRequiredWaitGuard::new(batch.acks.iter()));
+                        if let Some(work) = quiesce_work.as_deref_mut() {
+                            work.park_for_required_materialized_state();
+                        }
+                    }
                     if !wait_for_required_state {
                         for ack in batch.acks.iter() {
                             ack.no_ack(format!(
@@ -12080,7 +12241,7 @@ impl Runtime {
                         continue;
                     }
                 };
-                let (event, _work) = work.into_parts();
+                let (event, mut work) = work.into_parts();
                 match event {
                     RelayInteractionEvent::Stopped(reason) => {
                         runtime
@@ -12197,8 +12358,11 @@ impl Runtime {
                                 &task_from_relay,
                                 &task_materialized_state,
                                 batch,
-                                interaction.shutdown_receiver(),
-                                wait_for_required_state,
+                                MaterializedBatchWaitContext {
+                                    shutdown_rx: interaction.shutdown_receiver(),
+                                    wait_for_required_state,
+                                    quiesce_work: work.as_mut(),
+                                },
                             )
                             .await
                         {
@@ -13324,6 +13488,13 @@ impl Runtime {
             .is_some_and(|control| !control.is_quiesced())
         {
             self.remove_ingestor_quiescence(domain, ingestor);
+        }
+        if self
+            .in_flight_by_ingestor
+            .get(&key)
+            .is_some_and(|tracker| tracker.outstanding() == 0)
+        {
+            self.in_flight_by_ingestor.remove(&key);
         }
         Ok(())
     }

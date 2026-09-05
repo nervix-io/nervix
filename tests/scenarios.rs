@@ -4929,6 +4929,7 @@ async fn when_these_nspl_commands_are_executed_on_node(
 ) {
     world.last_command_error = None;
     world.last_command_output = None;
+    let node_id = expand_placeholders(world, &node_id);
     let commands = expand_placeholders(world, docstring(step));
     let session = if commands_are_retry_safe_session_ops(&commands) {
         let deadline = Instant::now() + Duration::from_secs(5);
