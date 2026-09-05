@@ -7018,7 +7018,7 @@ impl Runtime {
             let replica_nodes = node
                 .replica_nodes()
                 .into_iter()
-                .map(str::to_string)
+                .cloned()
                 .collect::<Vec<_>>();
             let required_replica_acks = replica_nodes.len();
             let state = self
@@ -7051,11 +7051,11 @@ impl Runtime {
 
         let aggregate_primary_node = execution_node
             .clone()
-            .or_else(|| executes_locally.then(|| local_node_id.to_string()));
+            .or_else(|| executes_locally.then(|| local_node_id.clone()));
         let aggregate_replica_nodes = if execution_node.is_some() && node.kind != ModelKind::Relay {
             node.replica_nodes()
                 .into_iter()
-                .map(str::to_string)
+                .cloned()
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -7074,7 +7074,7 @@ impl Runtime {
                         None,
                     ),
                     aggregate_primary_node.clone(),
-                    aggregate_primary_node.unwrap_or_else(|| local_node_id.to_string()),
+                    aggregate_primary_node.unwrap_or_else(|| local_node_id.clone()),
                     aggregate_replica_nodes,
                     required_replica_acks,
                 )

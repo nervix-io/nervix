@@ -767,7 +767,7 @@ impl SessionSubscriptions {
                                     tokio::task::consume_budget().await;
                                     let Some(message) = (match filter_map.as_ref() {
                                         Some(filter_map) => match execute_filter_map_on_record(
-                                            &SubscriptionName::from(&event_name.clone().clone()),
+                                            &SubscriptionName::from(&event_name.clone()),
                                             filter_map,
                                             message.record.clone(),
                                             message.key.as_ref(),
@@ -897,7 +897,7 @@ impl SessionSubscriptions {
         });
 
         self.subscriptions.insert(
-            SubscriptionName::from(&name.clone().clone().clone()),
+            SubscriptionName::from(&name.clone()),
             SessionSubscription {
                 domain,
                 relay,
@@ -3950,7 +3950,7 @@ impl SessionService for SessionServiceImpl {
         };
 
         let resources = self.consensus.current_resources().await;
-        if !resources.is_declared(&domain, &ResourceName::from(&identifier.clone().clone())) {
+        if !resources.is_declared(&domain, &ResourceName::from(&identifier.clone())) {
             return Ok(Response::new(UploadResourceResponse {
                 success: false,
                 message: format!("resource '{}' does not exist", identifier.as_str()),
@@ -10916,7 +10916,7 @@ impl SessionServiceImpl {
         let created_at = current_timestamp();
         let version = match self
             .consensus
-            .allocate_resource_version(domain, &ResourceName::from(&identifier.clone().clone()))
+            .allocate_resource_version(domain, &ResourceName::from(&identifier.clone()))
             .await
         {
             Ok(version) => version,
@@ -10927,7 +10927,7 @@ impl SessionServiceImpl {
                 ));
             }
         };
-        let id = ResourceId::new(domain.clone(), ResourceName::from(&identifier.clone().clone().clone()), version);
+        let id = ResourceId::new(domain.clone(), ResourceName::from(&identifier.clone()), version);
 
         let manifest = match self
             .resource_store
@@ -11803,7 +11803,7 @@ impl SessionServiceImpl {
             .domains
             .iter()
             .flat_map(|schedule| &schedule.nodes)
-            .filter(|node| node.execution_node() == Some(&ClusterNodeName::from(&node_id.clone().clone().clone())))
+            .filter(|node| node.execution_node() == Some(&ClusterNodeName::from(&node_id.clone())))
             .count();
         let mut moved = 0usize;
         let mut outcomes = Vec::new();

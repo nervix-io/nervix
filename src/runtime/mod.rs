@@ -970,7 +970,7 @@ struct DomainExecution {
     relay_services: HashMap<RelayName, Arc<RelayBoundaryServices>>,
     lookups: HashMap<LookupName, Arc<LookupRuntime>>,
     udfs: UdfExecutor,
-    relay_branchings: HashMap<RelayName, Vec<RelayName>>,
+    relay_branchings: HashMap<RelayName, Vec<FieldName>>,
     relay_branching_schemas: HashMap<RelayName, Option<StdArc<arrow_schema::Schema>>>,
     materialized_stream_specs: HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
@@ -3445,7 +3445,7 @@ struct ExpiringRelayState {
 struct ExecutionBuildDeps<'a> {
     domain: &'a DomainName,
     relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
-    relay_branchings: &'a HashMap<RelayName, Vec<RelayName>>,
+    relay_branchings: &'a HashMap<RelayName, Vec<FieldName>>,
     materialized_relay_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
 }
@@ -15485,7 +15485,7 @@ async fn execute_filter_map_program_on_batch(
 }
 
 async fn evaluate_output_branch_program(
-    owner: &UserName,
+    node: impl Into<ModelName>,
     program: &CompiledBranchProgram,
     input: &RuntimeRecordBatch,
     output: &RuntimeRecordBatch,
@@ -15493,11 +15493,12 @@ async fn evaluate_output_branch_program(
     side_inputs: &HashMap<String, RuntimeValue>,
     execution_now: Timestamp,
 ) -> Result<Vec<Result<Option<BranchKey>, String>>, String> {
+    let node = node.into();
     let row_count = output.batch().num_rows();
     if input.batch().num_rows() != row_count || keys.len() != row_count {
         return Err(format!(
             "branch construction for '{}' received {} input rows, {} output rows, and {} keys",
-            owner.as_str(),
+            node.as_str(),
             input.batch().num_rows(),
             row_count,
             keys.len()
@@ -15554,7 +15555,7 @@ async fn evaluate_output_branch_program(
     .map_err(|error| {
         format!(
             "branch construction VM for '{}' failed: {}",
-            owner.as_str(),
+            node.as_str(),
             error
         )
     })?;
@@ -15565,7 +15566,7 @@ async fn evaluate_output_branch_program(
         if input_row >= outcomes.len() {
             return Err(format!(
                 "branch construction VM for '{}' selected unknown row {}",
-                owner.as_str(),
+                node.as_str(),
                 input_row
             ));
         }
