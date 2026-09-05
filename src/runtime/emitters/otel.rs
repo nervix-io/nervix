@@ -353,10 +353,10 @@ impl OtelEmitter {
                 }
                 let tls = client_tls_paths(config);
                 if settings.endpoint.scheme() == "https" {
-                    let host = settings
-                        .endpoint
-                        .host_str()
-                        .expect("validated OTEL URL must retain its host");
+                    let host = settings.endpoint.host_str().verified(
+                        "the check above accepted an https endpoint, and the url crate always \
+                         gives a special-scheme URL a host",
+                    );
                     let mut tls_config = ClientTlsConfig::new()
                         .with_webpki_roots()
                         .domain_name(host.to_string());
@@ -1528,8 +1528,14 @@ fn parse_hex_id(value: &str, byte_len: usize, key: &str) -> Result<Vec<u8>, Otel
         .0
         .iter()
         .map(|digits| {
-            let digits = std::str::from_utf8(digits).expect("validated hex is ASCII");
-            u8::from_str_radix(digits, 16).expect("validated hex pair must decode")
+            let digits = std::str::from_utf8(digits).verified(
+                "the guard above rejected every value that is not an even-length run of ASCII hex \
+                 digits",
+            );
+            u8::from_str_radix(digits, 16).verified(
+                "the guard above rejected every value that is not an even-length run of ASCII hex \
+                 digits",
+            )
         })
         .collect::<Vec<_>>();
     if decoded.iter().all(|byte| *byte == 0) {
@@ -1578,51 +1584,75 @@ fn integer_as_i64(array: &ArrayRef, row: usize) -> Result<i64, String> {
         DataType::UInt8 => Ok(array
             .as_any()
             .downcast_ref::<UInt8Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::Int8 => Ok(array
             .as_any()
             .downcast_ref::<Int8Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt16 => Ok(array
             .as_any()
             .downcast_ref::<UInt16Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::Int16 => Ok(array
             .as_any()
             .downcast_ref::<Int16Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt32 => Ok(array
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::Int32 => Ok(array
             .as_any()
             .downcast_ref::<Int32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt64 => i64::try_from(
             array
                 .as_any()
                 .downcast_ref::<UInt64Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL integer exceeds the OTLP signed 64-bit range".to_string()),
         DataType::Int64 => Ok(array
             .as_any()
             .downcast_ref::<Int64Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)),
         ty => Err(format!(
             "OTEL value requires an integer-family type, found {ty}"
@@ -1635,31 +1665,46 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
         DataType::UInt8 => Ok(array
             .as_any()
             .downcast_ref::<UInt8Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt16 => Ok(array
             .as_any()
             .downcast_ref::<UInt16Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt32 => Ok(array
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt64 => Ok(array
             .as_any()
             .downcast_ref::<UInt64Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)),
         DataType::Int8 => u64::try_from(
             array
                 .as_any()
                 .downcast_ref::<Int8Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
@@ -1667,7 +1712,10 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
             array
                 .as_any()
                 .downcast_ref::<Int16Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
@@ -1675,7 +1723,10 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
             array
                 .as_any()
                 .downcast_ref::<Int32Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
@@ -1683,7 +1734,10 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
             array
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
@@ -1698,53 +1752,83 @@ fn numeric_as_f64(array: &ArrayRef, row: usize) -> Result<f64, String> {
         DataType::Float32 => Ok(array
             .as_any()
             .downcast_ref::<Float32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::Float64 => Ok(array
             .as_any()
             .downcast_ref::<Float64Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)),
         DataType::UInt8 => Ok(array
             .as_any()
             .downcast_ref::<UInt8Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row) as f64),
         DataType::Int8 => Ok(array
             .as_any()
             .downcast_ref::<Int8Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row) as f64),
         DataType::UInt16 => Ok(array
             .as_any()
             .downcast_ref::<UInt16Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row) as f64),
         DataType::Int16 => Ok(array
             .as_any()
             .downcast_ref::<Int16Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row) as f64),
         DataType::UInt32 => Ok(array
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row) as f64),
         DataType::Int32 => Ok(array
             .as_any()
             .downcast_ref::<Int32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row) as f64),
         DataType::UInt64 => Ok(array
             .as_any()
             .downcast_ref::<UInt64Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row) as f64),
         DataType::Int64 => Ok(array
             .as_any()
             .downcast_ref::<Int64Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row) as f64),
         ty => Err(format!("OTEL value requires a numeric type, found {ty}")),
     }
@@ -1756,7 +1840,10 @@ fn number_value_at(array: &ArrayRef, row: usize) -> Result<number_data_point::Va
             array
                 .as_any()
                 .downcast_ref::<Float32Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row)
                 .into(),
         )),
@@ -1764,7 +1851,10 @@ fn number_value_at(array: &ArrayRef, row: usize) -> Result<number_data_point::Va
             array
                 .as_any()
                 .downcast_ref::<Float64Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )),
         ty if OtelEmitter::is_integer_type(ty) => {
@@ -1785,7 +1875,10 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             array
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row)
                 .to_string(),
         ),
@@ -1793,14 +1886,20 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             array
                 .as_any()
                 .downcast_ref::<BooleanArray>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         ),
         DataType::Float32 => any_value::Value::DoubleValue(
             array
                 .as_any()
                 .downcast_ref::<Float32Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row)
                 .into(),
         ),
@@ -1808,7 +1907,10 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             array
                 .as_any()
                 .downcast_ref::<Float64Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         ),
         ty if OtelEmitter::is_integer_type(ty) => {
@@ -1825,7 +1927,9 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             )
         }
         DataType::List(_) | DataType::FixedSizeList(_, _) => {
-            let values = list_value(array, row)?.expect("non-null list must contain a child array");
+            let values = list_value(array, row)?.verified(
+                "any_value_at returns early for a null row, so this list value is present",
+            );
             let mut converted = Vec::with_capacity(values.len());
             for index in 0..values.len() {
                 converted.push(any_value_at(&values, index)?.ok_or_else(|| {

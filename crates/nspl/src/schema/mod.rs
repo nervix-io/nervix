@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterSchema, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AvroType,
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema,
@@ -78,6 +79,13 @@ pub(crate) fn nervix_type<'src>()
                     .map_err(|_| Rich::custom(span, "array length must be an unsigned integer"))?;
                 if len == 0 {
                     return Err(Rich::custom(span, "array length must be greater than zero"));
+                }
+                // An array field becomes an Arrow fixed-size list, whose length is an i32.
+                if i32::try_from(len).is_err() {
+                    return Err(Rich::custom(
+                        span,
+                        "array length must not exceed 2147483647",
+                    ));
                 }
                 Ok(len)
             })
@@ -440,7 +448,7 @@ pub fn parse_create_wire_schema_tokens(tokens: &[Token]) -> Result<Statement, Ve
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -451,7 +459,7 @@ pub fn parse_alter_schema_tokens(tokens: &[Token]) -> Result<AlterSchema, Vec<Pa
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -464,7 +472,7 @@ pub fn parse_alter_wire_schema_tokens(tokens: &[Token]) -> Result<Statement, Vec
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -477,7 +485,7 @@ pub fn parse_create_schema_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -753,6 +761,18 @@ mod tests {
     #[test]
     fn rejects_zero_length_in_any_multidimensional_array_axis() {
         let input = "CREATE SCHEMA metrics (cpu ARRAY<F32, 2, 0>);";
+        assert!(parse_create_schema(input).is_err());
+    }
+
+    #[test]
+    fn parses_largest_array_length_an_arrow_fixed_size_list_holds() {
+        let input = "CREATE SCHEMA metrics (cpu ARRAY<F32, 2147483647>);";
+        assert!(parse_create_schema(input).is_ok());
+    }
+
+    #[test]
+    fn rejects_array_length_beyond_an_arrow_fixed_size_list() {
+        let input = "CREATE SCHEMA metrics (cpu ARRAY<F32, 2147483648>);";
         assert!(parse_create_schema(input).is_err());
     }
 

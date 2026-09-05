@@ -324,9 +324,10 @@ impl NatsEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready NATS confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(_ack) => outcome.deliver(confirmation.position),
                 Err(error) if Self::is_jetstream_record_rejection(&error) => outcome.reject(

@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterDomain, CreateDomain, CreateStatement, DomainConfig, DomainPace, DomainStartPoint,
     PlacementPolicy, StartDomain, StopDomain,
@@ -150,7 +151,7 @@ pub fn parse_create_domain(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

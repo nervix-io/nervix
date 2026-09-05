@@ -1,5 +1,6 @@
 use std::sync::Arc as StdArc;
 
+use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
 
@@ -403,7 +404,10 @@ impl RelayRecordBatch {
 
         let key = first.key.clone();
         if batches.len() == 1 {
-            return Ok(batches.into_iter().next().expect("single batch must exist"));
+            return Ok(batches
+                .into_iter()
+                .next()
+                .verified("the length was just checked to be one"));
         }
 
         let concatenated = {
@@ -535,7 +539,7 @@ fn reorder_owned_values<T>(values: Vec<T>, row_order: &[usize]) -> Vec<T> {
         .map(|row| {
             values[*row]
                 .take()
-                .expect("validated relay batch reorder must contain each row once")
+                .verified("the row order is a permutation, so each row is taken exactly once")
         })
         .collect()
 }

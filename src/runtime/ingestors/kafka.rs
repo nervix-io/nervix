@@ -100,7 +100,9 @@ impl KafkaIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled Kafka ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
         let resolved_client = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
             .map_err(|reason| RuntimeError::StartIngestor {
@@ -739,7 +741,7 @@ impl KafkaIngestor {
                                                     match Runtime::await_ack_completion(
                                                         &mut shutdown_rx,
                                                         completion,
-                                                        ack_timeout.expect("ack timeout must exist"),
+                                                        ack_timeout.verified("this branch runs only for an ACK mode, and every ACK mode parses a timeout above"),
                                                     ).await {
                                                         Some(AckOutcome::Ack) => {
                                                             let commit_result = if let Some(state) =
@@ -859,7 +861,7 @@ impl KafkaIngestor {
                                             };
                                             batch.push(first);
                                             let batch_deadline =
-                                                Instant::now() + batch_timeout.expect("batch timeout must exist");
+                                                Instant::now() + batch_timeout.verified("this branch runs only for the parallel ACK mode, which parses a batch timeout above");
 
                                             while batch.len() < ack_parallel_limit {
                                                 tokio::task::consume_budget().await;
@@ -1051,7 +1053,7 @@ impl KafkaIngestor {
                                                         match Runtime::await_ack_completion(
                                                             &mut shutdown_rx,
                                                             completion,
-                                                            ack_timeout.expect("ack timeout must exist"),
+                                                            ack_timeout.verified("this branch runs only for an ACK mode, and every ACK mode parses a timeout above"),
                                                         ).await {
                                                             Some(AckOutcome::Ack) => {}
                                                             Some(AckOutcome::NoAck(error)) => {

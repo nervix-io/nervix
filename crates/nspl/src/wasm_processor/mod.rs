@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, CreateStatement, CreateWasmProcessor, GeneralErrorPolicy, ProcessorOutput,
     ProcessorOutputs, RouteConstruction, WasmProcessorLimits,
@@ -31,7 +32,7 @@ fn wasm_processor_limits<'src>()
         .try_map(|value, span| {
             let bytes = value
                 .parse::<ubyte::ByteUnit>()
-                .expect("byte_size_lit must produce a valid byte size")
+                .verified("byte_size_lit only yields text the ByteUnit parser accepts")
                 .as_u64();
             if bytes == 0 {
                 Err(Rich::custom(span, "MAX MEMORY must be greater than zero"))
@@ -187,7 +188,7 @@ pub fn parse_create_wasm_processor_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

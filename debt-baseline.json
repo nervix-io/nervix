@@ -1,7 +1,7 @@
 {
   "as_casts": 368,
   "bare_error_signatures": 929,
-  "bare_unwrap_and_expect": 510,
+  "bare_unwrap_and_expect": 0,
   "files_over_3000_lines": 18,
   "model_matches_in_data_plane": 184,
   "parser_imports_outside_edges": 61,

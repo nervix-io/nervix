@@ -1,4 +1,5 @@
 use error_stack::{Report, ResultExt};
+use meticulous::ResultExt as _;
 use nervix_models::{
     AckMode, AvroType, BranchEviction, BranchSelection, ClickHouseValueMapping, CodecEncoding,
     CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
@@ -5382,7 +5383,7 @@ impl From<StoredIcebergCatalog> for IcebergCatalog {
         match value {
             StoredIcebergCatalog::Rest { client } => Self::Rest {
                 client: Identifier::parse(&client)
-                    .expect("stored Iceberg REST catalog client must be a valid identifier"),
+                    .verified("the identifier was validated before it was stored"),
             },
         }
     }

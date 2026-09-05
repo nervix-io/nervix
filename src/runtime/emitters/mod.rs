@@ -3164,7 +3164,10 @@ impl EmitterTask {
                     allow_metadata: false,
                 },
             )?
-            .expect("an emitter FROM WHERE expression must compile to a program");
+            .verified(
+                "a FROM WHERE clause is present here, and a present clause always compiles to a \
+                 program",
+            );
             source_filters.insert(source_filter.relay.clone(), program);
         }
         let client = clients.get(emitter.sink.client()).cloned();
@@ -3251,7 +3254,10 @@ impl EmitterTask {
                 Some(quiesce_counters),
                 command_rx,
             )
-            .expect("validated emitter inputs must build a relay interaction");
+            .verified(
+                "the registry validated this emitter's inputs, and a non-empty input list builds \
+                 an interaction",
+            );
             let context = EmitterSinkContext {
                 runtime: runtime.clone(),
                 domain: task_domain.clone(),
@@ -3820,7 +3826,7 @@ impl EmitterTask {
                                 &mut emitter_buffer,
                                 pending_batch
                                     .as_ref()
-                                    .expect("pending emitter batch must exist")
+                                    .verified("this branch only runs while a batch is pending")
                                     .clone(),
                             )
                             .await;
