@@ -10,4 +10,5 @@ workspace = true
 [dependencies]
 ahash = { workspace = true }
 intrusive-collections = { workspace = true }
+meticulous = { workspace = true }
 triomphe = { workspace = true }

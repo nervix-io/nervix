@@ -2,6 +2,7 @@ use std::{borrow::Borrow, fmt, hash::Hash};
 
 use ahash::HashMap;
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
+use meticulous::OptionExt as _;
 use triomphe::Arc;
 
 struct Entry<K, V> {
@@ -115,13 +116,15 @@ where
         let (stored_key, node) = self
             .entries
             .remove_entry(KeyRef::from_key(key.as_ref()))
-            .expect("linked entry must exist in the hash index");
+            .verified(
+                "the map inserts into the index and the order list together and holds &mut self \
+                 here",
+            );
         debug_assert_eq!(Arc::as_ptr(&node), node_ptr);
 
-        let linked = self
-            .order
-            .pop_front()
-            .expect("indexed oldest entry must remain linked");
+        let linked = self.order.pop_front().verified(
+            "the map inserts into the index and the order list together and holds &mut self here",
+        );
         debug_assert_eq!(UnsafeRef::into_raw(linked).cast_const(), node_ptr);
         drop(key);
         drop(stored_key);
@@ -142,10 +145,9 @@ where
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let key = KeyRef::from_key(key);
         let node_ptr = self.entries.get(key).map(Arc::as_ptr)?;
-        let (stored_key, node) = self
-            .entries
-            .remove_entry(key)
-            .expect("entry found by key must still exist during exclusive removal");
+        let (stored_key, node) = self.entries.remove_entry(key).verified(
+            "the map inserts into the index and the order list together and holds &mut self here",
+        );
         debug_assert_eq!(Arc::as_ptr(&node), node_ptr);
         self.unlink(node_ptr);
         drop(stored_key);
@@ -192,7 +194,10 @@ where
         // UnsafeRef from `order`.
         let linked = unsafe { self.order.cursor_mut_from_ptr(node_ptr) }
             .remove()
-            .expect("indexed entry must remain linked");
+            .verified(
+                "the map inserts into the index and the order list together and holds &mut self \
+                 here",
+            );
         debug_assert_eq!(UnsafeRef::into_raw(linked).cast_const(), node_ptr);
     }
 }

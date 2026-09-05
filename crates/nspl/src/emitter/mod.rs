@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
+use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CreateEmitter,
     CreateStatement, EmitSink, EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend,
@@ -1312,7 +1313,7 @@ pub fn parse_create_emitter_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -1323,7 +1324,7 @@ pub fn parse_alter_emitter_tokens(tokens: &[Token]) -> Result<AlterEmitter, Vec<
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

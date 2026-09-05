@@ -9,6 +9,7 @@ use std::{
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use futures_util::StreamExt;
+use meticulous::OptionExt as _;
 use nervix_models::{
     ClusterSchedule, Domain, DomainClockState, DomainId, DomainSchedule, DomainStartPoint,
     DomainState, DomainStatus, Identifier, ResourceNodeStatus, ResourceVersion,
@@ -2178,10 +2179,10 @@ fn apply_consensus_command(
             if let Some(effect) = effect {
                 if let Err(error) = validate_transaction_step_effect(
                     state,
-                    state
-                        .transactions
-                        .get(id)
-                        .expect("transaction was read from replicated state"),
+                    state.transactions.get(id).verified(
+                        "the branch above resolved this transaction id in the same replicated \
+                         state",
+                    ),
                     *expected_next_statement,
                     *next_statement,
                     result,
@@ -2192,10 +2193,9 @@ fn apply_consensus_command(
                 }
                 apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
             } else if let Err(error) = validate_transaction_step_without_effect(
-                state
-                    .transactions
-                    .get(id)
-                    .expect("transaction was read from replicated state"),
+                state.transactions.get(id).verified(
+                    "the branch above resolved this transaction id in the same replicated state",
+                ),
                 *expected_next_statement,
                 *next_statement,
                 result,

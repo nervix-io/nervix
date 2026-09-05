@@ -114,7 +114,10 @@ impl WorkloadOptions {
     }
 }
 
-const DEFAULT_AB_RUNS: NonZeroUsize = NonZeroUsize::new(3).unwrap();
+const DEFAULT_AB_RUNS: NonZeroUsize = match NonZeroUsize::new(3) {
+    Some(runs) => runs,
+    None => panic!("three is nonzero"),
+};
 
 #[derive(Debug, clap::Args)]
 struct RunAbArgs {

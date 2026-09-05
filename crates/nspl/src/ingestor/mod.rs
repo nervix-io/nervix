@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AlterIngestor, AlterIngestorOperation, CreateIngestor, CreateStatement, EndpointIngestMode,
     GeneralErrorPolicy, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
@@ -299,7 +300,7 @@ fn positive_quiesce_buffer_size<'src>()
     byte_size_lit().try_map(|value, span| {
         let bytes = value
             .parse::<ubyte::ByteUnit>()
-            .expect("byte_size_lit must produce a valid byte size")
+            .verified("byte_size_lit only yields text the ByteUnit parser accepts")
             .as_u64();
         if bytes == 0 {
             Err(Rich::custom(
@@ -868,7 +869,7 @@ pub fn parse_create_ingestor_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -887,7 +888,7 @@ pub fn parse_alter_ingestor_tokens(tokens: &[Token]) -> Result<AlterIngestor, Ve
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

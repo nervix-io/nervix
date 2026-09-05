@@ -74,9 +74,9 @@ fn branch_policy(
     let Some(branch_ref) = branch_ref else {
         return (None, None, None);
     };
-    let branch = branches
-        .get(branch_ref)
-        .expect("branch references must be validated before runtime planning");
+    let branch = branches.get(branch_ref).verified(
+        "the registry resolved every branch reference before the schedule reached planning",
+    );
     (
         Some(branch_ref.clone()),
         Some(branch.ttl.clone()),
@@ -342,10 +342,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
             }
             Model::Ingestor(ingestor) => {
                 for output in ingestor.output_routes.outputs() {
-                    let branch_action = output
-                        .branch
-                        .as_ref()
-                        .expect("validated ingestor route must declare branch behavior");
+                    let branch_action = output.branch.as_ref().verified(
+                        "the registry requires every route of these nodes to declare its branch \
+                         behavior",
+                    );
                     let entrypoint = branch_entrypoint(branch_action, &branches);
                     ingestors.push((
                         kind,
@@ -358,7 +358,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         output
                             .flush_policy
                             .as_ref()
-                            .expect("validated ingestor output must have a flush policy")
+                            .verified(
+                                "the registry requires a flush policy on every flush-based output \
+                                 route",
+                            )
                             .flush_each
                             .clone(),
                         output
@@ -374,10 +377,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
             }
             Model::Reingestor(reingestor) => {
                 for output in reingestor.output_routes.outputs() {
-                    let branch_action = output
-                        .branch
-                        .as_ref()
-                        .expect("validated reingestor route must declare branch behavior");
+                    let branch_action = output.branch.as_ref().verified(
+                        "the registry requires every route of these nodes to declare its branch \
+                         behavior",
+                    );
                     let entrypoint = branch_entrypoint(branch_action, &branches);
                     ingestors.push((
                         kind,
@@ -390,7 +393,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         output
                             .flush_policy
                             .as_ref()
-                            .expect("validated reingestor output must have a flush policy")
+                            .verified(
+                                "the registry requires a flush policy on every flush-based output \
+                                 route",
+                            )
                             .flush_each
                             .clone(),
                         output
@@ -980,7 +986,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     )?;
     let template = materialize_nodes(std::slice::from_ref(spec), relay_schemas, udfs)?
         .pop()
-        .expect("single processor spec must materialize one template");
+        .verified("materialize_nodes answers one template per spec and this call passes one spec");
     let mut processors = HashMap::default();
     processors.insert(spec.processor.clone(), template);
     Ok(BranchInstanceTemplate {

@@ -46,6 +46,7 @@ use hyper::{
     upgrade,
 };
 use hyper_util::rt::TokioIo;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     Client as NervixClient, ConnectOptions as ClientConnectOptions,
     TlsRequirement as ClientTlsRequirement,
@@ -1056,7 +1057,7 @@ fn validate_subscription_bindings(
         })?;
         let literal = bound
             .get(field)
-            .expect("validated binding set must include branch field");
+            .verified("the check above requires the bound keys to match the branch fields exactly");
         let expected = parse_subscription_literal(field, ty, literal)?;
         matchers.push(SubscriptionMatcher {
             field: field.clone(),
@@ -1212,7 +1213,10 @@ fn response_with_status(status: StatusCode) -> HyperResponse<Empty<Bytes>> {
     HyperResponse::builder()
         .status(status)
         .body(empty_body())
-        .expect("empty response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn endpoint_rejection_response(retry_after: Option<Duration>) -> HyperResponse<Empty<Bytes>> {
@@ -1223,9 +1227,10 @@ fn endpoint_rejection_response(retry_after: Option<Duration>) -> HyperResponse<E
             .saturating_add(u64::from(retry_after.subsec_nanos() > 0));
         response = response.header(RETRY_AFTER, seconds.to_string());
     }
-    response
-        .body(empty_body())
-        .expect("endpoint rejection response must build")
+    response.body(empty_body()).assured(
+        "the status and header values are typed constants or generated ASCII, which the http \
+         builder always accepts",
+    )
 }
 
 fn response_with_bytes(
@@ -1237,7 +1242,10 @@ fn response_with_bytes(
         .status(status)
         .header(hyper::header::CONTENT_TYPE, content_type)
         .body(Full::new(body.into()))
-        .expect("byte response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn text_response(status: StatusCode, body: impl Into<Bytes>) -> HyperResponse<Full<Bytes>> {
@@ -1255,7 +1263,10 @@ fn web_console_upload_text_response(
         .header(ACCESS_CONTROL_ALLOW_METHODS, "POST, OPTIONS")
         .header(ACCESS_CONTROL_ALLOW_HEADERS, "content-type")
         .body(Full::new(body.into()))
-        .expect("web console upload response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn redirect_response(location: &'static str) -> HyperResponse<Full<Bytes>> {
@@ -1263,7 +1274,10 @@ fn redirect_response(location: &'static str) -> HyperResponse<Full<Bytes>> {
         .status(StatusCode::PERMANENT_REDIRECT)
         .header(LOCATION, location)
         .body(Full::new(Bytes::new()))
-        .expect("redirect response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn try_take_length_delimited_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
@@ -1378,7 +1392,10 @@ async fn handle_http_request(
                 derive_accept_key(sec_websocket_key.as_bytes()),
             )
             .body(empty_body())
-            .expect("websocket upgrade response must build");
+            .assured(
+                "the status and header values are typed constants or generated ASCII, which the \
+                 http builder always accepts",
+            );
 
         let on_upgrade = upgrade::on(&mut request);
         request_tasks.spawn(async move {
@@ -1676,7 +1693,8 @@ async fn handle_cluster_api_request(
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
     let response = match (request.method(), request.uri().path()) {
         (&Method::GET, path) if parse_resource_archive_request_path(path).is_some() => {
-            let id = parse_resource_archive_request_path(path).expect("path checked above");
+            let id = parse_resource_archive_request_path(path)
+                .verified("the match guard above accepted this same path");
             match resource_store.read_archive_bytes(&id) {
                 Ok(bytes) => response_with_bytes(StatusCode::OK, bytes, "application/x-tar"),
                 Err(_) => text_response(StatusCode::NOT_FOUND, "resource archive not found"),
@@ -1969,7 +1987,10 @@ async fn handle_web_console_request(
                 derive_accept_key(sec_websocket_key.as_bytes()),
             )
             .body(Full::new(Bytes::new()))
-            .expect("web console websocket upgrade response must build");
+            .assured(
+                "the status and header values are typed constants or generated ASCII, which the \
+                 http builder always accepts",
+            );
 
         let on_upgrade = upgrade::on(&mut request);
         let service_tasks = service.service_tasks.clone();
@@ -2408,7 +2429,10 @@ fn unauthorized_basic_response() -> HyperResponse<Full<Bytes>> {
             format!("Basic realm=\"{BASIC_AUTH_REALM}\""),
         )
         .body(Full::new(Bytes::from_static(b"authentication failed")))
-        .expect("basic authentication response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn sanitized_upload_relative_path(raw: &str) -> Option<PathBuf> {
@@ -3294,6 +3318,8 @@ const INTERNAL_TLS_KEY_FILE: &str = "node-key.pem";
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("failed to build the Tokio runtime")]
+    BuildRuntime,
     #[error("failed to parse server address")]
     ParseAddress,
     #[error("failed to bind gRPC listen address")]
@@ -4134,7 +4160,8 @@ async fn apply_cluster_runtime_state(
 impl SessionServiceImpl {
     fn new_auth_rate_limiter() -> Arc<AuthRateLimiter> {
         let quota = Quota::per_second(
-            NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND).expect("auth rate limit must be positive"),
+            NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND)
+                .assured("AUTH_RATE_LIMIT_PER_SECOND is a positive constant"),
         );
         Arc::new(RateLimiter::keyed(quota))
     }
@@ -4403,10 +4430,9 @@ impl SessionServiceImpl {
         model_metadata.validate_binding_names(processor)?;
 
         for mapping in &processor.inputs {
-            let model_type = model_metadata
-                .inputs
-                .get(&mapping.tensor)
-                .expect("validated ONNX input binding must exist");
+            let model_type = model_metadata.inputs.get(&mapping.tensor).verified(
+                "validate_binding_names above rejected any mapping this metadata does not carry",
+            );
             model_type.validate_declared_schema(
                 processor,
                 "input",
@@ -4416,10 +4442,9 @@ impl SessionServiceImpl {
         }
 
         for declaration in &processor.output_schema {
-            let model_type = model_metadata
-                .outputs
-                .get(&declaration.tensor)
-                .expect("validated ONNX output binding must exist");
+            let model_type = model_metadata.outputs.get(&declaration.tensor).verified(
+                "validate_binding_names above rejected any mapping this metadata does not carry",
+            );
             model_type.validate_declared_schema(
                 processor,
                 "output",
@@ -8410,7 +8435,7 @@ impl SessionServiceImpl {
         };
         let domain = domains
             .get(domain_id)
-            .expect("the transaction domain was checked while replaying the transaction");
+            .verified("replaying the transaction resolved this domain before reaching the step");
         self.validate_changed_model_bindings(domain_id, domain.config.pace, planned)
             .await?;
         let _ = self.prepare_planned_domain_udfs(planned).await?;
@@ -8808,10 +8833,10 @@ impl SessionServiceImpl {
         transaction: &ReplicatedTransaction,
         statement_index: usize,
     ) -> Result<ReplicatedTransaction, String> {
-        let queued = transaction
-            .statements
-            .get(statement_index)
-            .expect("replicated commit progress must point to a statement");
+        let queued = transaction.statements.get(statement_index).verified(
+            "the caller checked this index against the same statement list before dispatching the \
+             step",
+        );
         let mut start_clock = None;
         let mut stop_clock = None;
         let mut ownership_handoff = None;
@@ -9261,9 +9286,10 @@ impl SessionServiceImpl {
                         if !statement.is_model_mutation() {
                             break;
                         }
-                        let next = commands
-                            .next()
-                            .expect("peeked command must still be available");
+                        let next = commands.next().verified(
+                            "the peek above observed this command and nothing consumed the \
+                             iterator since",
+                        );
                         let ClientStatement::Server(statement) = next.statement else {
                             unreachable!("peeked model mutation statement must be next");
                         };
@@ -9304,7 +9330,7 @@ impl SessionServiceImpl {
         if !is_batch {
             return results
                 .pop()
-                .expect("non-empty results must contain the single result");
+                .verified("the empty check above already returned");
         }
 
         CommandResult {
@@ -9593,10 +9619,9 @@ impl SessionServiceImpl {
 
         let mut completed_result = None;
         if !mutations.is_empty() {
-            let error_target = applied
-                .first()
-                .map(|(_, id, _)| id.clone())
-                .expect("non-empty mutation batch must have a first model");
+            let error_target = applied.first().map(|(_, id, _)| id.clone()).verified(
+                "every arm that records a mutation records an applied model in the same step",
+            );
             let planned = match self.registry.plan_mutations(&domain, &mutations) {
                 Ok(planned) => planned,
                 Err(err) => {
@@ -9806,13 +9831,19 @@ impl SessionServiceImpl {
                         domain: domain.clone(),
                         expected_schedule: transaction_schedule
                             .as_ref()
-                            .expect("transaction model mutation must prepare a schedule")
+                            .verified(
+                                "the schedule is prepared exactly when a transaction step is \
+                                 present, and this branch has one",
+                            )
                             .0
                             .clone()
                             .map(Box::new),
                         schedule: transaction_schedule
                             .clone()
-                            .expect("transaction model mutation must prepare a schedule")
+                            .verified(
+                                "the schedule is prepared exactly when a transaction step is \
+                                 present, and this branch has one",
+                            )
                             .1
                             .map(Box::new),
                     };
@@ -10135,14 +10166,18 @@ impl SessionServiceImpl {
         }
 
         if requires_existing_domain(&statement) {
-            let domain = domain.as_ref().expect("domain required");
+            let domain = domain
+                .as_ref()
+                .verified("this statement requires a request domain, which was resolved above");
             if self.consensus.current_domain(domain).await.is_none() {
                 return command_error(format!("domain '{}' does not exist", domain.as_str()));
             }
         }
 
         if requires_runtime_reconcile(&statement) {
-            let domain = domain.as_ref().expect("domain required");
+            let domain = domain
+                .as_ref()
+                .verified("this statement requires a request domain, which was resolved above");
             if let Err(error) = self.reconcile_running_domain_runtime(domain).await {
                 return command_error(error);
             }
@@ -10151,21 +10186,34 @@ impl SessionServiceImpl {
         match statement {
             Statement::CreateDomain(create) => self.create_domain(create).await,
             Statement::AlterDomain(alter) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.alter_domain(domain, alter).await
             }
             Statement::CreateUser(create) => self.create_user(create).await,
             Statement::CreateResource(create) => {
-                self.create_resource(domain.as_ref().expect("domain required"), create)
-                    .await
+                self.create_resource(
+                    domain.as_ref().verified(
+                        "this statement requires a request domain, which was resolved above",
+                    ),
+                    create,
+                )
+                .await
             }
             Statement::UploadResource(upload) => self.upload_resource_command(upload).await,
             Statement::StartDomain(start) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.start_domain(domain, start).await
             }
             Statement::StopDomain(stop) => {
-                let domain = domain.as_ref().expect("domain required");
+                // `STOP` names no domain, so it acts on the session's domain. It is excluded from
+                // `requires_request_domain`, which leaves the session free of one here.
+                let Some(domain) = domain.as_ref() else {
+                    return command_error("no active domain selected".to_string());
+                };
                 self.stop_domain(domain, stop).await
             }
             Statement::Create(_)
@@ -10192,83 +10240,126 @@ impl SessionServiceImpl {
             }
             Statement::DrainNode(drain) => self.drain_node(drain.node_id).await,
             Statement::Relocate(relocation) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.relocate(domain, relocation).await
             }
             Statement::DescribeRelocation(relocation) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_relocation(domain, relocation).await
             }
             Statement::DescribeRelay(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_stream(domain, describe).await
             }
             Statement::DescribeDomain(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_domain(domain, describe).await
             }
             Statement::DescribeEndpoint(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_endpoint(domain, describe).await
             }
             Statement::DescribeIngestor(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_ingestor(domain, describe).await
             }
             Statement::DescribeLookup(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_lookup(domain, describe).await
             }
             Statement::DescribeJunction(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_junction(domain, describe).await
             }
             Statement::DescribeDeduplicator(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_deduplicator(domain, describe).await
             }
             Statement::DescribeReingestor(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_reingestor(domain, describe).await
             }
             Statement::DescribeCorrelator(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_correlator(domain, describe).await
             }
             Statement::DescribeReorderer(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_reorderer(domain, describe).await
             }
             Statement::DescribeEmitter(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_emitter(domain, describe).await
             }
             Statement::DescribeWindowProcessor(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_window_processor(domain, describe).await
             }
             Statement::DescribeWasmProcessor(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_wasm_processor(domain, describe).await
             }
             Statement::DescribeUdf(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_udf(domain, describe)
             }
             Statement::DescribePlacement(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_placement(domain, describe).await
             }
             Statement::DescribeResource(describe) => {
-                self.describe_resource(domain.as_ref().expect("domain required"), describe)
-                    .await
+                self.describe_resource(
+                    domain.as_ref().verified(
+                        "this statement requires a request domain, which was resolved above",
+                    ),
+                    describe,
+                )
+                .await
             }
             Statement::LookupQuery(query) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.lookup_query(domain, query).await
             }
             Statement::ShowCreate(show) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 let name_span = find_identifier_span(query, &show.name).unwrap_or(0..0);
                 let model = match self.registry.get(domain, show.kind, &show.name) {
                     Ok(Some(model)) => model,
@@ -10337,15 +10428,21 @@ impl SessionServiceImpl {
                 }
             }
             Statement::ShowRelayMaterializedState(show) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.show_stream_materialized_state(domain, show).await
             }
             Statement::ShowUdfs(_) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.show_udfs(domain)
             }
             Statement::ShowPlacements(_) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.show_placements(domain).await
             }
             Statement::ShowClusterStatus(_) => CommandResult {
@@ -11360,7 +11457,9 @@ impl SessionServiceImpl {
             return command_ok(lines.join("\n"));
         }
 
-        let version = describe.version.expect("checked above");
+        let version = describe
+            .version
+            .verified("the branch above returned for the absent case");
         let id = ResourceId::new(domain.clone(), describe.identifier.clone(), version);
         let resources = self.consensus.current_resources().await;
         let Some(resource) = resources
@@ -12466,8 +12565,10 @@ impl SessionServiceImpl {
                 }
             }
             assigned_nodes.truncate(replica_slots);
-            let node = scheduled_node_for_placement_member_mut(schedule, member)
-                .expect("validated placement group member must remain scheduled");
+            let node = scheduled_node_for_placement_member_mut(schedule, member).verified(
+                "the early return above required every group member to resolve in this same \
+                 schedule",
+            );
             node.primary_node = Some(target.clone());
             node.assigned_nodes = assigned_nodes;
         }
@@ -12598,7 +12699,7 @@ impl SessionServiceImpl {
         });
         let desired = desired
             .or(generated_desired.as_ref())
-            .expect("failover always has a desired schedule");
+            .verified("the generated schedule is built exactly when no desired schedule was given");
 
         let groups = schedule.placement_groups.clone();
         let mut grouped_members = HashSet::default();
@@ -15460,7 +15561,7 @@ fn password_argon2() -> Argon2<'static> {
         TESTING_ARGON2_PARALLELISM,
         None,
     )
-    .expect("testing Argon2 parameters must be valid");
+    .assured("the testing cost constants are inside the ranges Argon2 accepts");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
@@ -15612,7 +15713,12 @@ fn model_mutation_success_result(
     }
     let results = results
         .into_iter()
-        .map(|result| result.expect("every mutation statement must produce a command result"))
+        .map(|result| {
+            result.verified(
+                "each statement either filled its own slot or was recorded in applied, which this \
+                 function fills",
+            )
+        })
         .collect::<Vec<_>>();
     CommandResult {
         success: true,
@@ -17409,7 +17515,7 @@ impl Application {
         let consensus = startup
             .consensus
             .as_ref()
-            .expect("consensus is initialized before cluster startup");
+            .verified("startup assigns this handle before it reaches this point");
         if let Err(error) = startup
             .registry
             .synchronize_cluster_schedule(&consensus.current_schedule().await)
@@ -17499,8 +17605,10 @@ impl Application {
             consensus,
             interconnect,
         } = startup;
-        let consensus = consensus.expect("consensus is initialized before server startup");
-        let interconnect = interconnect.expect("interconnect is initialized before server startup");
+        let consensus =
+            consensus.verified("startup assigns this handle before it reaches this point");
+        let interconnect =
+            interconnect.verified("startup assigns this handle before it reaches this point");
         let mut interconnect_rx = interconnect_rx;
         runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
 

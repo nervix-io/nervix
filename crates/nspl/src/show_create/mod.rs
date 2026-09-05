@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{ModelKind, ShowCreate};
 
 use crate::{
@@ -169,7 +170,7 @@ pub fn parse_show_create_tokens(tokens: &[Token]) -> Result<ShowCreate, Vec<Pars
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

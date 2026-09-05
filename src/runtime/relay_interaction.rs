@@ -23,6 +23,7 @@
 use std::{future::pending, task::Poll};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use meticulous::OptionExt as _;
 use nervix_models::Identifier;
 use thiserror::Error;
 use tokio::{
@@ -249,7 +250,7 @@ impl RelayInputCollection {
         let collection = self
             .pending
             .remove(key)
-            .expect("ordered input collection key must exist");
+            .verified("the branch order only names keys the pending map still holds");
         self.branch_order.retain(|candidate| candidate != key);
         self.pending_batches = self
             .pending_batches
@@ -793,7 +794,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         loop {
             tokio::task::consume_budget().await;
             let ready = {
-                let drain = self.drain.as_mut().expect("drain state must exist");
+                let drain = self
+                    .drain
+                    .as_mut()
+                    .verified("this path only runs while the interaction is draining");
                 self.inputs.try_recv_snapshot(&mut drain.remaining)
             };
             let input = match ready {
@@ -811,7 +815,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 return Ok(self.work_with(RelayInteractionEvent::Batch { relay, batch }, work));
             }
             drop(work);
-            let drain = self.drain.take().expect("drain state must exist");
+            let drain = self
+                .drain
+                .take()
+                .verified("this path only runs while the interaction is draining");
             let event = match drain.finish {
                 DrainFinish::ForceFlush(completion) => {
                     RelayInteractionEvent::ForceFlush(completion)

@@ -10,6 +10,7 @@ use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
 };
 use leptos::{ev, mount::mount_to_body, prelude::*};
+use meticulous::OptionExt as _;
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
@@ -1144,7 +1145,9 @@ fn handle_session_response(
                     .map(|status| status.id)
                     .filter(|id| !id.is_empty())
             {
-                pending_requests.push_front(pending.take().expect("pending was checked above"));
+                pending_requests.push_front(pending.take().verified(
+                    "the condition above matched on this same pending request being present",
+                ));
                 return SessionResponseAction::ReattachTransaction { id };
             }
             let pending = pending;
@@ -2370,7 +2373,7 @@ fn event_target_input(event: &ev::Event) -> web_sys::HtmlInputElement {
     event
         .target()
         .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-        .expect("upload input event target must be an input")
+        .verified("this handler is only bound to the upload input element")
 }
 
 async fn upload_resource_files(
@@ -2662,10 +2665,14 @@ fn GraphPanel(
             .filter(|graph| graph.id == selected_domain)
             .or_else(&visible_graph)
     };
-    let current_graph =
-        move || visible_graph().expect("graph view must exist when graph is visible");
-    let current_topology_graph =
-        move || visible_topology_graph().expect("graph topology must exist when graph is visible");
+    let current_graph = move || {
+        visible_graph()
+            .verified("the panel only renders while the visible graph signal holds a value")
+    };
+    let current_topology_graph = move || {
+        visible_topology_graph()
+            .verified("the panel only renders while the visible graph signal holds a value")
+    };
     let active_graph_search = move || {
         let query = graph_search.get().trim().to_ascii_lowercase();
         (query.chars().count() >= 2).then_some(query)
@@ -4887,7 +4894,10 @@ impl GraphViewEdge {
                 current.0, current.1, exit.0, exit.1
             ));
         }
-        let end = self.points.last().expect("non-empty points checked above");
+        let end = self
+            .points
+            .last()
+            .verified("the empty-points branch above already returned");
         path.push_str(&format!(" L{} {}", end.0, end.1));
         path
     }

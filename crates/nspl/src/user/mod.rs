@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{CreateStatement, CreateUser};
 
 use crate::{
@@ -40,7 +41,7 @@ pub fn parse_create_user(input: &str) -> Result<CreateStatement<CreateUser>, Par
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

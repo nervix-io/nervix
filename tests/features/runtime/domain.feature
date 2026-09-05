@@ -281,3 +281,16 @@ Feature: Domain lifecycle
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: Stopping without an active domain is rejected instead of aborting the request
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is ""
+    When these NSPL commands fail with "no active domain selected"
+      """
+      STOP
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

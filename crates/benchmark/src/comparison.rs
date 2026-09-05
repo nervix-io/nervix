@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use meticulous::{OptionExt as _, ResultExt as _};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -879,7 +880,10 @@ fn human_list(values: &[String]) -> String {
         values => format!(
             "{}, and {}",
             values[..values.len() - 1].join(", "),
-            values.last().expect("non-empty list has a last value")
+            values.last().verified(
+                "the shorter slice patterns above already matched every list of fewer than three \
+                 values"
+            )
         ),
     }
 }
@@ -895,7 +899,10 @@ pub(crate) fn format_count(value: u64) -> String {
         if first_group > 0 || index > 0 {
             formatted.push(',');
         }
-        formatted.push_str(std::str::from_utf8(chunk).expect("decimal digits are valid UTF-8"));
+        formatted.push_str(
+            std::str::from_utf8(chunk)
+                .verified("the chunks come from a decimal rendering, which is ASCII"),
+        );
     }
     formatted
 }

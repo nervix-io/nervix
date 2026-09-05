@@ -221,9 +221,10 @@ impl KafkaEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready Kafka confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(Ok(_delivery)) => outcome.deliver(confirmation.position),
                 Ok(Err((source, _message))) if Self::is_record_rejection(&source) => outcome

@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, SubscriptionBinding, SubscriptionDeliveryBehavior,
     SubscriptionLiteral,
@@ -140,10 +141,10 @@ pub fn create_subscription_query(
     }
     if let Some(where_clause) = where_clause {
         query.push_str(" WHERE ");
-        query.push_str(
-            &nervix_models::expression_to_nspl(where_clause)
-                .expect("a parsed subscription expression must be canonically renderable"),
-        );
+        query.push_str(&nervix_models::expression_to_nspl(where_clause).verified(
+            "the expression came from this parser, and every parsed expression renders back to \
+             NSPL",
+        ));
     }
     query.push(';');
     query
@@ -172,7 +173,7 @@ pub fn parse_create_subscription_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

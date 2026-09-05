@@ -35,6 +35,8 @@ pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
 pub enum WasmProcessorError {
     #[error("failed to configure wasmtime: {0}")]
     Configure(#[source] wasmtime::Error),
+    #[error("failed to spawn the wasm epoch driver thread: {0}")]
+    SpawnEpochDriver(#[source] std::io::Error),
     #[error("failed to compile wasm module: {0}")]
     Compile(#[source] wasmtime::Error),
     #[error("failed to join wasm compilation task: {0}")]
@@ -319,7 +321,8 @@ impl WasmRuntime {
             engine.clone(),
             StdArc::clone(&stop),
             config.epoch_tick_interval,
-        );
+        )
+        .map_err(WasmProcessorError::SpawnEpochDriver)?;
         Ok(Self {
             engine,
             stop,
@@ -361,7 +364,11 @@ impl Drop for WasmRuntime {
     }
 }
 
-fn spawn_epoch_driver(engine: Engine, stop: StdArc<AtomicBool>, interval: Duration) {
+fn spawn_epoch_driver(
+    engine: Engine,
+    stop: StdArc<AtomicBool>,
+    interval: Duration,
+) -> std::io::Result<()> {
     let weak_stop = StdArc::downgrade(&stop);
     thread::Builder::new()
         .name("nervix-wasm-epoch".to_string())
@@ -377,7 +384,7 @@ fn spawn_epoch_driver(engine: Engine, stop: StdArc<AtomicBool>, interval: Durati
                 engine.increment_epoch();
             }
         })
-        .expect("failed to spawn nervix wasm epoch driver");
+        .map(|_handle| ())
 }
 
 #[derive(Debug, Clone)]

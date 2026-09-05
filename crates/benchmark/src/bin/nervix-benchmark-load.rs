@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand};
+use meticulous::ResultExt as _;
 use nervix_benchmark::LoadShape;
 use parking_lot::Mutex;
 use rdkafka::{
@@ -264,7 +265,7 @@ impl PayloadWriter {
                     cycle_digits = KEY_CYCLE_DIGITS,
                     index_digits = KEY_INDEX_DIGITS,
                 )
-                .expect("the key slot is exactly as wide as the formatted key");
+                .assured("fmt::Write over an in-memory buffer has no failure mode");
                 payload
             }
         }

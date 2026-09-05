@@ -69,7 +69,9 @@ impl SqsIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled SQS ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
         let ack_timeout = match &ack_mode {
             SqsIngestMode::AckSequential { timeout, .. } => {
                 Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?

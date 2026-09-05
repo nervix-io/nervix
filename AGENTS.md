@@ -255,6 +255,21 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   belong at `debug` or `trace`.
 - Hot-path logs and structured errors must not expose sensitive payload values.
 
+## Failure Handling and Panics
+
+- Use `meticulous`'s `ResultExt` and `OptionExt` instead of bare `unwrap` and `expect`, and pick the
+  method that states why the failure cannot happen: `assured` for a guarantee that holds by
+  construction or by target platform, `verified` for a condition already checked earlier in the same
+  code, `todo` for a path that is not implemented yet.
+- The reason is part of the call. Write the actual guarantee, not a restatement of the operation:
+  `verified("the has_errors branch above already returned")`, not `verified("parse must succeed")`.
+- Import the traits anonymously with `use meticulous::{OptionExt as _, ResultExt as _};` so they
+  never collide with the `ResultExt` that `error-stack` brings into the same module.
+- A site with no guarantee is a defect, not a renamed `unwrap`. Give it a typed error and propagate
+  it, or make the invariant hold in the type. Never invent a guarantee to retire a panic site.
+- A build script is the exception that stays a panic: a failed code generation is a real build
+  failure, so it panics with its cause rather than claiming a guarantee it does not have.
+
 ## Engineering Conventions
 
 - Keep Rust modules organized around coherent ownership boundaries, not broad technical categories.

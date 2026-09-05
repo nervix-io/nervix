@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{AlterGenerator, AlterGeneratorOperation, CreateGenerator, CreateStatement};
 
 use crate::{
@@ -111,7 +112,7 @@ pub fn parse_create_generator_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -124,7 +125,7 @@ pub fn parse_alter_generator_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

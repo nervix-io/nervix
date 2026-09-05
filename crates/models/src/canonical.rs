@@ -1,5 +1,7 @@
 use std::fmt::{Display, Formatter};
 
+use meticulous::OptionExt as _;
+
 use crate::{
     AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
@@ -573,9 +575,10 @@ impl Statement {
                 if !create.if_not_exists {
                     return Ok(rendered);
                 }
-                let rest = rendered
-                    .strip_prefix("CREATE ")
-                    .expect("every model renders as a CREATE statement");
+                let rest = rendered.strip_prefix("CREATE ").verified(
+                    "this branch renders a create statement, whose rendering starts with the \
+                     CREATE keyword",
+                );
                 Ok(format!("CREATE IF NOT EXISTS {rest}"))
             }
             Self::CreateDomain(create) => {
@@ -1801,9 +1804,10 @@ impl CreateCodec {
         // The wire description may itself carry a CONFIG map, which becomes a block of its own.
         match wire.split_once(" CONFIG {") {
             Some((before, rest)) => {
-                let (entries, after) = rest
-                    .rsplit_once('}')
-                    .expect("a rendered CONFIG map is closed");
+                let (entries, after) = rest.rsplit_once('}').verified(
+                    "the split above found an opening CONFIG brace, which this renderer always \
+                     closes",
+                );
                 clauses.push(Clause::line(format!("FROM {before}")));
                 clauses.push(Clause::braced("CONFIG", split_config_entries(entries)));
                 if !after.trim().is_empty() {

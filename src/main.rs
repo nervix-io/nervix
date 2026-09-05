@@ -1,5 +1,5 @@
 use clap::Parser;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_server::application::{AppError, Args, init_tracing, run_cli};
 use tokio::runtime::Builder;
 
@@ -8,7 +8,7 @@ fn main() -> Result<(), Report<AppError>> {
         .thread_stack_size(8 * 1024 * 1024) // Set custom stack size here
         .enable_all()
         .build()
-        .unwrap();
+        .change_context(AppError::BuildRuntime)?;
 
     let args = Args::parse();
     let _tracing_guard = init_tracing(&args)?;

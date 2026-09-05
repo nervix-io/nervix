@@ -161,7 +161,10 @@ impl SyslogIngestor {
             codec: dependencies.codec,
             quiesce: runtime
                 .ingestor_quiesce_control(domain, &ingestor.name)
-                .expect("scheduled Syslog ingestor must have quiesce control"),
+                .verified(
+                    "the runtime registers quiesce control for an ingestor before it starts the \
+                     task",
+                ),
             events: runtime.events.clone(),
         };
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -681,7 +684,8 @@ impl StreamFrameDecoder {
         if prefix.first() == Some(&b'0') || !prefix.iter().all(|byte| byte.is_ascii_digit()) {
             return Err(SyslogFrameError::MalformedOctetCount);
         }
-        let prefix = std::str::from_utf8(prefix).expect("ASCII digit prefix must be valid UTF-8");
+        let prefix = std::str::from_utf8(prefix)
+            .verified("the check above rejected every prefix that is not made of ASCII digits");
         let length = prefix
             .parse::<usize>()
             .map_err(|source| SyslogFrameError::InvalidOctetCount { source })?;

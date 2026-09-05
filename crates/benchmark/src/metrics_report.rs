@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use meticulous::OptionExt as _;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -471,7 +472,10 @@ impl ScrapedMetrics {
                 .insert_bucket(
                     metric,
                     &key,
-                    upper_bound.expect("histogram bucket has an upper bound"),
+                    upper_bound.verified(
+                        "this branch only runs for a bucket sample, which always parses an upper \
+                         bound",
+                    ),
                     value,
                 ),
             MESSAGES_PER_BATCH_COUNT => self
@@ -486,7 +490,10 @@ impl ScrapedMetrics {
                 .insert_bucket(
                     metric,
                     &key,
-                    upper_bound.expect("histogram bucket has an upper bound"),
+                    upper_bound.verified(
+                        "this branch only runs for a bucket sample, which always parses an upper \
+                         bound",
+                    ),
                     value,
                 ),
             RELAY_BUFFER_LEN_COUNT => self

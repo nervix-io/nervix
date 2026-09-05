@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{CreateEndpoint, CreateStatement, EndpointType};
 
 use crate::{
@@ -88,7 +89,7 @@ pub fn parse_create_endpoint_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

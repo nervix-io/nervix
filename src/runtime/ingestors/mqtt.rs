@@ -163,7 +163,9 @@ impl MqttIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled MQTT ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -430,7 +432,10 @@ impl MqttIngestor {
                                     &client_handle,
                                     &mut shutdown_rx,
                                     publish,
-                                    task_ack_timeout.expect("ack timeout must exist"),
+                                    task_ack_timeout.verified(
+                                        "this branch runs only for an ACK mode, and every ACK \
+                                         mode parses a timeout above",
+                                    ),
                                     task_retry_policy,
                                     &mut backoff,
                                 )
@@ -451,7 +456,10 @@ impl MqttIngestor {
                                         }
                                     };
                                 let deadline = Instant::now()
-                                    + task_batch_timeout.expect("batch timeout must exist");
+                                    + task_batch_timeout.verified(
+                                        "this branch runs only for the parallel ACK mode, which \
+                                         parses a batch timeout above",
+                                    );
                                 while batch.len() < (*max as usize).max(1) {
                                     tokio::task::consume_budget().await;
                                     tokio::select! {
@@ -490,7 +498,10 @@ impl MqttIngestor {
                                     &client_handle,
                                     &mut shutdown_rx,
                                     batch,
-                                    task_ack_timeout.expect("ack timeout must exist"),
+                                    task_ack_timeout.verified(
+                                        "this branch runs only for an ACK mode, and every ACK \
+                                         mode parses a timeout above",
+                                    ),
                                     task_retry_policy,
                                     &mut backoff,
                                 )
