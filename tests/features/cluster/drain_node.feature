@@ -30,6 +30,43 @@ Feature: Drain node
       - kind=junction name=handoff_junction from={{drained_owner}} to=
       """
 
+  @planned-handoff-owner-loss
+  Scenario: Losing the former owner during a held drain leaves relocation to failover
+    Given entity gate deadline is configured as "60s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CORDON NODE node-1;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA owner_loss_event ( seq I64 );
+      CREATE RELAY owner_loss_input SCHEMA owner_loss_event UNBRANCHED;
+      CREATE RELAY owner_loss_output SCHEMA owner_loss_event UNBRANCHED;
+      CREATE JUNCTION owner_loss_junction FROM owner_loss_input UNBRANCHED
+        TO owner_loss_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      UNCORDON NODE node-1;
+      UNCORDON NODE node-3;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=owner_loss_junction owner=node-2
+      """
+    And the last cluster status owner for scheduled "junction" "owner_loss_junction" is saved as placeholder "former_owner"
+    Given the entity gate for domain "{{domain}}" pauses after engagement
+    When these NSPL commands begin executing in the background
+      """
+      DRAIN NODE node-2;
+      """
+    Then the entity gate pause for domain "{{domain}}" is reached
+    When node "node-2" is stopped
+    And the entity gate pause for domain "{{domain}}" is released
+    Then the background NSPL execution fails with "former owner 'node-2' became unavailable during ownership handoff"
+    And node "node-1" eventually observes a stable leader
+    And within "60s" node "node-1" eventually reports scheduled "junction" "owner_loss_junction" owner different from placeholder "former_owner"
+
   @planned-handoff-timeout
   Scenario: A stalled schedule unit fails independently and can be retried
     Given entity gate deadline is configured as "250ms"

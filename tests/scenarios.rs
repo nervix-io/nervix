@@ -3802,6 +3802,27 @@ async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) 
     world.last_command_output = Some(output);
 }
 
+#[then(expr = "the background NSPL execution fails with {string}")]
+async fn then_the_background_nspl_execution_fails_with(
+    world: &mut ScenarioWorld,
+    expected: String,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let task = world
+        .background_nspl
+        .take()
+        .expect("a background NSPL execution must be active");
+    let error = task
+        .await
+        .expect("background NSPL task must not panic")
+        .expect_err("background NSPL execution must fail");
+    assert!(
+        error.contains(&expected),
+        "background NSPL error must contain '{expected}', got: {error}"
+    );
+    world.last_command_error = Some(error);
+}
+
 #[then("the background NSPL execution is discarded")]
 async fn then_the_background_nspl_execution_is_discarded(world: &mut ScenarioWorld) {
     let task = world
