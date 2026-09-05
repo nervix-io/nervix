@@ -8486,7 +8486,16 @@ impl SessionServiceImpl {
                 .await
                 .map_err(|error| error.to_string())
         } else {
-            self.execute_replicated_commit(&id).await
+            // A replicated commit owns its execution independently of the session. Keep its
+            // model-mutation future off the session's poll stack as well.
+            let service = self.clone();
+            let commit_id = id.clone();
+            match tokio::spawn(async move { service.execute_replicated_commit(&commit_id).await })
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(format!("transaction '{id}' commit task failed: {error}")),
+            }
         };
         match finished {
             Ok(transaction) => {
