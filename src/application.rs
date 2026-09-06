@@ -19816,16 +19816,16 @@ mod tests {
             Some(DrainMove {
                 label: "junction alpha".to_string(),
                 promoted_replica: None,
-                fallback_node: Some(ClusterNodeName::parse("node-3").expect("valid name")),
+                fallback_node: Some(named::<ClusterNodeName>("node-1")),
             })
         );
         assert_eq!(
-            schedule.nodes[0].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-2")]
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-2"))
         );
         assert_eq!(
-            schedule.nodes[1].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-3")]
+            schedule.nodes[1].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
         );
     }
 
