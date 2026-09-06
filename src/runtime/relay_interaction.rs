@@ -20,10 +20,11 @@
 //! lifecycle code must stop graph sources and prove relay buffers, node work, and force-flush
 //! obligations are quiescent before broadcasting the terminal watch value.
 
-use nervix_models::{RelayName};
+use nervix_models::{FieldName, RelayName, SchemaName};
 use std::{future::pending, task::Poll};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use meticulous::OptionExt as _;
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, watch},
@@ -249,7 +250,7 @@ impl RelayInputCollection {
         let collection = self
             .pending
             .remove(key)
-            .expect("ordered input collection key must exist");
+            .verified("the branch order only names keys the pending map still holds");
         self.branch_order.retain(|candidate| candidate != key);
         self.pending_batches = self
             .pending_batches
@@ -793,7 +794,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         loop {
             tokio::task::consume_budget().await;
             let ready = {
-                let drain = self.drain.as_mut().expect("drain state must exist");
+                let drain = self
+                    .drain
+                    .as_mut()
+                    .verified("this path only runs while the interaction is draining");
                 self.inputs.try_recv_snapshot(&mut drain.remaining)
             };
             let input = match ready {
@@ -811,7 +815,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 return Ok(self.work_with(RelayInteractionEvent::Batch { relay, batch }, work));
             }
             drop(work);
-            let drain = self.drain.take().expect("drain state must exist");
+            let drain = self
+                .drain
+                .take()
+                .verified("this path only runs while the interaction is draining");
             let event = match drain.finish {
                 DrainFinish::ForceFlush(completion) => {
                     RelayInteractionEvent::ForceFlush(completion)
@@ -883,9 +890,9 @@ mod tests {
         SCHEMA
             .get_or_init(|| {
                 triomphe::Arc::new(compile_schema(&CreateSchema {
-                    name: ModelName::parse("relay_interaction_test").expect("valid schema"),
+                    name: SchemaName::from(&ModelName::parse("relay_interaction_test").expect("valid schema")),
                     fields: vec![nervix_models::SchemaField {
-                        name: ModelName::parse("value").expect("valid field"),
+                        name: FieldName::from(FieldName::from(FieldName::from(&ModelName::parse("value").expect("valid field").clone().clone().clone()))),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
@@ -912,9 +919,9 @@ mod tests {
 
     fn alternate_batch(acks: AckSet) -> RelayRecordBatch {
         let alternate_schema = triomphe::Arc::new(compile_schema(&CreateSchema {
-            name: ModelName::parse("relay_interaction_alternate").expect("valid alternate schema"),
+            name: SchemaName::from(&ModelName::parse("relay_interaction_alternate").expect("valid alternate schema")),
             fields: vec![nervix_models::SchemaField {
-                name: ModelName::parse("value").expect("valid field"),
+                name: FieldName::from(FieldName::from(FieldName::from(&ModelName::parse("value").expect("valid field").clone().clone().clone()))),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,

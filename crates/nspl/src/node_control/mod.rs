@@ -1,5 +1,5 @@
 use chumsky::prelude::*;
-use nervix_models::{CordonNode, DrainNode, UncordonNode};
+use nervix_models::{ClusterNodeName, CordonNode, DrainNode, UncordonNode};
 
 use crate::{
     lexer::{Identifier, Token},
@@ -54,7 +54,7 @@ mod tests {
             .parse(tokens.as_slice())
             .into_result()
             .expect("parse should succeed");
-        assert_eq!(parsed.node_id, "node-2");
+        assert_eq!(parsed.node_id, ClusterNodeName::parse("node-2").expect("valid name"));
     }
 
     #[test]
@@ -65,7 +65,7 @@ mod tests {
             .parse(tokens.as_slice())
             .into_result()
             .expect("parse should succeed");
-        assert_eq!(parsed.node_id, "node-2");
+        assert_eq!(parsed.node_id, ClusterNodeName::parse("node-2").expect("valid name"));
     }
 
     #[test]
@@ -76,6 +76,6 @@ mod tests {
             .parse(tokens.as_slice())
             .into_result()
             .expect("parse should succeed");
-        assert_eq!(parsed.node_id, "node-2");
+        assert_eq!(parsed.node_id, ClusterNodeName::parse("node-2").expect("valid name"));
     }
 }

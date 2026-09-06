@@ -1,6 +1,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use meticulous::OptionExt as _;
 use rkyv::{
     Archive, Archived, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
     rancor::Fallible,
@@ -45,9 +46,10 @@ impl Timestamp {
     }
 
     pub fn unix_nanos(self) -> i64 {
-        self.0
-            .timestamp_nanos_opt()
-            .expect("Timestamp must always be representable as unix nanoseconds")
+        self.0.timestamp_nanos_opt().assured(
+            "Nervix timestamps come from the system clock or from unix nanoseconds, both inside \
+             the nanosecond range",
+        )
     }
 }
 
@@ -100,7 +102,10 @@ impl ArchiveWith<DateTime<Utc>> for UnixNanoseconds {
     fn resolve_with(field: &DateTime<Utc>, resolver: Self::Resolver, out: Place<Self::Archived>) {
         field
             .timestamp_nanos_opt()
-            .expect("timestamp must always be representable as unix nanoseconds")
+            .assured(
+                "Nervix timestamps come from the system clock or from unix nanoseconds, both \
+                 inside the nanosecond range",
+            )
             .resolve(resolver, out);
     }
 }
@@ -114,9 +119,10 @@ where
         field: &DateTime<Utc>,
         serializer: &mut S,
     ) -> Result<Self::Resolver, S::Error> {
-        let nanos = field
-            .timestamp_nanos_opt()
-            .expect("timestamp must always be representable as unix nanoseconds");
+        let nanos = field.timestamp_nanos_opt().assured(
+            "Nervix timestamps come from the system clock or from unix nanoseconds, both inside \
+             the nanosecond range",
+        );
         RkyvSerialize::serialize(&nanos, serializer)
     }
 }

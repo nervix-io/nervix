@@ -1,5 +1,7 @@
 use std::fmt::{Display, Formatter};
 
+use meticulous::OptionExt as _;
+
 use crate::{
     AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
@@ -576,9 +578,10 @@ impl Statement {
                 if !create.if_not_exists {
                     return Ok(rendered);
                 }
-                let rest = rendered
-                    .strip_prefix("CREATE ")
-                    .expect("every model renders as a CREATE statement");
+                let rest = rendered.strip_prefix("CREATE ").verified(
+                    "this branch renders a create statement, whose rendering starts with the \
+                     CREATE keyword",
+                );
                 Ok(format!("CREATE IF NOT EXISTS {rest}"))
             }
             Self::CreateDomain(create) => {
@@ -1804,9 +1807,10 @@ impl CreateCodec {
         // The wire description may itself carry a CONFIG map, which becomes a block of its own.
         match wire.split_once(" CONFIG {") {
             Some((before, rest)) => {
-                let (entries, after) = rest
-                    .rsplit_once('}')
-                    .expect("a rendered CONFIG map is closed");
+                let (entries, after) = rest.rsplit_once('}').verified(
+                    "the split above found an opening CONFIG brace, which this renderer always \
+                     closes",
+                );
                 clauses.push(Clause::line(format!("FROM {before}")));
                 clauses.push(Clause::braced("CONFIG", split_config_entries(entries)));
                 if !after.trim().is_empty() {
@@ -4079,7 +4083,7 @@ impl NativeTypeToNspl for AvroType {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
+    use crate::{BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, EmitterName, FieldName, IngestorName, LookupName, ModelName, RelayName, ResourceName, SchemaName, SubscriptionName, TopicName, UdfName, UserName, WireSchemaName, 
         AckMode, AvroType, BinaryOperator, BranchSelection, CodecEncoding, CodecEncodingRule,
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
         CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
@@ -4090,7 +4094,7 @@ mod tests {
         CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
         CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWindowProcessor,
         CreateWireSchema, EmitSink, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-        ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, Identifier,
+        ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, 
         IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal,
         MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
         MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch,
@@ -4103,8 +4107,12 @@ mod tests {
         expression_to_nspl,
     };
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::try_from(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn retry_policy() -> RetryPolicy {
@@ -4122,7 +4130,7 @@ mod tests {
 
     fn flushed_output(relay: &str, construction: Option<RouteConstruction>) -> ProcessorOutput {
         let mut output = ProcessorOutput::with_flush_policy(
-            identifier(relay),
+            named(relay),
             "100ms".to_string(),
             Some("1MiB".to_string()),
         );
@@ -4131,11 +4139,11 @@ mod tests {
     }
 
     fn bare_field(name: &str) -> Expression {
-        Expression::Field(crate::FieldReference::bare(identifier(name)))
+        Expression::Field(crate::FieldReference::bare(named(name)))
     }
 
     fn scoped_field(scope: FieldScope, name: &str) -> Expression {
-        Expression::Field(crate::FieldReference::scoped(scope, identifier(name)))
+        Expression::Field(crate::FieldReference::scoped(scope, named(name)))
     }
 
     fn string_value(value: &str) -> Expression {
@@ -4144,7 +4152,7 @@ mod tests {
 
     fn call(name: &str, arguments: Vec<Expression>) -> Expression {
         Expression::Call {
-            function: identifier(name),
+            function: named(name),
             arguments,
         }
     }
@@ -4167,7 +4175,7 @@ mod tests {
     fn route_set(field: &str, value: Expression) -> RouteConstruction {
         RouteConstruction {
             assignments: vec![crate::Assignment {
-                target: crate::AssignmentTarget::bare(identifier(field)),
+                target: crate::AssignmentTarget::bare(named(field)),
                 value,
             }],
             ..RouteConstruction::default()
@@ -4183,7 +4191,7 @@ mod tests {
     }
 
     fn processor_branched_by(schema: &str) -> BranchSelection {
-        BranchSelection::branched_by(identifier(&format!("by_{schema}")))
+        BranchSelection::branched_by(named(&format!("by_{schema}")))
     }
 
     fn config_entry(key: &str, value: &str) -> KafkaConfigEntry {
@@ -4196,16 +4204,16 @@ mod tests {
     #[test]
     fn renders_wire_schema_canonical() {
         let schema = WireSchemaDefinition::Avro(CreateWireSchema {
-            name: identifier("latency"),
+            name: named("latency"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("p99"),
+                    name: named("p99"),
                     ty: AvroType::Double,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("created_at"),
+                    name: named("created_at"),
                     ty: AvroType::String,
                     optional: false,
                 },
@@ -4222,16 +4230,16 @@ mod tests {
     #[test]
     fn renders_internal_schema_canonical() {
         let schema = CreateSchema {
-            name: identifier("latency"),
+            name: named("latency"),
             fields: vec![
                 SchemaField {
-                    name: identifier("p99"),
+                    name: named("p99"),
                     ty: ParseAsType::F64,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("created_at"),
+                    name: named("created_at"),
                     ty: ParseAsType::Datetime,
                     optional: false,
                     sensitive: false,
@@ -4249,9 +4257,9 @@ mod tests {
     #[test]
     fn renders_multidimensional_internal_arrays_canonical() {
         let schema = CreateSchema {
-            name: identifier("tensors"),
+            name: named("tensors"),
             fields: vec![SchemaField {
-                name: identifier("matrix"),
+                name: named("matrix"),
                 ty: ParseAsType::Array {
                     len: 2,
                     element: Box::new(ParseAsType::Array {
@@ -4273,7 +4281,7 @@ mod tests {
     #[test]
     fn renders_transport_values_as_string_literals() {
         let model = CreateClientKafka {
-            name: identifier("kafka_main"),
+            name: named("kafka_main"),
             mount: None,
             config: vec![
                 config_entry("bootstrap.servers", "host1:9092"),
@@ -4292,7 +4300,7 @@ mod tests {
     #[test]
     fn renders_config_values_that_mix_quote_styles() {
         let model = CreateClientKafka {
-            name: identifier("k"),
+            name: named("k"),
             mount: None,
             config: vec![KafkaConfigEntry {
                 key: "quoted".to_string(),
@@ -4320,16 +4328,16 @@ mod tests {
     #[test]
     fn renders_json_wire_schema_canonical() {
         let schema = WireSchemaDefinition::Json(CreateWireSchema {
-            name: identifier("payload"),
+            name: named("payload"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("items"),
+                    name: named("items"),
                     ty: JsonType::Array,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("active"),
+                    name: named("active"),
                     ty: JsonType::Boolean,
                     optional: false,
                 },
@@ -4345,10 +4353,10 @@ mod tests {
     #[test]
     fn renders_loose_cbor_wire_schema_canonical() {
         let schema = WireSchemaDefinition::Cbor(CreateWireSchema {
-            name: identifier("payload"),
+            name: named("payload"),
             strictness: crate::WireSchemaStrictness::Loose,
             fields: vec![WireSchemaField {
-                name: identifier("active"),
+                name: named("active"),
                 ty: JsonType::Boolean,
                 optional: false,
             }],
@@ -4363,19 +4371,19 @@ mod tests {
     #[test]
     fn renders_optional_schema_fields_canonical() {
         let internal = CreateSchema {
-            name: identifier("latency"),
+            name: named("latency"),
             fields: vec![SchemaField {
-                name: identifier("p99"),
+                name: named("p99"),
                 ty: ParseAsType::F64,
                 optional: true,
                 sensitive: false,
             }],
         };
         let wire = WireSchemaDefinition::Json(CreateWireSchema {
-            name: identifier("payload"),
+            name: named("payload"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
-                name: identifier("active"),
+                name: named("active"),
                 ty: JsonType::Boolean,
                 optional: true,
             }],
@@ -4396,7 +4404,7 @@ mod tests {
         let expectations = [
             (
                 CreateClientHttp {
-                    name: identifier("http_main"),
+                    name: named("http_main"),
                     mount: None,
                     config: vec![HttpConfigEntry {
                         key: "base_url".to_string(),
@@ -4409,7 +4417,7 @@ mod tests {
             ),
             (
                 CreateClientSentry {
-                    name: identifier("sentry_main"),
+                    name: named("sentry_main"),
                     mount: None,
                     config: vec![SentryConfigEntry {
                         key: "dsn".to_string(),
@@ -4422,7 +4430,7 @@ mod tests {
             ),
             (
                 CreateClientMqtt {
-                    name: identifier("mqtt_main"),
+                    name: named("mqtt_main"),
                     mount: None,
                     config: vec![config_entry("host", "mqtt.internal")],
                 }
@@ -4432,7 +4440,7 @@ mod tests {
             ),
             (
                 CreateClientNats {
-                    name: identifier("nats_main"),
+                    name: named("nats_main"),
                     mount: None,
                     config: vec![config_entry("servers", "nats://localhost:4222")],
                 }
@@ -4442,7 +4450,7 @@ mod tests {
             ),
             (
                 CreateClientPrometheus {
-                    name: identifier("prom_main"),
+                    name: named("prom_main"),
                     mount: None,
                     config: vec![PrometheusConfigEntry {
                         key: "url".to_string(),
@@ -4455,7 +4463,7 @@ mod tests {
             ),
             (
                 CreateClientRabbitMq {
-                    name: identifier("rmq_main"),
+                    name: named("rmq_main"),
                     mount: None,
                     config: vec![config_entry("uri", "amqp://guest:guest@localhost:5672")],
                 }
@@ -4465,7 +4473,7 @@ mod tests {
             ),
             (
                 CreateClientRedis {
-                    name: identifier("redis_main"),
+                    name: named("redis_main"),
                     mount: None,
                     config: vec![config_entry("url", "redis://localhost:6379")],
                 }
@@ -4475,7 +4483,7 @@ mod tests {
             ),
             (
                 CreateClientZeroMq {
-                    name: identifier("zmq_main"),
+                    name: named("zmq_main"),
                     mount: None,
                     config: vec![config_entry("bind", "tcp://*:5555")],
                 }
@@ -4485,8 +4493,8 @@ mod tests {
             ),
             (
                 CreateClientSyslog {
-                    name: identifier("syslog_main"),
-                    mount: Some(identifier("syslog_tls")),
+                    name: named("syslog_main"),
+                    mount: Some(named("syslog_tls")),
                     config: vec![
                         config_entry("protocol", "tls"),
                         config_entry("addr", "logs.example.com:6514"),
@@ -4499,7 +4507,7 @@ mod tests {
             ),
             (
                 CreateClientSqs {
-                    name: identifier("sqs_main"),
+                    name: named("sqs_main"),
                     mount: None,
                     config: vec![config_entry("region", "us-east-1")],
                 }
@@ -4509,7 +4517,7 @@ mod tests {
             ),
             (
                 CreateClientWebsockets {
-                    name: identifier("ws_main"),
+                    name: named("ws_main"),
                     mount: None,
                     signaling_protocol: None,
                     config: vec![config_entry("url", "wss://example.com/socket")],
@@ -4520,9 +4528,9 @@ mod tests {
             ),
             (
                 CreateClientWebsockets {
-                    name: identifier("ws_main"),
+                    name: named("ws_main"),
                     mount: None,
-                    signaling_protocol: Some(identifier("binance_ws")),
+                    signaling_protocol: Some(named("binance_ws")),
                     config: vec![config_entry("url", "wss://example.com/socket")],
                 }
                 .to_canonical_nspl()
@@ -4539,7 +4547,7 @@ mod tests {
     #[test]
     fn renders_other_model_kinds_canonical() {
         let vhost = CreateVhost {
-            name: identifier("public"),
+            name: named("public"),
             hostnames: vec!["example.com".to_string(), "api.example.com".to_string()],
             tls: None,
         };
@@ -4549,10 +4557,10 @@ mod tests {
         );
 
         let tls_vhost = CreateVhost {
-            name: identifier("secure"),
+            name: named("secure"),
             hostnames: vec!["secure.example.com".to_string()],
             tls: Some(crate::VhostTlsResource {
-                resource: identifier("certs"),
+                resource: named("certs"),
                 version: Some(7),
             }),
         };
@@ -4562,8 +4570,8 @@ mod tests {
         );
 
         let endpoint = CreateEndpoint {
-            name: identifier("orders_http"),
-            on_vhost: identifier("public"),
+            name: named("orders_http"),
+            on_vhost: named("public"),
             path: "/orders".to_string(),
             endpoint_type: EndpointType::Http,
             signaling_protocol: None,
@@ -4573,11 +4581,11 @@ mod tests {
             "CREATE ENDPOINT orders_http ON public PATH '/orders' TYPE HTTP;"
         );
         let websocket_endpoint = CreateEndpoint {
-            name: identifier("orders_ws"),
-            on_vhost: identifier("public"),
+            name: named("orders_ws"),
+            on_vhost: named("public"),
             path: "/ws".to_string(),
             endpoint_type: EndpointType::Websockets,
-            signaling_protocol: Some(identifier("binance_ws")),
+            signaling_protocol: Some(named("binance_ws")),
         };
         assert_eq!(
             websocket_endpoint.to_canonical_nspl().expect("must render"),
@@ -4586,7 +4594,7 @@ mod tests {
         );
 
         let signaling_protocol = CreateSignalingProtocol {
-            name: identifier("binance_ws"),
+            name: named("binance_ws"),
             format: SignalingWireFormat::Json,
             on_connect: crate::SignalingProtocolOnConnect {
                 accept_data: false,
@@ -4606,9 +4614,9 @@ mod tests {
         );
 
         let protobuf_signaling_protocol = CreateSignalingProtocol {
-            name: identifier("orders_ws"),
+            name: named("orders_ws"),
             format: SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                resource: identifier("proto_bundle"),
+                resource: named("proto_bundle"),
                 resource_version: Some(2),
                 config: vec![crate::ClientConfigEntry {
                     key: "file".to_string(),
@@ -4646,10 +4654,10 @@ mod tests {
         );
 
         let codec = CreateCodec {
-            name: identifier("orders_codec"),
+            name: named("orders_codec"),
             wire_format: CodecWireFormat::Json,
-            wire_schema: Some(identifier("orders_wire")),
-            schema: identifier("orders"),
+            wire_schema: Some(named("orders_wire")),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4658,10 +4666,10 @@ mod tests {
         );
 
         let syslog_codec = CreateCodec {
-            name: identifier("syslog_codec"),
+            name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
             wire_schema: None,
-            schema: identifier("syslog_event"),
+            schema: named("syslog_event"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4670,12 +4678,12 @@ mod tests {
         );
 
         let codec_with_encoding = CreateCodec {
-            name: identifier("orders_codec"),
+            name: named("orders_codec"),
             wire_format: CodecWireFormat::Json,
-            wire_schema: Some(identifier("orders_wire")),
-            schema: identifier("orders"),
+            wire_schema: Some(named("orders_wire")),
+            schema: named("orders"),
             encoding_rules: vec![CodecEncodingRule {
-                field: identifier("created_at"),
+                field: named("created_at"),
                 encoding: CodecEncoding::Rfc3339,
             }],
         };
@@ -4687,7 +4695,7 @@ mod tests {
         );
 
         let codec_with_jaq = CreateCodec {
-            name: identifier("orders_codec"),
+            name: named("orders_codec"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
                 transformations: CodecJaqTransformations {
@@ -4696,7 +4704,7 @@ mod tests {
                 },
             },
             wire_schema: None,
-            schema: identifier("orders"),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4706,7 +4714,7 @@ mod tests {
         );
 
         let ingestion_codec = CreateCodec {
-            name: identifier("orders_ingestion"),
+            name: named("orders_ingestion"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
                 transformations: CodecJaqTransformations {
@@ -4715,7 +4723,7 @@ mod tests {
                 },
             },
             wire_schema: None,
-            schema: identifier("orders"),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4725,7 +4733,7 @@ mod tests {
         );
 
         let cbor_codec = CreateCodec {
-            name: identifier("orders_cbor"),
+            name: named("orders_cbor"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Cbor,
                 transformations: CodecJaqTransformations {
@@ -4734,7 +4742,7 @@ mod tests {
                 },
             },
             wire_schema: None,
-            schema: identifier("orders"),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4744,9 +4752,9 @@ mod tests {
         );
 
         let protobuf_codec = CreateCodec {
-            name: identifier("orders_proto"),
+            name: named("orders_proto"),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
-                resource: identifier("proto_bundle"),
+                resource: named("proto_bundle"),
                 resource_version: Some(3),
                 config: vec![crate::ClientConfigEntry {
                     key: "file".to_string(),
@@ -4759,7 +4767,7 @@ mod tests {
                 },
             }),
             wire_schema: None,
-            schema: identifier("orders"),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4771,10 +4779,10 @@ mod tests {
         );
 
         let relay = CreateRelay {
-            name: identifier("orders_stream"),
-            schema: identifier("orders"),
+            name: named("orders_stream"),
+            schema: named("orders"),
             buffer: 1,
-            branching: RelayBranching::branched_by(identifier("by_orders")),
+            branching: RelayBranching::branched_by(named("by_orders")),
             materialized_state: None,
         };
         assert_eq!(
@@ -4783,8 +4791,8 @@ mod tests {
         );
 
         let relay = CreateRelay {
-            name: identifier("orders_stream"),
-            schema: identifier("orders"),
+            name: named("orders_stream"),
+            schema: named("orders"),
             buffer: 1,
             branching: RelayBranching::unbranched(),
             materialized_state: None,
@@ -4795,9 +4803,9 @@ mod tests {
         );
 
         let junction = CreateJunction {
-            name: identifier("orders_junction"),
+            name: named("orders_junction"),
             from: ProcessorInputs::new(
-                vec![identifier("orders_a"), identifier("orders_b")],
+                vec![named("orders_a"), named("orders_b")],
                 Vec::new(),
             )
             .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
@@ -4815,8 +4823,8 @@ mod tests {
         );
 
         let deduplicator = CreateDeduplicator {
-            name: identifier("orders_dedup"),
-            from: ProcessorInputs::single(identifier("orders_in")),
+            name: named("orders_dedup"),
+            from: ProcessorInputs::single(named("orders_in")),
             output_routes: flushed_outputs("orders_out"),
             branched_by: processor_branched_by("tenant_branch"),
             deduplicate_on: vec![scoped_field(FieldScope::Input, "transaction_id")],
@@ -4833,13 +4841,13 @@ mod tests {
         );
 
         let correlator = CreateCorrelator {
-            name: identifier("orders_correlator"),
+            name: named("orders_correlator"),
             left: ProcessorInputs::new(
-                vec![identifier("orders_left"), identifier("orders_left_archive")],
+                vec![named("orders_left"), named("orders_left_archive")],
                 Vec::new(),
             )
             .with_collect_policy("10ms".to_string(), None),
-            right: ProcessorInputs::single(identifier("orders_right"))
+            right: ProcessorInputs::single(named("orders_right"))
                 .with_collect_policy("20ms".to_string(), Some("1MiB".to_string())),
             output_routes: ProcessorOutputs::new(vec![flushed_output(
                 "orders_matched",
@@ -4847,7 +4855,7 @@ mod tests {
                     "id",
                     Expression::Field(crate::FieldReference::scoped(
                         FieldScope::Left,
-                        identifier("id"),
+                        named("id"),
                     )),
                 )),
             )]),
@@ -4877,14 +4885,14 @@ mod tests {
         );
 
         let window_processor = CreateWindowProcessor {
-            name: identifier("latency_window"),
-            from: ProcessorInputs::single(identifier("orders_in")),
+            name: named("latency_window"),
+            from: ProcessorInputs::single(named("orders_in")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
-                relay: identifier("orders_p99"),
+                relay: named("orders_p99"),
                 construction: route_set(
                     "latency_p99",
                     Expression::Call {
-                        function: identifier("percentile_linear_histogram"),
+                        function: named("percentile_linear_histogram"),
                         arguments: vec![
                             scoped_field(FieldScope::Input, "latency"),
                             Expression::Literal(Literal::I64(99)),
@@ -4922,8 +4930,8 @@ mod tests {
         );
 
         let reingestor = CreateReingestor {
-            name: identifier("orders_repartition"),
-            from: ProcessorInputs::single(identifier("orders_in")),
+            name: named("orders_repartition"),
+            from: ProcessorInputs::single(named("orders_in")),
             output_routes: flushed_outputs("orders_out").with_branch(OutputBranch::Unbranched),
             mode: AckMode::Attached,
             filter_where: None,
@@ -4935,8 +4943,8 @@ mod tests {
         );
 
         let route_reingestor = CreateReingestor {
-            name: identifier("orders_splitter"),
-            from: ProcessorInputs::single(identifier("orders_in")),
+            name: named("orders_splitter"),
+            from: ProcessorInputs::single(named("orders_in")),
             output_routes: ProcessorOutputs::new(vec![
                 flushed_output(
                     "orders_errors",
@@ -4976,55 +4984,55 @@ mod tests {
         let sinks = [
             (
                 EmitSink::Kafka {
-                    client: identifier("kafka_main"),
-                    topic: identifier("orders"),
+                    client: named("kafka_main"),
+                    topic: named("orders"),
                 },
                 "KAFKA kafka_main TOPIC orders",
             ),
             (
                 EmitSink::Pulsar {
-                    client: identifier("pulsar_main"),
-                    topic: identifier("orders"),
+                    client: named("pulsar_main"),
+                    topic: named("orders"),
                 },
                 "PULSAR pulsar_main TOPIC orders",
             ),
             (
                 EmitSink::RabbitMq {
-                    client: identifier("rmq_main"),
-                    queue: identifier("orders_q"),
+                    client: named("rmq_main"),
+                    queue: named("orders_q"),
                 },
                 "RABBITMQ rmq_main QUEUE orders_q",
             ),
             (
                 EmitSink::Redis {
-                    client: identifier("redis_main"),
-                    channel: identifier("orders_ch"),
+                    client: named("redis_main"),
+                    channel: named("orders_ch"),
                 },
                 "REDIS PUBSUB redis_main CHANNEL orders_ch",
             ),
             (
                 EmitSink::Mqtt {
-                    client: identifier("mqtt_main"),
-                    topic: identifier("orders_topic"),
+                    client: named("mqtt_main"),
+                    topic: named("orders_topic"),
                 },
                 "MQTT mqtt_main TOPIC orders_topic",
             ),
             (
                 EmitSink::Nats {
-                    client: identifier("nats_main"),
-                    subject: identifier("orders_subject"),
+                    client: named("nats_main"),
+                    subject: named("orders_subject"),
                 },
                 "NATS nats_main SUBJECT orders_subject",
             ),
             (
                 EmitSink::ZeroMq {
-                    client: identifier("zmq_main"),
+                    client: named("zmq_main"),
                 },
                 "ZEROMQ zmq_main",
             ),
             (
                 EmitSink::Sqs {
-                    client: identifier("sqs_main"),
+                    client: named("sqs_main"),
                     queue: "orders_queue".to_string(),
                     fifo_group: None,
                 },
@@ -5032,13 +5040,13 @@ mod tests {
             ),
             (
                 EmitSink::Sentry {
-                    client: identifier("sentry_main"),
+                    client: named("sentry_main"),
                 },
                 "SENTRY sentry_main",
             ),
             (
                 EmitSink::Syslog {
-                    client: identifier("syslog_main"),
+                    client: named("syslog_main"),
                 },
                 "SYSLOG syslog_main",
             ),
@@ -5059,10 +5067,10 @@ mod tests {
             };
             let rendered_mode = publishing_mode.to_canonical_nspl();
             let emitter = CreateEmitter {
-                name: identifier("emit_orders"),
-                from: ProcessorInputs::single(identifier("orders_stream"))
+                name: named("emit_orders"),
+                from: ProcessorInputs::single(named("orders_stream"))
                     .with_collect_policy("50ms".to_string(), Some("4MiB".to_string())),
-                encode_using_codec: Some(identifier("orders_codec")),
+                encode_using_codec: Some(named("orders_codec")),
                 sink: Box::new(sink),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
@@ -5088,12 +5096,12 @@ mod tests {
     #[test]
     fn renders_postgres_conflict_action_canonical() {
         let emitter = CreateEmitter {
-            name: identifier("emit_notifications"),
-            from: ProcessorInputs::single(identifier("notifications")),
+            name: named("emit_notifications"),
+            from: ProcessorInputs::single(named("notifications")),
             encode_using_codec: None,
             sink: Box::new(EmitSink::Postgres {
-                client: identifier("postgres_main"),
-                table: identifier("notification_rows"),
+                client: named("postgres_main"),
+                table: named("notification_rows"),
                 values: vec![
                     PostgresValueMapping {
                         column: "postgres_user_id".to_string(),
@@ -5129,12 +5137,12 @@ mod tests {
     #[test]
     fn renders_mysql_conflict_action_canonical() {
         let emitter = CreateEmitter {
-            name: identifier("emit_notifications"),
-            from: ProcessorInputs::single(identifier("notifications")),
+            name: named("emit_notifications"),
+            from: ProcessorInputs::single(named("notifications")),
             encode_using_codec: None,
             sink: Box::new(EmitSink::MySql {
-                client: identifier("mysql_main"),
-                table: identifier("notification_rows"),
+                client: named("mysql_main"),
+                table: named("notification_rows"),
                 values: vec![
                     MySqlValueMapping {
                         column: "mysql_user_id".to_string(),
@@ -5173,12 +5181,12 @@ mod tests {
     #[test]
     fn renders_mongodb_conflict_action_canonical() {
         let emitter = CreateEmitter {
-            name: identifier("emit_notifications"),
-            from: ProcessorInputs::single(identifier("notifications")),
+            name: named("emit_notifications"),
+            from: ProcessorInputs::single(named("notifications")),
             encode_using_codec: None,
             sink: Box::new(EmitSink::MongoDb {
-                client: identifier("mongodb_main"),
-                collection: identifier("notification_rows"),
+                client: named("mongodb_main"),
+                collection: named("notification_rows"),
                 values: vec![
                     MongoDbValueMapping {
                         column: "mongodb_user_id".to_string(),
@@ -5225,12 +5233,12 @@ mod tests {
         let expectations = [
             (
                 CreateIngestor {
-                    name: identifier("http_ingestor"),
+                    name: named("http_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Http {
-                        client: identifier("http_main"),
+                        client: named("http_main"),
                         every: "30s".to_string(),
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     },
@@ -5246,14 +5254,14 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("kafka_ingestor"),
+                    name: named("kafka_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
-                        client: identifier("kafka_main"),
-                        topic: identifier("orders_topic"),
-                        offset_mode: KafkaOffsetMode::ConsumerGroup(identifier("orders_group")),
+                        client: named("kafka_main"),
+                        topic: named("orders_topic"),
+                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("orders_group")),
                         instances: 3,
                         mode: KafkaIngestMode::AckParallel {
                             max: 8,
@@ -5277,12 +5285,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("mqtt_ingestor"),
+                    name: named("mqtt_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Mqtt {
-                        client: identifier("mqtt_main"),
+                        client: named("mqtt_main"),
                         topic: "orders_topic".to_string(),
                         instances: 1,
                         mode: MqttIngestMode::NoAckSequential {
@@ -5304,14 +5312,14 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("nats_ingestor"),
+                    name: named("nats_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Nats {
-                        client: identifier("nats_main"),
-                        subject: identifier("orders_subject"),
-                        queue_group: identifier("orders_workers"),
+                        client: named("nats_main"),
+                        subject: named("orders_subject"),
+                        queue_group: named("orders_workers"),
                         instances: 2,
                         mode: NatsIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::Drop,
@@ -5329,13 +5337,13 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("rabbit_ingestor"),
+                    name: named("rabbit_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::RabbitMq {
-                        client: identifier("rmq_main"),
-                        queue: identifier("orders_q"),
+                        client: named("rmq_main"),
+                        queue: named("orders_q"),
                         instances: 2,
                         mode: RabbitMqIngestMode::AckSequential {
                             timeout: "10s".to_string(),
@@ -5357,13 +5365,13 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("redis_ingestor"),
+                    name: named("redis_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::RedisPubSub {
-                        client: identifier("redis_main"),
-                        channel: identifier("orders_channel"),
+                        client: named("redis_main"),
+                        channel: named("orders_channel"),
                         mode: RedisPubSubIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     },
@@ -5380,12 +5388,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("prom_ingestor"),
+                    name: named("prom_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Prometheus {
-                        client: identifier("prom_main"),
+                        client: named("prom_main"),
                         query: "sum(rate(http_requests_total[5m]))".to_string(),
                         every: "15s".to_string(),
                         quiesce: crate::IngestQuiesceMode::Suspend,
@@ -5403,12 +5411,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("zmq_ingestor"),
+                    name: named("zmq_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_main"),
+                        client: named("zmq_main"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     },
@@ -5425,13 +5433,13 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("sqs_ingestor"),
+                    name: named("sqs_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Sqs {
-                        client: identifier("sqs_main"),
-                        queue: identifier("orders_queue"),
+                        client: named("sqs_main"),
+                        queue: named("orders_queue"),
                         instances: 1,
                         mode: SqsIngestMode::AckSequential {
                             timeout: "20s".to_string(),
@@ -5452,12 +5460,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("endpoint_ingestor"),
+                    name: named("endpoint_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Endpoint {
-                        endpoint: identifier("orders_endpoint"),
+                        endpoint: named("orders_endpoint"),
                         mode: EndpointIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
@@ -5476,12 +5484,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("ws_ingestor"),
+                    name: named("ws_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Websockets {
-                        client: identifier("ws_main"),
+                        client: named("ws_main"),
                         mode: WebsocketsIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     },
@@ -5498,12 +5506,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("syslog_ingestor"),
+                    name: named("syslog_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("syslog_codec"),
+                    decode_using_codec: named("syslog_codec"),
                     timestamp_source: None,
                     source: IngestSource::Syslog {
-                        client: identifier("syslog_main"),
+                        client: named("syslog_main"),
                         quiesce: crate::IngestQuiesceMode::Buffer {
                             max_size: "1MiB".to_string(),
                             overflow: crate::IngestQuiesceOverflow::DropOldest,
@@ -5529,7 +5537,7 @@ mod tests {
     #[test]
     fn model_dispatches_to_variant_specific_canonicalization() {
         let model = Model::ClientKafka(CreateClientKafka {
-            name: identifier("kafka_main"),
+            name: named("kafka_main"),
             mount: None,
             config: vec![config_entry("bootstrap.servers", "localhost:9092")],
         });
@@ -5544,9 +5552,9 @@ mod tests {
     #[test]
     fn placement_canonicalization_preserves_member_order_policy_and_rank() {
         let placement = CreatePlacement::new(
-            identifier("latency_path"),
-            vec![identifier("ingest"), identifier("enrich")],
-            vec![identifier("score")],
+            named("latency_path"),
+            vec![named("ingest"), named("enrich")],
+            vec![named("score")],
             PlacementPolicy::RequireColocation,
             Some(1),
         )
@@ -5561,9 +5569,9 @@ mod tests {
     #[test]
     fn unranked_neutral_placement_canonicalization_omits_rank() {
         let placement = CreatePlacement::new(
-            identifier("ordinary"),
-            vec![identifier("ingest")],
-            vec![identifier("emit")],
+            named("ordinary"),
+            vec![named("ingest")],
+            vec![named("emit")],
             PlacementPolicy::Neutral,
             None,
         )
@@ -5616,10 +5624,10 @@ mod tests {
                     value\n}\n"
             .to_string();
         let udf = CreateUdf::new(
-            identifier("redact"),
+            named("redact"),
             UdfLanguage::Roto0_11,
             vec![UdfArgument {
-                name: identifier("value"),
+                name: named("value"),
                 ty: ParseAsType::String,
                 optional: true,
             }],

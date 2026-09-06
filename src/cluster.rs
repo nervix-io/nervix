@@ -40,7 +40,7 @@ pub struct ClusterHandle {
     chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
     chitchat_server: Mutex<Option<ChitchatHandle>>,
     events: broadcast::Sender<String>,
-    interconnect_state: RwLock<BTreeMap<String, InterconnectPeerState>>,
+    interconnect_state: RwLock<BTreeMap<ClusterNodeName, InterconnectPeerState>>,
     node_unavailability_timeout: Duration,
     membership_task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -224,7 +224,7 @@ pub async fn start_cluster_with_transport(
         None => Vec::new(),
     };
     let chitchat_id = ChitchatId {
-        node_id: node_id.clone(),
+        node_id: node_id.to_string(),
         generation_id,
         gossip_advertise_addr,
     };
@@ -243,7 +243,7 @@ pub async fn start_cluster_with_transport(
 
     let initial_key_values = vec![
         (KEY_CLUSTER_ID.to_string(), settings.cluster_id.clone()),
-        (KEY_NODE_ID.to_string(), node_id),
+        (KEY_NODE_ID.to_string(), node_id.to_string()),
         (
             KEY_CLUSTER_LISTEN_ADDR.to_string(),
             settings.cluster_listen_addr.to_string(),
@@ -415,7 +415,7 @@ impl ClusterHandle {
 
         let mut dead_node_ids = chitchat
             .dead_nodes()
-            .map(|node_id| node_id.node_id.clone())
+            .filter_map(|node_id| ClusterNodeName::parse(&node_id.node_id).ok())
             .filter(|node_id| !live_node_ids.contains(node_id))
             .collect::<BTreeSet<_>>();
         dead_node_ids.extend(self.unavailable_interconnect_nodes());
@@ -453,7 +453,7 @@ impl ClusterHandle {
         if let Some(state) = chitchat.node_state(&self_id)
             && runtime_revision_is_ready(state, revision)
         {
-            ready.insert(self_id.node_id.clone());
+            ready.extend(ClusterNodeName::parse(&self_id.node_id).ok());
         }
         for node_id in chitchat.live_nodes() {
             if *node_id == self_id {
@@ -462,7 +462,7 @@ impl ClusterHandle {
             if let Some(state) = chitchat.node_state(node_id)
                 && runtime_revision_is_ready(state, revision)
             {
-                ready.insert(node_id.node_id.clone());
+                ready.extend(ClusterNodeName::parse(&node_id.node_id).ok());
             }
         }
         ready
@@ -489,7 +489,7 @@ impl ClusterHandle {
         &self,
         domain: &str,
         relay: &str,
-    ) -> BTreeSet<String> {
+    ) -> BTreeSet<ClusterNodeName> {
         let key = subscription_interest_key(domain, relay);
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
@@ -499,7 +499,7 @@ impl ClusterHandle {
         if let Some(state) = chitchat.node_state(&self_id)
             && state.get(&key).is_some()
         {
-            interested.insert(self_id.node_id.clone());
+            interested.extend(ClusterNodeName::parse(&self_id.node_id).ok());
         }
 
         for node_id in chitchat.live_nodes() {
@@ -509,7 +509,7 @@ impl ClusterHandle {
             if let Some(state) = chitchat.node_state(node_id)
                 && state.get(&key).is_some()
             {
-                interested.insert(node_id.node_id.clone());
+                interested.extend(ClusterNodeName::parse(&node_id.node_id).ok());
             }
         }
 
@@ -519,7 +519,7 @@ impl ClusterHandle {
     pub fn record_interconnect_connected(&self, node_id: &ClusterNodeName, target_addr: String) {
         let mut peers = self.interconnect_state.write();
         let entry = peers
-            .entry(node_id.to_string())
+            .entry(node_id.clone())
             .or_insert_with(|| InterconnectPeerState {
                 target_addr: Some(target_addr.clone()),
                 connected: false,
@@ -547,7 +547,7 @@ impl ClusterHandle {
     pub fn record_interconnect_failure(&self, node_id: &ClusterNodeName, target_addr: Option<String>) {
         let mut peers = self.interconnect_state.write();
         let entry = peers
-            .entry(node_id.to_string())
+            .entry(node_id.clone())
             .or_insert_with(|| InterconnectPeerState {
                 target_addr: target_addr.clone(),
                 connected: false,
@@ -744,7 +744,7 @@ fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode>
         .unwrap_or("")
         .to_string();
     Some(GossipNode {
-        node_id: node_id.node_id.clone(),
+        node_id: ClusterNodeName::parse(&node_id.node_id).ok()?,
         cluster_api_advertise_addr,
         grpc_advertise_addr,
         web_console_advertise_addr,

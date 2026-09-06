@@ -422,19 +422,27 @@ mod tests {
         FieldName::try_from(raw).expect("valid field name")
     }
 
+    fn schema_name(raw: &str) -> SchemaName {
+        SchemaName::try_from(raw).expect("valid schema name")
+    }
+
+    fn wire_schema(raw: &str) -> WireSchemaName {
+        WireSchemaName::try_from(raw).expect("valid wire schema name")
+    }
+
     #[test]
     fn applies_internal_schema_operations_in_written_order() {
         let mut schema = CreateSchema {
-            name: identifier("events"),
+            name: schema_name("events"),
             fields: vec![
                 SchemaField {
-                    name: identifier("id"),
+                    name: field("id"),
                     ty: ParseAsType::U64,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("legacy"),
+                    name: field("legacy"),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
@@ -442,34 +450,34 @@ mod tests {
             ],
         };
         let alter = AlterSchema {
-            schema: identifier("events"),
+            schema: schema_name("events"),
             operations: vec![
                 AlterSchemaOperation::AddField {
                     field: SchemaField {
-                        name: identifier("note"),
+                        name: field("note"),
                         ty: ParseAsType::String,
                         optional: true,
                         sensitive: false,
                     },
                 },
                 AlterSchemaOperation::SetFieldSensitive {
-                    field: identifier("note"),
+                    field: field("note"),
                     sensitive: true,
                 },
                 AlterSchemaOperation::RenameField {
-                    field: identifier("id"),
-                    to: identifier("event_id"),
+                    field: field("id"),
+                    to: field("event_id"),
                 },
                 AlterSchemaOperation::SetFieldType {
-                    field: identifier("event_id"),
+                    field: field("event_id"),
                     ty: ParseAsType::I64,
                 },
                 AlterSchemaOperation::SetFieldOptional {
-                    field: identifier("event_id"),
+                    field: field("event_id"),
                     optional: true,
                 },
                 AlterSchemaOperation::DropField {
-                    field: identifier("legacy"),
+                    field: field("legacy"),
                 },
             ],
         };
@@ -480,13 +488,13 @@ mod tests {
             schema.fields,
             vec![
                 SchemaField {
-                    name: identifier("event_id"),
+                    name: field("event_id"),
                     ty: ParseAsType::I64,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("note"),
+                    name: field("note"),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: true,
@@ -498,9 +506,9 @@ mod tests {
     #[test]
     fn rejects_invalid_internal_schema_operations_without_partial_application() {
         let original = CreateSchema {
-            name: identifier("events"),
+            name: schema_name("events"),
             fields: vec![SchemaField {
-                name: identifier("id"),
+                name: field("id"),
                 ty: ParseAsType::U64,
                 optional: false,
                 sensitive: false,
@@ -512,51 +520,51 @@ mod tests {
                     field: original.fields[0].clone(),
                 },
                 AlterSchemaError::FieldAlreadyExists {
-                    field: identifier("id"),
+                    field: field("id"),
                 },
             ),
             (
                 AlterSchemaOperation::DropField {
-                    field: identifier("missing"),
+                    field: field("missing"),
                 },
                 AlterSchemaError::FieldNotFound {
-                    field: identifier("missing"),
+                    field: field("missing"),
                 },
             ),
             (
                 AlterSchemaOperation::RenameField {
-                    field: identifier("missing"),
-                    to: identifier("new_id"),
+                    field: field("missing"),
+                    to: field("new_id"),
                 },
                 AlterSchemaError::FieldNotFound {
-                    field: identifier("missing"),
+                    field: field("missing"),
                 },
             ),
             (
                 AlterSchemaOperation::SetFieldType {
-                    field: identifier("missing"),
+                    field: field("missing"),
                     ty: ParseAsType::String,
                 },
                 AlterSchemaError::FieldNotFound {
-                    field: identifier("missing"),
+                    field: field("missing"),
                 },
             ),
             (
                 AlterSchemaOperation::SetFieldOptional {
-                    field: identifier("missing"),
+                    field: field("missing"),
                     optional: true,
                 },
                 AlterSchemaError::FieldNotFound {
-                    field: identifier("missing"),
+                    field: field("missing"),
                 },
             ),
             (
                 AlterSchemaOperation::SetFieldSensitive {
-                    field: identifier("missing"),
+                    field: field("missing"),
                     sensitive: true,
                 },
                 AlterSchemaError::FieldNotFound {
-                    field: identifier("missing"),
+                    field: field("missing"),
                 },
             ),
         ];
@@ -565,7 +573,7 @@ mod tests {
             let mut schema = original.clone();
             let error = schema
                 .apply_alter(&AlterSchema {
-                    schema: identifier("events"),
+                    schema: schema_name("events"),
                     operations: vec![operation],
                 })
                 .expect_err("alter should fail");
@@ -577,9 +585,9 @@ mod tests {
     #[test]
     fn rejects_dropping_the_last_internal_schema_field() {
         let mut schema = CreateSchema {
-            name: identifier("events"),
+            name: schema_name("events"),
             fields: vec![SchemaField {
-                name: identifier("id"),
+                name: field("id"),
                 ty: ParseAsType::U64,
                 optional: false,
                 sensitive: false,
@@ -588,9 +596,9 @@ mod tests {
 
         let error = schema
             .apply_alter(&AlterSchema {
-                schema: identifier("events"),
+                schema: schema_name("events"),
                 operations: vec![AlterSchemaOperation::DropField {
-                    field: identifier("id"),
+                    field: field("id"),
                 }],
             })
             .expect_err("alter should fail");
@@ -602,37 +610,37 @@ mod tests {
     #[test]
     fn applies_exact_wire_schema_operations() {
         let mut schema = CreateWireSchema {
-            name: identifier("payload"),
+            name: wire_schema("payload"),
             strictness: WireSchemaStrictness::Strict,
             fields: vec![WireSchemaField {
-                name: identifier("id"),
+                name: field("id"),
                 ty: JsonType::Integer,
                 optional: false,
             }],
         };
         let alter = AlterWireSchema {
-            schema: identifier("payload"),
+            schema: wire_schema("payload"),
             operations: vec![
                 AlterWireSchemaOperation::SetMode {
                     mode: WireSchemaStrictness::Loose,
                 },
                 AlterWireSchemaOperation::AddField {
                     field: WireSchemaField {
-                        name: identifier("note"),
+                        name: field("note"),
                         ty: JsonType::String,
                         optional: false,
                     },
                 },
                 AlterWireSchemaOperation::RenameField {
-                    field: identifier("note"),
-                    to: identifier("message"),
+                    field: field("note"),
+                    to: field("message"),
                 },
                 AlterWireSchemaOperation::SetFieldType {
-                    field: identifier("message"),
+                    field: field("message"),
                     ty: JsonType::Object,
                 },
                 AlterWireSchemaOperation::SetFieldOptional {
-                    field: identifier("message"),
+                    field: field("message"),
                     optional: true,
                 },
             ],
@@ -643,7 +651,7 @@ mod tests {
         assert_eq!(
             schema.fields[1],
             WireSchemaField {
-                name: identifier("message"),
+                name: field("message"),
                 ty: JsonType::Object,
                 optional: true,
             }

@@ -898,7 +898,7 @@ mod tests {
     fn remove_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "remove-node", "node-2"]);
         match args.subcommand {
-            Some(Command::RemoveNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::RemoveNode { node_id }) => assert_eq!(node_id, ClusterNodeName::parse("node-2").expect("valid name")),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -907,7 +907,7 @@ mod tests {
     fn cordon_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "cordon-node", "node-2"]);
         match args.subcommand {
-            Some(Command::CordonNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::CordonNode { node_id }) => assert_eq!(node_id, ClusterNodeName::parse("node-2").expect("valid name")),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -916,7 +916,7 @@ mod tests {
     fn uncordon_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "uncordon-node", "node-2"]);
         match args.subcommand {
-            Some(Command::UncordonNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::UncordonNode { node_id }) => assert_eq!(node_id, ClusterNodeName::parse("node-2").expect("valid name")),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -925,7 +925,7 @@ mod tests {
     fn drain_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "drain-node", "node-2"]);
         match args.subcommand {
-            Some(Command::DrainNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::DrainNode { node_id }) => assert_eq!(node_id, ClusterNodeName::parse("node-2").expect("valid name")),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }

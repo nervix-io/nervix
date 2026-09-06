@@ -387,13 +387,17 @@ impl Runtime {
 mod tests {
     use super::*;
 
-    fn identifier(value: &str) -> Identifier {
-        Identifier::parse(value).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn test_delivery() -> (MessageErrorDelivery, AckCompletion) {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
-            name: identifier("message_error"),
+            name: named("message_error"),
             fields: Vec::new(),
         }));
         let batch = RelayRecordBatch::single(schema, None, test_runtime_row([]), AckSet::empty())
@@ -417,9 +421,9 @@ mod tests {
             route: MessageErrorRouteKey {
                 domain: DomainName::try_from("test").expect("valid domain"),
                 node_kind: "emitter".to_string(),
-                node: identifier("notifications"),
+                node: named("notifications"),
                 source_route: None,
-                error_relay: identifier("emitter_errors"),
+                error_relay: named("emitter_errors"),
             },
             target: MessageErrorRouteTarget {
                 registry: RelayRegistry::new(),

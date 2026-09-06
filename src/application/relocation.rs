@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use nervix_models::{ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, ModelName, PlacementPolicy, PlacementRuntimeNode, QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode};
+use nervix_models::{ClusterNodeName, DomainName, DomainSchedule, DomainStatus, JunctionName, Model, ModelName, PlacementPolicy, PlacementRuntimeNode, QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode};
 
 use super::{
     CommandResult, DomainAlterError, SessionServiceImpl, command_error, command_ok,
@@ -618,7 +618,7 @@ mod tests {
             identifier: identifier.clone(),
             kind: ModelKind::Junction,
             config: Box::new(Model::Junction(CreateJunction {
-                name: identifier,
+                name: JunctionName::from(&identifier),
                 from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
                 output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
                 branched_by: nervix_models::BranchSelection::unbranched(),
@@ -630,7 +630,7 @@ mod tests {
             effective_branching_schema: None,
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
-            primary_node: Some(primary.to_string()),
+            primary_node: Some(ClusterNodeName::parse(primary).expect("valid node name")),
             assigned_nodes,
         }
     }
@@ -646,12 +646,15 @@ mod tests {
     fn member(name: &str) -> PlacementRuntimeNode {
         PlacementRuntimeNode::new(
             ModelKind::Junction,
-            Identifier::try_from(name).expect("test name must be an identifier"),
+            ModelName::try_from(name).expect("test name must be a model name"),
         )
     }
 
-    fn live(nodes: &[&str]) -> BTreeSet<String> {
-        nodes.iter().map(|node| (*node).to_string()).collect()
+    fn live(nodes: &[&str]) -> BTreeSet<ClusterNodeName> {
+        nodes
+            .iter()
+            .map(|node| ClusterNodeName::parse(node).expect("valid node name"))
+            .collect()
     }
 
     #[test]
@@ -700,7 +703,7 @@ mod tests {
         let planned = planned_relocation_schedule(
             &current,
             &desired,
-            "node-2",
+            &ClusterNodeName::parse("node-2").expect("valid name"),
             &[member("route")],
             1,
             &live(&["node-1", "node-2", "node-3"]),
@@ -708,7 +711,7 @@ mod tests {
         );
         let node =
             scheduled_node(&planned, &member("route")).expect("member must remain scheduled");
-        assert_eq!(node.primary_node.as_ref(), Some("node-2"));
+        assert_eq!(node.primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-2")));
         assert_eq!(node.assigned_nodes, vec!["node-2", "node-1"]);
     }
 
@@ -719,7 +722,7 @@ mod tests {
         let planned = planned_relocation_schedule(
             &current,
             &desired,
-            "node-2",
+            &ClusterNodeName::parse("node-2").expect("valid name"),
             &[member("route")],
             0,
             &live(&["node-1", "node-2"]),

@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     CreateStatement, CreateUdf, DescribeUdf, ShowUdfs, UdfArgument, UdfLanguage, UdfReturn,
 };
@@ -128,7 +129,7 @@ pub fn parse_create_udf(input: &str) -> Result<CreateStatement<CreateUdf>, Parse
     } else {
         Ok(output
             .into_output()
-            .expect("successful UDF parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

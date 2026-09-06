@@ -1939,7 +1939,7 @@ mod tests {
     use std::{io::ErrorKind, path::PathBuf, process::Command};
 
     use ahash::HashMap;
-    use nervix_models::{DomainName, Identifier};
+    use nervix_models::{DomainName, RelayName};
     use tokio::time::timeout;
 
     use super::*;
@@ -1976,14 +1976,14 @@ mod tests {
     }
 
     fn test_identity(node_id: &ClusterNodeName) -> LocalIdentity {
-        LocalIdentity::generate(node_id)
+        LocalIdentity::generate(node_id.clone())
     }
 
     fn verifier_for(identities: &[&LocalIdentity]) -> PeerVerifier {
         let keys = Arc::new(
             identities
                 .iter()
-                .map(|identity| (identity.node_id().to_string(), identity.public_key()))
+                .map(|identity| (identity.node_id().clone(), identity.public_key()))
                 .collect::<HashMap<_, _>>(),
         );
         PeerVerifier::new(move |node_id| keys.get(node_id).copied())
@@ -2000,7 +2000,7 @@ mod tests {
         RelayPayload {
             kind: RelayPayloadKind::Routed,
             domain: DomainName::try_from("test").expect("valid domain"),
-            relay: Identifier::try_from(stream).expect("valid identifier"),
+            relay: RelayName::try_from(stream).expect("valid relay name"),
             key: None,
             batch_ipc: vec![1, 2, 3, 4],
             metadata: vec![RemoteRuntimeRecordMetadata {
@@ -2056,8 +2056,8 @@ mod tests {
     #[tokio::test]
     async fn bidirectional_send_and_receive_roundtrips() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, mut incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2090,7 +2090,7 @@ mod tests {
             .expect("send a->b");
 
         let first = recv_one(&mut incoming_b).await;
-        assert_eq!(first.peer_node_id, "node-a");
+        assert_eq!(first.peer_node_id, ClusterNodeName::parse("node-a").expect("valid name"));
         assert_eq!(
             first.envelope,
             Envelope::RelayPayload(dummy_stream_payload("orders"))
@@ -2103,7 +2103,7 @@ mod tests {
             .expect("reply b->a");
 
         let second = recv_one(&mut incoming_a).await;
-        assert_eq!(second.peer_node_id, "node-b");
+        assert_eq!(second.peer_node_id, ClusterNodeName::parse("node-b").expect("valid name"));
         assert_eq!(
             second.envelope,
             Envelope::RelayPayload(dummy_stream_payload("orders"))
@@ -2116,8 +2116,8 @@ mod tests {
     #[tokio::test]
     async fn outbound_pool_reuses_connections() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2162,8 +2162,8 @@ mod tests {
     #[tokio::test]
     async fn connection_for_reuses_disconnected_outbound_handle() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2222,8 +2222,8 @@ mod tests {
     #[tokio::test]
     async fn both_peers_observe_active_connection() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2259,7 +2259,7 @@ mod tests {
 
         timeout(Duration::from_secs(5), async {
             loop {
-                if transport_a.is_connected_to("node-b") && transport_b.is_connected_to("node-a") {
+                if transport_a.is_connected_to(&ClusterNodeName::parse("node-b").expect("valid name")) && transport_b.is_connected_to(&ClusterNodeName::parse("node-a").expect("valid name")) {
                     break;
                 }
                 sleep(Duration::from_millis(50)).await;
@@ -2278,9 +2278,9 @@ mod tests {
             max_connections: 1,
             ..TransportOptions::default()
         };
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let identity_c = test_identity("node-c");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
+        let identity_c = test_identity(&ClusterNodeName::parse("node-c").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2344,8 +2344,8 @@ mod tests {
             reconnect_backoff: Duration::from_millis(100),
             ..TransportOptions::default()
         };
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2378,7 +2378,7 @@ mod tests {
             .await
             .expect("initial send");
         let first = recv_one(&mut incoming_b).await;
-        assert_eq!(first.peer_node_id, "node-a");
+        assert_eq!(first.peer_node_id, ClusterNodeName::parse("node-a").expect("valid name"));
         assert_eq!(
             first.envelope,
             Envelope::RelayPayload(dummy_stream_payload("reconnect"))
@@ -2406,7 +2406,7 @@ mod tests {
 
         send_fut.await.expect("queued send should succeed");
         let second = recv_one(&mut incoming_b2).await;
-        assert_eq!(second.peer_node_id, "node-a");
+        assert_eq!(second.peer_node_id, ClusterNodeName::parse("node-a").expect("valid name"));
         assert_eq!(
             second.envelope,
             Envelope::RelayPayload(dummy_stream_payload("reconnect"))
@@ -2418,8 +2418,8 @@ mod tests {
 
     #[tokio::test]
     async fn connection_failure_retains_pending_payload_for_reconnect() {
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (incoming_tx, _incoming_rx) = mpsc::channel(1);
         let inner = Arc::new(TransportInner {
             mode: TransportMode::Plain,
@@ -2486,8 +2486,8 @@ mod tests {
             reconnect_backoff: Duration::from_millis(50),
             ..TransportOptions::default()
         };
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let wrong_public = SigningKey::generate(&mut OsRng).verifying_key();
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
@@ -2505,7 +2505,7 @@ mod tests {
             Some(test_tls()),
             identity_b,
             PeerVerifier::new(move |node_id| {
-                if node_id == "node-a" {
+                if node_id.as_str() == "node-a" {
                     Some(wrong_public)
                 } else {
                     None
@@ -2539,8 +2539,8 @@ mod tests {
     #[tokio::test]
     async fn peer_that_stops_sending_pings_is_disconnected() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2591,7 +2591,7 @@ mod tests {
         )
         .await
         .expect("read server introduction");
-        assert_eq!(peer, "node-a");
+        assert_eq!(peer, ClusterNodeName::parse("node-a").expect("valid name"));
 
         timeout(Duration::from_secs(5), async {
             loop {

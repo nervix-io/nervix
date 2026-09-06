@@ -83,7 +83,7 @@ pub enum RelocationPlanError {
     #[error("relocation covers no runtime node: no FROM/TO pair is connected")]
     DisconnectedCorridor,
     #[error("conflicting preference strategies for hard group [{members}]")]
-    ConflictingGroupStrategies { members: ClusterNodeName },
+    ConflictingGroupStrategies { members: String },
     #[error("{kind} '{name}' is not part of the relocation")]
     OverrideOutsideUnit { kind: &'static str, name: String },
 }

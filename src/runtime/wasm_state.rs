@@ -1,4 +1,4 @@
-use nervix_models::{ClusterNodeName};
+use nervix_models::{ClusterNodeName, FieldName};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::RandomState;
@@ -130,7 +130,7 @@ mod tests {
     fn wasm_processor_state_tracks_replica_quorum() {
         let state = ReplicatedWasmProcessorState::new(
             placement(),
-            vec!["node-2".to_string(), "node-3".to_string()],
+            vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
             2,
             None,
         )
@@ -141,9 +141,9 @@ mod tests {
 
         assert_eq!(payload, vec![1, 2, 3]);
         assert!(!state.replica_quorum_satisfied(lsm));
-        state.mark_replica_progress("node-2", lsm);
+        state.mark_replica_progress(&ClusterNodeName::parse("node-2").expect("valid name"), lsm);
         assert!(!state.replica_quorum_satisfied(lsm));
-        state.mark_replica_progress("node-3", lsm);
+        state.mark_replica_progress(&ClusterNodeName::parse("node-3").expect("valid name"), lsm);
         assert!(state.replica_quorum_satisfied(lsm));
     }
 

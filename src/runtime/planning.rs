@@ -67,15 +67,15 @@ struct BranchEntrypoint {
 fn branch_policy(
     branch_ref: Option<&BranchName>,
     branches: &HashMap<BranchName, CreateBranch>,
-) -> (Option<SchemaName>, Option<String>, Option<u64>) {
+) -> (Option<BranchName>, Option<String>, Option<u64>) {
     let Some(branch_ref) = branch_ref else {
         return (None, None, None);
     };
-    let branch = branches
-        .get(branch_ref)
-        .expect("branch references must be validated before runtime planning");
+    let branch = branches.get(branch_ref).verified(
+        "the registry resolved every branch reference before the schedule reached planning",
+    );
     (
-        Some(SchemaName::from(branch_ref)),
+        Some(branch_ref.clone()),
         Some(branch.ttl.clone()),
         branch
             .eviction
@@ -339,10 +339,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
             }
             Model::Ingestor(ingestor) => {
                 for output in ingestor.output_routes.outputs() {
-                    let branch_action = output
-                        .branch
-                        .as_ref()
-                        .expect("validated ingestor route must declare branch behavior");
+                    let branch_action = output.branch.as_ref().verified(
+                        "the registry requires every route of these nodes to declare its branch \
+                         behavior",
+                    );
                     let entrypoint = branch_entrypoint(branch_action, &branches);
                     ingestors.push((
                         kind,
@@ -355,7 +355,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         output
                             .flush_policy
                             .as_ref()
-                            .expect("validated ingestor output must have a flush policy")
+                            .verified(
+                                "the registry requires a flush policy on every flush-based output \
+                                 route",
+                            )
                             .flush_each
                             .clone(),
                         output
@@ -371,10 +374,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
             }
             Model::Reingestor(reingestor) => {
                 for output in reingestor.output_routes.outputs() {
-                    let branch_action = output
-                        .branch
-                        .as_ref()
-                        .expect("validated reingestor route must declare branch behavior");
+                    let branch_action = output.branch.as_ref().verified(
+                        "the registry requires every route of these nodes to declare its branch \
+                         behavior",
+                    );
                     let entrypoint = branch_entrypoint(branch_action, &branches);
                     ingestors.push((
                         kind,
@@ -387,7 +390,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         output
                             .flush_policy
                             .as_ref()
-                            .expect("validated reingestor output must have a flush policy")
+                            .verified(
+                                "the registry requires a flush policy on every flush-based output \
+                                 route",
+                            )
                             .flush_each
                             .clone(),
                         output
@@ -978,7 +984,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     )?;
     let template = materialize_nodes(std::slice::from_ref(spec), relay_schemas, udfs)?
         .pop()
-        .expect("single processor spec must materialize one template");
+        .verified("materialize_nodes answers one template per spec and this call passes one spec");
     let mut processors = HashMap::default();
     processors.insert(spec.processor.clone(), template);
     Ok(BranchInstanceTemplate {
@@ -1029,8 +1035,12 @@ mod tests {
 
     use super::*;
 
-    fn identifier(value: &str) -> Identifier {
-        Identifier::parse(value).expect("test identifier must be valid")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
@@ -1043,12 +1053,12 @@ mod tests {
 
     #[test]
     fn inferencer_input_mappings_compile_when_template_is_materialized() {
-        let input_relay = identifier("features");
-        let processor = identifier("score_model");
+        let input_relay = named::<RelayName>("features");
+        let processor = named::<ModelName>("score_model");
         let input_schema = Arc::new(compile_schema(&CreateSchema {
-            name: identifier("feature_schema"),
+            name: named("feature_schema"),
             fields: vec![SchemaField {
-                name: identifier("vector"),
+                name: named("vector"),
                 ty: ParseAsType::Array {
                     element: Box::new(ParseAsType::F32),
                     len: 2,
@@ -1070,14 +1080,14 @@ mod tests {
             operation: BranchedProcessorOperationSpec::Inferencer {
                 output_routes: BranchedProcessorOutputsSpec {
                     routes: vec![BranchedProcessorOutputSpec {
-                        relay: identifier("scores"),
+                        relay: named("scores"),
                         construction: RouteConstruction::default(),
                         flush_each: Some("IMMEDIATE".to_string()),
                         max_batch_size: None,
                         message_error_policy: MessageErrorPolicy::Log,
                     }],
                 },
-                resource: identifier("fraud_model"),
+                resource: named("fraud_model"),
                 resource_version: Some(1),
                 file: "models/fraud.onnx".to_string(),
                 inputs: vec![InferencerTensorMapping {

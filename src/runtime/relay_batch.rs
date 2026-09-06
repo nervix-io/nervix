@@ -1,5 +1,6 @@
 use std::sync::Arc as StdArc;
 
+use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
 
@@ -403,7 +404,10 @@ impl RelayRecordBatch {
 
         let key = first.key.clone();
         if batches.len() == 1 {
-            return Ok(batches.into_iter().next().expect("single batch must exist"));
+            return Ok(batches
+                .into_iter()
+                .next()
+                .verified("the length was just checked to be one"));
         }
 
         let concatenated = {
@@ -535,7 +539,7 @@ fn reorder_owned_values<T>(values: Vec<T>, row_order: &[usize]) -> Vec<T> {
         .map(|row| {
             values[*row]
                 .take()
-                .expect("validated relay batch reorder must contain each row once")
+                .verified("the row order is a permutation, so each row is taken exactly once")
         })
         .collect()
 }
@@ -632,6 +636,8 @@ mod tests {
     use triomphe::Arc;
 
     use super::{RelayMessage, RelayRecordBatch, delivery_observation_from_timestamps};
+    use nervix_models::{FieldName, SchemaName};
+
     use crate::{
         runtime_ack::AckSet,
         runtime_schema::{
@@ -641,9 +647,9 @@ mod tests {
 
     fn test_schema() -> Arc<CompiledSchema> {
         Arc::new(compile_schema(&CreateSchema {
-            name: ModelName::parse("relay_batch_test").expect("valid schema name"),
+            name: SchemaName::from(&ModelName::parse("relay_batch_test").expect("valid schema name")),
             fields: vec![SchemaField {
-                name: ModelName::parse("value").expect("valid field name"),
+                name: FieldName::from(FieldName::from(FieldName::from(&ModelName::parse("value").expect("valid field name").clone().clone().clone()))),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,

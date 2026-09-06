@@ -329,9 +329,10 @@ impl RabbitMqEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready RabbitMQ confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(Confirmation::Ack(None)) => outcome.deliver(confirmation.position),
                 Ok(Confirmation::Ack(Some(returned)) | Confirmation::Nack(Some(returned)))

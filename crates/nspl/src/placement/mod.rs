@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterPlacement, AlterPlacementOperation, CreatePlacement, CreateStatement, DescribePlacement,
     ModelName, PlacementPolicy, ShowPlacements,
@@ -171,7 +172,7 @@ pub fn parse_create_placement(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -190,7 +191,7 @@ pub fn parse_alter_placement(input: &str) -> Result<AlterPlacement, ParseFromSou
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -223,7 +224,7 @@ mod tests {
             parsed
                 .from
                 .iter()
-                .map(nervix_models::Identifier::as_str)
+                .map(nervix_models::ModelName::as_str)
                 .collect::<Vec<_>>(),
             vec!["ingest", "enrich"]
         );

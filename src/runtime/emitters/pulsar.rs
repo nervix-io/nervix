@@ -291,9 +291,10 @@ impl PulsarEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready Pulsar confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(_receipt) => outcome.deliver(confirmation.position),
                 Err(source) if Self::is_record_rejection(&source) => outcome.reject(

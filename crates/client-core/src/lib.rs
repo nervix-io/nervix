@@ -8,6 +8,7 @@ use std::{
 
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use meticulous::OptionExt as _;
 pub use nervix_models::SubscriptionDeliveryBehavior;
 use nervix_nspl::client_statement::ClientStatement;
 pub use nervix_proto as proto;
@@ -587,7 +588,7 @@ impl Client {
             let parsed = statements
                 .into_iter()
                 .next()
-                .expect("non-empty parsed statements must contain one statement");
+                .verified("the empty and multi-statement cases above already returned");
             let source = parsed.source(query).to_string();
             return self
                 .execute_client_statement(parsed.statement, &source)

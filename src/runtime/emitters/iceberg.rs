@@ -904,11 +904,10 @@ impl IcebergEmitter {
             self.commit_state.store(prepared);
         }
         self.client
-            .commit_prepared(
-                self.commit_state
-                    .prepared()
-                    .expect("Iceberg commit must remain prepared until it finishes"),
-            )
+            .commit_prepared(self.commit_state.prepared().verified(
+                "the commit state holds its prepared commit from preparation until this call \
+                 completes",
+            ))
             .await?;
         self.commit_state.finish();
         let staged = std::mem::take(&mut self.staged_batches);

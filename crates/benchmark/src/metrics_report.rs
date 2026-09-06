@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use meticulous::OptionExt as _;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -40,7 +41,7 @@ pub struct BatchTargetMetrics {
     pub domain: String,
     pub target_kind: String,
     pub target: String,
-    pub physical_node_id: ClusterNodeName,
+    pub physical_node_id: String,
     pub direction: String,
     pub relay: String,
     pub messages_total: u64,
@@ -71,7 +72,7 @@ impl BatchTargetMetrics {
 pub struct RelayBufferMetrics {
     pub domain: String,
     pub relay: String,
-    pub physical_node_id: ClusterNodeName,
+    pub physical_node_id: String,
     pub direction: String,
     pub observations: u64,
     pub p50: f64,
@@ -165,7 +166,7 @@ struct SeriesKey {
     domain: String,
     target_kind: String,
     target: String,
-    physical_node_id: ClusterNodeName,
+    physical_node_id: String,
     direction: String,
     relay: String,
     peer_kind: String,
@@ -472,7 +473,10 @@ impl ScrapedMetrics {
                 .insert_bucket(
                     metric,
                     &key,
-                    upper_bound.expect("histogram bucket has an upper bound"),
+                    upper_bound.verified(
+                        "this branch only runs for a bucket sample, which always parses an upper \
+                         bound",
+                    ),
                     value,
                 ),
             MESSAGES_PER_BATCH_COUNT => self
@@ -487,7 +491,10 @@ impl ScrapedMetrics {
                 .insert_bucket(
                     metric,
                     &key,
-                    upper_bound.expect("histogram bucket has an upper bound"),
+                    upper_bound.verified(
+                        "this branch only runs for a bucket sample, which always parses an upper \
+                         bound",
+                    ),
                     value,
                 ),
             RELAY_BUFFER_LEN_COUNT => self

@@ -1,7 +1,7 @@
 use std::{future::Future, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use nervix_models::CreateSignalingProtocol;
+use nervix_models::{CreateSignalingProtocol, SignalingProtocolName};
 use prost_reflect::MessageDescriptor;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
@@ -572,7 +572,7 @@ mod tests {
         on_connect: SignalingProtocolOnConnect,
     ) -> CreateSignalingProtocol {
         CreateSignalingProtocol {
-            name: ModelName::parse("handshake").expect("valid identifier"),
+            name: SignalingProtocolName::from(&ModelName::parse("handshake").expect("valid identifier")),
             format,
             on_connect,
         }

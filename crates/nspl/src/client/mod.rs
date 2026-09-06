@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     ClientName, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
@@ -365,7 +366,7 @@ pub fn parse_create_client_kafka_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -434,7 +435,7 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "kafka_tls");
         assert_eq!(
-            parsed.mount.as_ref().map(nervix_models::Identifier::as_str),
+            parsed.mount.as_ref().map(nervix_models::ResourceName::as_str),
             Some("dev_tls")
         );
         assert_eq!(parsed.config[0].value, "{{dev_tls}}/ca.pem");
@@ -454,7 +455,7 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "syslog_tls");
         assert_eq!(
-            parsed.mount.as_ref().map(nervix_models::Identifier::as_str),
+            parsed.mount.as_ref().map(nervix_models::ResourceName::as_str),
             Some("tls_bundle")
         );
         assert_eq!(parsed.config.len(), 3);
@@ -974,7 +975,7 @@ mod tests {
             parsed
                 .signaling_protocol
                 .as_ref()
-                .map(nervix_models::Identifier::as_str),
+                .map(nervix_models::SignalingProtocolName::as_str),
             Some("binance_style")
         );
     }

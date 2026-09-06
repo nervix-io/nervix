@@ -1,5 +1,6 @@
 use error_stack::{Report, ResultExt};
-use nervix_models::{AckMode, AvroType, BranchEviction, BranchName, BranchSelection, ChannelName, ClickHouseValueMapping, ClientName, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat, CollectionName, ConsumerGroupName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CorrelatorName, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DeduplicatorName, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, ErrorPolicies, Expression, FieldName, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend, InferencerName, InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, InputCollectPolicy, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, LookupName, MaterializedRelayState, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OutputFlushPolicy, ParseAsType, PlacementName, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, PulsarSubscriptionName, QueueGroupName, QueueName, RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayBranching, RelayName, ReordererName, ResourceName, RetryPolicy, SchemaField, SchemaName, SignalingProtobufConfig, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, SubjectName, SubscriptionName, TableName, TopicName, UdfArgument, UdfLanguage, UdfName, UdfReturn, VhostName, VhostTlsResource, WasmProcessorName, WebsocketsIngestMode, WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName, WireSchemaStrictness, ZeroMqIngestMode};
+use meticulous::ResultExt as _;
+use nervix_models::{AckMode, AvroType, BranchEviction, BranchName, BranchSelection, ChannelName, ClickHouseValueMapping, ClientName, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat, CollectionName, ConsumerGroupName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CorrelatorName, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DeduplicatorName, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, ErrorPolicies, Expression, FieldName, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend, InferencerName, InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, InputCollectPolicy, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, LookupName, MaterializedRelayState, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OutputFlushPolicy, ParseAsType, PlacementName, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, PulsarSubscriptionName, QueueGroupName, QueueName, RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayBranching, RelayName, ReordererName, ResourceName, RetryPolicy, SchemaField, SchemaName, SignalingProtobufConfig, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, SubjectName, TableName, TopicName, UdfArgument, UdfLanguage, UdfName, UdfReturn, VhostName, VhostTlsResource, WasmProcessorName, WebsocketsIngestMode, WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName, WireSchemaStrictness, ZeroMqIngestMode};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -5353,7 +5354,7 @@ impl From<StoredIcebergCatalog> for IcebergCatalog {
         match value {
             StoredIcebergCatalog::Rest { client } => Self::Rest {
                 client: ClientName::parse(&client)
-                    .expect("stored Iceberg REST catalog client must be a valid identifier"),
+                    .verified("the identifier was validated before it was stored"),
             },
         }
     }
@@ -5515,44 +5516,48 @@ impl From<StoredOtelScope> for OtelScope {
 mod tests {
     use super::*;
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::parse(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn processor_branched_by(schema: &str) -> BranchSelection {
-        BranchSelection::branched_by(identifier(&format!("by_{schema}")))
+        BranchSelection::branched_by(named(&format!("by_{schema}")))
     }
 
     #[test]
     fn stored_model_envelope_roundtrips_multiple_model_variants() {
         let models = vec![
             Model::Schema(CreateSchema {
-                name: identifier("events"),
+                name: named("events"),
                 fields: vec![SchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: ParseAsType::U32,
                     optional: false,
                     sensitive: false,
                 }],
             }),
             Model::WireJsonSchema(CreateWireSchema {
-                name: identifier("events_json"),
+                name: named("events_json"),
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: JsonType::Integer,
                     optional: false,
                 }],
             }),
             Model::Codec(CreateCodec {
-                name: identifier("syslog_codec"),
+                name: named("syslog_codec"),
                 wire_format: CodecWireFormat::Syslog,
                 wire_schema: None,
-                schema: identifier("events"),
+                schema: named("events"),
                 encoding_rules: Vec::new(),
             }),
             Model::ClientHttp(CreateClientHttp {
-                name: identifier("http_client"),
+                name: named("http_client"),
                 mount: None,
                 config: vec![
                     StoredClientConfigEntry {
@@ -5563,7 +5568,7 @@ mod tests {
                 ],
             }),
             Model::ClientSentry(CreateClientSentry {
-                name: identifier("sentry_client"),
+                name: named("sentry_client"),
                 mount: None,
                 config: vec![
                     StoredClientConfigEntry {
@@ -5574,7 +5579,7 @@ mod tests {
                 ],
             }),
             Model::ClientOtel(CreateClientOtel {
-                name: identifier("otel_client"),
+                name: named("otel_client"),
                 mount: None,
                 config: vec![
                     StoredClientConfigEntry {
@@ -5590,8 +5595,8 @@ mod tests {
                 ],
             }),
             Model::ClientSyslog(CreateClientSyslog {
-                name: identifier("syslog_client"),
-                mount: Some(identifier("syslog_tls")),
+                name: named("syslog_client"),
+                mount: Some(named("syslog_tls")),
                 config: vec![
                     StoredClientConfigEntry {
                         key: "protocol".to_string(),
@@ -5606,14 +5611,14 @@ mod tests {
                 ],
             }),
             Model::Endpoint(CreateEndpoint {
-                name: identifier("events_http"),
-                on_vhost: identifier("public"),
+                name: named("events_http"),
+                on_vhost: named("public"),
                 path: "/ingest".to_string(),
                 endpoint_type: EndpointType::Http,
                 signaling_protocol: None,
             }),
             Model::SignalingProtocol(CreateSignalingProtocol {
-                name: identifier("binance_ws"),
+                name: named("binance_ws"),
                 format: SignalingWireFormat::Json,
                 on_connect: SignalingProtocolOnConnect {
                     accept_data: false,
@@ -5628,9 +5633,9 @@ mod tests {
                 },
             }),
             Model::SignalingProtocol(CreateSignalingProtocol {
-                name: identifier("proto_ws"),
+                name: named("proto_ws"),
                 format: SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                    resource: identifier("proto_bundle"),
+                    resource: named("proto_bundle"),
                     resource_version: Some(1),
                     config: vec![nervix_models::ClientConfigEntry {
                         key: "file".to_string(),
@@ -5657,13 +5662,13 @@ mod tests {
                 },
             }),
             Model::Ingestor(CreateIngestor {
-                name: identifier("events_ingestor"),
-                output_routes: (ProcessorOutputs::single(identifier("events_stream")))
+                name: named("events_ingestor"),
+                output_routes: (ProcessorOutputs::single(named("events_stream")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                decode_using_codec: identifier("events_codec"),
+                decode_using_codec: named("events_codec"),
                 timestamp_source: None,
                 source: IngestSource::Http {
-                    client: identifier("http_client"),
+                    client: named("http_client"),
                     every: "5s".to_string(),
                     quiesce: IngestQuiesceMode::Suspend,
                 },
@@ -5672,13 +5677,13 @@ mod tests {
                 filter_where: None,
             }),
             Model::Ingestor(CreateIngestor {
-                name: identifier("syslog_ingestor"),
-                output_routes: (ProcessorOutputs::single(identifier("events_stream")))
+                name: named("syslog_ingestor"),
+                output_routes: (ProcessorOutputs::single(named("events_stream")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                decode_using_codec: identifier("syslog_codec"),
+                decode_using_codec: named("syslog_codec"),
                 timestamp_source: None,
                 source: IngestSource::Syslog {
-                    client: identifier("syslog_client"),
+                    client: named("syslog_client"),
                     quiesce: IngestQuiesceMode::Buffer {
                         max_size: "1MiB".to_string(),
                         overflow: IngestQuiesceOverflow::DropNewest,
@@ -5688,13 +5693,13 @@ mod tests {
                 filter_where: None,
             }),
             Model::Junction(CreateJunction {
-                name: identifier("events_junction"),
+                name: named("events_junction"),
                 from: ProcessorInputs::new(
-                    vec![identifier("events_a"), identifier("events_b")],
+                    vec![named("events_a"), named("events_b")],
                     Vec::new(),
                 )
                 .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
-                output_routes: (ProcessorOutputs::single(identifier("events_stream")))
+                output_routes: (ProcessorOutputs::single(named("events_stream")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: processor_branched_by("events"),
                 mode: AckMode::Attached,
@@ -5702,11 +5707,11 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Reingestor(CreateReingestor {
-                name: identifier("events_splitter"),
-                from: ProcessorInputs::single(identifier("events_stream")),
+                name: named("events_splitter"),
+                from: ProcessorInputs::single(named("events_stream")),
                 output_routes: (ProcessorOutputs::new(vec![
                     ProcessorOutput {
-                        relay: identifier("events_errors"),
+                        relay: named("events_errors"),
                         construction: nervix_nspl::parse_route_construction(
                             r#"SET severity = lower(input.level) WHERE output.level = "error""#,
                         )
@@ -5715,7 +5720,7 @@ mod tests {
                         message_error_policy: MessageErrorPolicy::Log,
                         branch: None,
                     },
-                    ProcessorOutput::new(identifier("events_other")),
+                    ProcessorOutput::new(named("events_other")),
                 ]))
                 .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 mode: AckMode::Attached,
@@ -5723,10 +5728,10 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Reingestor(CreateReingestor {
-                name: identifier("events_forwarder"),
-                from: ProcessorInputs::single(identifier("events_stream")),
+                name: named("events_forwarder"),
+                from: ProcessorInputs::single(named("events_stream")),
                 output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
-                    relay: identifier("events_projected"),
+                    relay: named("events_projected"),
                     construction: nervix_nspl::parse_route_construction(
                         "INHERIT ALL EXCEPT raw SET normalized = lower(input.raw) WHERE \
                          output.active",
@@ -5745,10 +5750,10 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::WindowProcessor(CreateWindowProcessor {
-                name: identifier("events_window"),
-                from: ProcessorInputs::single(identifier("events_stream")),
+                name: named("events_window"),
+                from: ProcessorInputs::single(named("events_stream")),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
-                    relay: identifier("events_summary"),
+                    relay: named("events_summary"),
                     construction: nervix_nspl::parse_route_construction(
                         "SET count = COUNT(input.id)",
                     )
@@ -5771,11 +5776,11 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::WasmProcessor(CreateWasmProcessor {
-                name: identifier("events_guest"),
-                from: ProcessorInputs::single(identifier("events_stream")),
-                output_routes: ProcessorOutputs::single(identifier("events_projected")),
+                name: named("events_guest"),
+                from: ProcessorInputs::single(named("events_stream")),
+                output_routes: ProcessorOutputs::single(named("events_projected")),
                 branched_by: processor_branched_by("events"),
-                resource: identifier("events_guest_resource"),
+                resource: named("events_guest_resource"),
                 resource_version: Some(3),
                 file: "processor.wasm".to_string(),
                 limits: nervix_models::WasmProcessorLimits {
@@ -5788,13 +5793,13 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Emitter(CreateEmitter {
-                name: identifier("events_emitter"),
-                from: ProcessorInputs::single(identifier("events_stream"))
+                name: named("events_emitter"),
+                from: ProcessorInputs::single(named("events_stream"))
                     .with_collect_policy("50ms".to_string(), None),
-                encode_using_codec: Some(identifier("events_codec")),
+                encode_using_codec: Some(named("events_codec")),
                 sink: Box::new(EmitSink::Nats {
-                    client: identifier("nats_client"),
-                    subject: identifier("events_subject"),
+                    client: named("nats_client"),
+                    subject: named("events_subject"),
                 }),
                 publishing_mode: EmitterPublishingMode::NoAck {
                     retry_policy: RetryPolicy {
@@ -5811,11 +5816,11 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Emitter(CreateEmitter {
-                name: identifier("syslog_emitter"),
-                from: ProcessorInputs::single(identifier("events_stream")),
-                encode_using_codec: Some(identifier("syslog_codec")),
+                name: named("syslog_emitter"),
+                from: ProcessorInputs::single(named("events_stream")),
+                encode_using_codec: Some(named("syslog_codec")),
                 sink: Box::new(EmitSink::Syslog {
-                    client: identifier("syslog_client"),
+                    client: named("syslog_client"),
                 }),
                 publishing_mode: EmitterPublishingMode::NoAck {
                     retry_policy: RetryPolicy {
@@ -5831,11 +5836,11 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Emitter(CreateEmitter {
-                name: identifier("otel_metric_emitter"),
-                from: ProcessorInputs::single(identifier("events_stream")),
+                name: named("otel_metric_emitter"),
+                from: ProcessorInputs::single(named("events_stream")),
                 encode_using_codec: None,
                 sink: Box::new(EmitSink::Otel {
-                    client: identifier("otel_client"),
+                    client: named("otel_client"),
                     signal: OtelSignal::Metric(OtelMetric {
                         name: "request.duration".to_string(),
                         unit: "ms".to_string(),
@@ -5888,9 +5893,9 @@ mod tests {
             }),
             Model::Placement(
                 CreatePlacement::new(
-                    identifier("critical_corridor"),
-                    vec![identifier("events_ingestor"), identifier("events_junction")],
-                    vec![identifier("events_emitter")],
+                    named("critical_corridor"),
+                    vec![named("events_ingestor"), named("events_junction")],
+                    vec![named("events_emitter")],
                     PlacementPolicy::RequireColocation,
                     Some(1),
                 )
@@ -5909,16 +5914,16 @@ mod tests {
     fn stored_model_roundtrip_preserves_optional_schema_fields() {
         let models = vec![
             Model::Schema(CreateSchema {
-                name: identifier("events"),
+                name: named("events"),
                 fields: vec![
                     SchemaField {
-                        name: identifier("user_id"),
+                        name: named("user_id"),
                         ty: ParseAsType::U32,
                         optional: false,
                         sensitive: false,
                     },
                     SchemaField {
-                        name: identifier("nickname"),
+                        name: named("nickname"),
                         ty: ParseAsType::String,
                         optional: true,
                         sensitive: false,
@@ -5926,16 +5931,16 @@ mod tests {
                 ],
             }),
             Model::WireJsonSchema(CreateWireSchema {
-                name: identifier("events_json"),
+                name: named("events_json"),
                 strictness: Default::default(),
                 fields: vec![
                     WireSchemaField {
-                        name: identifier("user_id"),
+                        name: named("user_id"),
                         ty: JsonType::Integer,
                         optional: false,
                     },
                     WireSchemaField {
-                        name: identifier("nickname"),
+                        name: named("nickname"),
                         ty: JsonType::String,
                         optional: true,
                     },

@@ -183,10 +183,9 @@ declare_names! {
     /// A user-defined function declared with `CREATE UDF`.
     UdfName => Allowed,
 
-    /// A model's own name, held next to the [`ModelKind`](crate::ModelKind) that says which kind
-    /// of model it names. Storage keys, `DROP`, `SHOW CREATE`, placement members, and relocation
-    /// members all address a model this way, because the kind is carried beside the name rather
-    /// than in it.
+    /// The name of a control-plane entity, held next to the kind that says what it names. Storage
+    /// keys, `DROP`, `SHOW CREATE`, placement members, relocation members, and diagnostics all
+    /// address an entity this way, because the kind is carried beside the name rather than in it.
     ModelName => Allowed,
 
     /// An uploaded resource, addressed by name and version.
@@ -222,10 +221,10 @@ declare_names! {
     PulsarSubscriptionName => Allowed,
 }
 
-/// Generate the widening of a model's own name into the kind-erased [`ModelName`].
+/// Generate the widening of an entity's own name into the kind-erased [`ModelName`].
 ///
-/// Only the names of models widen. A field, a topic, or a cluster node is not a model, so its
-/// name has no `ModelName` form and cannot be used as a storage key by accident.
+/// Only the names of control-plane entities widen. A field, a topic, or a cluster node does not
+/// name an entity, so it has no `ModelName` form and cannot become a storage key by accident.
 macro_rules! declare_model_names {
     ($($Name:ident,)+) => {
         $(
@@ -280,6 +279,9 @@ declare_model_names! {
     EmitterName,
     PlacementName,
     UdfName,
+    ResourceName,
+    SubscriptionName,
+    UserName,
 }
 
 /// A model name is already the erased form, so it widens into itself. This is what lets an API

@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use ahash::{HashMap, HashMapExt};
+use meticulous::OptionExt as _;
 use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, InferencerTensorSchema,
@@ -424,7 +425,9 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
             if let InferencerTensorDimension::Batch = dimension {
                 shape.push(batch_size);
             } else {
-                shape.push(*slice_dimensions.next().expect("slice rank was validated"));
+                shape.push(*slice_dimensions.next().verified(
+                    "the rank check above rejected a slice shape with too few dimensions",
+                ));
             }
         }
         self.validate_concrete_shape(&shape, batch_size, true)?;

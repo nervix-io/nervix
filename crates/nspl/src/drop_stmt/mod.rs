@@ -1,5 +1,6 @@
 use chumsky::prelude::*;
-use nervix_models::{DropModel, DropNode, ModelKind};
+use meticulous::OptionExt as _;
+use nervix_models::{ClusterNodeName, DropModel, DropNode, ModelKind};
 
 use crate::{
     lexer::{Identifier, Token},
@@ -9,8 +10,7 @@ use crate::{
         into_parse_error, junction_ref, kw, lex_input, cluster_node_name, placement_ref, reingestor_ref,
         relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref,
         wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
-    },
-};
+    }};
 
 pub fn drop_parser<'src>()
 -> impl Parser<'src, &'src [Token], DropModel, extra::Err<ParseError<'src>>> + Clone {
@@ -158,7 +158,7 @@ pub fn parse_drop_tokens(tokens: &[Token]) -> Result<DropModel, Vec<ParseError<'
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -264,7 +264,7 @@ mod tests {
             .parse(tokens.as_slice())
             .into_result()
             .expect("parse should succeed");
-        assert_eq!(parsed.node_id, "node-2");
+        assert_eq!(parsed.node_id, ClusterNodeName::parse("node-2").expect("valid name"));
     }
 
     #[test]

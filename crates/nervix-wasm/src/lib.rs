@@ -35,6 +35,8 @@ pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
 pub enum WasmProcessorError {
     #[error("failed to configure wasmtime: {0}")]
     Configure(#[source] wasmtime::Error),
+    #[error("failed to spawn the wasm epoch driver thread: {0}")]
+    SpawnEpochDriver(#[source] std::io::Error),
     #[error("failed to compile wasm module: {0}")]
     Compile(#[source] wasmtime::Error),
     #[error("failed to join wasm compilation task: {0}")]
@@ -319,7 +321,8 @@ impl WasmRuntime {
             engine.clone(),
             StdArc::clone(&stop),
             config.epoch_tick_interval,
-        );
+        )
+        .map_err(WasmProcessorError::SpawnEpochDriver)?;
         Ok(Self {
             engine,
             stop,
@@ -361,7 +364,11 @@ impl Drop for WasmRuntime {
     }
 }
 
-fn spawn_epoch_driver(engine: Engine, stop: StdArc<AtomicBool>, interval: Duration) {
+fn spawn_epoch_driver(
+    engine: Engine,
+    stop: StdArc<AtomicBool>,
+    interval: Duration,
+) -> std::io::Result<()> {
     let weak_stop = StdArc::downgrade(&stop);
     thread::Builder::new()
         .name("nervix-wasm-epoch".to_string())
@@ -377,7 +384,7 @@ fn spawn_epoch_driver(engine: Engine, stop: StdArc<AtomicBool>, interval: Durati
                 engine.increment_epoch();
             }
         })
-        .expect("failed to spawn nervix wasm epoch driver");
+        .map(|_handle| ())
 }
 
 #[derive(Debug, Clone)]
@@ -1745,7 +1752,7 @@ mod tests {
     use arrow_array::{Int32Array, RecordBatch, StringArray};
     use arrow_ipc::writer::StreamWriter;
     use arrow_schema::{DataType, Field, Schema};
-    use nervix_models::{CreateSchema, Identifier, ParseAsType, SchemaField};
+    use nervix_models::{CreateSchema, FieldName, ParseAsType, SchemaField, SchemaName};
 
     use super::*;
 
@@ -1961,9 +1968,9 @@ mod tests {
 
     fn processor_schema(name: &str) -> CreateSchema {
         CreateSchema {
-            name: Identifier::parse(name).expect("schema name must be valid"),
+            name: SchemaName::parse(name).expect("schema name must be valid"),
             fields: vec![SchemaField {
-                name: Identifier::parse("value").expect("field name must be valid"),
+                name: FieldName::parse("value").expect("field name must be valid"),
                 ty: ParseAsType::I32,
                 optional: false,
                 sensitive: false,
@@ -2014,16 +2021,16 @@ mod tests {
 
     fn string_passthrough_init() -> WasmBranchInit {
         let schema = CreateSchema {
-            name: Identifier::parse("input_events").expect("schema name must be valid"),
+            name: SchemaName::parse("input_events").expect("schema name must be valid"),
             fields: vec![
                 SchemaField {
-                    name: Identifier::parse("value").expect("field name must be valid"),
+                    name: FieldName::parse("value").expect("field name must be valid"),
                     ty: ParseAsType::I32,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("payload").expect("field name must be valid"),
+                    name: FieldName::parse("payload").expect("field name must be valid"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -2043,20 +2050,20 @@ mod tests {
 
     fn shared_generated_init() -> WasmBranchInit {
         let input_schema = CreateSchema {
-            name: Identifier::parse("input_events").expect("schema name must be valid"),
+            name: SchemaName::parse("input_events").expect("schema name must be valid"),
             fields: vec![SchemaField {
-                name: Identifier::parse("value").expect("field name must be valid"),
+                name: FieldName::parse("value").expect("field name must be valid"),
                 ty: ParseAsType::I32,
                 optional: false,
                 sensitive: false,
             }],
         };
         let enriched_schema = CreateSchema {
-            name: Identifier::parse("enriched_events").expect("schema name must be valid"),
+            name: SchemaName::parse("enriched_events").expect("schema name must be valid"),
             fields: vec![
                 input_schema.fields[0].clone(),
                 SchemaField {
-                    name: Identifier::parse("bucket").expect("field name must be valid"),
+                    name: FieldName::parse("bucket").expect("field name must be valid"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -2064,11 +2071,11 @@ mod tests {
             ],
         };
         let audit_schema = CreateSchema {
-            name: Identifier::parse("audit_events").expect("schema name must be valid"),
+            name: SchemaName::parse("audit_events").expect("schema name must be valid"),
             fields: vec![
                 input_schema.fields[0].clone(),
                 SchemaField {
-                    name: Identifier::parse("classification").expect("field name must be valid"),
+                    name: FieldName::parse("classification").expect("field name must be valid"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -2301,16 +2308,16 @@ mod tests {
     #[test]
     fn wasm_schema_contract_converts_from_nervix_schema_model() {
         let source = CreateSchema {
-            name: Identifier::parse("events").expect("schema name must be valid"),
+            name: SchemaName::parse("events").expect("schema name must be valid"),
             fields: vec![
                 SchemaField {
-                    name: Identifier::parse("value").expect("field name must be valid"),
+                    name: FieldName::parse("value").expect("field name must be valid"),
                     ty: ParseAsType::I32,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("tags").expect("field name must be valid"),
+                    name: FieldName::parse("tags").expect("field name must be valid"),
                     ty: ParseAsType::Vec {
                         element: Box::new(ParseAsType::String),
                     },

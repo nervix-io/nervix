@@ -435,7 +435,7 @@ impl Runtime {
 
     pub fn with_test_hooks(hooks: RuntimeTestHooks) -> Self {
         Self::with_persistence(None, DEFAULT_STATE_SNAPSHOT_INTERVAL, hooks)
-            .expect("runtime without persistence should initialize")
+            .verified("the None persistence path has no fallible step")
     }
 
     pub fn with_persistence(
@@ -528,7 +528,7 @@ impl Runtime {
             replicated_branch_aggregated_states: Arc::new(DashMap::default()),
             wasm_runtime: Arc::new(
                 WasmRuntime::new(WasmRuntimeConfig::default())
-                    .expect("wasm runtime should initialize"),
+                    .assured("wasmtime accepts its own default configuration"),
             ),
             branch_instance_expiration_scan_interval: hooks
                 .branch_instance_expiration_scan_interval
@@ -579,7 +579,7 @@ impl Runtime {
             .iter()
             .flat_map(|entity| {
                 if entity.kind == ModelKind::Relay {
-                    return vec![entity.identifier.clone()];
+                    return vec![RelayName::from(&entity.identifier)];
                 }
                 if let Some(processor) = processor_specs.processor(entity.kind, &entity.identifier)
                 {
@@ -711,7 +711,7 @@ impl Runtime {
             if !self.ingestors.contains_key(&key) {
                 continue;
             }
-            if self.engage_ingestor_quiesce(domain, ingestor, quiesce_cause)
+            if self.engage_ingestor_quiesce(domain, &IngestorName::from(ingestor), quiesce_cause)
                 && let Some(mut hold) = self.entity_gate_holds.get_mut(&hold_key)
             {
                 hold.quiesced_ingestors
@@ -2940,7 +2940,7 @@ impl Runtime {
             .get_or_try_create_with(batch.key.clone(), now, |_| {
                 Ok::<(), std::convert::Infallible>(())
             })
-            .expect("relay branch tracking is infallible");
+            .assured("the tracking closure's error type is Infallible");
         if let Some(capacity) = branches.capacity {
             for (evicted_key, _) in branches.instances.evict_lru_to_capacity(capacity) {
                 branches.registry.remove(&evicted_key);
@@ -3826,7 +3826,7 @@ impl Runtime {
             self.handle_structured_message_error(MessageErrorHandling {
                 domain,
                 node_kind,
-                &ModelName::from(&node),
+                node: &node,
                 source_route: None,
                 policy: &policies.message,
                 message: error.message,
@@ -4681,7 +4681,7 @@ impl Runtime {
                 .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
                     domain,
                     kind: ModelKind::Ingestor,
-                    node: ingestor,
+                    node: &ModelName::from(ingestor),
                     physical_node_id: physical_node_id.as_ref(),
                     messages: 1,
                     bytes: bytes_per_row.saturating_add(u64::from(
@@ -4872,12 +4872,12 @@ impl Runtime {
             for (output_index, error, partial_output, materialized_state) in route_errors {
                 let acks = ack_queue
                     .pop_front()
-                    .expect("ack queue must match ingestor route outcomes");
+                    .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[output_index];
                 self.handle_structured_message_error(MessageErrorHandling {
                     domain,
                     node_kind: ModelKind::Ingestor.as_str(),
-                    node: ingestor,
+                    node: &ModelName::from(ingestor),
                     source_route: Some(&output.relay),
                     policy: &output.message_error_policy,
                     message: RelayMessage {
@@ -4895,7 +4895,7 @@ impl Runtime {
             for (output_index, key, output_record) in route_outputs {
                 let acks = ack_queue
                     .pop_front()
-                    .expect("ack queue must match ingestor route outcomes");
+                    .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[output_index];
                 let relay = output.relay.clone();
                 output.branch.as_ref().ok_or_else(|| {
@@ -4944,11 +4944,11 @@ impl Runtime {
         for output in &output_routes.routes {
             let acks = ack_queue
                 .pop_front()
-                .expect("ack queue must match ingestor output routes");
+                .verified("the queue above was filled with one ACK entry per route");
             self.handle_structured_message_error(MessageErrorHandling {
                 domain,
                 node_kind: ModelKind::Ingestor.as_str(),
-                node: ingestor,
+                node: &ModelName::from(ingestor),
                 source_route: Some(&output.relay),
                 policy: &output.message_error_policy,
                 message: RelayMessage {
@@ -5239,7 +5239,7 @@ impl Runtime {
 
     fn branched_specs_by_identifier(
         specs: &[BranchedIngestorSpec],
-    ) -> HashMap<BranchName, Vec<BranchedIngestorSpec>> {
+    ) -> HashMap<ModelName, Vec<BranchedIngestorSpec>> {
         let mut specs_by_identifier = HashMap::default();
         for spec in specs {
             specs_by_identifier
@@ -5921,15 +5921,14 @@ impl Runtime {
                         })?,
                         Some(schema.arrow_schema()),
                     )?;
-                    let state_task = if desired_node.executes_on(
-                        local_node_id
-                            .as_ref()
-                            .expect("validated local node id must remain available"),
-                    ) {
+                    let state_task = if desired_node.executes_on(local_node_id.as_ref().verified(
+                        "the resolution above returned an error unless the local node id is \
+                         present",
+                    )) {
                         Some(self.spawn_relay_state_task(
                             domain,
                             RelayStateTaskSpec {
-                                relay: RelayName::from(&entity.identifier),
+                                relay: RelayName::from(&entity.identifier.clone()),
                                 state: placement.materialized_state.clone().ok_or_else(|| {
                                     RuntimeError::BuildDomainExecution {
                                         domain: domain.as_str().to_string(),
@@ -7444,12 +7443,18 @@ impl Runtime {
                         relay.name.clone(),
                         RuntimeMaterializedRelaySpec::new(
                             relay_schemas
-                                .get(&relay.name)
-                                .expect("inserted relay schema must exist")
+                                .get(&RelayName::from(&node.identifier))
+                                .verified(
+                                    "the schema was inserted under this identifier immediately \
+                                     above",
+                                )
                                 .arrow_schema(),
                             relay_schemas
-                                .get(&relay.name)
-                                .expect("inserted relay schema must exist")
+                                .get(&RelayName::from(&node.identifier))
+                                .verified(
+                                    "the schema was inserted under this identifier immediately \
+                                     above",
+                                )
                                 .vm_sensitivity(),
                             node.effective_branching.clone().unwrap_or_default(),
                         ),
@@ -7480,10 +7485,10 @@ impl Runtime {
                 materialized_schema,
             )?;
             if let Some(state) = placement.kafka_offset_state {
-                kafka_offset_states.insert(relay.name.clone(), state);
+                kafka_offset_states.insert(RelayName::from(&node.identifier), state);
             }
             if let Some(state) = placement.materialized_state {
-                materialized_states.insert(relay.name.clone(), state);
+                materialized_states.insert(RelayName::from(&node.identifier), state);
             }
             if !placement.tasks.is_empty() {
                 placement_tasks.insert(
@@ -7514,7 +7519,7 @@ impl Runtime {
                     };
                     if node.executes_on(local_node_id) {
                         let state = materialized_states
-                            .get(&node.identifier)
+                            .get(&RelayName::from(&node.identifier))
                             .cloned()
                             .ok_or_else(|| RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
@@ -7648,7 +7653,7 @@ impl Runtime {
                 Model::Ingestor(ingestor) if node.executes_on(local_node_id) => {
                     ingestor_specs.push((
                         ingestor.clone(),
-                        kafka_offset_states.get(&node.identifier).cloned(),
+                        kafka_offset_states.get(&RelayName::from(&node.identifier)).cloned(),
                     ));
                 }
                 _ => {}
@@ -7743,16 +7748,14 @@ impl Runtime {
             if node.kind != ModelKind::Relay || !node.executes_on(local_node_id) {
                 continue;
             }
-            let services = relay_services
-                .get(&RelayName::from(&node.identifier))
-                .cloned()
-                .expect("scheduled relay services must exist");
-            let registry = relay_registries
-                .get(&RelayName::from(&node.identifier))
-                .cloned()
-                .expect("scheduled relay registry must exist");
+            let services = relay_services.get(&RelayName::from(&node.identifier)).cloned().verified(
+                "these maps were built from the same scheduled relay nodes this loop walks",
+            );
+            let registry = relay_registries.get(&RelayName::from(&node.identifier)).cloned().verified(
+                "these maps were built from the same scheduled relay nodes this loop walks",
+            );
             relay_owner_tasks.insert(
-                ingestor.name.clone(),
+                node.identifier.clone(),
                 self.spawn_relay_owner_task(
                     domain,
                     &RelayName::from(&node.identifier),
@@ -8049,7 +8052,7 @@ impl Runtime {
         self.clear_state_schema_fingerprints(domain);
         for node in graph.nodes() {
             self.state_schema_fingerprints.insert(
-                RuntimeStateSchemaKey::new(domain.clone(), node.kind, relay.name.clone()),
+                RuntimeStateSchemaKey::new(domain.clone(), node.kind, node.identifier.clone()),
                 graph
                     .schema_fingerprint(node.kind, &node.identifier)
                     .unwrap_or([0; 32]),
@@ -8506,7 +8509,7 @@ impl Runtime {
         let relay_registry = execution
             .relay_registries
             .get(relay)
-            .expect("checked above that relay exists");
+            .verified("the missing-relay branch above already returned");
         Ok(relay_registry.contains_key(key))
     }
 
@@ -8518,7 +8521,7 @@ impl Runtime {
     ) -> Vec<String> {
         let identifier = identifier.into();
         if let Err(error) =
-            self.refresh_branch_aggregated_metrics_for_target(domain, kind, identifier)
+            self.refresh_branch_aggregated_metrics_for_target(domain, kind, identifier.clone())
         {
             warn!(
                 domain = domain.as_str(),
@@ -8545,7 +8548,7 @@ impl Runtime {
             let placement = &state.placement;
             if &placement.domain != domain
                 || placement.kind != ModelKind::WasmProcessor
-                || placement.identifier != *processor
+                || placement.identifier != processor
             {
                 continue;
             }
@@ -8748,7 +8751,7 @@ impl Runtime {
                 let placement = entry.key();
                 if &placement.domain == domain
                     && placement.kind == kind
-                    && &placement.identifier == identifier
+                    && placement.identifier == identifier
                 {
                     Some(placement.clone())
                 } else {
@@ -8768,7 +8771,7 @@ impl Runtime {
             domain,
             RuntimeStateKind::BranchAggregated,
             kind,
-            identifier,
+            identifier.clone(),
             None,
         );
         if !self
@@ -9163,7 +9166,7 @@ impl Runtime {
             .cloned();
         let local_node_id = self.local_node_id.read().clone();
         if let Some(owner) = owner
-            && local_node_id.as_ref() != Some(owner.as_str())
+            && local_node_id.as_ref() != Some(&owner)
         {
             return self
                 .remote_materialized_stream_values_for_branch(
@@ -9280,7 +9283,7 @@ impl Runtime {
             .flatten();
         let local_node_id = self.local_node_id.read().clone();
         if let Some(owner) = owner
-            && local_node_id.as_ref() != Some(owner.as_str())
+            && local_node_id.as_ref() != Some(&owner)
         {
             return self
                 .remote_materialized_stream_state(&owner, domain, relay)
@@ -9565,9 +9568,8 @@ impl Runtime {
     pub fn describe_local_lookup(
         &self,
         domain: &DomainName,
-        name: impl Into<ModelName>,
+        name: &LookupName,
     ) -> Result<(CreateLookup, u64, usize), String> {
-        let name = name.into();
         let Some(execution) = self.executions.get(domain) else {
             if let Some(error) = self.domain_instantiation_errors.get(domain) {
                 return Err(error.value().clone());
@@ -9632,10 +9634,9 @@ impl Runtime {
     pub fn query_local_lookup(
         &self,
         domain: &DomainName,
-        name: impl Into<ModelName>,
+        name: &LookupName,
         key: &str,
     ) -> Result<Option<RuntimeRecordBatch>, String> {
-        let name = name.into();
         let Some(execution) = self.executions.get(domain) else {
             if let Some(error) = self.domain_instantiation_errors.get(domain) {
                 return Err(error.value().clone());
@@ -9653,7 +9654,7 @@ impl Runtime {
             .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
                 domain,
                 kind: ModelKind::Lookup,
-                node: &ModelName::from(&name),
+                node: &ModelName::from(name),
                 physical_node_id: self.local_node_id.read().as_ref(),
                 messages: 1,
                 bytes: u64::try_from(key.len()).unwrap_or(u64::MAX),
@@ -9982,12 +9983,18 @@ impl Runtime {
                         relay.name.clone(),
                         RuntimeMaterializedRelaySpec::new(
                             relay_schemas
-                                .get(&relay.name)
-                                .expect("inserted relay schema must exist")
+                                .get(&RelayName::from(&node.identifier))
+                                .verified(
+                                    "the schema was inserted under this identifier immediately \
+                                     above",
+                                )
                                 .arrow_schema(),
                             relay_schemas
-                                .get(&relay.name)
-                                .expect("inserted relay schema must exist")
+                                .get(&RelayName::from(&node.identifier))
+                                .verified(
+                                    "the schema was inserted under this identifier immediately \
+                                     above",
+                                )
                                 .vm_sensitivity(),
                             node.effective_branching.clone().unwrap_or_default(),
                         ),
@@ -10148,10 +10155,10 @@ impl Runtime {
         let relay_owner_tasks = relay_services
             .iter()
             .map(|(relay, services)| {
-                let registry = relay_registries
-                    .get(relay)
-                    .cloned()
-                    .expect("relay registry must exist");
+                let registry = relay_registries.get(relay).cloned().verified(
+                    "the registries were built from the same relay set as the services this loop \
+                     walks",
+                );
                 (
                     relay.clone(),
                     self.spawn_relay_owner_task(
@@ -11104,7 +11111,10 @@ impl Runtime {
                                             }
                                             let materialized_state = materialized_state_snapshot
                                                 .as_ref()
-                                                .expect("generator state snapshot was set")
+                                                .verified(
+                                                    "the branch above takes the snapshot and \
+                                                     continues when it cannot",
+                                                )
                                                 .clone();
                                             let (acks, _completion) =
                                                 runtime.tracked_ack_root(&task_domain);
@@ -11123,9 +11133,9 @@ impl Runtime {
                                                                 0,
                                                                 source_metadata.clone(),
                                                             )
-                                                            .expect(
-                                                                "decoded generator source batch \
-                                                                 must contain one row",
+                                                            .verified(
+                                                                "the generator decodes one source \
+                                                                 row per tick before reaching here",
                                                             ),
                                                             acks,
                                                         },
@@ -11337,7 +11347,7 @@ impl Runtime {
             match compile_processor_output_filter_map_program(
                 RuntimeCompileTarget {
                     domain,
-                    identifier: reingestor,
+                    identifier: &ModelName::from(reingestor),
                 },
                 std::slice::from_ref(from_relay),
                 &output.relay,
@@ -11369,7 +11379,7 @@ impl Runtime {
             output.compiled_branch_program = compile_output_branch_program(
                 RuntimeCompileTarget {
                     domain,
-                    identifier: reingestor,
+                    identifier: &ModelName::from(reingestor),
                 },
                 output.branch.as_ref(),
                 RuntimeVmSchema {
@@ -11817,7 +11827,7 @@ impl Runtime {
             self.handle_structured_message_error(MessageErrorHandling {
                 domain,
                 node_kind: "reingestor",
-                node: reingestor,
+                node: &ModelName::from(reingestor),
                 source_route: Some(&output_routes.routes[output_index].relay),
                 policy: &output_routes.routes[output_index].message_error_policy,
                 message: RelayMessage {
@@ -12053,7 +12063,7 @@ impl Runtime {
             match compile_expression_filter_program(
                 RuntimeCompileTarget {
                     domain,
-                    identifier: reingestor,
+                    identifier: &ModelName::from(reingestor),
                 },
                 Some(from_where),
                 RuntimeVmSchema {
@@ -12218,7 +12228,10 @@ impl Runtime {
                 Some(force_flush),
                 Some(quiesce_counters.clone()),
             )
-            .expect("validated reingestor input must build a relay interaction");
+            .verified(
+                "the registry validated this input, and a non-empty input list builds an \
+                 interaction",
+            );
             let mut compiled_from_where = None;
             loop {
                 tokio::task::consume_budget().await;
@@ -12494,7 +12507,7 @@ impl Runtime {
                             .unwrap_or_else(current_timestamp);
                         for (expired_key, _) in branches.instances.expire(
                             now,
-                            branch_ttl.expect("expiration wake requires relay branch ttl"),
+                            branch_ttl.verified("this select branch only arms while a branch TTL is configured"),
                         ) {
                             branches.registry.remove(&expired_key);
                             runtime.remove_stream_key_presence(&domain, &relay, &expired_key);
@@ -12566,7 +12579,10 @@ impl Runtime {
                 Some(force_flush),
                 Some(quiesce_counters),
             )
-            .expect("validated relay-state input must build a relay interaction");
+            .verified(
+                "the registry validated this input, and a non-empty input list builds an \
+                 interaction",
+            );
             let mut branch_instances = BranchInstanceRegistry::<Option<BranchKey>, ()>::new();
             let mut restored_branches = state
                 .entries
@@ -12659,7 +12675,7 @@ impl Runtime {
                     .get_or_try_create_with(branch_key.clone(), now, |_| {
                         Ok::<(), std::convert::Infallible>(())
                     })
-                    .expect("infallible materialized branch tracking must succeed");
+                    .assured("the tracking closure's error type is Infallible");
                 if let Some(branch_capacity) = branch_capacity {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {
@@ -12888,21 +12904,7 @@ impl Runtime {
         schedule: &DomainSchedule,
         ingestor: &CreateIngestor,
     ) -> Option<Model> {
-        let source_ref = match &ingestor.source {
-            IngestSource::Http { client, .. } => client,
-            IngestSource::Kafka { client, .. } => client,
-            IngestSource::Pulsar { client, .. } => client,
-            IngestSource::Prometheus { client, .. } => client,
-            IngestSource::RabbitMq { client, .. } => client,
-            IngestSource::RedisPubSub { client, .. } => client,
-            IngestSource::Mqtt { client, .. } => client,
-            IngestSource::Nats { client, .. } => client,
-            IngestSource::ZeroMq { client, .. } => client,
-            IngestSource::Sqs { client, .. } => client,
-            IngestSource::Websockets { client, .. } => client,
-            IngestSource::Syslog { client, .. } => client,
-            IngestSource::Endpoint { endpoint, .. } => endpoint,
-        };
+        let source_ref = ingestor.source.source_ref();
         let source_kind = match &ingestor.source {
             IngestSource::Endpoint { .. } => ModelKind::Endpoint,
             _ => ModelKind::Client,
@@ -12910,7 +12912,7 @@ impl Runtime {
         schedule
             .nodes
             .iter()
-            .find(|node| node.kind == source_kind && node.identifier == *source_ref)
+            .find(|node| node.kind == source_kind && node.identifier == source_ref)
             .map(|node| (*node.config).clone())
     }
 
@@ -13334,7 +13336,7 @@ impl Runtime {
             let interval = Self::parse_runtime_node_duration_setting(
                 domain,
                 kind,
-                identifier,
+                identifier.clone(),
                 "flush_each",
                 value,
             )?;
@@ -13378,7 +13380,7 @@ impl Runtime {
                 let interval = Self::parse_runtime_node_duration_setting(
                     domain,
                     kind,
-                    identifier,
+                    identifier.clone(),
                     "collect_for",
                     &policy.collect_for,
                 )?;

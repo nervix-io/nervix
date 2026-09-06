@@ -18,6 +18,7 @@ arrow-schema = { workspace = true }
 chumsky = { workspace = true }
 error-stack = { workspace = true }
 humantime = { workspace = true }
+meticulous = { workspace = true }
 nervix-models = { workspace = true }
 sorted-vec = { workspace = true }
 strum = { workspace = true, features = ["derive"] }

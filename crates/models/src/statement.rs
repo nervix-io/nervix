@@ -1,5 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, IntoStaticStr};
@@ -270,13 +271,13 @@ pub enum ModelKind {
 impl ModelKind {
     pub fn completion_label(self) -> &'static str {
         self.get_str("completion_label")
-            .expect("every model kind must define a completion_label")
+            .assured("the strum property is declared on every variant of this enum")
     }
 
     /// The NSPL keyword phrase that names this kind in `DROP` and `SHOW CREATE`.
     pub fn keyword_phrase(self) -> &'static str {
         self.get_str("keyword")
-            .expect("every model kind must define a keyword phrase")
+            .assured("the strum property is declared on every variant of this enum")
     }
 
     pub fn from_completion_label(label: &str) -> Option<Self> {
@@ -4418,15 +4419,19 @@ mod tests {
         KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, OutputFlushPolicy,
         PlacementPolicy, RelayBranching, RetryPolicy, ScheduledNode,
     };
-    use crate::{
-        CreateIngestor, CreateJunction, DomainName, EndpointIngestMode, Expression, Identifier,
+    use crate::{BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, EmitterName, FieldName, IngestorName, LookupName, ModelName, RelayName, ResourceName, SchemaName, SubscriptionName, TopicName, UdfName, UserName, WireSchemaName, 
+        CreateIngestor, CreateJunction, DomainName, EndpointIngestMode, Expression, 
         IngestQuiesceMode, IngestSource, Literal, MaterializedStateDependency,
         MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         SchemaField,
     };
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::try_from(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn domain(raw: &str) -> DomainName {
@@ -4532,45 +4537,45 @@ mod tests {
     #[test]
     fn scheduled_node_assignment_checks_exact_node_id() {
         let node = ScheduledNode {
-            identifier: identifier("orders_ingestor"),
+            identifier: named("orders_ingestor"),
             kind: ModelKind::Schema,
             config: Box::new(Model::Schema(CreateSchema {
-                name: identifier("orders"),
+                name: named("orders"),
                 fields: vec![SchemaField {
-                    name: identifier("tenant"),
+                    name: named("tenant"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
                 }],
             })),
-            effective_branching: Some(vec![identifier("tenant")]),
+            effective_branching: Some(vec![named("tenant")]),
             effective_branching_schema: None,
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string()],
+            primary_node: Some(named::<ClusterNodeName>("node-a")),
+            assigned_nodes: vec![named::<ClusterNodeName>("node-a")],
         };
 
-        assert!(node.is_assigned_to("node-a"));
-        assert!(!node.is_assigned_to("node-b"));
+        assert!(node.is_assigned_to(&named::<ClusterNodeName>("node-a")));
+        assert!(!node.is_assigned_to(&named::<ClusterNodeName>("node-b")));
         assert!(
             !ScheduledNode {
                 assigned_nodes: Vec::new(),
                 ..node
             }
-            .is_assigned_to("node-a")
+            .is_assigned_to(&named::<ClusterNodeName>("node-a"))
         );
     }
 
     #[test]
     fn scheduled_node_single_assignment_only_when_exactly_one_node_is_present() {
         let node = ScheduledNode {
-            identifier: identifier("orders_ingestor"),
+            identifier: named("orders_ingestor"),
             kind: ModelKind::Schema,
             config: Box::new(Model::Schema(CreateSchema {
-                name: identifier("orders"),
+                name: named("orders"),
                 fields: vec![SchemaField {
-                    name: identifier("tenant"),
+                    name: named("tenant"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -4580,14 +4585,14 @@ mod tests {
             effective_branching_schema: None,
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string()],
+            primary_node: Some(named::<ClusterNodeName>("node-a")),
+            assigned_nodes: vec![named::<ClusterNodeName>("node-a")],
         };
 
-        assert_eq!(node.assigned_single_node(), Some("node-a"));
+        assert_eq!(node.assigned_single_node(), Some(&named("node-a")));
         assert_eq!(
             ScheduledNode {
-                assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
+                assigned_nodes: vec![named::<ClusterNodeName>("node-a"), named::<ClusterNodeName>("node-b")],
                 ..node.clone()
             }
             .assigned_single_node(),
@@ -4611,12 +4616,12 @@ mod tests {
     #[test]
     fn scheduled_node_exposes_primary_and_replicas() {
         let node = ScheduledNode {
-            identifier: identifier("orders_ingestor"),
+            identifier: named("orders_ingestor"),
             kind: ModelKind::Schema,
             config: Box::new(Model::Schema(CreateSchema {
-                name: identifier("orders"),
+                name: named("orders"),
                 fields: vec![SchemaField {
-                    name: identifier("tenant"),
+                    name: named("tenant"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -4626,33 +4631,36 @@ mod tests {
             effective_branching_schema: None,
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
+            primary_node: Some(named::<ClusterNodeName>("node-a")),
             assigned_nodes: vec![
-                "node-a".to_string(),
-                "node-b".to_string(),
-                "node-c".to_string(),
+                named::<ClusterNodeName>("node-a"),
+                named::<ClusterNodeName>("node-b"),
+                named::<ClusterNodeName>("node-c"),
             ],
         };
 
-        assert_eq!(node.primary_node(), Some("node-a"));
-        assert_eq!(node.replica_nodes(), vec!["node-b", "node-c"]);
-        assert!(node.is_primary_on("node-a"));
-        assert!(!node.is_primary_on("node-b"));
+        assert_eq!(node.primary_node(), Some(&named("node-a")));
+        assert_eq!(
+            node.replica_nodes(),
+            vec![&named("node-b"), &named("node-c")]
+        );
+        assert!(node.is_primary_on(&named::<ClusterNodeName>("node-a")));
+        assert!(!node.is_primary_on(&named::<ClusterNodeName>("node-b")));
     }
 
     #[test]
     fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() {
         let replicated_junction = ScheduledNode {
-            identifier: identifier("orders_merge"),
+            identifier: named("orders_merge"),
             kind: ModelKind::Junction,
             config: Box::new(Model::Junction(CreateJunction {
-                name: identifier("orders_merge"),
+                name: named("orders_merge"),
                 from: ProcessorInputs::new(
-                    vec![identifier("orders_in_a"), identifier("orders_in_b")],
+                    vec![named("orders_in_a"), named("orders_in_b")],
                     Vec::new(),
                 ),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                    identifier("orders_out"),
+                    named("orders_out"),
                     "100ms".to_string(),
                     Some("1MiB".to_string()),
                 )]),
@@ -4665,23 +4673,23 @@ mod tests {
             effective_branching_schema: None,
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
+            primary_node: Some(named::<ClusterNodeName>("node-a")),
+            assigned_nodes: vec![named::<ClusterNodeName>("node-a"), named::<ClusterNodeName>("node-b")],
         };
         let endpoint_ingestor = ScheduledNode {
-            identifier: identifier("orders_http"),
+            identifier: named("orders_http"),
             kind: ModelKind::Ingestor,
             config: Box::new(Model::Ingestor(CreateIngestor {
-                name: identifier("orders_http"),
+                name: named("orders_http"),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                    identifier("orders_out"),
+                    named("orders_out"),
                     "100ms".to_string(),
                     Some("1MiB".to_string()),
                 )]),
-                decode_using_codec: identifier("codec"),
+                decode_using_codec: named("codec"),
                 timestamp_source: None,
                 source: IngestSource::Endpoint {
-                    endpoint: identifier("public_http"),
+                    endpoint: named("public_http"),
                     mode: EndpointIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
@@ -4695,23 +4703,23 @@ mod tests {
             effective_branching_schema: None,
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
+            primary_node: Some(named::<ClusterNodeName>("node-a")),
+            assigned_nodes: vec![named::<ClusterNodeName>("node-a"), named::<ClusterNodeName>("node-b")],
         };
         let syslog_ingestor = ScheduledNode {
-            identifier: identifier("orders_syslog"),
+            identifier: named("orders_syslog"),
             kind: ModelKind::Ingestor,
             config: Box::new(Model::Ingestor(CreateIngestor {
-                name: identifier("orders_syslog"),
+                name: named("orders_syslog"),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                    identifier("orders_out"),
+                    named("orders_out"),
                     "100ms".to_string(),
                     Some("1MiB".to_string()),
                 )]),
-                decode_using_codec: identifier("codec"),
+                decode_using_codec: named("codec"),
                 timestamp_source: None,
                 source: IngestSource::Syslog {
-                    client: identifier("syslog_listener"),
+                    client: named("syslog_listener"),
                     quiesce: IngestQuiesceMode::Suspend,
                 },
                 general_error_policy: GeneralErrorPolicy::Log,
@@ -4721,21 +4729,21 @@ mod tests {
             effective_branching_schema: None,
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
+            primary_node: Some(named::<ClusterNodeName>("node-a")),
+            assigned_nodes: vec![named::<ClusterNodeName>("node-a"), named::<ClusterNodeName>("node-b")],
         };
 
-        assert_eq!(replicated_junction.execution_node(), Some("node-a"));
-        assert!(replicated_junction.executes_on("node-a"));
-        assert!(!replicated_junction.executes_on("node-b"));
+        assert_eq!(replicated_junction.execution_node(), Some(&named("node-a")));
+        assert!(replicated_junction.executes_on(&named::<ClusterNodeName>("node-a")));
+        assert!(!replicated_junction.executes_on(&named::<ClusterNodeName>("node-b")));
 
         assert_eq!(endpoint_ingestor.execution_node(), None);
-        assert!(endpoint_ingestor.executes_on("node-a"));
-        assert!(endpoint_ingestor.executes_on("node-b"));
+        assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
+        assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
 
         assert_eq!(syslog_ingestor.execution_node(), None);
-        assert!(syslog_ingestor.executes_on("node-a"));
-        assert!(syslog_ingestor.executes_on("node-b"));
+        assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
+        assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
     }
 
     #[test]
@@ -4750,19 +4758,19 @@ mod tests {
     #[test]
     fn relay_alter_applies_operations_in_order_and_is_atomic() {
         let mut relay = CreateRelay {
-            name: identifier("events"),
-            schema: identifier("event_v1"),
+            name: named("events"),
+            schema: named("event_v1"),
             buffer: 1,
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         };
         relay
             .apply_alter(&AlterRelay {
-                relay: identifier("events"),
+                relay: named("events"),
                 operations: vec![
                     AlterRelayOperation::SetCapacity { capacity: 8 },
                     AlterRelayOperation::SetSchema {
-                        schema: identifier("event_v2"),
+                        schema: named("event_v2"),
                     },
                     AlterRelayOperation::SetCapacity { capacity: 16 },
                     AlterRelayOperation::SetMaterializedState,
@@ -4770,7 +4778,7 @@ mod tests {
             })
             .expect("relay alter should apply");
         assert_eq!(relay.buffer, 16);
-        assert_eq!(relay.schema, identifier("event_v2"));
+        assert_eq!(relay.schema, named("event_v2"));
         assert_eq!(
             relay.materialized_state,
             Some(MaterializedRelayState::LastByTimestamp)
@@ -4779,7 +4787,7 @@ mod tests {
         let before = relay.clone();
         let error = relay
             .apply_alter(&AlterRelay {
-                relay: identifier("events"),
+                relay: named("events"),
                 operations: vec![
                     AlterRelayOperation::SetCapacity { capacity: 32 },
                     AlterRelayOperation::DropMaterializedState,
@@ -4794,16 +4802,16 @@ mod tests {
     #[test]
     fn junction_alter_preserves_order_and_rejects_ambiguous_routes_atomically() {
         let mut junction = CreateJunction {
-            name: identifier("route_events"),
-            from: ProcessorInputs::new(vec![identifier("incoming")], Vec::new()),
+            name: named("route_events"),
+            from: ProcessorInputs::new(vec![named("incoming")], Vec::new()),
             output_routes: ProcessorOutputs::new(vec![
                 ProcessorOutput::with_flush_policy(
-                    identifier("accepted"),
+                    named("accepted"),
                     "100ms".to_string(),
                     Some("1MiB".to_string()),
                 ),
                 ProcessorOutput::with_flush_policy(
-                    identifier("accepted"),
+                    named("accepted"),
                     "200ms".to_string(),
                     Some("2MiB".to_string()),
                 ),
@@ -4816,13 +4824,13 @@ mod tests {
         let before = junction.clone();
         let error = junction
             .apply_alter(&AlterJunction {
-                junction: identifier("route_events"),
+                junction: named("route_events"),
                 operations: vec![
                     AlterProcessorOperation::SetMode {
                         mode: AckMode::Detached,
                     },
                     AlterProcessorOperation::DropRoute {
-                        relay: identifier("accepted"),
+                        relay: named("accepted"),
                     },
                 ],
             })
@@ -4830,7 +4838,7 @@ mod tests {
         assert_eq!(
             error,
             AlterJunctionError::Processor(AlterProcessorError::RouteTargetAmbiguous {
-                relay: identifier("accepted"),
+                relay: named("accepted"),
             })
         );
         assert_eq!(junction, before, "failed ALTER must not partially apply");
@@ -4839,10 +4847,10 @@ mod tests {
     #[test]
     fn junction_alter_applies_ordered_collection_filter_dependency_and_route_updates() {
         let mut junction = CreateJunction {
-            name: identifier("route_events"),
-            from: ProcessorInputs::single(identifier("incoming_a")),
+            name: named("route_events"),
+            from: ProcessorInputs::single(named("incoming_a")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("accepted"),
+                named("accepted"),
                 "100ms".to_string(),
                 Some("1MiB".to_string()),
             )]),
@@ -4854,20 +4862,20 @@ mod tests {
         let true_expression = Expression::Literal(Literal::Bool(true));
         let false_expression = Expression::Literal(Literal::Bool(false));
         let replacement = ProcessorOutput::with_flush_policy(
-            identifier("accepted"),
+            named("accepted"),
             "250ms".to_string(),
             Some("2MiB".to_string()),
         );
         junction
             .apply_alter(&AlterJunction {
-                junction: identifier("route_events"),
+                junction: named("route_events"),
                 operations: vec![
                     AlterProcessorOperation::AddFrom {
-                        relay: identifier("incoming_b"),
+                        relay: named("incoming_b"),
                         where_clause: Some(true_expression.clone()),
                     },
                     AlterProcessorOperation::AlterFromSetWhere {
-                        relay: identifier("incoming_b"),
+                        relay: named("incoming_b"),
                         where_clause: false_expression.clone(),
                     },
                     AlterProcessorOperation::SetFilterWhere {
@@ -4878,23 +4886,23 @@ mod tests {
                     },
                     AlterProcessorOperation::AddMaterializedState {
                         dependency: MaterializedStateDependency {
-                            relay: identifier("profiles"),
+                            relay: named("profiles"),
                             policy: MaterializedStatePolicy::RequiredWait,
                         },
                     },
                     AlterProcessorOperation::AddMaterializedState {
                         dependency: MaterializedStateDependency {
-                            relay: identifier("accounts"),
+                            relay: named("accounts"),
                             policy: MaterializedStatePolicy::RequiredSkip,
                         },
                     },
                     AlterProcessorOperation::AlterMaterializedState {
-                        relay: identifier("profiles"),
+                        relay: named("profiles"),
                         policy: MaterializedStatePolicy::RequiredSkip,
                     },
                     AlterProcessorOperation::AddRoute {
                         route: ProcessorOutput::with_flush_policy(
-                            identifier("audit"),
+                            named("audit"),
                             "100ms".to_string(),
                             Some("1MiB".to_string()),
                         ),
@@ -4911,7 +4919,7 @@ mod tests {
 
         assert_eq!(
             junction.from.from,
-            vec![identifier("incoming_a"), identifier("incoming_b")]
+            vec![named("incoming_a"), named("incoming_b")]
         );
         assert_eq!(junction.from.r#where[0].where_clause, false_expression);
         assert_eq!(
@@ -4924,7 +4932,7 @@ mod tests {
                 .iter()
                 .map(|dependency| dependency.relay.clone())
                 .collect::<Vec<_>>(),
-            vec![identifier("profiles"), identifier("accounts")]
+            vec![named("profiles"), named("accounts")]
         );
         assert_eq!(
             junction.materialized_state[0].policy,
@@ -4937,7 +4945,7 @@ mod tests {
                 .iter()
                 .map(|route| route.relay.clone())
                 .collect::<Vec<_>>(),
-            vec![identifier("accepted"), identifier("audit")]
+            vec![named("accepted"), named("audit")]
         );
         assert_eq!(junction.output_routes.routes[0], replacement);
         assert_eq!(junction.mode, AckMode::Detached);
@@ -4946,8 +4954,8 @@ mod tests {
     #[test]
     fn relay_alter_reports_each_typed_error() {
         let relay = CreateRelay {
-            name: identifier("events"),
-            schema: identifier("event"),
+            name: named("events"),
+            schema: named("event"),
             buffer: 1,
             branching: RelayBranching::unbranched(),
             materialized_state: None,
@@ -4955,24 +4963,24 @@ mod tests {
         let cases = [
             (
                 AlterRelay {
-                    relay: identifier("other"),
+                    relay: named("other"),
                     operations: vec![AlterRelayOperation::SetCapacity { capacity: 2 }],
                 },
                 AlterRelayError::RelayNameMismatch {
-                    stored: identifier("events"),
-                    requested: identifier("other"),
+                    stored: named("events"),
+                    requested: named("other"),
                 },
             ),
             (
                 AlterRelay {
-                    relay: identifier("events"),
+                    relay: named("events"),
                     operations: vec![AlterRelayOperation::SetCapacity { capacity: 0 }],
                 },
                 AlterRelayError::InvalidCapacity,
             ),
             (
                 AlterRelay {
-                    relay: identifier("events"),
+                    relay: named("events"),
                     operations: vec![AlterRelayOperation::DropMaterializedState],
                 },
                 AlterRelayError::MaterializedStateNotConfigured,
@@ -4988,14 +4996,14 @@ mod tests {
     #[test]
     fn junction_alter_reports_each_typed_lookup_and_last_element_error() {
         let base = CreateJunction {
-            name: identifier("route_events"),
-            from: ProcessorInputs::single(identifier("incoming")),
-            output_routes: ProcessorOutputs::single(identifier("accepted")),
+            name: named("route_events"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: ProcessorOutputs::single(named("accepted")),
             branched_by: BranchSelection::unbranched(),
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: vec![MaterializedStateDependency {
-                relay: identifier("profiles"),
+                relay: named("profiles"),
                 policy: MaterializedStatePolicy::RequiredWait,
             }],
         };
@@ -5003,103 +5011,103 @@ mod tests {
         let cases = vec![
             (
                 AlterJunction {
-                    junction: identifier("other"),
+                    junction: named("other"),
                     operations: Vec::new(),
                 },
                 AlterJunctionError::JunctionNameMismatch {
-                    stored: identifier("route_events"),
-                    requested: identifier("other"),
+                    stored: named("route_events"),
+                    requested: named("other"),
                 },
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::AddFrom {
-                        relay: identifier("incoming"),
+                        relay: named("incoming"),
                         where_clause: None,
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::InputAlreadyExists {
-                    relay: identifier("incoming"),
+                    relay: named("incoming"),
                 }),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::DropFrom {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::InputNotFound {
-                    relay: identifier("missing"),
+                    relay: named("missing"),
                 }),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::AlterFromDropWhere {
-                        relay: identifier("incoming"),
+                        relay: named("incoming"),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::InputWhereNotConfigured {
-                    relay: identifier("incoming"),
+                    relay: named("incoming"),
                 }),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::DropFrom {
-                        relay: identifier("incoming"),
+                        relay: named("incoming"),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::CannotDropLastInput),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::AddMaterializedState {
                         dependency: MaterializedStateDependency {
-                            relay: identifier("profiles"),
+                            relay: named("profiles"),
                             policy: MaterializedStatePolicy::RequiredSkip,
                         },
                     }],
                 },
                 AlterJunctionError::Processor(
                     AlterProcessorError::MaterializedStateAlreadyConfigured {
-                        relay: identifier("profiles"),
+                        relay: named("profiles"),
                     },
                 ),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::AlterMaterializedState {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                         policy: MaterializedStatePolicy::RequiredSkip,
                     }],
                 },
                 AlterJunctionError::Processor(
                     AlterProcessorError::MaterializedStateNotConfigured {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     },
                 ),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::ReplaceRoute {
-                        route: ProcessorOutput::new(identifier("missing")),
+                        route: ProcessorOutput::new(named("missing")),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::RouteTargetNotFound {
-                    relay: identifier("missing"),
+                    relay: named("missing"),
                 }),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::DropRoute {
-                        relay: identifier("accepted"),
+                        relay: named("accepted"),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::CannotDropLastRoute),
@@ -5115,9 +5123,9 @@ mod tests {
         let mut with_where = base.clone();
         with_where
             .apply_alter(&AlterJunction {
-                junction: identifier("route_events"),
+                junction: named("route_events"),
                 operations: vec![AlterProcessorOperation::AlterFromSetWhere {
-                    relay: identifier("incoming"),
+                    relay: named("incoming"),
                     where_clause: true_expression,
                 }],
             })
@@ -5127,11 +5135,11 @@ mod tests {
     #[test]
     fn emitter_alter_applies_operations_in_order_and_is_atomic() {
         let mut emitter = CreateEmitter {
-            name: identifier("event_sink"),
-            from: ProcessorInputs::single(identifier("events")),
-            encode_using_codec: Some(identifier("event_codec")),
+            name: named("event_sink"),
+            from: ProcessorInputs::single(named("events")),
+            encode_using_codec: Some(named("event_codec")),
             sink: Box::new(EmitSink::ZeroMq {
-                client: identifier("sink_a"),
+                client: named("sink_a"),
             }),
             flush_each: "1s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
@@ -5148,17 +5156,17 @@ mod tests {
         };
         emitter
             .apply_alter(&AlterEmitter {
-                emitter: identifier("event_sink"),
+                emitter: named("event_sink"),
                 operations: vec![
                     AlterEmitterOperation::AddFrom {
-                        relay: identifier("backup_events"),
+                        relay: named("backup_events"),
                         where_clause: Some(Expression::Literal(Literal::Bool(true))),
                     },
                     AlterEmitterOperation::AlterFromDropWhere {
-                        relay: identifier("backup_events"),
+                        relay: named("backup_events"),
                     },
                     AlterEmitterOperation::SetClient {
-                        client: identifier("sink_b"),
+                        client: named("sink_b"),
                     },
                     AlterEmitterOperation::SetFlush {
                         flush_each: "2s".to_string(),
@@ -5174,22 +5182,22 @@ mod tests {
                 ],
             })
             .expect("emitter alter should apply");
-        assert_eq!(emitter.sink.client(), &identifier("sink_b"));
+        assert_eq!(emitter.sink.client(), &named("sink_b"));
         assert_eq!(emitter.flush_policy(), ("IMMEDIATE", None));
         assert_eq!(emitter.mode, AckMode::Detached);
         assert_eq!(
             emitter.from.relays(),
-            &[identifier("events"), identifier("backup_events")]
+            &[named("events"), named("backup_events")]
         );
         assert!(emitter.from.where_clauses().is_empty());
 
         let before = emitter.clone();
         let error = emitter
             .apply_alter(&AlterEmitter {
-                emitter: identifier("event_sink"),
+                emitter: named("event_sink"),
                 operations: vec![
                     AlterEmitterOperation::SetClient {
-                        client: identifier("sink_c"),
+                        client: named("sink_c"),
                     },
                     AlterEmitterOperation::DropEncode,
                     AlterEmitterOperation::DropEncode,
@@ -5203,11 +5211,11 @@ mod tests {
     #[test]
     fn emitter_alter_reports_name_and_commit_policy_errors() {
         let emitter = CreateEmitter {
-            name: identifier("event_sink"),
-            from: ProcessorInputs::single(identifier("events")),
-            encode_using_codec: Some(identifier("event_codec")),
+            name: named("event_sink"),
+            from: ProcessorInputs::single(named("events")),
+            encode_using_codec: Some(named("event_codec")),
             sink: Box::new(EmitSink::ZeroMq {
-                client: identifier("sink"),
+                client: named("sink"),
             }),
             flush_each: "IMMEDIATE".to_string(),
             max_batch_size: None,
@@ -5225,17 +5233,17 @@ mod tests {
         let cases = [
             (
                 AlterEmitter {
-                    emitter: identifier("other"),
+                    emitter: named("other"),
                     operations: Vec::new(),
                 },
                 AlterEmitterError::EmitterNameMismatch {
-                    stored: identifier("event_sink"),
-                    requested: identifier("other"),
+                    stored: named("event_sink"),
+                    requested: named("other"),
                 },
             ),
             (
                 AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![AlterEmitterOperation::SetCommit {
                         commit_each: "1m".to_string(),
                         max_commit_size: "1GiB".to_string(),
@@ -5245,32 +5253,32 @@ mod tests {
             ),
             (
                 AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![AlterEmitterOperation::AddFrom {
-                        relay: identifier("events"),
+                        relay: named("events"),
                         where_clause: None,
                     }],
                 },
                 AlterEmitterError::InputAlreadyExists {
-                    relay: identifier("events"),
+                    relay: named("events"),
                 },
             ),
             (
                 AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![AlterEmitterOperation::DropFrom {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     }],
                 },
                 AlterEmitterError::InputNotFound {
-                    relay: identifier("missing"),
+                    relay: named("missing"),
                 },
             ),
             (
                 AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![AlterEmitterOperation::DropFrom {
-                        relay: identifier("events"),
+                        relay: named("events"),
                     }],
                 },
                 AlterEmitterError::CannotDropLastInput,
@@ -5286,7 +5294,7 @@ mod tests {
     #[test]
     fn ingestor_alter_applies_operations_in_order_and_is_atomic() {
         let route = ProcessorOutput {
-            relay: identifier("events"),
+            relay: named("events"),
             construction: crate::RouteConstruction::default(),
             flush_policy: Some(OutputFlushPolicy {
                 flush_each: "1s".to_string(),
@@ -5296,12 +5304,12 @@ mod tests {
             branch: Some(crate::OutputBranch::Unbranched),
         };
         let mut ingestor = CreateIngestor {
-            name: identifier("event_source"),
+            name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
-            decode_using_codec: identifier("event_codec"),
+            decode_using_codec: named("event_codec"),
             timestamp_source: None,
             source: IngestSource::Endpoint {
-                endpoint: identifier("ingress_a"),
+                endpoint: named("ingress_a"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
@@ -5312,11 +5320,11 @@ mod tests {
         };
         ingestor
             .apply_alter(&AlterIngestor {
-                ingestor: identifier("event_source"),
+                ingestor: named("event_source"),
                 operations: vec![
                     AlterIngestorOperation::SetSource {
                         source: IngestSource::Endpoint {
-                            endpoint: identifier("ingress_b"),
+                            endpoint: named("ingress_b"),
                             mode: EndpointIngestMode::NoAckSequential,
                             quiesce: IngestQuiesceMode::EndpointBuffer {
                                 max_size: "1MiB".to_string(),
@@ -5324,7 +5332,7 @@ mod tests {
                         },
                     },
                     AlterIngestorOperation::SetDecodeUsing {
-                        codec: identifier("event_codec_v2"),
+                        codec: named("event_codec_v2"),
                     },
                     AlterIngestorOperation::SetTimestamp {
                         source: super::IngestTimestampSource::Now,
@@ -5334,7 +5342,7 @@ mod tests {
                     },
                     AlterIngestorOperation::ReplaceRoute {
                         route: ProcessorOutput {
-                            relay: identifier("events"),
+                            relay: named("events"),
                             flush_policy: Some(OutputFlushPolicy {
                                 flush_each: "IMMEDIATE".to_string(),
                                 max_batch_size: None,
@@ -5344,7 +5352,7 @@ mod tests {
                     },
                     AlterIngestorOperation::AddRoute {
                         route: ProcessorOutput {
-                            relay: identifier("audit"),
+                            relay: named("audit"),
                             ..route.clone()
                         },
                     },
@@ -5358,14 +5366,14 @@ mod tests {
         assert_eq!(
             ingestor.source,
             IngestSource::Endpoint {
-                endpoint: identifier("ingress_b"),
+                endpoint: named("ingress_b"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
                 },
             }
         );
-        assert_eq!(ingestor.decode_using_codec, identifier("event_codec_v2"));
+        assert_eq!(ingestor.decode_using_codec, named("event_codec_v2"));
         assert_eq!(
             ingestor.timestamp_source,
             Some(super::IngestTimestampSource::Now)
@@ -5376,13 +5384,13 @@ mod tests {
         let before = ingestor.clone();
         let error = ingestor
             .apply_alter(&AlterIngestor {
-                ingestor: identifier("event_source"),
+                ingestor: named("event_source"),
                 operations: vec![
                     AlterIngestorOperation::SetDecodeUsing {
-                        codec: identifier("event_codec_v3"),
+                        codec: named("event_codec_v3"),
                     },
                     AlterIngestorOperation::DropRoute {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     },
                 ],
             })
@@ -5390,7 +5398,7 @@ mod tests {
         assert_eq!(
             error,
             AlterIngestorError::RouteTargetNotFound {
-                relay: identifier("missing")
+                relay: named("missing")
             }
         );
         assert_eq!(ingestor, before, "failed ALTER must not partially apply");
@@ -5398,14 +5406,14 @@ mod tests {
 
     #[test]
     fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
-        let route = ProcessorOutput::new(identifier("events"));
+        let route = ProcessorOutput::new(named("events"));
         let base = CreateIngestor {
-            name: identifier("event_source"),
+            name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
-            decode_using_codec: identifier("event_codec"),
+            decode_using_codec: named("event_codec"),
             timestamp_source: None,
             source: IngestSource::Endpoint {
-                endpoint: identifier("ingress"),
+                endpoint: named("ingress"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
@@ -5418,12 +5426,12 @@ mod tests {
         let mut candidate = base.clone();
         assert_eq!(
             candidate.apply_alter(&AlterIngestor {
-                ingestor: identifier("other"),
+                ingestor: named("other"),
                 operations: Vec::new(),
             }),
             Err(AlterIngestorError::IngestorNameMismatch {
-                stored: identifier("event_source"),
-                requested: identifier("other"),
+                stored: named("event_source"),
+                requested: named("other"),
             })
         );
         assert_eq!(candidate, base);
@@ -5431,9 +5439,9 @@ mod tests {
         let mut candidate = base.clone();
         assert_eq!(
             candidate.apply_alter(&AlterIngestor {
-                ingestor: identifier("event_source"),
+                ingestor: named("event_source"),
                 operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: identifier("events"),
+                    relay: named("events"),
                 }],
             }),
             Err(AlterIngestorError::CannotDropLastRoute)
@@ -5445,13 +5453,13 @@ mod tests {
         let before = ambiguous.clone();
         assert_eq!(
             ambiguous.apply_alter(&AlterIngestor {
-                ingestor: identifier("event_source"),
+                ingestor: named("event_source"),
                 operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: identifier("events"),
+                    relay: named("events"),
                 }],
             }),
             Err(AlterIngestorError::RouteTargetAmbiguous {
-                relay: identifier("events"),
+                relay: named("events"),
             })
         );
         assert_eq!(ambiguous, before);
@@ -5459,9 +5467,9 @@ mod tests {
 
     fn deduplicator() -> CreateDeduplicator {
         CreateDeduplicator {
-            name: identifier("dedup_events"),
-            from: ProcessorInputs::single(identifier("incoming")),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(identifier(
+            name: named("dedup_events"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named(
                 "outgoing",
             ))]),
             branched_by: BranchSelection::unbranched(),
@@ -5475,9 +5483,9 @@ mod tests {
 
     fn reorderer() -> CreateReorderer {
         CreateReorderer {
-            name: identifier("order_events"),
-            from: ProcessorInputs::single(identifier("incoming")),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(identifier(
+            name: named("order_events"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named(
                 "outgoing",
             ))]),
             branched_by: BranchSelection::unbranched(),
@@ -5494,11 +5502,11 @@ mod tests {
         let mut candidate = deduplicator();
         candidate
             .apply_alter(&AlterDeduplicator {
-                deduplicator: identifier("dedup_events"),
+                deduplicator: named("dedup_events"),
                 operations: vec![
                     AlterDeduplicatorOperation::Processor(Box::new(
                         AlterProcessorOperation::AddFrom {
-                            relay: identifier("secondary"),
+                            relay: named("secondary"),
                             where_clause: Some(Expression::Literal(Literal::Bool(true))),
                         },
                     )),
@@ -5525,7 +5533,7 @@ mod tests {
 
         assert_eq!(
             candidate.from.from,
-            vec![identifier("incoming"), identifier("secondary")]
+            vec![named("incoming"), named("secondary")]
         );
         assert_eq!(
             candidate.deduplicate_on,
@@ -5540,7 +5548,7 @@ mod tests {
         let mut candidate = reorderer();
         candidate
             .apply_alter(&AlterReorderer {
-                reorderer: identifier("order_events"),
+                reorderer: named("order_events"),
                 operations: vec![
                     AlterReordererOperation::SetOrderBy {
                         expressions: vec![Expression::Literal(Literal::I64(2))],
@@ -5580,21 +5588,21 @@ mod tests {
         let original = deduplicator.clone();
         assert_eq!(
             deduplicator.apply_alter(&AlterDeduplicator {
-                deduplicator: identifier("dedup_events"),
+                deduplicator: named("dedup_events"),
                 operations: vec![
                     AlterDeduplicatorOperation::SetMaxTime {
                         max_time: "1s".to_string(),
                     },
                     AlterDeduplicatorOperation::Processor(Box::new(
                         AlterProcessorOperation::DropRoute {
-                            relay: identifier("missing"),
+                            relay: named("missing"),
                         },
                     )),
                 ],
             }),
             Err(AlterDeduplicatorError::Processor(
                 AlterProcessorError::RouteTargetNotFound {
-                    relay: identifier("missing"),
+                    relay: named("missing"),
                 }
             ))
         );
@@ -5604,12 +5612,12 @@ mod tests {
         let original = reorderer.clone();
         assert_eq!(
             reorderer.apply_alter(&AlterReorderer {
-                reorderer: identifier("other"),
+                reorderer: named("other"),
                 operations: Vec::new(),
             }),
             Err(AlterReordererError::ReordererNameMismatch {
-                stored: identifier("order_events"),
-                requested: identifier("other"),
+                stored: named("order_events"),
+                requested: named("other"),
             })
         );
         assert_eq!(reorderer, original);
@@ -5618,9 +5626,9 @@ mod tests {
     #[test]
     fn reingestor_alter_is_ordered_atomic_and_rejects_node_branching() {
         let mut reingestor = CreateReingestor {
-            name: identifier("repartition"),
-            from: ProcessorInputs::single(identifier("incoming")),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(identifier(
+            name: named("repartition"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named(
                 "outgoing",
             ))]),
             mode: AckMode::Attached,
@@ -5629,13 +5637,13 @@ mod tests {
         };
         reingestor
             .apply_alter(&AlterReingestor {
-                reingestor: identifier("repartition"),
+                reingestor: named("repartition"),
                 operations: vec![
                     AlterProcessorOperation::SetMode {
                         mode: AckMode::Detached,
                     },
                     AlterProcessorOperation::AddFrom {
-                        relay: identifier("secondary"),
+                        relay: named("secondary"),
                         where_clause: Some(Expression::Literal(Literal::Bool(true))),
                     },
                     AlterProcessorOperation::SetFilterWhere {
@@ -5651,7 +5659,7 @@ mod tests {
         let before = reingestor.clone();
         assert_eq!(
             reingestor.apply_alter(&AlterReingestor {
-                reingestor: identifier("repartition"),
+                reingestor: named("repartition"),
                 operations: vec![
                     AlterProcessorOperation::SetMode {
                         mode: AckMode::Attached,
@@ -5670,17 +5678,17 @@ mod tests {
 
     #[test]
     fn generator_alter_is_ordered_atomic_and_reports_route_errors() {
-        let route = ProcessorOutput::new(identifier("outgoing"));
+        let route = ProcessorOutput::new(named("outgoing"));
         let mut generator = CreateGenerator {
-            name: identifier("synth"),
-            materialized_relay: identifier("state"),
+            name: named("synth"),
+            materialized_relay: named("state"),
             branched_by: BranchSelection::unbranched(),
             each: "1s".to_string(),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
         };
         generator
             .apply_alter(&AlterGenerator {
-                generator: identifier("synth"),
+                generator: named("synth"),
                 operations: vec![
                     AlterGeneratorOperation::SetEach {
                         each: "500ms".to_string(),
@@ -5689,33 +5697,33 @@ mod tests {
                         each: "250ms".to_string(),
                     },
                     AlterGeneratorOperation::SetMaterializedState {
-                        relay: identifier("state_v2"),
+                        relay: named("state_v2"),
                     },
                     AlterGeneratorOperation::AddRoute {
-                        route: ProcessorOutput::new(identifier("audit")),
+                        route: ProcessorOutput::new(named("audit")),
                     },
                 ],
             })
             .expect("generator alter should apply");
         assert_eq!(generator.each, "250ms");
-        assert_eq!(generator.materialized_relay, identifier("state_v2"));
+        assert_eq!(generator.materialized_relay, named("state_v2"));
         assert_eq!(generator.output_routes.routes.len(), 2);
 
         let before = generator.clone();
         assert_eq!(
             generator.apply_alter(&AlterGenerator {
-                generator: identifier("synth"),
+                generator: named("synth"),
                 operations: vec![
                     AlterGeneratorOperation::SetEach {
                         each: "10ms".to_string(),
                     },
                     AlterGeneratorOperation::DropRoute {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     },
                 ],
             }),
             Err(AlterGeneratorError::RouteTargetNotFound {
-                relay: identifier("missing")
+                relay: named("missing")
             })
         );
         assert_eq!(generator, before, "failed ALTER must not partially apply");
@@ -5726,9 +5734,9 @@ mod tests {
         };
         assert_eq!(
             single.apply_alter(&AlterGenerator {
-                generator: identifier("synth"),
+                generator: named("synth"),
                 operations: vec![AlterGeneratorOperation::DropRoute {
-                    relay: identifier("outgoing"),
+                    relay: named("outgoing"),
                 }],
             }),
             Err(AlterGeneratorError::CannotDropLastRoute)
@@ -5737,13 +5745,13 @@ mod tests {
         single.output_routes.routes.push(route);
         assert_eq!(
             single.apply_alter(&AlterGenerator {
-                generator: identifier("synth"),
+                generator: named("synth"),
                 operations: vec![AlterGeneratorOperation::DropRoute {
-                    relay: identifier("outgoing"),
+                    relay: named("outgoing"),
                 }],
             }),
             Err(AlterGeneratorError::RouteTargetAmbiguous {
-                relay: identifier("outgoing")
+                relay: named("outgoing")
             })
         );
     }
@@ -5751,31 +5759,31 @@ mod tests {
     #[test]
     fn placement_creation_collapses_duplicate_members() {
         let placement = CreatePlacement::new(
-            identifier("corridor"),
-            vec![identifier("ingest"), identifier("ingest")],
-            vec![identifier("emit"), identifier("emit")],
+            named("corridor"),
+            vec![named("ingest"), named("ingest")],
+            vec![named("emit"), named("emit")],
             PlacementPolicy::PreferColocation,
             None,
         )
         .expect("placement should be valid");
 
-        assert_eq!(placement.from, vec![identifier("ingest")]);
-        assert_eq!(placement.to, vec![identifier("emit")]);
+        assert_eq!(placement.from, vec![named("ingest")]);
+        assert_eq!(placement.to, vec![named("emit")]);
     }
 
     #[test]
     fn placement_alter_applies_operations_in_order_and_is_atomic() {
         let mut placement = CreatePlacement::new(
-            identifier("corridor"),
-            vec![identifier("ingest")],
-            vec![identifier("emit")],
+            named("corridor"),
+            vec![named("ingest")],
+            vec![named("emit")],
             PlacementPolicy::PreferColocation,
             None,
         )
         .expect("placement should be valid");
         placement
             .apply_alter(&AlterPlacement {
-                placement: identifier("corridor"),
+                placement: named("corridor"),
                 operations: vec![
                     AlterPlacementOperation::SetRank { rank: 3 },
                     AlterPlacementOperation::SetRank { rank: 1 },
@@ -5783,26 +5791,26 @@ mod tests {
                         policy: PlacementPolicy::RequireColocation,
                     },
                     AlterPlacementOperation::SetMembers {
-                        from: vec![identifier("source"), identifier("source")],
-                        to: vec![identifier("sink")],
+                        from: vec![named("source"), named("source")],
+                        to: vec![named("sink")],
                     },
                     AlterPlacementOperation::RenameTo {
-                        name: identifier("critical"),
+                        name: named("critical"),
                     },
                 ],
             })
             .expect("placement alter should apply");
 
-        assert_eq!(placement.name, identifier("critical"));
+        assert_eq!(placement.name, named("critical"));
         assert_eq!(placement.rank, Some(1));
         assert_eq!(placement.policy, PlacementPolicy::RequireColocation);
-        assert_eq!(placement.from, vec![identifier("source")]);
-        assert_eq!(placement.to, vec![identifier("sink")]);
+        assert_eq!(placement.from, vec![named("source")]);
+        assert_eq!(placement.to, vec![named("sink")]);
 
         let before = placement.clone();
         assert_eq!(
             placement.apply_alter(&AlterPlacement {
-                placement: identifier("critical"),
+                placement: named("critical"),
                 operations: vec![
                     AlterPlacementOperation::SetPolicy {
                         policy: PlacementPolicy::Neutral,

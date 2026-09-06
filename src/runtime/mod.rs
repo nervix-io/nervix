@@ -31,11 +31,132 @@ use chrono::{TimeDelta, TimeZone, Utc};
 use dashmap::DashMap;
 use fjall::Database;
 use futures_util::stream::FuturesUnordered;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, RelayPayload, RelayPayloadKind, Transport,
     TransportMode as InterconnectTransportMode,
 };
-use nervix_models::{AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName, ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol, CreateUdf, DomainConfig, DomainName, DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode, SchemaName, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp, UserName, WireSchemaDefinition};
+use nervix_models::{
+    AckMode,
+    Assignment,
+    BranchName,
+    ClickHouseValueMapping,
+    ClientConfigEntry,
+    ClientName,
+    ClusterNodeName,
+    ClusterSchedule,
+    CodecName,
+    CodecWireFormat,
+    CorrelationTimeoutAction,
+    CorrelatorMatchPolicy,
+    CreateClientAzureBlob,
+    CreateClientGcs,
+    CreateClientHttp,
+    CreateClientIcebergRest,
+    CreateClientKafka,
+    CreateClientMqtt,
+    CreateClientNats,
+    CreateClientOtel,
+    CreateClientPrometheus,
+    CreateClientPulsar,
+    CreateClientRabbitMq,
+    CreateClientRedis,
+    CreateClientS3,
+    CreateClientSentry,
+    CreateClientSqs,
+    CreateClientSyslog,
+    CreateClientWebsockets,
+    CreateClientZeroMq,
+    CreateCodec,
+    CreateEmitter,
+    CreateEndpoint,
+    CreateGenerator,
+    CreateIngestor,
+    CreateLookup,
+    CreateReingestor,
+    CreateRelay,
+    CreateSignalingProtocol,
+    CreateUdf,
+    DomainConfig,
+    DomainName,
+    DomainPace,
+    DomainSchedule,
+    DomainState,
+    DomainTick,
+    EmitSink,
+    EmitterAckWindow,
+    EmitterName,
+    EmitterPublishingMode,
+    EndpointName,
+    EndpointType,
+    ErrorPolicies,
+    FieldName,
+    FieldPath,
+    GeneralErrorPolicy,
+    GeneratorName,
+    IcebergCatalog,
+    IcebergStorageBackend,
+    IcebergValueMapping,
+    InferencerExecutionMode,
+    InferencerTensorDeclaration,
+    IngestQuiesceMode,
+    IngestQuiesceOverflow,
+    IngestSource,
+    IngestTimestampSource,
+    IngestorName,
+    KafkaIngestMode,
+    KafkaOffsetMode,
+    KafkaPartitionSchedule,
+    Literal as ModelLiteral,
+    LookupName,
+    MaterializedStatePolicy,
+    MessageErrorCode,
+    MessageErrorOperation,
+    MessageErrorPolicy,
+    Model,
+    ModelKind,
+    ModelName,
+    MongoDbConflictAction,
+    MongoDbValueMapping,
+    MqttIngestMode,
+    MqttQos,
+    MqttSession,
+    MySqlConflictAction,
+    MySqlValueMapping,
+    OtelAggregationTemporality,
+    OtelMetric,
+    OtelMetricKind,
+    OtelScope,
+    OtelSignal,
+    OtelValueMapping,
+    OutputBranch,
+    PostgresConflictAction,
+    PostgresValueMapping,
+    ProcessorOutput,
+    PulsarIngestMode,
+    RabbitMqIngestMode,
+    RelayName,
+    RemoteAckOutcome,
+    RemoteAckRegistration,
+    RemoteAckResolution,
+    RemoteRuntimeField,
+    ResourceId,
+    ResourceName,
+    ResourceVersionStatus,
+    RetryPolicy,
+    RouteConstruction,
+    ScheduledNode,
+    SchemaName,
+    SignalingProtocolName,
+    SignalingWireFormat,
+    SqsFifoGroup,
+    SqsIngestMode,
+    StructuredMessageError,
+    SubscriptionName,
+    Timestamp,
+    UserName,
+    WireSchemaDefinition,
+};
 use nervix_nspl::{
     vm_program::{
         CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
@@ -443,9 +564,10 @@ impl BufferedIngestPayload {
     }
 
     pub(crate) fn payload(&self) -> &[u8] {
-        self.payloads
-            .first()
-            .expect("buffered ingest payload must contain at least one source payload")
+        self.payloads.first().verified(
+            "both constructors take at least one payload with its metadata, and the batching \
+             caller skips an empty set",
+        )
     }
 
     /// The number of source payloads, which is the row count of the group this buffer opens.
@@ -457,7 +579,10 @@ impl BufferedIngestPayload {
     fn first_metadata_row(&self) -> IngestMetadataRow<'_> {
         self.metadata
             .first()
-            .expect("buffered ingest payload must carry metadata for its first payload")
+            .verified(
+                "both constructors take at least one payload with its metadata, and the batching \
+                 caller skips an empty set",
+            )
             .row()
     }
 
@@ -902,7 +1027,7 @@ impl BranchKey {
         };
         let mut values = BTreeMap::new();
         for field in fields {
-            let name = ModelName::try_from(field.name.clone()).map_err(|error| {
+            let name = FieldName::try_from(field.name.clone()).map_err(|error| {
                 format!(
                     "remote branch key field '{}' is invalid: {error}",
                     field.name
@@ -1108,6 +1233,19 @@ impl NodeQuiesceWorkGuard {
             .fetch_add(1, Ordering::AcqRel);
         self.counters
             .mailbox_and_in_flight
+            .fetch_sub(1, Ordering::AcqRel);
+        self.required_materialized_wait = true;
+    }
+
+    fn resume_from_required_materialized_state(&mut self) {
+        if !self.required_materialized_wait {
+            return;
+        }
+        self.counters
+            .mailbox_and_in_flight
+            .fetch_add(1, Ordering::AcqRel);
+        self.counters
+            .pending_materialized
             .fetch_sub(1, Ordering::AcqRel);
         self.required_materialized_wait = true;
     }
@@ -1886,10 +2024,10 @@ impl IngestRouteCollector {
             return Ok(None);
         }
         self.flush_at = None;
-        let context = self
-            .context
-            .take()
-            .expect("a non-empty ingest group must retain its execution context");
+        let context = self.context.take().verified(
+            "the empty check above already returned, and a group keeps its context while it holds \
+             rows",
+        );
         let pending = std::mem::replace(
             &mut self.pending,
             PendingIngestGroup::new(self.kind, self.row_bound),
@@ -1917,7 +2055,7 @@ impl IngestRouteCollector {
     /// `RelayRecordBatch::from_messages` requires a uniform key per batch.
     fn drain_groups(&mut self) -> Vec<(RelayName, Vec<RelayMessage>)> {
         let mut groups: Vec<(RelayName, Option<BranchKey>, Vec<RelayMessage>)> = Vec::new();
-        let mut group_indices: HashMap<(BranchName, Option<BranchKey>), usize> = HashMap::default();
+        let mut group_indices: HashMap<(RelayName, Option<BranchKey>), usize> = HashMap::default();
         for (relay, message) in self.routed.drain(..) {
             let group_key = (relay.clone(), message.key.clone());
             if let Some(index) = group_indices.get(&group_key).copied() {
@@ -2412,7 +2550,7 @@ impl IngestMetadataBuilders {
                 // address does not allocate a string per message.
                 use std::fmt::Write as _;
                 write!(peer_addr, "{source_peer_addr}")
-                    .expect("writing into an Arrow string builder cannot fail");
+                    .assured("fmt::Write over an in-memory string builder has no failure mode");
                 peer_addr.append_value("");
                 None
             }
@@ -2695,7 +2833,7 @@ impl RelayConsumerFanout {
 
     fn activate_owner_buffer(&self) -> RelayRuntimeConsumerReceiver {
         let capacity = NonZeroUsize::new(self.owner_capacity.load(Ordering::Acquire))
-            .expect("validated relay capacity must remain nonzero");
+            .verified("relay capacity is validated as nonzero before it is stored");
         let buffer = Arc::new(RelayBroadcast::with_capacity(capacity));
         let receiver = buffer.new_receiver();
         *self.owner_buffer.write() = Some(buffer);
@@ -4752,7 +4890,7 @@ impl RemoteDispatcher {
                 .await
             {
                 warn!(
-                    target_node = node_id,
+                    target_node = %node_id,
                     domain = domain.as_str(),
                     relay = relay.as_str(),
                     error = %error,
@@ -4826,7 +4964,7 @@ fn push_remote_runtime_consumer(
     }
 
     consumers.push(RemoteRuntimeConsumer {
-        node_id: node_id.to_string(),
+        node_id: node_id.clone(),
         relay: relay.clone(),
         mode,
     });
@@ -7094,7 +7232,9 @@ impl RelayProcessorNode {
                     for timeout in due_timeouts {
                         let timeout_result = instance
                             .as_mut()
-                            .expect("WASM timeout instance was checked")
+                            .verified(
+                                "the let-else above returned unless this branch holds an instance",
+                            )
                             .on_timeout(timeout.handle)
                             .await;
                         let outputs = match timeout_result {
@@ -7204,7 +7344,7 @@ impl RelayProcessorNode {
             };
             let flush_result = instance
                 .as_mut()
-                .expect("WASM flush instance was checked")
+                .verified("the let-else above returned unless this branch holds an instance")
                 .flush()
                 .await;
             let outputs = match flush_result {
@@ -7366,7 +7506,7 @@ impl RelayProcessorNode {
 /// The exact relay schemas one WASM guest call encodes against.
 struct WasmGuestCallSchemas {
     input: Arc<CompiledSchema>,
-    outputs: Vec<(SchemaName, Arc<CompiledSchema>)>,
+    outputs: Vec<(RelayName, Arc<CompiledSchema>)>,
 }
 
 /// Resolves the input and output relay schemas a WASM guest call needs. Returns `None` after
@@ -8124,7 +8264,7 @@ impl BranchRuntime {
         graph: &SharedActiveGraph,
         output: &RelayProcessorOutputNode,
         source_kind: ModelKind,
-        source: &RelayName,
+        source: &ModelName,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.runtime
@@ -8132,7 +8272,7 @@ impl BranchRuntime {
             .observe_global_node_sent(NodeBatchObservation {
                 domain: &self.domain,
                 kind: source_kind,
-                node: source,
+                node: &ModelName::from(source),
                 relay: &output.relay,
                 physical_node_id: self.runtime.local_node_id.read().as_ref(),
                 messages: batch.message_count(),
@@ -8144,7 +8284,7 @@ impl BranchRuntime {
             NodeBatchObservation {
                 domain: &self.domain,
                 kind: source_kind,
-                node: source,
+                node: &ModelName::from(source),
                 relay: &output.relay,
                 physical_node_id: self.runtime.local_node_id.read().as_ref(),
                 messages: batch.message_count(),
@@ -9536,7 +9676,7 @@ async fn run_processor_node_runtime(
         Some(quiesce_counters),
         command_rx,
     )
-    .expect("validated processor inputs must build a relay interaction");
+    .verified("the registry validated these processor inputs before the node was started");
     let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
     let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
 
@@ -9610,7 +9750,9 @@ async fn run_processor_node_runtime(
         let (event, work) = work.into_parts();
         match event {
             RelayInteractionEvent::Batch { relay, batch } => {
-                let work = work.expect("processor relay input must track quiesce work");
+                let work = work.verified(
+                    "a batch event always carries the quiesce work the interaction recorded for it",
+                );
                 dispatch_processor_node_input(
                     ProcessorNodeDispatchContext {
                         runtime_handle: &runtime_handle,
@@ -9913,7 +10055,7 @@ async fn run_processor_branch_task(
             snapshot_request = async {
                 snapshot.requests
                     .as_mut()
-                    .expect("enabled window snapshot receiver must exist")
+                    .verified("this select branch only runs while the snapshot receiver is present")
                     .recv()
                     .await
             }, if snapshot.requests.is_some() => {
@@ -9995,7 +10137,8 @@ async fn run_processor_branch_task(
     match stop_mode {
         Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
         Some(ProcessorBranchStopMode::Handoff(response)) => {
-            let restored_at = handoff_timestamp.expect("handoff timestamp must be captured");
+            let restored_at = handoff_timestamp
+                .verified("the handoff arm above captured the timestamp for this same stop mode");
             let pending_materialized = branch
                 .processors
                 .get_mut(&processor)
@@ -10073,7 +10216,7 @@ async fn handoff_all_processor_branch_instances(
         let (response, receiver) = oneshot::channel();
         stop_processor_branch_task(
             domain,
-            processor,
+            processor.clone(),
             &key,
             entry,
             ProcessorBranchStopMode::Handoff(response),
@@ -10105,7 +10248,7 @@ async fn expire_processor_branch_instances(
         );
         stop_processor_branch_task(
             domain,
-            processor,
+            processor.clone(),
             &key,
             entry,
             ProcessorBranchStopMode::Evict,
@@ -10138,7 +10281,7 @@ async fn evict_processor_branch_instances_to_capacity(
         );
         stop_processor_branch_task(
             domain,
-            processor,
+            processor.clone(),
             &key,
             entry,
             ProcessorBranchStopMode::Evict,
@@ -10166,7 +10309,7 @@ async fn shutdown_all_processor_branch_instances(
         runtime.observe_branch_instance_removed(domain, branch, &key, None);
         stop_processor_branch_task(
             domain,
-            processor,
+            processor.clone(),
             &key,
             entry,
             ProcessorBranchStopMode::Detach,
@@ -11075,7 +11218,7 @@ fn compile_finalized_output_filter_program(
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     compile_scoped_filter_program(
-        RuntimeCompileTarget { domain, identifier },
+        RuntimeCompileTarget { domain, identifier: &identifier },
         filter,
         RuntimeVmSchema {
             schema: output_schema,
@@ -11765,7 +11908,8 @@ pub(crate) fn compile_sqs_fifo_group_program(
     else {
         return Ok(None);
     };
-    let field = FieldName::parse("fifo_group").expect("internal FIFO field name is valid");
+    let field = FieldName::parse("fifo_group")
+        .assured("this is a constant literal that satisfies the identifier grammar");
     let output_schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
         field.as_str(),
         ArrowDataType::Utf8,
@@ -11931,7 +12075,7 @@ pub(crate) fn compile_session_filter_map_program(
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     let identifier = identifier.into();
     compile_expression_filter_program(
-        RuntimeCompileTarget { domain, &ModelName::from(&identifier) },
+        RuntimeCompileTarget { domain, identifier: &identifier },
         where_clause,
         RuntimeVmSchema {
             schema: input_schema,
@@ -12967,9 +13111,9 @@ fn correlator_output_batch_errors(
     acks.into_iter()
         .enumerate()
         .map(|(row, acks)| {
-            let source = matched
-                .source_message(row, acks)
-                .expect("validated correlator batch rows must remain aligned");
+            let source = matched.source_message(row, acks).verified(
+                "the correlator output batch is built row-aligned with the ACKs it was given",
+            );
             Err(Box::new(planned_structured_message_error(
                 source,
                 structured_message_error(
@@ -13143,10 +13287,10 @@ async fn evaluate_correlator_output_batch(
     for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         let acks = pending_acks[input_row]
             .take()
-            .expect("validated correlator selection must consume each ACK once");
-        let source = matched
-            .source_message(input_row, acks)
-            .expect("validated correlator rows must remain aligned");
+            .verified("the selection lists each input row at most once, so its ACK is taken once");
+        let source = matched.source_message(input_row, acks).verified(
+            "the correlator output batch is built row-aligned with the ACKs it was given",
+        );
         if let Some(side_error) = result.batch.errors().row(output_row).first() {
             outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
                 source,
@@ -13255,7 +13399,7 @@ async fn evaluate_correlator_output_batch(
 
     Ok(outcomes
         .into_iter()
-        .map(|outcome| outcome.expect("every correlator input row must produce an outcome"))
+        .map(|outcome| outcome.verified("the loops above assign an outcome to every input row"))
         .collect())
 }
 
@@ -13367,7 +13511,7 @@ async fn enqueue_correlator_output(
         }
     };
     if branch
-        .dispatch_output(graph, output, ModelKind::Correlator, processor, &forwarded)
+        .dispatch_output(graph, output, ModelKind::Correlator, &ModelName::from(&RelayName::from(processor)), &forwarded)
         .await
         .is_ok()
     {
@@ -13455,7 +13599,7 @@ async fn handle_correlator_timeout_action(
                 }
             };
             if branch
-                .dispatch_output(graph, &output, ModelKind::Correlator, processor, &batch)
+                .dispatch_output(graph, &output, ModelKind::Correlator, &ModelName::from(&RelayName::from(processor)), &batch)
                 .await
                 .is_ok()
             {
@@ -13710,7 +13854,7 @@ pub(crate) async fn execute_filter_map_on_record(
     .await?
     .into_iter()
     .next()
-    .expect("filter-map returns one outcome per input record");
+    .verified("this call passes a single record, and filter-map answers one outcome per record");
     match outcome {
         SingleRecordFilterMapOutcome::Filtered => Ok(None),
         SingleRecordFilterMapOutcome::Output(record) => Ok(Some(record)),
@@ -15590,7 +15734,7 @@ async fn evaluate_output_branch_program(
                 field.name(),
             )?
             .ok_or_else(|| format!("branch field '{}' is null", field.name()))?;
-            let name = ModelName::parse(field.name()).map_err(|error| {
+            let name = FieldName::parse(field.name()).map_err(|error| {
                 format!(
                     "compiled branch field '{}' is invalid: {}",
                     field.name(),
@@ -15946,10 +16090,10 @@ impl WindowAggregateAccumulator {
                 counts: BTreeMap::new(),
             },
             WindowAggregateStorageKind::Histogram => {
-                let config = demand
-                    .linear_histogram
-                    .as_ref()
-                    .expect("linear histogram aggregate spec must carry histogram config");
+                let config = demand.linear_histogram.as_ref().verified(
+                    "the histogram storage kind is only chosen for a demand that carries the \
+                     histogram config",
+                );
                 Self::LinearHistogram {
                     buckets: vec![0; config.buckets],
                     total: 0,
@@ -16086,9 +16230,9 @@ impl WindowAggregateAccumulator {
             .front()
             .is_some_and(|removal| removal.expires_at <= now)
         {
-            let removal = delayed_removals
-                .pop_front()
-                .expect("front removal exists after is_some_and");
+            let removal = delayed_removals.pop_front().verified(
+                "the loop condition just observed a front entry and nothing else pops the queue",
+            );
             let Some(count) = buckets.get_mut(removal.bucket) else {
                 return Err("linear histogram delayed removal bucket is out of range".to_string());
             };
@@ -18432,7 +18576,7 @@ async fn flush_branch_wasm_processor(
     ack_map.extend(input_ack_map);
     let process_result = instance
         .as_mut()
-        .expect("WASM instance presence was checked")
+        .verified("the let-else above returned unless this branch holds an instance")
         .process_envelope(&envelope)
         .await;
     let outputs = match process_result {
@@ -18512,7 +18656,7 @@ struct WasmInstanceContext<'a> {
     limits: nervix_models::WasmProcessorLimits,
     guest_input_relay: &'a RelayName,
     input_schema: &'a Arc<CompiledSchema>,
-    output_schemas: &'a [(SchemaName, Arc<CompiledSchema>)],
+    output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     replicated_state: &'a ReplicatedWasmProcessorState,
 }
 
@@ -18716,7 +18860,7 @@ struct WasmOutputContext<'a> {
     output_routes: &'a mut RelayProcessorOutputsNode,
     input_relays: &'a [RelayName],
     input_schema: &'a Arc<CompiledSchema>,
-    output_schemas: &'a [(SchemaName, Arc<CompiledSchema>)],
+    output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     key: &'a Option<BranchKey>,
     dispatch_error: &'static str,
 }
@@ -18870,7 +19014,7 @@ enum WasmOutputError {
 struct WasmOutputValidator<'a> {
     ack_map: &'a WasmAckMap,
     input_schema: &'a Arc<CompiledSchema>,
-    output_schemas: &'a [(SchemaName, Arc<CompiledSchema>)],
+    output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     output_routes: &'a RelayProcessorOutputsNode,
 }
 
@@ -19993,7 +20137,7 @@ async fn dispatch_wasm_output_route(
 }
 
 fn wasm_output_schema<'a>(
-    output_schemas: &'a [(SchemaName, Arc<CompiledSchema>)],
+    output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     output_relay: &RelayName,
 ) -> Option<&'a Arc<CompiledSchema>> {
     output_schemas
@@ -20037,9 +20181,10 @@ async fn apply_wasm_sidecar_terminal_decisions(
     } = context;
     for message_error in &sidecar.message_errors {
         for token in &message_error.tokens {
-            let context = ack_map
-                .remove(&token.0)
-                .expect("message error token should have been validated");
+            let context = ack_map.remove(&token.0).verified(
+                "the guest output was validated against this ACK map above, and invalid output \
+                 returned early",
+            );
             let record = match context
                 .input_batch
                 .runtime_row(context.input_row, context.metadata.clone())
@@ -20084,17 +20229,19 @@ async fn apply_wasm_sidecar_terminal_decisions(
     }
     for acked in &sidecar.acked {
         for token in &acked.tokens {
-            let context = ack_map
-                .remove(&token.0)
-                .expect("terminal ACK token should have been validated");
+            let context = ack_map.remove(&token.0).verified(
+                "the guest output was validated against this ACK map above, and invalid output \
+                 returned early",
+            );
             context.acks.ack_success();
         }
     }
     for nacked in &sidecar.nacked {
         for token in &nacked.tokens {
-            let context = ack_map
-                .remove(&token.0)
-                .expect("terminal NACK token should have been validated");
+            let context = ack_map.remove(&token.0).verified(
+                "the guest output was validated against this ACK map above, and invalid output \
+                 returned early",
+            );
             context.acks.no_ack(nacked.reason.clone());
         }
     }
@@ -20162,19 +20309,22 @@ fn relay_batch_from_wasm_output(
         ));
         let mut row_ack_sets = Vec::with_capacity(row.tokens.len());
         for token in row.tokens {
-            let remaining_uses = token_use_counts
-                .get_mut(&token.0)
-                .expect("validated token use count should exist");
+            let remaining_uses = token_use_counts.get_mut(&token.0).verified(
+                "the use counts were built from this same validated output, which the ACK map \
+                 still backs",
+            );
             if *remaining_uses > 1 {
                 *remaining_uses -= 1;
-                let context = ack_map
-                    .get(&token.0)
-                    .expect("validated carried token should remain live");
+                let context = ack_map.get(&token.0).verified(
+                    "the use counts were built from this same validated output, which the ACK map \
+                     still backs",
+                );
                 row_ack_sets.push(context.acks.attached());
             } else {
-                let context = ack_map
-                    .remove(&token.0)
-                    .expect("last validated token use should remain live");
+                let context = ack_map.remove(&token.0).verified(
+                    "the use counts were built from this same validated output, which the ACK map \
+                     still backs",
+                );
                 row_ack_sets.push(context.acks);
             }
         }
@@ -20411,7 +20561,7 @@ pub(crate) fn scheduled_relay_owner_nodes(
         .iter()
         .find(|node| node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay))
         .and_then(ScheduledNode::execution_node)
-        .map(|owner| vec![owner.to_string()])
+        .map(|owner| vec![owner.clone()])
         .unwrap_or_default()
 }
 

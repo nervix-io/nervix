@@ -237,7 +237,7 @@ mod tests {
             domain,
             state: super::super::RuntimeStateKind::MaterializedRelay,
             kind: ModelKind::Relay,
-            identifier: relay,
+            identifier: ModelName::from(&relay),
             schema_fingerprint: [0; 32],
             branch_key: None,
         };

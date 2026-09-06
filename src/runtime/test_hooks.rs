@@ -35,7 +35,7 @@ pub struct SchedulePublicationFaultInjector {
 
 #[derive(Debug, Default)]
 pub(crate) struct SyslogIngestorBindAddressOverrides {
-    hosts: DashMap<String, IpAddr, RandomState>,
+    hosts: DashMap<ClusterNodeName, IpAddr, RandomState>,
 }
 
 /// Drops a node's leader-local transaction session bindings on its next transaction command, so
@@ -47,7 +47,7 @@ pub struct TransactionBindingDropInjector {
 
 #[derive(Debug, Default)]
 pub(crate) struct TransactionCommitPauseInjector {
-    pauses: DashMap<(String, usize), Arc<TransactionCommitPause>, RandomState>,
+    pauses: DashMap<(ClusterNodeName, usize), Arc<TransactionCommitPause>, RandomState>,
 }
 
 #[derive(Debug, Default)]
@@ -123,7 +123,7 @@ impl RuntimeTestHooks {
     pub fn set_syslog_ingestor_bind_ip(&self, node_id: ClusterNodeName, host: IpAddr) {
         self.syslog_ingestor_bind_address_overrides
             .hosts
-            .insert(node_id.into(), host);
+            .insert(node_id, host);
     }
 
     pub fn request_leadership_transfer(
@@ -149,7 +149,7 @@ impl RuntimeTestHooks {
         completed_statements: usize,
     ) {
         self.transaction_commit_pauses.pauses.insert(
-            (node_id.into(), completed_statements),
+            (node_id, completed_statements),
             Arc::new(TransactionCommitPause::default()),
         );
     }
@@ -196,7 +196,7 @@ impl RuntimeTestHooks {
         node_id: &ClusterNodeName,
         completed_statements: usize,
     ) {
-        let key = (node_id.to_string(), completed_statements);
+        let key = (node_id.clone(), completed_statements);
         let pause = self
             .transaction_commit_pauses
             .pauses
@@ -219,7 +219,7 @@ impl RuntimeTestHooks {
     }
 
     pub fn release_transaction_commit_pause(&self, node_id: &ClusterNodeName, completed_statements: usize) {
-        let key = (node_id.to_string(), completed_statements);
+        let key = (node_id.clone(), completed_statements);
         let pause = self
             .transaction_commit_pauses
             .pauses
@@ -262,7 +262,7 @@ impl TransactionBindingDropInjector {
 impl TransactionCommitPauseInjector {
     #[cfg(feature = "testing")]
     pub(crate) async fn pause_if_armed(&self, node_id: &ClusterNodeName, completed_statements: usize) {
-        let key = (node_id.to_string(), completed_statements);
+        let key = (node_id.clone(), completed_statements);
         let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
             return;
         };

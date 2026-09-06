@@ -41,6 +41,7 @@ use arrow_string::like::{
     contains as string_contains, ends_with as string_ends_with, starts_with as string_starts_with,
 };
 use chrono::DateTime;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::Timestamp;
 use nervix_nspl::vm_program::{BinaryOp, FunctionName, Span, UnaryOp};
 use regex::Regex;
@@ -993,7 +994,9 @@ impl Instruction {
                         Err(RuntimeError::MissingFunctionInjector { .. })
                             if default_injector.is_some() =>
                         {
-                            inject(default_injector.expect("checked above"))?
+                            inject(default_injector.verified(
+                                "the match guard above requires the default injector to be present",
+                            ))?
                         }
                         result => result?,
                     }
@@ -1201,84 +1204,120 @@ fn array_ref_to_typed_array(array: ArrayRef) -> Result<TypedArray, RuntimeError>
             array
                 .as_any()
                 .downcast_ref::<UInt8Array>()
-                .expect("arrow kernel returned UInt8 data type without UInt8Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::Int8 => Ok(TypedArray::Int8(
             array
                 .as_any()
                 .downcast_ref::<Int8Array>()
-                .expect("arrow kernel returned Int8 data type without Int8Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::UInt16 => Ok(TypedArray::UInt16(
             array
                 .as_any()
                 .downcast_ref::<UInt16Array>()
-                .expect("arrow kernel returned UInt16 data type without UInt16Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::Int16 => Ok(TypedArray::Int16(
             array
                 .as_any()
                 .downcast_ref::<Int16Array>()
-                .expect("arrow kernel returned Int16 data type without Int16Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::UInt32 => Ok(TypedArray::UInt32(
             array
                 .as_any()
                 .downcast_ref::<UInt32Array>()
-                .expect("arrow kernel returned UInt32 data type without UInt32Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::Int32 => Ok(TypedArray::Int32(
             array
                 .as_any()
                 .downcast_ref::<Int32Array>()
-                .expect("arrow kernel returned Int32 data type without Int32Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::UInt64 => Ok(TypedArray::UInt64(
             array
                 .as_any()
                 .downcast_ref::<UInt64Array>()
-                .expect("arrow kernel returned UInt64 data type without UInt64Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::Int64 => Ok(TypedArray::Int64(
             array
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .expect("arrow kernel returned Int64 data type without Int64Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::Float32 => Ok(TypedArray::Float32(
             array
                 .as_any()
                 .downcast_ref::<Float32Array>()
-                .expect("arrow kernel returned Float32 data type without Float32Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::Float64 => Ok(TypedArray::Float64(
             array
                 .as_any()
                 .downcast_ref::<Float64Array>()
-                .expect("arrow kernel returned Float64 data type without Float64Array backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::Boolean => Ok(TypedArray::Boolean(
             array
                 .as_any()
                 .downcast_ref::<BooleanArray>()
-                .expect("arrow kernel returned Boolean data type without BooleanArray backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::Utf8 => Ok(TypedArray::Utf8(
             array
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .expect("arrow kernel returned Utf8 data type without StringArray backing")
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .clone(),
         )),
         DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
@@ -1288,9 +1327,9 @@ fn array_ref_to_typed_array(array: ArrayRef) -> Result<TypedArray, RuntimeError>
                 array
                     .as_any()
                     .downcast_ref::<TimestampNanosecondArray>()
-                    .expect(
-                        "arrow kernel returned UTC nanosecond timestamp data type without \
-                         TimestampNanosecondArray backing",
+                    .verified(
+                        "the match arm above narrowed this array's data type, which fixes its \
+                         concrete Arrow array type",
                     )
                     .clone(),
             ))
@@ -1439,7 +1478,7 @@ fn execute_coalesce_arrow(inputs: &[TypedArray]) -> Result<TypedArray, RuntimeEr
     let mut result = typed_array_to_array_ref(
         inputs
             .first()
-            .expect("coalesce requires at least one input")
+            .verified("the compiler rejects a coalesce with fewer than one argument")
             .clone(),
     );
     for input in &inputs[1..] {
@@ -1512,9 +1551,9 @@ fn write_null_literal(
 
 fn execute_neg_i64(input: &Int64Array, row_errors: &mut RowErrors, span: Span) -> Int64Array {
     if let Some(output) = try_execute_neg_kernel(input) {
-        let TypedArray::Int64(output) =
-            array_ref_to_typed_array(output).expect("int64 neg kernel must produce Int64 output")
-        else {
+        let TypedArray::Int64(output) = array_ref_to_typed_array(output).verified(
+            "the kernel returns an array of the operand's own type, which this mapping covers",
+        ) else {
             unreachable!("int64 neg kernel must produce Int64Array");
         };
         return output;
@@ -1543,10 +1582,12 @@ fn execute_neg_i64(input: &Int64Array, row_errors: &mut RowErrors, span: Span) -
 }
 
 fn execute_neg_f64(input: &Float64Array) -> Float64Array {
-    let output = try_execute_neg_kernel(input).expect("float64 neg kernel must succeed");
-    let TypedArray::Float64(output) =
-        array_ref_to_typed_array(output).expect("float64 neg kernel must produce Float64 output")
-    else {
+    let output = try_execute_neg_kernel(input).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    );
+    let TypedArray::Float64(output) = array_ref_to_typed_array(output).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    ) else {
         unreachable!("float64 neg kernel must produce Float64Array");
     };
     output
@@ -1562,7 +1603,7 @@ macro_rules! define_checked_neg {
             ) -> $array {
                 if let Some(output) = try_execute_neg_kernel(input) {
                     let TypedArray::$typed_variant(output) = array_ref_to_typed_array(output)
-                        .expect("integer neg kernel must produce matching integer output")
+                        .verified("the kernel returns an array of the operand's own type, which this mapping covers")
                     else {
                         unreachable!("integer neg kernel must produce matching integer array");
                     };
@@ -1601,17 +1642,21 @@ define_checked_neg!(
 );
 
 fn execute_neg_f32(input: &Float32Array) -> Float32Array {
-    let output = try_execute_neg_kernel(input).expect("float32 neg kernel must succeed");
-    let TypedArray::Float32(output) =
-        array_ref_to_typed_array(output).expect("float32 neg kernel must produce Float32 output")
-    else {
+    let output = try_execute_neg_kernel(input).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    );
+    let TypedArray::Float32(output) = array_ref_to_typed_array(output).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    ) else {
         unreachable!("float32 neg kernel must produce Float32Array");
     };
     output
 }
 
 fn execute_not(input: &BooleanArray) -> BooleanArray {
-    not(input).expect("boolean not kernel must succeed for BooleanArray")
+    not(input).assured(
+        "arrow's not kernel is defined for BooleanArray, and this signature accepts nothing else",
+    )
 }
 
 macro_rules! define_integer_binary {
@@ -1628,7 +1673,7 @@ macro_rules! define_integer_binary {
                     BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
                         if let Some(output) = try_execute_numeric_kernel(left, right, op) {
                             let typed = array_ref_to_typed_array(output)
-                                .expect("integer arithmetic kernel must produce matching integer output");
+                                .verified("the kernel returns an array of the operand's own type, which this mapping covers");
                             return Ok(typed);
                         }
                         let mut builder = <$builder>::new();
@@ -2151,14 +2196,14 @@ impl<'a> ListColumn<'a> {
             Self::Variable(array) => {
                 let offsets = array.value_offsets();
                 let start = usize::try_from(offsets[row])
-                    .expect("validated list offset must be non-negative");
+                    .assured("arrow offset and width buffers are non-negative by construction");
                 let end = usize::try_from(offsets[row + 1])
-                    .expect("validated list offset must be non-negative");
+                    .assured("arrow offset and width buffers are non-negative by construction");
                 start..end
             }
             Self::Fixed(array) => {
                 let width = usize::try_from(array.value_length())
-                    .expect("validated fixed-size list width must be non-negative");
+                    .assured("arrow offset and width buffers are non-negative by construction");
                 let start = row * width;
                 start..start + width
             }
@@ -2340,8 +2385,9 @@ fn execute_list_item(
 /// repeatedly grow and copy the offset and value buffers.
 fn string_builder_like(input: &StringArray) -> StringBuilder {
     let offsets = input.value_offsets();
-    let value_bytes = usize::try_from(offsets[input.len()] - offsets[0])
-        .expect("validated Utf8 offsets must define a non-negative visible byte span");
+    let value_bytes = usize::try_from(offsets[input.len()] - offsets[0]).assured(
+        "arrow offset buffers are non-decreasing, so the span between two of them is non-negative",
+    );
     StringBuilder::with_capacity(input.len(), value_bytes)
 }
 
@@ -2356,7 +2402,10 @@ fn execute_ascii_case(input: &StringArray, convert: fn(&u8) -> u8) -> StringArra
         values.into(),
         input.nulls().cloned(),
     )
-    .expect("ascii case conversion preserves utf8 values, offsets and validity")
+    .verified(
+        "the output reuses the input's offsets and null buffer and maps bytes one to one, so \
+         try_new's invariants still hold",
+    )
 }
 
 fn execute_lower(input: &StringArray) -> StringArray {
@@ -2375,10 +2424,10 @@ fn execute_string_slice_transform(
     transform: impl for<'a> Fn(&'a str) -> &'a str,
 ) -> StringArray {
     let input_offsets = input.value_offsets();
-    let start =
-        usize::try_from(input_offsets[0]).expect("validated string offset must be non-negative");
+    let start = usize::try_from(input_offsets[0])
+        .assured("arrow offset and width buffers are non-negative by construction");
     let end = usize::try_from(input_offsets[input.len()])
-        .expect("validated string offset must be non-negative");
+        .assured("arrow offset and width buffers are non-negative by construction");
     let mut values = Vec::with_capacity(end - start);
     let mut offsets = Vec::with_capacity(input.len() + 1);
     offsets.push(0_i32);
@@ -2386,10 +2435,10 @@ fn execute_string_slice_transform(
         if let Some(value) = value {
             values.extend_from_slice(transform(value).as_bytes());
         }
-        offsets.push(
-            i32::try_from(values.len())
-                .expect("trimmed Utf8 output cannot exceed its input's i32 offset range"),
-        );
+        offsets.push(i32::try_from(values.len()).verified(
+            "the transform returns slices of the input, so the output stays inside the input's \
+             own i32 offset range",
+        ));
     }
     StringArray::new(
         OffsetBuffer::new(offsets.into()),
@@ -2408,16 +2457,19 @@ fn execute_length(input: &StringArray) -> Int64Array {
         .value_offsets()
         .windows(2)
         .map(|offsets| {
-            let start =
-                usize::try_from(offsets[0]).expect("validated string offset must be non-negative");
-            let end =
-                usize::try_from(offsets[1]).expect("validated string offset must be non-negative");
+            let start = usize::try_from(offsets[0])
+                .assured("arrow offset and width buffers are non-negative by construction");
+            let end = usize::try_from(offsets[1])
+                .assured("arrow offset and width buffers are non-negative by construction");
             bytes[start..end]
                 .iter()
                 .filter(|byte| **byte & 0b1100_0000 != 0b1000_0000)
                 .count()
                 .try_into()
-                .expect("Utf8 character count cannot exceed its i32 offset range")
+                .verified(
+                    "the count is bounded by the input's byte span, which already fits an i32 \
+                     offset",
+                )
         })
         .collect::<Vec<_>>();
     Int64Array::new(lengths.into(), input.nulls().cloned())
@@ -2489,14 +2541,21 @@ fn execute_abs_f32(input: &Float32Array, row_errors: &mut RowErrors, span: Span)
     let zero = Float32Array::new_scalar(0.0);
     let input_datum = input as &dyn Datum;
     let zero_datum = &zero as &dyn Datum;
-    let negative = lt(input_datum, zero_datum).expect("float32 abs comparison kernel must succeed");
-    let negated = try_execute_neg_kernel(input).expect("float32 neg kernel must succeed");
+    let negative = lt(input_datum, zero_datum).assured(
+        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
+         else",
+    );
+    let negated = try_execute_neg_kernel(input).assured(
+        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
+         else",
+    );
     let negated = negated.as_ref();
-    let zipped = zip(&negative, &negated as &dyn Datum, &input as &dyn Datum)
-        .expect("float32 abs zip kernel must succeed");
-    let TypedArray::Float32(output) =
-        array_ref_to_typed_array(zipped).expect("float32 abs kernel must produce Float32 output")
-    else {
+    let zipped = zip(&negative, &negated as &dyn Datum, &input as &dyn Datum).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    );
+    let TypedArray::Float32(output) = array_ref_to_typed_array(zipped).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    ) else {
         unreachable!("float32 abs kernel must produce Float32Array");
     };
     sanitize_float32_non_finite(
@@ -2511,14 +2570,21 @@ fn execute_abs_f64(input: &Float64Array, row_errors: &mut RowErrors, span: Span)
     let zero = Float64Array::new_scalar(0.0);
     let input_datum = input as &dyn Datum;
     let zero_datum = &zero as &dyn Datum;
-    let negative = lt(input_datum, zero_datum).expect("float64 abs comparison kernel must succeed");
-    let negated = try_execute_neg_kernel(input).expect("float64 neg kernel must succeed");
+    let negative = lt(input_datum, zero_datum).assured(
+        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
+         else",
+    );
+    let negated = try_execute_neg_kernel(input).assured(
+        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
+         else",
+    );
     let negated = negated.as_ref();
-    let zipped = zip(&negative, &negated as &dyn Datum, &input as &dyn Datum)
-        .expect("float64 abs zip kernel must succeed");
-    let TypedArray::Float64(output) =
-        array_ref_to_typed_array(zipped).expect("float64 abs kernel must produce Float64 output")
-    else {
+    let zipped = zip(&negative, &negated as &dyn Datum, &input as &dyn Datum).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    );
+    let TypedArray::Float64(output) = array_ref_to_typed_array(zipped).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    ) else {
         unreachable!("float64 abs kernel must produce Float64Array");
     };
     sanitize_float64_non_finite(
@@ -2530,16 +2596,18 @@ fn execute_abs_f64(input: &Float64Array, row_errors: &mut RowErrors, span: Span)
 }
 
 fn execute_contains(string: &StringArray, substring: &StringArray) -> BooleanArray {
-    string_contains(string, substring).expect("utf8 contains kernel must succeed for Utf8 arrays")
+    string_contains(string, substring)
+        .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
 }
 
 fn execute_starts_with(string: &StringArray, prefix: &StringArray) -> BooleanArray {
     string_starts_with(string, prefix)
-        .expect("utf8 starts_with kernel must succeed for Utf8 arrays")
+        .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
 }
 
 fn execute_ends_with(string: &StringArray, suffix: &StringArray) -> BooleanArray {
-    string_ends_with(string, suffix).expect("utf8 ends_with kernel must succeed for Utf8 arrays")
+    string_ends_with(string, suffix)
+        .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
 }
 
 fn execute_now(row_count: usize, now: Timestamp) -> TimestampNanosecondArray {
@@ -2635,7 +2703,7 @@ fn execute_is_null_typed(input: &TypedArray) -> BooleanArray {
     match input {
         TypedArray::Uninitialized { len, .. } => BooleanArray::from(vec![true; *len]),
         _ => is_null(typed_array_as_array(input))
-            .expect("is_null kernel supports every materialized Arrow array"),
+            .assured("arrow's is_null kernel is defined for every array type"),
     }
 }
 
@@ -3192,7 +3260,10 @@ impl RegexCache {
         &self
             .entry
             .as_ref()
-            .expect("regex cache entry was just populated")
+            .verified(
+                "the branch above stores an entry whenever the cache does not already hold this \
+                 pattern",
+            )
             .1
     }
 }
@@ -3308,15 +3379,15 @@ fn execute_replace(input: &StringArray, from: &StringArray, to: &StringArray) ->
         for (start, matched) in value.match_indices(from) {
             builder
                 .write_str(&value[copied_until..start])
-                .expect("StringBuilder writes are infallible");
+                .assured("fmt::Write over an in-memory string buffer has no failure mode");
             builder
                 .write_str(to)
-                .expect("StringBuilder writes are infallible");
+                .assured("fmt::Write over an in-memory string buffer has no failure mode");
             copied_until = start + matched.len();
         }
         builder
             .write_str(&value[copied_until..])
-            .expect("StringBuilder writes are infallible");
+            .assured("fmt::Write over an in-memory string buffer has no failure mode");
         builder.append_value("");
     }
     builder.finish()
@@ -3468,7 +3539,7 @@ fn execute_to_hex_values(
         };
         formatted.clear();
         fmt::write(&mut formatted, format_args!("{value:x}"))
-            .expect("formatting hexadecimal into a String cannot fail");
+            .assured("fmt::Write over an in-memory string buffer has no failure mode");
         builder.append_value(&formatted);
     }
     builder.finish()
@@ -3685,7 +3756,8 @@ where
             builder.append_null();
             continue;
         };
-        write!(&mut builder, "{value}").expect("StringBuilder writes are infallible");
+        write!(&mut builder, "{value}")
+            .assured("fmt::Write over an in-memory string buffer has no failure mode");
         builder.append_value("");
     }
     builder.finish()
@@ -3718,9 +3790,10 @@ fn annotate_cast_failures(
     }
 
     let input_nulls = input.nulls();
-    let output_nulls = output
-        .nulls()
-        .expect("a cast that introduced nulls must have an output null buffer");
+    let output_nulls = output.nulls().verified(
+        "a cast never removes nulls, so the unequal count checked above leaves the output with \
+         nulls and therefore a null buffer",
+    );
     let invalid_output = !output_nulls.inner();
     let failures = match input_nulls {
         Some(input_nulls) => input_nulls.inner() & &invalid_output,

@@ -9,10 +9,11 @@ use std::{
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use futures_util::StreamExt;
+use meticulous::OptionExt as _;
 use nervix_models::{
     ClusterNodeName, ClusterSchedule, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus,
-    ResourceVersion, ResourceVersionStatus, Statement, UserName,
+    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceVersion,
+    ResourceVersionStatus, Statement, UserName,
 };
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
@@ -2179,10 +2180,10 @@ fn apply_consensus_command(
             if let Some(effect) = effect {
                 if let Err(error) = validate_transaction_step_effect(
                     state,
-                    state
-                        .transactions
-                        .get(id)
-                        .expect("transaction was read from replicated state"),
+                    state.transactions.get(id).verified(
+                        "the branch above resolved this transaction id in the same replicated \
+                         state",
+                    ),
                     *expected_next_statement,
                     *next_statement,
                     result,
@@ -2193,10 +2194,9 @@ fn apply_consensus_command(
                 }
                 apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
             } else if let Err(error) = validate_transaction_step_without_effect(
-                state
-                    .transactions
-                    .get(id)
-                    .expect("transaction was read from replicated state"),
+                state.transactions.get(id).verified(
+                    "the branch above resolved this transaction id in the same replicated state",
+                ),
                 *expected_next_statement,
                 *next_statement,
                 result,
@@ -2652,7 +2652,7 @@ mod tests {
     use fjall::Database;
     use nervix_models::{
         DomainName, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
-        DomainStatus, Identifier, ResourceId, ResourceNodeState, ResourceNodeStatus,
+        DomainStatus, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus,
         ResourceReplicaKey, ResourceVersion, ResourceVersionStatus, Statement,
     };
     use openraft::{
@@ -2669,7 +2669,7 @@ mod tests {
         UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame, io_error,
         load_value, read_key, write_key,
     };
-    use crate::{ConsensusError, ReplicatedTransaction, TransactionQueueLimits, VoteOf};
+    use crate::{ClusterNodeName, ConsensusError, ReplicatedTransaction, TransactionQueueLimits, UserName, VoteOf};
 
     fn domain(raw: &str) -> DomainName {
         DomainName::try_from(raw).expect("valid domain")
@@ -2680,7 +2680,7 @@ mod tests {
         let state = GossipState {
             live_nodes: vec![
                 GossipNode {
-                    node_id: "node-2".to_string(),
+                    node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                     cluster_api_advertise_addr: "http://node-2".to_string(),
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
@@ -2689,7 +2689,7 @@ mod tests {
                     interconnect_public_key: String::new(),
                 },
                 GossipNode {
-                    node_id: "node-3".to_string(),
+                    node_id: ClusterNodeName::parse("node-3").expect("valid name"),
                     cluster_api_advertise_addr: "http://node-3".to_string(),
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
@@ -2698,7 +2698,9 @@ mod tests {
                     interconnect_public_key: String::new(),
                 },
             ],
-            dead_node_ids: ["node-3".to_string()].into_iter().collect(),
+            dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
+                .into_iter()
+                .collect(),
         };
 
         assert_eq!(
@@ -2738,7 +2740,7 @@ mod tests {
         ResourceVersion {
             id: ResourceId::new(
                 domain(domain_id),
-                Identifier::parse(identifier).expect("valid identifier"),
+                ResourceName::parse(identifier).expect("valid resource name"),
                 version,
             ),
             root_checksum: format!("root-{version}"),
@@ -2746,7 +2748,7 @@ mod tests {
             file_count: 2,
             total_bytes: 128,
             created_at: nervix_models::Timestamp::from_unix_nanos(42),
-            created_by_node: "node-1".to_string(),
+            created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
         }
     }
 
@@ -2791,7 +2793,7 @@ mod tests {
     #[test]
     fn snapshot_relay_header_roundtrips_in_length_delimited_cbor_frame() {
         let header = SnapshotRelayHeader {
-            vote: VoteOf::new(7, "node-1".to_string()),
+            vote: VoteOf::new(7, ClusterNodeName::parse("node-1").expect("valid name")),
             meta: SnapshotMeta {
                 last_log_id: None,
                 last_membership: StoredMembershipOf::default(),
@@ -2906,7 +2908,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::CreateUser {
                 user: Box::new(UserCredentials {
-                    name: Identifier::parse("app_user").expect("valid identifier"),
+                    name: UserName::parse("app_user").expect("valid user name"),
                     password_hash: "argon2-hash".to_string(),
                 }),
             },
@@ -2927,7 +2929,7 @@ mod tests {
 
     #[test]
     fn transaction_step_effect_and_progress_are_applied_once() {
-        let owner = Identifier::parse("app_user").expect("valid owner");
+        let owner = UserName::parse("app_user").expect("valid owner");
         let domain_id = domain("tenant");
         let mut stopped = running_domain_state("tenant");
         stopped.status = DomainStatus::Stopped;
@@ -3113,7 +3115,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::AdvanceResourceVersion {
                 domain: domain("tenant"),
-                identifier: Identifier::parse("fraud_model").expect("valid identifier"),
+                identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
             },
         );
         assert_eq!(
@@ -3125,14 +3127,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(
                 domain("tenant"),
-                Identifier::parse("fraud_model").expect("valid identifier"),
+                ResourceName::parse("fraud_model").expect("valid resource name"),
                 2
             )]
         );
         assert!(
             !state.resources.is_declared(
                 &domain("other"),
-                &Identifier::parse("fraud_model").expect("valid identifier")
+                &ResourceName::parse("fraud_model").expect("valid resource name")
             ),
             "a resource declared in one domain must not appear in another"
         );
@@ -3152,14 +3154,14 @@ mod tests {
         let replica = ResourceNodeStatus {
             key: ResourceReplicaKey::new(
                 domain("tenant"),
-                Identifier::parse("fraud_model").expect("valid identifier"),
+                ResourceName::parse("fraud_model").expect("valid resource name"),
                 1,
-                "node-2",
+                ClusterNodeName::parse("node-2").expect("valid name"),
             ),
             state: ResourceNodeState::Ready,
             root_checksum: Some("root-1".to_string()),
             last_verified_at: Some(nervix_models::Timestamp::from_unix_nanos(77)),
-            source_node_id: Some("node-1".to_string()),
+            source_node_id: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             error: None,
         };
         apply_consensus_command(
@@ -3181,7 +3183,7 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::SetNodeCordoned {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                 cordoned: true,
             },
         );
@@ -3190,7 +3192,7 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::SetNodeCordoned {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                 cordoned: false,
             },
         );
@@ -3200,7 +3202,7 @@ mod tests {
     #[test]
     fn apply_consensus_command_tracks_users_without_overwriting_existing_password_hash() {
         let mut state = StateMachineData::default();
-        let name = Identifier::parse("app_user").expect("valid identifier");
+        let name = UserName::parse("app_user").expect("valid user name");
 
         apply_consensus_command(
             &mut state,
@@ -3258,7 +3260,7 @@ mod tests {
         assert!(!store.has_raft_state().await);
 
         store
-            .write_vote(&VoteOf::new(7, "node-1".to_string()))
+            .write_vote(&VoteOf::new(7, ClusterNodeName::parse("node-1").expect("valid name")))
             .await
             .expect("vote should persist");
         assert!(store.has_raft_state().await);
