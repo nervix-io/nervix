@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand};
+use meticulous::ResultExt as _;
 use nervix_benchmark::LoadShape;
 use parking_lot::Mutex;
 use rdkafka::{
@@ -264,7 +265,7 @@ impl PayloadWriter {
                     cycle_digits = KEY_CYCLE_DIGITS,
                     index_digits = KEY_INDEX_DIGITS,
                 )
-                .expect("the key slot is exactly as wide as the formatted key");
+                .assured("fmt::Write over an in-memory buffer has no failure mode");
                 payload
             }
         }
@@ -421,31 +422,38 @@ impl DrainState {
             let Some(result) = consumer.poll(SUMMARY_POLL_INTERVAL) else {
                 continue;
             };
-            match result
-                .map_err(|error| error.to_string())
-                .and_then(|message| {
-                    let payload = message
-                        .payload()
-                        .ok_or_else(|| "output summary has no payload".to_string())?;
-                    let record_count = serde_json::from_slice::<serde_json::Value>(payload)
-                        .map_err(|error| format!("output summary is not JSON: {error}"))?
-                        .get(count_field)
-                        .and_then(serde_json::Value::as_u64)
-                        .ok_or_else(|| {
-                            format!("output summary has no unsigned '{count_field}' field")
-                        })?;
-                    Ok(SummaryObservation {
-                        partition: message.partition(),
-                        offset: message.offset(),
-                        record_count,
-                    })
-                }) {
-                Ok(observation) => self.record_summary(observation),
-                Err(failure) => {
+            let message = match result {
+                Ok(message) => message,
+                Err(error) => {
+                    self.failure.lock().get_or_insert(error.to_string());
+                    return;
+                }
+            };
+            let Some(payload) = message.payload() else {
+                self.failure
+                    .lock()
+                    .get_or_insert("output summary has no payload".to_string());
+                return;
+            };
+            let output = match serde_json::from_slice::<serde_json::Value>(payload) {
+                Ok(output) => output,
+                Err(error) => {
+                    let failure = format!("output summary is not JSON: {error}");
                     self.failure.lock().get_or_insert(failure);
                     return;
                 }
-            }
+            };
+            let Some(record_count) = output.get(count_field).and_then(serde_json::Value::as_u64)
+            else {
+                let failure = format!("output summary has no unsigned '{count_field}' field");
+                self.failure.lock().get_or_insert(failure);
+                return;
+            };
+            self.record_summary(SummaryObservation {
+                partition: message.partition(),
+                offset: message.offset(),
+                record_count,
+            });
         }
     }
 }

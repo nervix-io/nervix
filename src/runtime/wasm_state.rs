@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::RandomState;
 use dashmap::DashMap;
+use nervix_models::ClusterNodeName;
 use tokio::sync::Notify;
 
 use super::{PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement};
@@ -10,7 +11,7 @@ use super::{PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePla
 pub(super) struct ReplicatedWasmProcessorState {
     pub(super) placement: RuntimeStatePlacement,
     pub(super) required_replica_acks: usize,
-    pub(super) replica_nodes: Vec<String>,
+    pub(super) replica_nodes: Vec<ClusterNodeName>,
     snapshot: parking_lot::Mutex<Vec<u8>>,
     pub(super) current_lsm: AtomicU64,
     pub(super) last_persisted_lsm: AtomicU64,
@@ -22,7 +23,7 @@ pub(super) struct ReplicatedWasmProcessorState {
 impl ReplicatedWasmProcessorState {
     pub(super) fn new(
         placement: RuntimeStatePlacement,
-        replica_nodes: Vec<String>,
+        replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
@@ -77,7 +78,7 @@ impl ReplicatedWasmProcessorState {
         })
     }
 
-    pub(super) fn mark_replica_progress(&self, node_id: &str, lsm: u64) {
+    pub(super) fn mark_replica_progress(&self, node_id: &ClusterNodeName, lsm: u64) {
         self.replica_progress.insert(node_id.to_string(), lsm);
         self.replication_notify.notify_waiters();
     }
@@ -97,7 +98,7 @@ impl ReplicatedWasmProcessorState {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{Domain, Identifier, ModelKind};
+    use nervix_models::{DomainName, FieldName, ModelKind, ModelName};
 
     use super::*;
     use crate::{
@@ -107,13 +108,13 @@ mod tests {
 
     fn placement() -> RuntimeStatePlacement {
         RuntimeStatePlacement {
-            domain: Domain::parse("test").expect("valid domain"),
+            domain: DomainName::parse("test").expect("valid domain"),
             state: RuntimeStateKind::WasmProcessor,
             kind: ModelKind::WasmProcessor,
-            identifier: Identifier::parse("filter").expect("valid identifier"),
+            identifier: ModelName::parse("filter").expect("valid identifier"),
             schema_fingerprint: [0; 32],
             branch_key: BranchKey::from_fields([(
-                Identifier::parse("tenant").expect("valid identifier"),
+                FieldName::parse("tenant").expect("valid identifier"),
                 RuntimeValue::String("acme".to_string()),
             )])
             .expect("test branch key must be non-empty")
@@ -125,7 +126,10 @@ mod tests {
     fn wasm_processor_state_tracks_replica_quorum() {
         let state = ReplicatedWasmProcessorState::new(
             placement(),
-            vec!["node-2".to_string(), "node-3".to_string()],
+            vec![
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ],
             2,
             None,
         )
@@ -136,9 +140,9 @@ mod tests {
 
         assert_eq!(payload, vec![1, 2, 3]);
         assert!(!state.replica_quorum_satisfied(lsm));
-        state.mark_replica_progress("node-2", lsm);
+        state.mark_replica_progress(&ClusterNodeName::parse("node-2").expect("valid name"), lsm);
         assert!(!state.replica_quorum_satisfied(lsm));
-        state.mark_replica_progress("node-3", lsm);
+        state.mark_replica_progress(&ClusterNodeName::parse("node-3").expect("valid name"), lsm);
         assert!(state.replica_quorum_satisfied(lsm));
     }
 

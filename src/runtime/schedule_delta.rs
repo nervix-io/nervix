@@ -1,4 +1,5 @@
 use nervix_models::{DomainSchedule, DynamicModelUpdate, ModelKind, QuiesceLevel, ScheduledNode};
+use sorted_vec::SortedSet;
 
 use crate::registry::RegistryEntity;
 
@@ -8,6 +9,7 @@ pub(super) enum ScheduleDelta {
     Dynamic(Vec<DynamicModelUpdate>),
     EntitySwap {
         entities: Vec<RegistryEntity>,
+        reassignments: Vec<RegistryEntity>,
         dynamic_updates: Vec<DynamicModelUpdate>,
     },
     Rebuild,
@@ -24,10 +26,17 @@ impl ScheduleDelta {
 
         let mut updates = Vec::new();
         let mut entities = Vec::new();
+        let mut reassignments = Vec::new();
         for (identity, desired_node) in &desired.nodes {
             let Some(existing_node) = existing.nodes.get(identity) else {
                 return Self::Rebuild;
             };
+            if !existing_node.has_same_assignment_as(desired_node) {
+                reassignments.push(RegistryEntity {
+                    kind: desired_node.kind,
+                    identifier: desired_node.identifier.clone(),
+                });
+            }
             let aspects = existing_node
                 .config
                 .change_aspects_against(&desired_node.config);
@@ -53,6 +62,7 @@ impl ScheduleDelta {
                 continue;
             }
             match level {
+                QuiesceLevel::Dynamic if aspects.is_control_plane_only() => {}
                 QuiesceLevel::Dynamic => {
                     if aspects.dynamic_updates().is_empty() {
                         return Self::Rebuild;
@@ -70,21 +80,15 @@ impl ScheduleDelta {
             }
         }
 
-        if !entities.is_empty() {
-            entities.sort_by(|left, right| {
-                left.kind
-                    .as_str()
-                    .cmp(right.kind.as_str())
-                    .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
-            });
-            Self::EntitySwap {
-                entities,
-                dynamic_updates: updates,
-            }
-        } else if updates.is_empty() {
-            Self::Unchanged
-        } else {
-            Self::Dynamic(updates)
+        if entities.is_empty() && reassignments.is_empty() {
+            // The schedules still differ somewhere the runtime does not execute, such as a
+            // placement definition. Publishing it keeps the stored schedule truthful.
+            return Self::Dynamic(updates);
+        }
+        Self::EntitySwap {
+            entities: SortedSet::from_unsorted(entities).into_vec(),
+            reassignments: SortedSet::from_unsorted(reassignments).into_vec(),
+            dynamic_updates: updates,
         }
     }
 
@@ -103,8 +107,8 @@ impl ScheduleDelta {
             effective_branching_schema: existing_effective_branching_schema,
             schema_fingerprint: existing_schema_fingerprint,
             kafka_partition_schedule: existing_kafka_partition_schedule,
-            primary_node: existing_primary_node,
-            assigned_nodes: existing_assigned_nodes,
+            primary_node: _,
+            assigned_nodes: _,
         } = existing;
         let ScheduledNode {
             identifier: desired_identifier,
@@ -114,8 +118,8 @@ impl ScheduleDelta {
             effective_branching_schema: desired_effective_branching_schema,
             schema_fingerprint: desired_schema_fingerprint,
             kafka_partition_schedule: desired_kafka_partition_schedule,
-            primary_node: desired_primary_node,
-            assigned_nodes: desired_assigned_nodes,
+            primary_node: _,
+            assigned_nodes: _,
         } = desired;
 
         if existing_identifier != desired_identifier || existing_kind != desired_kind {
@@ -132,37 +136,51 @@ impl ScheduleDelta {
                 || allow_model_derived_residue_change
                 || existing_schema_fingerprint == desired_schema_fingerprint)
             && existing_kafka_partition_schedule == desired_kafka_partition_schedule
-            && existing_primary_node == desired_primary_node
-            && existing_assigned_nodes == desired_assigned_nodes
     }
 }
 
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        AckMode, BranchSelection, CreateEmitter, CreateIngestor, CreateJunction, CreateRelay,
-        Domain, DomainSchedule, DynamicModelUpdate, EmitSink, EmitterPublishingMode,
-        EndpointIngestMode, ErrorPolicies, Expression, GeneralErrorPolicy, Identifier,
-        IngestSource, Literal, Model, ModelKind, OutputBranch, OutputFlushPolicy, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, RelayBranching, RetryPolicy, RouteConstruction,
-        ScheduledNode,
+        AckMode, BranchSelection, ClusterNodeName, CreateEmitter, CreateIngestor, CreateJunction,
+        CreatePlacement, CreateRelay, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, GeneralErrorPolicy,
+        IngestSource, Literal, Model, ModelKind, ModelName, OutputBranch, OutputFlushPolicy,
+        PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
+        RetryPolicy, RouteConstruction, ScheduledNode,
     };
 
     use super::ScheduleDelta;
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::parse(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
+    }
+
+    fn push_scheduled(schedule: &mut DomainSchedule, node: ScheduledNode) {
+        schedule.nodes.insert(node.identity(), node);
+    }
+
+    fn first_scheduled(schedule: DomainSchedule) -> ScheduledNode {
+        schedule
+            .nodes
+            .into_values()
+            .next()
+            .expect("fixture schedule must contain a node")
     }
 
     fn schedule(capacity: usize) -> DomainSchedule {
         DomainSchedule::new(
-            Domain::parse("testing").expect("valid domain"),
+            DomainName::parse("testing").expect("valid domain"),
             vec![ScheduledNode {
-                identifier: identifier("events"),
+                identifier: named("events"),
                 kind: ModelKind::Relay,
                 config: Box::new(Model::Relay(CreateRelay {
-                    name: identifier("events"),
-                    schema: identifier("event"),
+                    name: named("events"),
+                    schema: named("event"),
                     buffer: capacity,
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
@@ -171,8 +189,8 @@ mod tests {
                 effective_branching_schema: None,
                 schema_fingerprint: [1; 32],
                 kafka_partition_schedule: None,
-                primary_node: Some("node-1".to_string()),
-                assigned_nodes: vec!["node-1".to_string()],
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
             }],
             Vec::new(),
         )
@@ -180,14 +198,14 @@ mod tests {
 
     fn ingestor_schedule(endpoint: &str) -> DomainSchedule {
         DomainSchedule::new(
-            Domain::parse("testing").expect("valid domain"),
+            DomainName::parse("testing").expect("valid domain"),
             vec![ScheduledNode {
-                identifier: identifier("event_source"),
+                identifier: named("event_source"),
                 kind: ModelKind::Ingestor,
                 config: Box::new(Model::Ingestor(CreateIngestor {
-                    name: identifier("event_source"),
+                    name: named("event_source"),
                     output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
-                        relay: identifier("events"),
+                        relay: named("events"),
                         construction: RouteConstruction::default(),
                         flush_policy: Some(OutputFlushPolicy {
                             flush_each: "IMMEDIATE".to_string(),
@@ -196,10 +214,10 @@ mod tests {
                         message_error_policy: nervix_models::MessageErrorPolicy::Log,
                         branch: Some(OutputBranch::Unbranched),
                     }]),
-                    decode_using_codec: identifier("event_codec"),
+                    decode_using_codec: named("event_codec"),
                     timestamp_source: None,
                     source: IngestSource::Endpoint {
-                        endpoint: identifier(endpoint),
+                        endpoint: named(endpoint),
                         mode: EndpointIngestMode::NoAckSequential,
                         quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
@@ -212,8 +230,8 @@ mod tests {
                 effective_branching_schema: None,
                 schema_fingerprint: [1; 32],
                 kafka_partition_schedule: None,
-                primary_node: Some("node-1".to_string()),
-                assigned_nodes: vec!["node-1".to_string()],
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
             }],
             Vec::new(),
         )
@@ -235,7 +253,7 @@ mod tests {
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::Dynamic(vec![DynamicModelUpdate::RelayCapacity {
-                relay: identifier("events"),
+                relay: named("events"),
                 capacity: 5,
             }])
         );
@@ -248,7 +266,7 @@ mod tests {
         let Model::Relay(relay) = schema_change.nodes[0].config.as_mut() else {
             panic!("test node should contain a relay");
         };
-        relay.schema = identifier("event_v2");
+        relay.schema = named("event_v2");
         assert_eq!(
             ScheduleDelta::classify(&existing, &schema_change),
             ScheduleDelta::Rebuild
@@ -265,10 +283,10 @@ mod tests {
     #[test]
     fn junction_filter_is_dynamic_and_attachment_changes_swap_the_entity() {
         let junction = CreateJunction {
-            name: identifier("route_events"),
-            from: ProcessorInputs::single(identifier("incoming")),
+            name: named("route_events"),
+            from: ProcessorInputs::single(named("incoming")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("outgoing"),
+                named("outgoing"),
                 "100ms".to_string(),
                 Some("1MiB".to_string()),
             )]),
@@ -278,17 +296,17 @@ mod tests {
             materialized_state: Vec::new(),
         };
         let existing = DomainSchedule::new(
-            Domain::parse("testing").expect("valid domain"),
+            DomainName::parse("testing").expect("valid domain"),
             vec![ScheduledNode {
-                identifier: identifier("route_events"),
+                identifier: named("route_events"),
                 kind: ModelKind::Junction,
                 config: Box::new(Model::Junction(junction.clone())),
                 effective_branching: Some(Vec::new()),
                 effective_branching_schema: None,
                 schema_fingerprint: [1; 32],
                 kafka_partition_schedule: None,
-                primary_node: Some("node-1".to_string()),
-                assigned_nodes: vec!["node-1".to_string()],
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
             }],
             Vec::new(),
         );
@@ -300,7 +318,7 @@ mod tests {
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Processor {
                 kind: ModelKind::Junction,
-                processor: identifier("route_events"),
+                processor: named("route_events"),
             }])
         );
 
@@ -314,8 +332,9 @@ mod tests {
             ScheduleDelta::EntitySwap {
                 entities: vec![crate::registry::RegistryEntity {
                     kind: ModelKind::Junction,
-                    identifier: identifier("route_events"),
+                    identifier: named("route_events"),
                 }],
+                reassignments: Vec::new(),
                 dynamic_updates: Vec::new(),
             }
         );
@@ -326,11 +345,13 @@ mod tests {
         let existing = ingestor_schedule("ingress_a");
         let mut desired = ingestor_schedule("ingress_b");
         desired.nodes[0].schema_fingerprint = [2; 32];
-        desired.nodes[0].primary_node = Some("node-2".to_string());
-        desired.nodes[0].assigned_nodes = vec!["node-2".to_string()];
+        desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        desired.nodes[0].assigned_nodes =
+            vec![ClusterNodeName::parse("node-2").expect("valid name")];
 
         let ScheduleDelta::EntitySwap {
             entities,
+            reassignments,
             dynamic_updates,
         } = ScheduleDelta::classify(&existing, &desired)
         else {
@@ -338,18 +359,19 @@ mod tests {
         };
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0].kind, ModelKind::Ingestor);
-        assert_eq!(entities[0].identifier, identifier("event_source"));
+        assert_eq!(entities[0].identifier, named("event_source"));
+        assert_eq!(reassignments, entities);
         assert!(dynamic_updates.is_empty());
     }
 
     #[test]
     fn emitter_flush_is_dynamic_and_client_changes_swap_despite_fingerprint_changes() {
         let emitter = CreateEmitter {
-            name: identifier("event_sink"),
-            from: nervix_models::ProcessorInputs::single(identifier("events")),
-            encode_using_codec: Some(identifier("event_codec")),
+            name: named("event_sink"),
+            from: nervix_models::ProcessorInputs::single(named("events")),
+            encode_using_codec: Some(named("event_codec")),
             sink: Box::new(EmitSink::ZeroMq {
-                client: identifier("sink_a"),
+                client: named("sink_a"),
             }),
             flush_each: "30s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
@@ -365,17 +387,17 @@ mod tests {
             materialized_state: Vec::new(),
         };
         let existing = DomainSchedule::new(
-            Domain::parse("testing").expect("valid domain"),
+            DomainName::parse("testing").expect("valid domain"),
             vec![ScheduledNode {
-                identifier: emitter.name.clone(),
+                identifier: ModelName::from(&emitter.name),
                 kind: ModelKind::Emitter,
                 config: Box::new(Model::Emitter(emitter.clone())),
                 effective_branching: Some(Vec::new()),
                 effective_branching_schema: None,
                 schema_fingerprint: [1; 32],
                 kafka_partition_schedule: None,
-                primary_node: Some("node-1".to_string()),
-                assigned_nodes: vec!["node-1".to_string()],
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
             }],
             Vec::new(),
         );
@@ -388,14 +410,14 @@ mod tests {
         assert_eq!(
             ScheduleDelta::classify(&existing, &dynamic),
             ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Emitter {
-                emitter: identifier("event_sink"),
+                emitter: named("event_sink"),
                 config: Box::new(dynamic_emitter),
             }])
         );
 
         let mut swapped_emitter = emitter;
         swapped_emitter.sink = Box::new(EmitSink::ZeroMq {
-            client: identifier("sink_b"),
+            client: named("sink_b"),
         });
         let mut swapped = existing.clone();
         *swapped.nodes[0].config = Model::Emitter(swapped_emitter);
@@ -405,9 +427,131 @@ mod tests {
             ScheduleDelta::EntitySwap {
                 entities: vec![crate::registry::RegistryEntity {
                     kind: ModelKind::Emitter,
-                    identifier: identifier("event_sink"),
+                    identifier: named("event_sink"),
+                }],
+                reassignments: Vec::new(),
+                dynamic_updates: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn owner_change_alone_reassigns_without_a_rebuild() {
+        let existing = ingestor_schedule("ingress_a");
+        let mut desired = ingestor_schedule("ingress_a");
+        desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        desired.nodes[0].assigned_nodes =
+            vec![ClusterNodeName::parse("node-2").expect("valid name")];
+
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &desired),
+            ScheduleDelta::EntitySwap {
+                entities: Vec::new(),
+                reassignments: vec![crate::registry::RegistryEntity {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("event_source"),
                 }],
                 dynamic_updates: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn replica_set_change_alone_reassigns_without_a_rebuild() {
+        let existing = ingestor_schedule("ingress_a");
+        let mut desired = ingestor_schedule("ingress_a");
+        desired.nodes[0].assigned_nodes = vec![
+            ClusterNodeName::parse("node-1").expect("valid name"),
+            ClusterNodeName::parse("node-3").expect("valid name"),
+        ];
+
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &desired),
+            ScheduleDelta::EntitySwap {
+                entities: Vec::new(),
+                reassignments: vec![crate::registry::RegistryEntity {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("event_source"),
+                }],
+                dynamic_updates: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_placement_policy_change_only_applies_its_reassignments() {
+        let placement_node = |policy: PlacementPolicy| ScheduledNode {
+            identifier: named("keep_local"),
+            kind: ModelKind::Placement,
+            config: Box::new(Model::Placement(
+                CreatePlacement::new(
+                    named("keep_local"),
+                    vec![named("event_source")],
+                    vec![named("events")],
+                    policy,
+                    Some(1),
+                )
+                .expect("valid placement"),
+            )),
+            effective_branching: None,
+            effective_branching_schema: None,
+            schema_fingerprint: [1; 32],
+            kafka_partition_schedule: None,
+            primary_node: None,
+            assigned_nodes: Vec::new(),
+        };
+        let mut existing = ingestor_schedule("ingress_a");
+        push_scheduled(
+            &mut existing,
+            placement_node(PlacementPolicy::PreferColocation),
+        );
+        let mut desired = ingestor_schedule("ingress_a");
+        desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        desired.nodes[0].assigned_nodes =
+            vec![ClusterNodeName::parse("node-2").expect("valid name")];
+        push_scheduled(
+            &mut desired,
+            placement_node(PlacementPolicy::RequireColocation),
+        );
+
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &desired),
+            ScheduleDelta::EntitySwap {
+                entities: Vec::new(),
+                reassignments: vec![crate::registry::RegistryEntity {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("event_source"),
+                }],
+                dynamic_updates: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_model_change_and_an_unrelated_move_apply_together() {
+        let mut existing = schedule(1);
+        push_scheduled(
+            &mut existing,
+            first_scheduled(ingestor_schedule("ingress_a")),
+        );
+        let mut desired = schedule(5);
+        let mut moved_ingestor = first_scheduled(ingestor_schedule("ingress_a"));
+        moved_ingestor.primary_node = Some(ClusterNodeName::parse("node-3").expect("valid name"));
+        moved_ingestor.assigned_nodes = vec![ClusterNodeName::parse("node-3").expect("valid name")];
+        push_scheduled(&mut desired, moved_ingestor);
+
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &desired),
+            ScheduleDelta::EntitySwap {
+                entities: Vec::new(),
+                reassignments: vec![crate::registry::RegistryEntity {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("event_source"),
+                }],
+                dynamic_updates: vec![DynamicModelUpdate::RelayCapacity {
+                    relay: named("events"),
+                    capacity: 5,
+                }],
             }
         );
     }

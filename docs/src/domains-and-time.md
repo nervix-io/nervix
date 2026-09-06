@@ -26,7 +26,8 @@ While the domain is running:
 
 Paced time is also important for expiration:
 
-- branch TTL uses domain logical time in paced domains
+- branch TTL uses domain logical time in paced domains, including the relay owner's cluster-wide
+  branch-presence decision
 - materialized-state cleanup follows the same logical-time rule
 
 Deterministic Roto UDFs preserve reproducibility when paced input is replayed at an accelerated
@@ -42,8 +43,10 @@ Ingestors in an unpaced domain admit records as they arrive, and branch TTL uses
 ## Placement Default
 
 Every domain has a fallback placement policy. It applies to directly connected runtime-node pairs
-that no named placement rule claims. The clause is optional on every domain-creation form, and
-omission means `NEUTRAL` so ordinary scheduler heuristics remain active:
+that no named placement rule claims. Because relays are scheduled runtime nodes, a
+producer-to-relay edge and a relay-to-consumer edge each receive the default independently. The
+clause is optional on every domain-creation form, and omission means `NEUTRAL` so ordinary
+scheduler heuristics remain active:
 
 ```nspl
 CREATE PACED DOMAIN production

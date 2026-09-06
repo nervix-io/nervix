@@ -1,5 +1,6 @@
 use std::sync::Arc as StdArc;
 
+use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
 
@@ -403,7 +404,10 @@ impl RelayRecordBatch {
 
         let key = first.key.clone();
         if batches.len() == 1 {
-            return Ok(batches.into_iter().next().expect("single batch must exist"));
+            return Ok(batches
+                .into_iter()
+                .next()
+                .verified("the length was just checked to be one"));
         }
 
         let concatenated = {
@@ -535,7 +539,7 @@ fn reorder_owned_values<T>(values: Vec<T>, row_order: &[usize]) -> Vec<T> {
         .map(|row| {
             values[*row]
                 .take()
-                .expect("validated relay batch reorder must contain each row once")
+                .verified("the row order is a permutation, so each row is taken exactly once")
         })
         .collect()
 }
@@ -622,7 +626,9 @@ pub(super) fn build_stream_record_batch_preserving_acks(
 mod tests {
     use std::{cell::Cell, sync::Arc as StdArc};
 
-    use nervix_models::{CreateSchema, Identifier, ParseAsType, SchemaField, Timestamp};
+    use nervix_models::{
+        CreateSchema, FieldName, ModelName, ParseAsType, SchemaField, SchemaName, Timestamp,
+    };
     use triomphe::Arc;
 
     use super::{RelayMessage, RelayRecordBatch, delivery_observation_from_timestamps};
@@ -635,9 +641,11 @@ mod tests {
 
     fn test_schema() -> Arc<CompiledSchema> {
         Arc::new(compile_schema(&CreateSchema {
-            name: Identifier::parse("relay_batch_test").expect("valid schema name"),
+            name: SchemaName::from(
+                &ModelName::parse("relay_batch_test").expect("valid schema name"),
+            ),
             fields: vec![SchemaField {
-                name: Identifier::parse("value").expect("valid field name"),
+                name: FieldName::parse("value").expect("valid field name"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,

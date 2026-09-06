@@ -8,7 +8,8 @@ use async_tar::{
     Archive as AsyncTarArchive, Builder as AsyncTarBuilder, EntryType, Header, HeaderMode,
 };
 use blake3::Hasher;
-use nervix_models::{ResourceId, ResourceVersion, Timestamp};
+use meticulous::ResultExt as _;
+use nervix_models::{ClusterNodeName, ResourceId, ResourceVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
@@ -43,7 +44,7 @@ struct PendingInstall {
     install_root: PathBuf,
     staging_root: PathBuf,
     content_root: PathBuf,
-    created_by_node: String,
+    created_by_node: ClusterNodeName,
     created_at: Timestamp,
 }
 
@@ -94,7 +95,7 @@ impl ResourceStore {
         &self,
         id: ResourceId,
         source_dir: impl AsRef<Path>,
-        created_by_node: impl Into<String>,
+        created_by_node: ClusterNodeName,
         created_at: Timestamp,
     ) -> Result<ResourceManifest, ResourceStoreError> {
         let source_dir = source_dir.as_ref();
@@ -106,7 +107,7 @@ impl ResourceStore {
         }
 
         let install = self
-            .prepare_install(id, created_by_node.into(), created_at)
+            .prepare_install(id, created_by_node, created_at)
             .await?;
         copy_directory_recursive(source_dir, &install.content_root).await?;
         self.finalize_install(install).await
@@ -150,11 +151,10 @@ impl ResourceStore {
         id: ResourceId,
         archive_path: impl AsRef<Path>,
         root_checksum: String,
-        created_by_node: impl Into<String>,
+        created_by_node: ClusterNodeName,
         created_at: Timestamp,
     ) -> Result<ResourceManifest, ResourceStoreError> {
         let archive_path = archive_path.as_ref().to_path_buf();
-        let created_by_node = created_by_node.into();
         let install = self
             .prepare_install(id, created_by_node, created_at)
             .await?;
@@ -222,7 +222,7 @@ impl ResourceStore {
     async fn prepare_install(
         &self,
         id: ResourceId,
-        created_by_node: String,
+        created_by_node: ClusterNodeName,
         created_at: Timestamp,
     ) -> Result<PendingInstall, ResourceStoreError> {
         let (install_root, staging_root, content_root) = self.prepare_install_paths(&id).await?;
@@ -440,7 +440,7 @@ fn collect_manifest_entries_recursive(
             .map_err(|_| ResourceStoreError::ReadDirectory)?;
         let relative = path
             .strip_prefix(root)
-            .expect("current path must remain under root")
+            .verified("the walk only yields entries below the root it started from")
             .to_string_lossy()
             .replace('\\', "/");
         if file_type.is_dir() {
@@ -524,15 +524,15 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{Domain, Identifier, ResourceId, Timestamp};
+    use nervix_models::{ClusterNodeName, DomainName, ResourceId, ResourceName, Timestamp};
     use tempfile::{NamedTempFile, tempdir};
 
     use super::{ResourceEntryType, ResourceStore, ResourceStoreError};
 
     fn resource_id(domain: &str, identifier: &str, version: u64) -> ResourceId {
         ResourceId::new(
-            Domain::parse(domain).expect("valid domain"),
-            Identifier::parse(identifier).expect("valid identifier"),
+            DomainName::parse(domain).expect("valid domain"),
+            ResourceName::parse(identifier).expect("valid identifier"),
             version,
         )
     }
@@ -556,7 +556,7 @@ mod tests {
             .install_from_directory(
                 resource_id("tenant", "fraud_model", 1),
                 source.path(),
-                "node-1",
+                ClusterNodeName::parse("node-1").expect("valid name"),
                 Timestamp::from_unix_nanos(42),
             )
             .await
@@ -605,7 +605,7 @@ mod tests {
             .install_from_directory(
                 source_id.clone(),
                 source.path(),
-                "node-1",
+                ClusterNodeName::parse("node-1").expect("valid name"),
                 Timestamp::from_unix_nanos(42),
             )
             .await
@@ -624,7 +624,7 @@ mod tests {
                 replica_id.clone(),
                 temp_archive.path(),
                 source_manifest.resource.root_checksum.clone(),
-                "node-2",
+                ClusterNodeName::parse("node-2").expect("valid name"),
                 Timestamp::from_unix_nanos(84),
             )
             .await
@@ -670,7 +670,7 @@ mod tests {
             .install_from_directory(
                 source_id.clone(),
                 source.path(),
-                "node-1",
+                ClusterNodeName::parse("node-1").expect("valid name"),
                 Timestamp::from_unix_nanos(42),
             )
             .await
@@ -688,7 +688,7 @@ mod tests {
                 resource_id("tenant", "fraud_model_streamed", 8),
                 temp_archive.path(),
                 source_manifest.resource.root_checksum.clone(),
-                "node-2",
+                ClusterNodeName::parse("node-2").expect("valid name"),
                 Timestamp::from_unix_nanos(84),
             )
             .await

@@ -36,6 +36,7 @@ use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filt
 use error_stack::{Report, ResultExt};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_storage_opendal::OpenDalStorageFactory;
+use nervix_models::TableName;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 use triomphe::Arc;
@@ -276,7 +277,7 @@ struct IcebergEmitterClientInit<'a> {
     catalog_client: &'a CreateClientIcebergRest,
     catalog_config: &'a [nervix_models::ClientConfigEntry],
     context: &'a EmitterSinkContext,
-    table: &'a Identifier,
+    table: &'a TableName,
     location: &'a str,
     catalog: &'a IcebergCatalog,
 }
@@ -293,7 +294,7 @@ pub(in crate::runtime::emitters) struct IcebergEmitterInit<'a> {
     pub(in crate::runtime::emitters) catalog_client: &'a CreateClientIcebergRest,
     pub(in crate::runtime::emitters) catalog_resolved: Option<&'a ResolvedClientConfig>,
     pub(in crate::runtime::emitters) context: &'a EmitterSinkContext,
-    pub(in crate::runtime::emitters) table: &'a Identifier,
+    pub(in crate::runtime::emitters) table: &'a TableName,
     pub(in crate::runtime::emitters) values: &'a [IcebergValueMapping],
     pub(in crate::runtime::emitters) location: &'a str,
     pub(in crate::runtime::emitters) catalog: &'a IcebergCatalog,
@@ -903,11 +904,10 @@ impl IcebergEmitter {
             self.commit_state.store(prepared);
         }
         self.client
-            .commit_prepared(
-                self.commit_state
-                    .prepared()
-                    .expect("Iceberg commit must remain prepared until it finishes"),
-            )
+            .commit_prepared(self.commit_state.prepared().verified(
+                "the commit state holds its prepared commit from preparation until this call \
+                 completes",
+            ))
             .await?;
         self.commit_state.finish();
         let staged = std::mem::take(&mut self.staged_batches);
@@ -1032,29 +1032,23 @@ impl IcebergEmitter {
             );
         }
         let mut rejected = Vec::new();
-        let accepted_rows = result
-            .batch
-            .errors()
-            .iter()
-            .enumerate()
-            .filter_map(|(row, errors)| {
-                if let Some(side_error) = errors.first() {
-                    let reason = format!(
-                        "Iceberg VALUES side error {}: {} at {}",
-                        side_error.code.as_str(),
-                        side_error.message,
-                        side_error.span
-                    );
-                    rejected.push(IcebergRejectedRow {
-                        row,
-                        error: program.structured_side_error(reason, side_error.span),
-                    });
-                    None
-                } else {
-                    Some(row)
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut accepted_rows = Vec::new();
+        for (row, errors) in result.batch.errors().iter().enumerate() {
+            let Some(side_error) = errors.first() else {
+                accepted_rows.push(row);
+                continue;
+            };
+            let reason = format!(
+                "Iceberg VALUES side error {}: {} at {}",
+                side_error.code.as_str(),
+                side_error.message,
+                side_error.span
+            );
+            rejected.push(IcebergRejectedRow {
+                row,
+                error: program.structured_side_error(reason, side_error.span),
+            });
+        }
         if accepted_rows.is_empty() {
             return Ok(IcebergMappedBatch {
                 accepted: None,
@@ -1496,6 +1490,7 @@ mod tests {
     };
     use arrow_array::{Array, Int64Array, TimestampMicrosecondArray, TimestampNanosecondArray};
     use arrow_schema::{DataType, Field, TimeUnit};
+    use nervix_models::DomainName;
     use tokio::time::timeout;
 
     use super::*;
@@ -1745,8 +1740,8 @@ mod tests {
                 .expect("valid VALUES expression"),
         }];
         let program = compile_iceberg_values_program(
-            &Domain::parse("test").expect("valid domain"),
-            &Identifier::parse("iceberg_values").expect("valid emitter"),
+            &DomainName::parse("test").expect("valid domain"),
+            &EmitterName::parse("iceberg_values").expect("valid emitter"),
             &values,
             input_schema,
             None,

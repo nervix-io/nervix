@@ -10,9 +10,10 @@ use std::{
 use dashmap::DashMap;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use nervix_models::{
-    Domain, DomainTick, Identifier, ModelKind, RemoteAckRegistration, RemoteAckResolution,
+    ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName, FieldName, IngestorName,
+    LookupName, ModelKind, ModelName, RelayName, RemoteAckRegistration, RemoteAckResolution,
     RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
-    SubscriptionBinding, Timestamp,
+    ResourceName, SubscriptionBinding, Timestamp,
 };
 use rand_core::OsRng;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -83,18 +84,20 @@ pub enum Envelope {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelayPayload {
     pub kind: RelayPayloadKind,
-    pub domain: Domain,
-    pub relay: Identifier,
+    pub domain: DomainName,
+    pub relay: RelayName,
     pub key: Option<Vec<RemoteRuntimeField>>,
     pub batch_ipc: Vec<u8>,
     pub metadata: Vec<RemoteRuntimeRecordMetadata>,
     pub acks: Vec<Option<RemoteAckRegistration>>,
+    pub admission: Option<RemoteAckRegistration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayPayloadKind {
     Routed,
     SubscriptionFanout,
+    Ingress,
 }
 
 impl RelayPayloadKind {
@@ -102,6 +105,7 @@ impl RelayPayloadKind {
         match self {
             Self::Routed => 1,
             Self::SubscriptionFanout => 2,
+            Self::Ingress => 3,
         }
     }
 
@@ -109,6 +113,7 @@ impl RelayPayloadKind {
         match tag {
             1 => Ok(Self::Routed),
             2 => Ok(Self::SubscriptionFanout),
+            3 => Ok(Self::Ingress),
             _ => Err(TransportError::Decode(format!(
                 "unknown relay payload kind tag {tag}"
             ))),
@@ -153,9 +158,9 @@ pub enum ControlEnvelope {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionInterestVisibilityRequest {
     pub correlation_id: u64,
-    pub subscriber_node_id: String,
-    pub domain: Domain,
-    pub relay: Identifier,
+    pub subscriber_node_id: ClusterNodeName,
+    pub domain: DomainName,
+    pub relay: RelayName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,8 +176,8 @@ pub struct RuntimeErrorEvent {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainClockStart {
-    pub domain_id: Domain,
-    pub owner_node_id: String,
+    pub domain_id: DomainName,
+    pub owner_node_id: ClusterNodeName,
     pub wall_started_at: Timestamp,
     pub logical_start: Timestamp,
     pub time_rate: String,
@@ -180,12 +185,12 @@ pub struct DomainClockStart {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainClockStop {
-    pub domain_id: Domain,
+    pub domain_id: DomainName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainTickEnvelope {
-    pub domain_id: Domain,
+    pub domain_id: DomainName,
     pub tick: DomainTick,
 }
 
@@ -204,10 +209,10 @@ pub enum RuntimeStateKind {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct StatePlacementEnvelope {
-    pub domain: Domain,
+    pub domain: DomainName,
     pub state: RuntimeStateKind,
     pub kind: ModelKind,
-    pub identifier: Identifier,
+    pub identifier: ModelName,
     pub schema_fingerprint: [u8; 32],
     pub branch_key: Option<Vec<RemoteRuntimeField>>,
 }
@@ -276,9 +281,9 @@ pub struct DataflowNodeStatusEnvelope {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataflowNodeStatusRequest {
     pub correlation_id: u64,
-    pub domain: Domain,
+    pub domain: DomainName,
     pub kind: ModelKind,
-    pub name: Identifier,
+    pub name: ModelName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -315,7 +320,7 @@ impl EmitterPublishingDrainStateEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmitterPublishingDrainStatusEnvelope {
-    pub emitter: Identifier,
+    pub emitter: EmitterName,
     pub state: EmitterPublishingDrainStateEnvelope,
     pub pending_messages: u64,
     pub retry_backoff_millis: Option<u64>,
@@ -325,7 +330,7 @@ pub struct EmitterPublishingDrainStatusEnvelope {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainDrainStatusRequest {
     pub correlation_id: u64,
-    pub domain: Domain,
+    pub domain: DomainName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -337,16 +342,32 @@ pub struct DomainDrainStatusResponse {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityReference {
     pub kind: ModelKind,
-    pub identifier: Identifier,
+    pub identifier: ModelName,
+}
+
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EntityGatePurpose {
+    ModelAlteration,
+    OwnershipHandoff,
+}
+
+impl EntityGatePurpose {
+    pub const fn operation_name(self) -> &'static str {
+        match self {
+            Self::ModelAlteration => "model alteration",
+            Self::OwnershipHandoff => "ownership handoff",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateRequest {
     pub correlation_id: u64,
     pub operation_id: u64,
-    pub domain: Domain,
-    pub relays: Vec<Identifier>,
+    pub domain: DomainName,
+    pub relays: Vec<RelayName>,
     pub affected_entities: Vec<EntityReference>,
+    pub purpose: EntityGatePurpose,
     pub deadline_millis: u64,
     pub reason: String,
 }
@@ -361,15 +382,17 @@ pub struct EntityGateResponse {
 pub struct EntityDrainStatusEnvelope {
     pub buffered_relay_batches: u64,
     pub node_work_items: u64,
+    pub outstanding_acks: u64,
     pub emitter_publishing: Vec<EmitterPublishingDrainStatusEnvelope>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityDrainStatusRequest {
     pub correlation_id: u64,
-    pub domain: Domain,
-    pub relays: Vec<Identifier>,
+    pub domain: DomainName,
+    pub relays: Vec<RelayName>,
     pub affected_entities: Vec<EntityReference>,
+    pub purpose: EntityGatePurpose,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -382,7 +405,7 @@ pub struct EntityDrainStatusResponse {
 pub struct EntityGateReleaseRequest {
     pub correlation_id: u64,
     pub operation_id: u64,
-    pub domain: Domain,
+    pub domain: DomainName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -394,9 +417,9 @@ pub struct EntityGateReleaseResponse {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeMetricsRequest {
     pub correlation_id: u64,
-    pub domain: Domain,
+    pub domain: DomainName,
     pub kind: ModelKind,
-    pub name: Identifier,
+    pub name: ModelName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -414,8 +437,8 @@ pub struct DescribeMetricsEnvelope {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeIngestorRequest {
     pub correlation_id: u64,
-    pub domain: Domain,
-    pub name: Identifier,
+    pub domain: DomainName,
+    pub name: IngestorName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -427,8 +450,8 @@ pub struct DescribeIngestorResponse {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeRelayRequest {
     pub correlation_id: u64,
-    pub domain: Domain,
-    pub relay: Identifier,
+    pub domain: DomainName,
+    pub relay: RelayName,
     pub bindings: Vec<SubscriptionBinding>,
 }
 
@@ -440,19 +463,19 @@ pub struct DescribeRelayResponse {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LookupDescribeEnvelope {
-    pub resource: Identifier,
+    pub resource: ResourceName,
     pub resource_version: u64,
     pub path: String,
-    pub decode_using_codec: Identifier,
-    pub key_field: Identifier,
+    pub decode_using_codec: CodecName,
+    pub key_field: FieldName,
     pub entry_count: u64,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeLookupRequest {
     pub correlation_id: u64,
-    pub domain: Domain,
-    pub name: Identifier,
+    pub domain: DomainName,
+    pub name: LookupName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -464,8 +487,8 @@ pub struct DescribeLookupResponse {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LookupRequest {
     pub correlation_id: u64,
-    pub domain: Domain,
-    pub name: Identifier,
+    pub domain: DomainName,
+    pub name: LookupName,
     pub key: String,
 }
 
@@ -478,7 +501,7 @@ pub struct LookupResponse {
 #[derive(Debug, Clone)]
 pub struct ReceivedEnvelope {
     pub peer_addr: SocketAddr,
-    pub peer_node_id: String,
+    pub peer_node_id: ClusterNodeName,
     pub envelope: Envelope,
     pub reply: ConnectionHandle,
 }
@@ -518,7 +541,7 @@ struct TransportInner {
     incoming_tx: mpsc::Sender<ReceivedEnvelope>,
     outbound: DashMap<ConnectionKey, ConnectionHandle, RandomState>,
     outbound_state: DashMap<ConnectionKey, ConnectionState, RandomState>,
-    connected_peers: DashMap<String, usize, RandomState>,
+    connected_peers: DashMap<ClusterNodeName, usize, RandomState>,
     outbound_permits: StdArc<Semaphore>,
     shutdown: CancellationToken,
     tasks: TaskTracker,
@@ -578,11 +601,11 @@ pub enum TlsConfigError {
 
 #[derive(Clone)]
 pub struct LocalIdentity {
-    node_id: String,
+    node_id: ClusterNodeName,
     signing_key: SigningKey,
 }
 
-type PeerKeyResolver = dyn Fn(&str) -> Option<VerifyingKey> + Send + Sync;
+type PeerKeyResolver = dyn Fn(&ClusterNodeName) -> Option<VerifyingKey> + Send + Sync;
 
 impl std::fmt::Debug for LocalIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -593,15 +616,15 @@ impl std::fmt::Debug for LocalIdentity {
 }
 
 impl LocalIdentity {
-    pub fn generate(node_id: impl Into<String>) -> Self {
+    pub fn generate(node_id: ClusterNodeName) -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
         Self {
-            node_id: node_id.into(),
+            node_id,
             signing_key,
         }
     }
 
-    pub fn node_id(&self) -> &str {
+    pub fn node_id(&self) -> &ClusterNodeName {
         &self.node_id
     }
 
@@ -630,25 +653,27 @@ impl std::fmt::Debug for PeerVerifier {
 }
 
 impl PeerVerifier {
-    pub fn new(resolver: impl Fn(&str) -> Option<VerifyingKey> + Send + Sync + 'static) -> Self {
+    pub fn new(
+        resolver: impl Fn(&ClusterNodeName) -> Option<VerifyingKey> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             resolver: Arc::new(Box::new(resolver)),
         }
     }
 
-    fn resolve(&self, node_id: &str) -> Option<VerifyingKey> {
+    fn resolve(&self, node_id: &ClusterNodeName) -> Option<VerifyingKey> {
         (self.resolver)(node_id)
     }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 struct SignedIntroduction {
-    node_id: String,
+    node_id: ClusterNodeName,
     signature: [u8; 64],
 }
 
 impl SignedIntroduction {
-    fn verify(&self, verifier: &PeerVerifier) -> Result<String, TransportError> {
+    fn verify(&self, verifier: &PeerVerifier) -> Result<ClusterNodeName, TransportError> {
         let public_key = verifier.resolve(&self.node_id).ok_or_else(|| {
             TransportError::InvalidHandshake(format!(
                 "no public key available for node '{}'",
@@ -715,7 +740,7 @@ impl Transport {
         self.inner.local_addr
     }
 
-    pub fn node_id(&self) -> &str {
+    pub fn node_id(&self) -> &ClusterNodeName {
         self.inner.identity.node_id()
     }
 
@@ -790,7 +815,7 @@ impl Transport {
         self.inner.outbound.len()
     }
 
-    pub fn is_connected_to(&self, node_id: &str) -> bool {
+    pub fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
         self.inner
             .connected_peers
             .get(node_id)
@@ -1116,15 +1141,15 @@ async fn run_connection_loop(
     result
 }
 
-fn register_connected_peer(inner: &TransportInner, peer_node_id: &str) {
+fn register_connected_peer(inner: &TransportInner, peer_node_id: &ClusterNodeName) {
     inner
         .connected_peers
-        .entry(peer_node_id.to_string())
+        .entry(peer_node_id.clone())
         .and_modify(|count| *count += 1)
         .or_insert(1);
 }
 
-fn unregister_connected_peer(inner: &TransportInner, peer_node_id: &str) {
+fn unregister_connected_peer(inner: &TransportInner, peer_node_id: &ClusterNodeName) {
     let Some(mut count) = inner.connected_peers.get_mut(peer_node_id) else {
         return;
     };
@@ -1182,7 +1207,7 @@ async fn read_and_verify_introduction<R>(
     reader: &mut R,
     max_frame_bytes: usize,
     verifier: &PeerVerifier,
-) -> Result<String, TransportError>
+) -> Result<ClusterNodeName, TransportError>
 where
     R: AsyncRead + Unpin,
 {
@@ -1313,6 +1338,14 @@ fn encode_stream_payload(
             None => bytes.push(0),
         }
     }
+    match &payload.admission {
+        Some(admission) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&admission.ack_id.to_be_bytes());
+            encode_string(bytes, admission.reply_node_id.as_str())?;
+        }
+        None => bytes.push(0),
+    }
     encode_bytes(bytes, &payload.batch_ipc)?;
     Ok(())
 }
@@ -1338,7 +1371,13 @@ fn decode_stream_payload(bytes: &[u8]) -> Result<RelayPayload, TransportError> {
             0 => acks.push(None),
             1 => {
                 let ack_id = cursor.read_u64()?;
-                let reply_node_id = cursor.read_string()?;
+                let reply_node_raw = cursor.read_string()?;
+                let reply_node_id =
+                    ClusterNodeName::try_from(reply_node_raw.as_str()).map_err(|error| {
+                        TransportError::Decode(format!(
+                            "invalid node id '{reply_node_raw}': {error}"
+                        ))
+                    })?;
                 acks.push(Some(RemoteAckRegistration {
                     ack_id,
                     reply_node_id,
@@ -1351,12 +1390,32 @@ fn decode_stream_payload(bytes: &[u8]) -> Result<RelayPayload, TransportError> {
             }
         }
     }
+    let admission = match cursor.read_u8()? {
+        0 => None,
+        1 => {
+            let ack_id = cursor.read_u64()?;
+            let reply_node_raw = cursor.read_string()?;
+            let reply_node_id =
+                ClusterNodeName::try_from(reply_node_raw.as_str()).map_err(|error| {
+                    TransportError::Decode(format!("invalid node id '{reply_node_raw}': {error}"))
+                })?;
+            Some(RemoteAckRegistration {
+                ack_id,
+                reply_node_id,
+            })
+        }
+        flag => {
+            return Err(TransportError::Decode(format!(
+                "invalid relay admission presence flag {flag}"
+            )));
+        }
+    };
     let batch_ipc = cursor.read_bytes()?.to_vec();
     cursor.finish()?;
-    let domain = Domain::try_from(domain_raw.as_str()).map_err(|error| {
+    let domain = DomainName::try_from(domain_raw.as_str()).map_err(|error| {
         TransportError::Decode(format!("invalid domain '{domain_raw}': {error}"))
     })?;
-    let relay = Identifier::try_from(relay_raw.as_str()).map_err(|error| {
+    let relay = RelayName::try_from(relay_raw.as_str()).map_err(|error| {
         TransportError::Decode(format!("invalid relay identifier '{relay_raw}': {error}"))
     })?;
     Ok(RelayPayload {
@@ -1367,6 +1426,7 @@ fn decode_stream_payload(bytes: &[u8]) -> Result<RelayPayload, TransportError> {
         batch_ipc,
         metadata,
         acks,
+        admission,
     })
 }
 
@@ -1783,7 +1843,8 @@ impl<'a> WireCursor<'a> {
     }
 }
 
-fn introduction_message(node_id: &str) -> Vec<u8> {
+fn introduction_message(node_id: &ClusterNodeName) -> Vec<u8> {
+    let node_id = node_id.as_str();
     let mut data = Vec::with_capacity(4 + node_id.len());
     data.extend_from_slice(&(node_id.len() as u32).to_be_bytes());
     data.extend_from_slice(node_id.as_bytes());
@@ -1877,7 +1938,7 @@ mod tests {
     use std::{io::ErrorKind, path::PathBuf, process::Command};
 
     use ahash::HashMap;
-    use nervix_models::{Domain, Identifier};
+    use nervix_models::{DomainName, RelayName};
     use tokio::time::timeout;
 
     use super::*;
@@ -1913,15 +1974,15 @@ mod tests {
         .expect("test tls should load")
     }
 
-    fn test_identity(node_id: &str) -> LocalIdentity {
-        LocalIdentity::generate(node_id)
+    fn test_identity(node_id: &ClusterNodeName) -> LocalIdentity {
+        LocalIdentity::generate(node_id.clone())
     }
 
     fn verifier_for(identities: &[&LocalIdentity]) -> PeerVerifier {
         let keys = Arc::new(
             identities
                 .iter()
-                .map(|identity| (identity.node_id().to_string(), identity.public_key()))
+                .map(|identity| (identity.node_id().clone(), identity.public_key()))
                 .collect::<HashMap<_, _>>(),
         );
         PeerVerifier::new(move |node_id| keys.get(node_id).copied())
@@ -1937,8 +1998,8 @@ mod tests {
     fn dummy_stream_payload(stream: &str) -> RelayPayload {
         RelayPayload {
             kind: RelayPayloadKind::Routed,
-            domain: Domain::try_from("test").expect("valid domain"),
-            relay: Identifier::try_from(stream).expect("valid identifier"),
+            domain: DomainName::try_from("test").expect("valid domain"),
+            relay: RelayName::try_from(stream).expect("valid relay name"),
             key: None,
             batch_ipc: vec![1, 2, 3, 4],
             metadata: vec![RemoteRuntimeRecordMetadata {
@@ -1946,6 +2007,7 @@ mod tests {
                 ingested_at_high_watermark: Timestamp::from_unix_nanos(2),
             }],
             acks: vec![None],
+            admission: None,
         }
     }
 
@@ -1993,8 +2055,8 @@ mod tests {
     #[tokio::test]
     async fn bidirectional_send_and_receive_roundtrips() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, mut incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2027,7 +2089,10 @@ mod tests {
             .expect("send a->b");
 
         let first = recv_one(&mut incoming_b).await;
-        assert_eq!(first.peer_node_id, "node-a");
+        assert_eq!(
+            first.peer_node_id,
+            ClusterNodeName::parse("node-a").expect("valid name")
+        );
         assert_eq!(
             first.envelope,
             Envelope::RelayPayload(dummy_stream_payload("orders"))
@@ -2040,7 +2105,10 @@ mod tests {
             .expect("reply b->a");
 
         let second = recv_one(&mut incoming_a).await;
-        assert_eq!(second.peer_node_id, "node-b");
+        assert_eq!(
+            second.peer_node_id,
+            ClusterNodeName::parse("node-b").expect("valid name")
+        );
         assert_eq!(
             second.envelope,
             Envelope::RelayPayload(dummy_stream_payload("orders"))
@@ -2053,8 +2121,8 @@ mod tests {
     #[tokio::test]
     async fn outbound_pool_reuses_connections() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2099,8 +2167,8 @@ mod tests {
     #[tokio::test]
     async fn connection_for_reuses_disconnected_outbound_handle() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2159,8 +2227,8 @@ mod tests {
     #[tokio::test]
     async fn both_peers_observe_active_connection() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2196,7 +2264,11 @@ mod tests {
 
         timeout(Duration::from_secs(5), async {
             loop {
-                if transport_a.is_connected_to("node-b") && transport_b.is_connected_to("node-a") {
+                if transport_a
+                    .is_connected_to(&ClusterNodeName::parse("node-b").expect("valid name"))
+                    && transport_b
+                        .is_connected_to(&ClusterNodeName::parse("node-a").expect("valid name"))
+                {
                     break;
                 }
                 sleep(Duration::from_millis(50)).await;
@@ -2215,9 +2287,9 @@ mod tests {
             max_connections: 1,
             ..TransportOptions::default()
         };
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let identity_c = test_identity("node-c");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
+        let identity_c = test_identity(&ClusterNodeName::parse("node-c").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2281,8 +2353,8 @@ mod tests {
             reconnect_backoff: Duration::from_millis(100),
             ..TransportOptions::default()
         };
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2315,7 +2387,10 @@ mod tests {
             .await
             .expect("initial send");
         let first = recv_one(&mut incoming_b).await;
-        assert_eq!(first.peer_node_id, "node-a");
+        assert_eq!(
+            first.peer_node_id,
+            ClusterNodeName::parse("node-a").expect("valid name")
+        );
         assert_eq!(
             first.envelope,
             Envelope::RelayPayload(dummy_stream_payload("reconnect"))
@@ -2343,7 +2418,10 @@ mod tests {
 
         send_fut.await.expect("queued send should succeed");
         let second = recv_one(&mut incoming_b2).await;
-        assert_eq!(second.peer_node_id, "node-a");
+        assert_eq!(
+            second.peer_node_id,
+            ClusterNodeName::parse("node-a").expect("valid name")
+        );
         assert_eq!(
             second.envelope,
             Envelope::RelayPayload(dummy_stream_payload("reconnect"))
@@ -2355,8 +2433,8 @@ mod tests {
 
     #[tokio::test]
     async fn connection_failure_retains_pending_payload_for_reconnect() {
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (incoming_tx, _incoming_rx) = mpsc::channel(1);
         let inner = Arc::new(TransportInner {
             mode: TransportMode::Plain,
@@ -2423,8 +2501,8 @@ mod tests {
             reconnect_backoff: Duration::from_millis(50),
             ..TransportOptions::default()
         };
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let wrong_public = SigningKey::generate(&mut OsRng).verifying_key();
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
@@ -2442,7 +2520,7 @@ mod tests {
             Some(test_tls()),
             identity_b,
             PeerVerifier::new(move |node_id| {
-                if node_id == "node-a" {
+                if node_id.as_str() == "node-a" {
                     Some(wrong_public)
                 } else {
                     None
@@ -2476,8 +2554,8 @@ mod tests {
     #[tokio::test]
     async fn peer_that_stops_sending_pings_is_disconnected() {
         let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
+        let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
+        let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().unwrap(),
             TransportMode::Tls,
@@ -2528,7 +2606,7 @@ mod tests {
         )
         .await
         .expect("read server introduction");
-        assert_eq!(peer, "node-a");
+        assert_eq!(peer, ClusterNodeName::parse("node-a").expect("valid name"));
 
         timeout(Duration::from_secs(5), async {
             loop {

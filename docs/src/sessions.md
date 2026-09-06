@@ -23,6 +23,10 @@ Current session behavior:
 - optional `BATCH SAMPLE RATE <rate>` samples arrivals after `WHERE` has been evaluated
 - `BLOCKING` delivery waits for the connected session transport queue, while `DROPPING` discards delivered events when that queue is full
 - subscription events are delivered asynchronously to the connected client session
+- the relay owner is the sole subscription fan-out source, so each admitted batch is delivered at
+  most once to a subscription even when producers and consumers run on several cluster nodes
+- when the subscription's cluster node also hosts a runtime consumer, subscription delivery
+  piggybacks on the same owner-to-node Arrow IPC batch instead of adding another serialized copy
 - runtime and server errors are also delivered asynchronously
 - cluster membership updates are also delivered asynchronously
 

@@ -14,6 +14,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 error-stack = { workspace = true }
 nervix-client-core = { workspace = true, features = ["autocomplete"] }
+nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 reedline = { workspace = true, features = ["external_printer"] }
 rpassword = { workspace = true }

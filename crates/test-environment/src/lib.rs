@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use meticulous::OptionExt as _;
 use tempfile::{TempDir, tempdir, tempdir_in};
 use testcontainers::{
     ContainerAsync, ContainerRequest, CopyTargetOptions, GenericBuildableImage, GenericImage,
@@ -942,7 +943,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let tls = self.ensure_tls()?.clone();
         let workspace_root = workspace_root();
-        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "v1")
+        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "v2")
             .with_dockerfile(workspace_root.join("docker/mock-server/Dockerfile"))
             .with_file(
                 workspace_root.join("docker/mock-server/app.py"),
@@ -1388,7 +1389,10 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             self.endpoints.set_tls(&tls);
             self.tls = Some(tls);
         }
-        Ok(self.tls.as_ref().expect("TLS materials were initialized"))
+        Ok(self
+            .tls
+            .as_ref()
+            .verified("the branch above assigns the materials whenever they are absent"))
     }
 
     async fn start_container<I, Build>(
@@ -1794,7 +1798,7 @@ fn dependency_configuration_hash(role: &str) -> String {
 
 fn short_hash(hash: &str) -> &str {
     hash.get(..16)
-        .expect("BLAKE3 hashes contain at least 16 ASCII characters")
+        .assured("a BLAKE3 hex digest is always 64 ASCII characters")
 }
 
 fn reusable_container_name(role: &str, config_hash: &str) -> String {

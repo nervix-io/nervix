@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::{HashMap, RandomState};
 use dashmap::DashMap;
+use nervix_models::ClusterNodeName;
 #[cfg(test)]
 use nervix_models::KafkaPartitionSchedule;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -9,7 +10,10 @@ use tokio::sync::Notify;
 
 #[cfg(test)]
 use super::KafkaDomainOffsetDescribe;
-use super::{PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement};
+use super::{
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+    StateReplicationRoles,
+};
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct KafkaOffsetEntrySnapshot {
@@ -55,9 +59,7 @@ struct KafkaTopicSchedulingState {
 #[derive(Debug)]
 pub(super) struct ReplicatedKafkaOffsetState {
     pub(super) placement: RuntimeStatePlacement,
-    pub(super) required_replica_acks: usize,
-    pub(super) primary_node: Option<String>,
-    pub(super) replica_nodes: Vec<String>,
+    roles: parking_lot::RwLock<StateReplicationRoles>,
     offsets: parking_lot::Mutex<HashMap<(String, i32), i64>>,
     schedules: parking_lot::Mutex<HashMap<String, KafkaTopicSchedulingState>>,
     pub(super) current_lsm: AtomicU64,
@@ -81,8 +83,8 @@ impl ReplicatedKafkaOffsetState {
 
     pub(super) fn new(
         placement: RuntimeStatePlacement,
-        primary_node: Option<String>,
-        replica_nodes: Vec<String>,
+        primary_node: Option<ClusterNodeName>,
+        replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
@@ -97,9 +99,11 @@ impl ReplicatedKafkaOffsetState {
         }
         Ok(Self {
             placement,
-            required_replica_acks,
-            primary_node,
-            replica_nodes,
+            roles: parking_lot::RwLock::new(StateReplicationRoles::new(
+                primary_node,
+                replica_nodes,
+                required_replica_acks,
+            )),
             offsets: parking_lot::Mutex::new(offsets),
             schedules: parking_lot::Mutex::new(schedules),
             current_lsm: AtomicU64::new(current_lsm),
@@ -254,13 +258,27 @@ impl ReplicatedKafkaOffsetState {
         })
     }
 
-    pub(super) fn mark_replica_progress(&self, node_id: &str, lsm: u64) {
+    pub(super) fn primary_node(&self) -> Option<ClusterNodeName> {
+        self.roles.read().primary_node.clone()
+    }
+
+    pub(super) fn required_replica_acks(&self) -> usize {
+        self.roles.read().required_replica_acks
+    }
+
+    pub(super) fn rebind_roles(&self, roles: StateReplicationRoles) {
+        *self.roles.write() = roles;
+    }
+
+    pub(super) fn mark_replica_progress(&self, node_id: &ClusterNodeName, lsm: u64) {
         self.replica_progress.insert(node_id.to_string(), lsm);
         self.replication_notify.notify_waiters();
     }
 
     pub(super) fn replica_quorum_satisfied(&self, lsm: u64) -> bool {
-        self.replica_nodes
+        let roles = self.roles.read();
+        roles
+            .replica_nodes
             .iter()
             .filter(|node_id| {
                 self.replica_progress
@@ -268,7 +286,7 @@ impl ReplicatedKafkaOffsetState {
                     .is_some_and(|observed| *observed >= lsm)
             })
             .count()
-            >= self.required_replica_acks
+            >= roles.required_replica_acks
     }
 }
 

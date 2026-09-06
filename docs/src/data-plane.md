@@ -23,6 +23,13 @@ Nervix has three separate persistence boundaries:
 - Execution node state is runtime state. Selected state such as domain offsets, deduplicator history, materialized relay entries, window accumulators, metric summaries, and WASM guest state is persisted through periodic snapshot/replication mechanisms.
 - Message streaming is the hot path. In-flight records, relay batches, processor handoff, outbound emitter attempts, ACK guards, ACK tokens, and ACK maps stay in memory and are never persisted as runtime state.
 
+Every relay has one scheduled owner. Producers on other cluster nodes use one fixed dispatch slot
+per relay and serialize each batch once for the owner. The owner alone maintains the bounded relay
+buffer, concrete branch presence, metrics, subscriptions, and fan-out. It sends at most one
+serialized copy to each remote consuming cluster node, where all runtime consumers and any local
+subscription share that delivery. Only a relay's optional materialized records have
+scheduler-selected state replicas; the relay's hot-path runtime is never replicated.
+
 Nervix is not a durable event log for every in-flight row. If hot-path message or ACK state is lost, sources and ingestors react according to their delivery mode, offsets, and retry policy.
 
 Branch grouping is native runtime isolation based on explicit `CREATE BRANCH` declarations. A
@@ -31,8 +38,9 @@ policy. The branch name is part of its identity: differently named branches rema
 even when they reference the same schema. Ingestor routes construct keys with `BRANCHED BY
 <branch> SET ...`; reingestor routes preserve the input key, construct another named branch, or
 become unbranched. Relays and branch-preserving processors use that exact named branch or declare
-`UNBRANCHED`. Runtime relay instances, processor buffers, deduplicator state, window state, and
-materialized entries remain scoped to one concrete branch.
+`UNBRANCHED`. Relay presence, processor buffers, deduplicator state, window state, and materialized
+entries remain scoped to one concrete branch; batches for those branches share the declared
+relay's owner buffer.
 
 Structured Model expressions are compiled into typed VM programs before local graph instantiation.
 The leader validates them eagerly so invalid scopes, construction, types, nullability, sensitivity,
@@ -97,7 +105,10 @@ Examples of state that is not treated as a durable commit log:
 - outbound emitter operations
 - intermediate processor handoff
 
-For relay movement between nodes, Nervix uses Arrow IPC batch serialization on the interconnect path. Control traffic such as lookups and state-sync RPCs still uses separate control-envelope formats.
+For relay movement between nodes, Nervix uses Arrow IPC batch serialization on the interconnect
+path. Admission responses hold the producer or owner dispatch slot until the receiving node has
+accepted the batch, while the attached ACK chain continues through downstream consumers. Control
+traffic such as lookups and state-sync RPCs still uses separate control-envelope formats.
 
 Runtime graph metrics are maintained alongside the data plane. Prometheus export uses branch-aggregated series to keep label cardinality bounded, while `DESCRIBE` can report branch-local metrics where a concrete relay branch is being inspected. See [Metrics And Observability](metrics-and-observability.md).
 

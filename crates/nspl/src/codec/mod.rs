@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
     CodecWireFormat, CreateCodec, CreateStatement,
@@ -196,7 +197,7 @@ pub fn parse_create_codec_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -329,7 +330,7 @@ mod tests {
         assert_eq!(
             parsed.wire_format,
             CodecWireFormat::Protobuf(CodecProtobufConfig {
-                resource: nervix_models::Identifier::parse("proto_bundle")
+                resource: nervix_models::ResourceName::parse("proto_bundle")
                     .expect("valid identifier"),
                 resource_version: Some(2),
                 config: vec![
@@ -423,7 +424,7 @@ mod tests {
         assert_eq!(
             parsed.encoding_rules,
             vec![CodecEncodingRule {
-                field: nervix_models::Identifier::parse("created_at").expect("valid identifier"),
+                field: nervix_models::FieldName::parse("created_at").expect("valid field name"),
                 encoding: CodecEncoding::Rfc3339,
             }]
         );

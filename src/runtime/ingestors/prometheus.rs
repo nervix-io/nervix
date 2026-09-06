@@ -1,3 +1,4 @@
+use nervix_models::DomainName;
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use url::Url;
@@ -28,7 +29,7 @@ pub(in crate::runtime) struct PrometheusVectorResult {
 impl PrometheusIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientPrometheus,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -90,7 +91,9 @@ impl PrometheusIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled Prometheus ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -286,7 +289,7 @@ impl PrometheusIngestor {
                                         Ok(payload) => {
                                             entries.push((
                                                 payload,
-                                                BufferedIngestMetadata::Headers(IngestHeaders::new()),
+                                                BufferedIngestMetadata::without_headers(),
                                             ));
                                         }
                                         Err(error) => {

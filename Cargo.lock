@@ -6077,6 +6077,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "meticulous"
+version = "0.2.0-pre.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "254bd2d996bb84a4b86f8585267402233e8905735b1c1a5964523747641b2b50"
+
+[[package]]
 name = "miette"
 version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6401,7 +6407,9 @@ dependencies = [
  "anyhow",
  "clap",
  "humantime",
+ "meticulous",
  "nervix-client-core",
+ "nervix-models",
  "nervix-nspl",
  "nervix-test-environment",
  "ordered-float 4.6.0",
@@ -6430,6 +6438,7 @@ dependencies = [
  "clap_complete",
  "error-stack",
  "nervix-client-core",
+ "nervix-models",
  "nervix-nspl",
  "reedline",
  "rpassword",
@@ -6444,6 +6453,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-tar",
  "base64 0.22.1",
+ "meticulous",
  "nervix-models",
  "nervix-nspl",
  "nervix-proto",
@@ -6464,6 +6474,7 @@ dependencies = [
  "ciborium",
  "fjall",
  "futures-util",
+ "meticulous",
  "nervix-models",
  "openraft",
  "parking_lot",
@@ -6495,6 +6506,7 @@ version = "0.1.0-dev"
 dependencies = [
  "ahash 0.8.12",
  "intrusive-collections",
+ "meticulous",
  "triomphe",
 ]
 
@@ -6528,6 +6540,7 @@ dependencies = [
  "chrono",
  "error-stack",
  "indexmap 2.14.1",
+ "meticulous",
  "rkyv 0.8.18",
  "serde",
  "serde_json",
@@ -6547,7 +6560,9 @@ dependencies = [
  "bolero",
  "chumsky",
  "clap",
+ "error-stack",
  "humantime",
+ "meticulous",
  "nervix-models",
  "rustyline",
  "serde",
@@ -6565,6 +6580,7 @@ dependencies = [
  "ariadne 0.5.1",
  "clap",
  "ignore",
+ "meticulous",
  "nervix-models",
  "nervix-nspl",
  "tempfile",
@@ -6575,6 +6591,7 @@ dependencies = [
 name = "nervix-proto"
 version = "0.1.0-dev"
 dependencies = [
+ "meticulous",
  "prost 0.13.5",
  "tonic 0.13.1",
  "tonic-build",
@@ -6591,6 +6608,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "fastrand",
+ "meticulous",
  "nervix-models",
  "nervix-nspl",
  "nervix-vm",
@@ -6662,6 +6680,7 @@ dependencies = [
  "jaq-std",
  "lapin",
  "loom",
+ "meticulous",
  "mongodb",
  "multer",
  "mysql_async",
@@ -6711,6 +6730,7 @@ dependencies = [
  "simd-json",
  "sorted-vec",
  "storekey",
+ "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.20",
  "tikv-jemalloc-ctl",
@@ -6744,6 +6764,7 @@ version = "0.1.0-dev"
 dependencies = [
  "blake3",
  "clap",
+ "meticulous",
  "reqwest 0.13.4",
  "serde_json",
  "tempfile",
@@ -6767,6 +6788,7 @@ dependencies = [
  "chrono",
  "criterion",
  "md5",
+ "meticulous",
  "nervix-models",
  "nervix-nspl",
  "regex",
@@ -6785,6 +6807,7 @@ dependencies = [
  "arrow-schema",
  "bytes",
  "flatbuffers",
+ "meticulous",
  "nervix-models",
  "nervix-wasm-protocol",
  "parking_lot",
@@ -6800,6 +6823,7 @@ version = "0.1.0-dev"
 dependencies = [
  "flatbuffers",
  "flatc-rust",
+ "meticulous",
  "thiserror 2.0.20",
 ]
 
@@ -6825,6 +6849,7 @@ dependencies = [
  "gloo-net 0.7.0",
  "js-sys",
  "leptos",
+ "meticulous",
  "nervix-dataflow-graph",
  "nervix-models",
  "nervix-nspl",

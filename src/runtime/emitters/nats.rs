@@ -11,6 +11,7 @@ use async_nats::{
     message::OutboundMessage,
 };
 use futures_util::{FutureExt, SinkExt};
+use nervix_models::SubjectName;
 
 use super::*;
 
@@ -34,7 +35,7 @@ impl NatsEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientNats,
         resolved: Option<&ResolvedClientConfig>,
-        subject: &Identifier,
+        subject: &SubjectName,
         mode: NatsPublishingMode,
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<Self> {
@@ -324,9 +325,10 @@ impl NatsEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready NATS confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(_ack) => outcome.deliver(confirmation.position),
                 Err(error) if Self::is_jetstream_record_rejection(&error) => outcome.reject(

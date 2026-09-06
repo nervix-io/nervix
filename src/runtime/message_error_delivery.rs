@@ -1,14 +1,15 @@
 use dashmap::mapref::entry::Entry as DashMapEntry;
+use nervix_models::{DomainName, ModelName};
 
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MessageErrorRouteKey {
-    pub(super) domain: Domain,
+    pub(super) domain: DomainName,
     pub(super) node_kind: String,
-    pub(super) node: Identifier,
-    pub(super) source_route: Option<Identifier>,
-    pub(super) error_relay: Identifier,
+    pub(super) node: ModelName,
+    pub(super) source_route: Option<RelayName>,
+    pub(super) error_relay: RelayName,
 }
 
 #[derive(Clone)]
@@ -69,25 +70,26 @@ struct MessageErrorRouteTask {
 /// same walk it replaces.
 pub(super) fn matching_message_error_output<'a>(
     outputs: &'a nervix_models::ProcessorOutputs,
-    source_route: Option<&Identifier>,
-    error_relay: &Identifier,
+    source_route: Option<&RelayName>,
+    error_relay: &RelayName,
     assignments: &[Assignment],
 ) -> Option<&'a ProcessorOutput> {
-    source_route
-        .and_then(|route| outputs.routes.iter().find(|output| &output.relay == route))
-        .or_else(|| {
-            outputs.routes.iter().find(|output| {
-                if let MessageErrorPolicy::Dlq {
-                    relay,
-                    assignments: configured,
-                } = &output.message_error_policy
-                {
-                    relay == error_relay && configured == assignments
-                } else {
-                    false
-                }
-            })
-        })
+    if let Some(route) = source_route
+        && let Some(output) = outputs.routes.iter().find(|output| &output.relay == route)
+    {
+        return Some(output);
+    }
+    outputs.routes.iter().find(|output| {
+        if let MessageErrorPolicy::Dlq {
+            relay,
+            assignments: configured,
+        } = &output.message_error_policy
+        {
+            relay == error_relay && configured == assignments
+        } else {
+            false
+        }
+    })
 }
 
 impl MessageErrorRouteRuntime {
@@ -372,7 +374,7 @@ impl Runtime {
             })
     }
 
-    pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &Domain) {
+    pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &DomainName) {
         let keys = self
             .message_error_routes
             .iter()
@@ -391,13 +393,17 @@ impl Runtime {
 mod tests {
     use super::*;
 
-    fn identifier(value: &str) -> Identifier {
-        Identifier::parse(value).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn test_delivery() -> (MessageErrorDelivery, AckCompletion) {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
-            name: identifier("message_error"),
+            name: named("message_error"),
             fields: Vec::new(),
         }));
         let batch = RelayRecordBatch::single(schema, None, test_runtime_row([]), AckSet::empty())
@@ -415,15 +421,15 @@ mod tests {
     fn test_task(
         flush_policy: RuntimeFlushPolicy,
         fanout: RelayBoundaryFanout,
-    ) -> MessageErrorRouteTask {
-        MessageErrorRouteTask {
+    ) -> (MessageErrorRouteTask, RelayOwnerTask) {
+        let task = MessageErrorRouteTask {
             runtime: Runtime::default(),
             route: MessageErrorRouteKey {
-                domain: Domain::try_from("test").expect("valid domain"),
+                domain: DomainName::try_from("test").expect("valid domain"),
                 node_kind: "emitter".to_string(),
-                node: identifier("notifications"),
+                node: named("notifications"),
                 source_route: None,
-                error_relay: identifier("emitter_errors"),
+                error_relay: named("emitter_errors"),
             },
             target: MessageErrorRouteTarget {
                 registry: RelayRegistry::new(),
@@ -431,7 +437,15 @@ mod tests {
             },
             flush_policy,
             pending: HashMap::default(),
-        }
+        };
+        let owner_task = task.runtime.spawn_relay_owner_task(
+            &task.route.domain,
+            &task.route.error_relay,
+            task.target.registry.clone(),
+            task.target.services.clone(),
+            RelayRetention::default(),
+        );
+        (task, owner_task)
     }
 
     #[tokio::test]
@@ -440,7 +454,7 @@ mod tests {
         let fanout = RelayBoundaryFanout::direct_with_capacity(
             NonZeroUsize::new(1).expect("non-zero test capacity"),
         );
-        let task = test_task(
+        let (task, owner_task) = test_task(
             RuntimeFlushPolicy::Each {
                 interval,
                 max_batch_size: u64::MAX,
@@ -470,6 +484,10 @@ mod tests {
         shutdown.send_replace(true);
         task.await.expect("message-error task must stop cleanly");
         assert_eq!(completion.wait().await, AckOutcome::Ack);
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
     }
 
     #[tokio::test]
@@ -482,7 +500,7 @@ mod tests {
             Instant::now() + Duration::from_secs(2),
             "block message-error relay delivery",
         );
-        let task = test_task(RuntimeFlushPolicy::Immediate, fanout);
+        let (task, owner_task) = test_task(RuntimeFlushPolicy::Immediate, fanout);
         let (sender, input) = mpsc::channel(1);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(task.run(input, shutdown_rx));
@@ -507,5 +525,9 @@ mod tests {
         assert_eq!(completion.wait().await, AckOutcome::Ack);
         shutdown.send_replace(true);
         task.await.expect("message-error task must stop cleanly");
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
     }
 }

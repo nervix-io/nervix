@@ -20,14 +20,14 @@ pub(in crate::runtime) struct MqttIngestorAddr {
 #[derive(Clone)]
 struct MqttTaskContext {
     runtime: Runtime,
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     error_policies: ErrorPolicies,
     timestamp_source: Option<IngestTimestampSource>,
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     events: broadcast::Sender<RuntimeEvent>,
     quiesce: Arc<IngestorQuiesceControl>,
 }
@@ -60,7 +60,7 @@ enum MqttSubscriptionState {
 impl MqttIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientMqtt,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -163,7 +163,9 @@ impl MqttIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled MQTT ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -430,7 +432,10 @@ impl MqttIngestor {
                                     &client_handle,
                                     &mut shutdown_rx,
                                     publish,
-                                    task_ack_timeout.expect("ack timeout must exist"),
+                                    task_ack_timeout.verified(
+                                        "this branch runs only for an ACK mode, and every ACK \
+                                         mode parses a timeout above",
+                                    ),
                                     task_retry_policy,
                                     &mut backoff,
                                 )
@@ -451,7 +456,10 @@ impl MqttIngestor {
                                         }
                                     };
                                 let deadline = Instant::now()
-                                    + task_batch_timeout.expect("batch timeout must exist");
+                                    + task_batch_timeout.verified(
+                                        "this branch runs only for the parallel ACK mode, which \
+                                         parses a batch timeout above",
+                                    );
                                 while batch.len() < (*max as usize).max(1) {
                                     tokio::task::consume_budget().await;
                                     tokio::select! {
@@ -490,7 +498,10 @@ impl MqttIngestor {
                                     &client_handle,
                                     &mut shutdown_rx,
                                     batch,
-                                    task_ack_timeout.expect("ack timeout must exist"),
+                                    task_ack_timeout.verified(
+                                        "this branch runs only for an ACK mode, and every ACK \
+                                         mode parses a timeout above",
+                                    ),
                                     task_retry_policy,
                                     &mut backoff,
                                 )
@@ -716,7 +727,7 @@ impl MqttIngestor {
     ) -> Option<Publish> {
         let payload = BufferedIngestPayload::new(
             publish.payload.as_ref(),
-            BufferedIngestMetadata::Headers(IngestHeaders::new()),
+            BufferedIngestMetadata::without_headers(),
         );
         match context.quiesce.intake(instance_idx, payload, false) {
             IngestorQuiesceIntake::Dispatch(_) => Some(publish),
@@ -777,7 +788,9 @@ impl MqttIngestor {
         };
         loop {
             tokio::task::consume_budget().await;
-            let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
+            let (acks, completion) = context
+                .runtime
+                .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
             // One acknowledged message is one group.
             let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
             let dispatch_result = Self::dispatch_entry(
@@ -792,10 +805,9 @@ impl MqttIngestor {
             )
             .await;
             let flush_result = Self::flush_collector(context, &mut collector).await;
-            let dispatched = dispatch_result
-                .and(flush_result)
-                .map(|()| true)
-                .unwrap_or_else(|error| {
+            let dispatched = match dispatch_result.and(flush_result) {
+                Ok(()) => true,
+                Err(error) => {
                     let _ = context.events.send(RuntimeEvent::Error(format!(
                         "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                         context.ingestor.as_str(),
@@ -803,7 +815,8 @@ impl MqttIngestor {
                         error
                     )));
                     false
-                });
+                }
+            };
             if dispatched {
                 acks.ack_success();
                 match Runtime::await_ack_completion(shutdown_rx, completion, ack_timeout).await {
@@ -895,8 +908,10 @@ impl MqttIngestor {
 
             for record in records {
                 tokio::task::consume_budget().await;
-                let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
-                let dispatched = Self::dispatch_entry(
+                let (acks, completion) = context
+                    .runtime
+                    .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
+                let dispatch_result = Self::dispatch_entry(
                     context,
                     record,
                     if !context.branched_senders.is_empty() {
@@ -906,17 +921,19 @@ impl MqttIngestor {
                     },
                     &mut collector,
                 )
-                .await
-                .map(|()| true)
-                .unwrap_or_else(|error| {
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
-                        "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                        context.ingestor.as_str(),
-                        context.domain.as_str(),
-                        error
-                    )));
-                    false
-                });
+                .await;
+                let dispatched = match dispatch_result {
+                    Ok(()) => true,
+                    Err(error) => {
+                        let _ = context.events.send(RuntimeEvent::Error(format!(
+                            "failed to dispatch message for ingestor '{}' in domain '{}': {}",
+                            context.ingestor.as_str(),
+                            context.domain.as_str(),
+                            error
+                        )));
+                        false
+                    }
+                };
                 if dispatched {
                     acks.ack_success();
                     completions.push(completion);
@@ -1102,7 +1119,7 @@ impl MqttIngestor {
         }
     }
 
-    fn subscribe_filter(topic: &str, domain: &Domain, ingestor: &Identifier) -> String {
+    fn subscribe_filter(topic: &str, domain: &DomainName, ingestor: &IngestorName) -> String {
         format!("$share/{}~{}/{topic}", domain.as_str(), ingestor.as_str())
     }
 

@@ -12,6 +12,7 @@ blake3 = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
+meticulous = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
 sorted-vec = { workspace = true, features = ["serde"] }

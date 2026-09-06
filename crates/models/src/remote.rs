@@ -1,14 +1,14 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::Timestamp;
+use crate::{ClusterNodeName, Timestamp};
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RemoteAckRegistration {
     pub ack_id: u64,
-    pub reply_node_id: String,
+    pub reply_node_id: ClusterNodeName,
 }
 
 #[derive(

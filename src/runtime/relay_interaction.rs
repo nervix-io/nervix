@@ -5,7 +5,7 @@
 //! input draining, and quiesce work accounting. Nodes retain their processing and output behavior.
 //!
 //! The mode deliberately uses Tokio's wall-clock [`Instant`]. Emitters and reingestors have this
-//! contract today, while materializers use it for their wall-clock expiration scan. Processor
+//! contract today, while relay-state tasks use it for their wall-clock expiration scan. Processor
 //! supervisors use it for relay fan-in, but their branch workers retain paced domain timestamps
 //! and operation-owned buffers behind that boundary. Connector ingestors consume external
 //! transports rather than relays and remain outside this boundary.
@@ -24,7 +24,8 @@ use std::{future::pending, task::Poll};
 
 use ahash::{HashSet, HashSetExt};
 use indexmap::IndexMap;
-use nervix_models::Identifier;
+use meticulous::OptionExt as _;
+use nervix_models::RelayName;
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, watch},
@@ -56,10 +57,10 @@ pub(super) enum RelayInteractionError {
     #[error("relay interaction requires at least one input")]
     NoInputs,
     #[error("relay interaction input relay '{relay}' is declared more than once")]
-    DuplicateInput { relay: Identifier },
+    DuplicateInput { relay: RelayName },
     #[error("failed to concatenate collected input from relay '{relay}': {reason}")]
     Concatenate {
-        relay: Identifier,
+        relay: RelayName,
         reason: String,
         acks: AckSet,
     },
@@ -107,7 +108,7 @@ pub(super) enum RelayInteractionStop {
 #[derive(Debug)]
 pub(super) enum RelayInteractionEvent<C> {
     Batch {
-        relay: Identifier,
+        relay: RelayName,
         batch: RelayRecordBatch,
     },
     Wake,
@@ -128,14 +129,14 @@ impl<C> RelayInteractionWork<C> {
 }
 
 pub(super) struct RelayInteractionInput {
-    relay: Identifier,
+    relay: RelayName,
     receiver: RelayRuntimeFanIn,
     collect_policy: Option<RuntimeInputCollectPolicy>,
 }
 
 impl RelayInteractionInput {
     pub(super) fn new(
-        relay: Identifier,
+        relay: RelayName,
         receiver: RelayRuntimeFanIn,
         collect_policy: Option<RuntimeInputCollectPolicy>,
     ) -> Self {
@@ -248,7 +249,7 @@ impl RelayInputCollection {
         let collection = self
             .pending
             .shift_remove(key)
-            .expect("ordered input collection key must exist");
+            .verified("take is only called with a key the pending map still holds");
         self.pending_batches = self
             .pending_batches
             .saturating_sub(collection.batches.len());
@@ -286,7 +287,7 @@ impl Drop for RelayInputCollection {
 }
 
 struct RelayInteractionSource {
-    relay: Identifier,
+    relay: RelayName,
     receiver: RelayRuntimeFanIn,
     collection: RelayInputCollection,
     closed: bool,
@@ -439,7 +440,7 @@ impl RelayInteractionInputs {
         &mut self,
         source: usize,
         batch: RelayRecordBatch,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         let relay = self.sources[source].relay.clone();
         self.sources[source]
             .collection
@@ -462,13 +463,11 @@ impl RelayInteractionInputs {
     fn take_due(
         &mut self,
         now: Instant,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         self.take_collection(|collection| collection.take_due(now))
     }
 
-    fn take_any(
-        &mut self,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    fn take_any(&mut self) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         self.take_collection(RelayInputCollection::take_any)
     }
 
@@ -477,7 +476,7 @@ impl RelayInteractionInputs {
         mut take: impl FnMut(
             &mut RelayInputCollection,
         ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError>,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         let source_count = self.sources.len();
         for offset in 0..source_count {
             let index = (self.collection_cursor + offset) % source_count;
@@ -791,7 +790,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         loop {
             tokio::task::consume_budget().await;
             let ready = {
-                let drain = self.drain.as_mut().expect("drain state must exist");
+                let drain = self
+                    .drain
+                    .as_mut()
+                    .verified("this path only runs while the interaction is draining");
                 self.inputs.try_recv_snapshot(&mut drain.remaining)
             };
             let input = match ready {
@@ -809,7 +811,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 return Ok(self.work_with(RelayInteractionEvent::Batch { relay, batch }, work));
             }
             drop(work);
-            let drain = self.drain.take().expect("drain state must exist");
+            let drain = self
+                .drain
+                .take()
+                .verified("this path only runs while the interaction is draining");
             let event = match drain.finish {
                 DrainFinish::ForceFlush(completion) => {
                     RelayInteractionEvent::ForceFlush(completion)
@@ -858,7 +863,9 @@ async fn wait_until(deadline: Option<Instant>) {
 mod tests {
     use std::{num::NonZeroUsize, sync::OnceLock};
 
-    use nervix_models::{CreateSchema, Identifier, ParseAsType, Timestamp};
+    use nervix_models::{
+        CreateSchema, FieldName, ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
+    };
 
     use super::*;
     use crate::{
@@ -875,9 +882,11 @@ mod tests {
         SCHEMA
             .get_or_init(|| {
                 triomphe::Arc::new(compile_schema(&CreateSchema {
-                    name: Identifier::parse("relay_interaction_test").expect("valid schema"),
+                    name: SchemaName::from(
+                        &ModelName::parse("relay_interaction_test").expect("valid schema"),
+                    ),
                     fields: vec![nervix_models::SchemaField {
-                        name: Identifier::parse("value").expect("valid field"),
+                        name: FieldName::parse("value").expect("valid field"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
@@ -904,9 +913,11 @@ mod tests {
 
     fn alternate_batch(acks: AckSet) -> RelayRecordBatch {
         let alternate_schema = triomphe::Arc::new(compile_schema(&CreateSchema {
-            name: Identifier::parse("relay_interaction_alternate").expect("valid alternate schema"),
+            name: SchemaName::from(
+                &ModelName::parse("relay_interaction_alternate").expect("valid alternate schema"),
+            ),
             fields: vec![nervix_models::SchemaField {
-                name: Identifier::parse("value").expect("valid field"),
+                name: FieldName::parse("value").expect("valid field"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
@@ -925,7 +936,7 @@ mod tests {
     fn branch(value: &str) -> Option<BranchKey> {
         Some(
             BranchKey::from_fields([(
-                Identifier::parse("tenant").expect("valid branch field"),
+                FieldName::parse("tenant").expect("valid branch field"),
                 RuntimeValue::String(value.to_string()),
             )])
             .expect("branch key must build"),
@@ -945,7 +956,7 @@ mod tests {
         capacity: usize,
         policy: Option<RuntimeInputCollectPolicy>,
     ) -> (RelayInteractionInput, RelayBroadcast<RelayRecordBatch>) {
-        let relay = Identifier::parse(name).expect("valid relay");
+        let relay = RelayName::parse(name).expect("valid relay");
         let broadcast = RelayBroadcast::with_capacity(
             NonZeroUsize::new(capacity).expect("nonzero test capacity"),
         );
@@ -1362,18 +1373,16 @@ mod tests {
             tokio::task::consume_budget().await;
             match event(&mut interaction, None).await {
                 RelayInteractionEvent::Batch { relay, batch } => {
-                    let tenant = batch
-                        .key
-                        .as_ref()
-                        .and_then(|key| key.field_value("tenant"))
-                        .and_then(|value| {
-                            if let RuntimeValue::String(value) = value {
-                                Some(value.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .expect("collected branch must be retained");
+                    let Some(key) = batch.key.as_ref() else {
+                        panic!("collected branch must be retained");
+                    };
+                    let Some(value) = key.field_value("tenant") else {
+                        panic!("collected branch must retain its tenant");
+                    };
+                    let RuntimeValue::String(tenant) = value else {
+                        panic!("collected tenant branch value must be STRING");
+                    };
+                    let tenant = tenant.clone();
                     groups.push((relay.as_str().to_string(), tenant, batch.message_count()));
                 }
                 RelayInteractionEvent::ForceFlush(completion) => {

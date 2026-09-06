@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use nervix_models::{DomainName, IngestorName};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -20,12 +21,12 @@ pub(in crate::runtime) struct SyslogIngestor;
 #[derive(Clone)]
 struct SyslogIngestContext {
     runtime: Runtime,
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     timestamp_source: Option<IngestTimestampSource>,
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
-    branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     codec: Arc<CompiledCodec>,
     quiesce: Arc<IngestorQuiesceControl>,
     events: broadcast::Sender<RuntimeEvent>,
@@ -99,7 +100,7 @@ enum SyslogFrameError {
 impl SyslogIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientSyslog,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -161,7 +162,10 @@ impl SyslogIngestor {
             codec: dependencies.codec,
             quiesce: runtime
                 .ingestor_quiesce_control(domain, &ingestor.name)
-                .expect("scheduled Syslog ingestor must have quiesce control"),
+                .verified(
+                    "the runtime registers quiesce control for an ingestor before it starts the \
+                     task",
+                ),
             events: runtime.events.clone(),
         };
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -681,7 +685,8 @@ impl StreamFrameDecoder {
         if prefix.first() == Some(&b'0') || !prefix.iter().all(|byte| byte.is_ascii_digit()) {
             return Err(SyslogFrameError::MalformedOctetCount);
         }
-        let prefix = std::str::from_utf8(prefix).expect("ASCII digit prefix must be valid UTF-8");
+        let prefix = std::str::from_utf8(prefix)
+            .verified("the check above rejected every prefix that is not made of ASCII digits");
         let length = prefix
             .parse::<usize>()
             .map_err(|source| SyslogFrameError::InvalidOctetCount { source })?;

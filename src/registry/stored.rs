@@ -1,33 +1,39 @@
 use error_stack::{Report, ResultExt};
+use meticulous::ResultExt as _;
 use nervix_models::{
-    AckMode, AvroType, BranchEviction, BranchSelection, ClickHouseValueMapping, CodecEncoding,
-    CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    AckMode, AvroType, BranchEviction, BranchName, BranchSelection, ChannelName,
+    ClickHouseValueMapping, ClientName, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+    CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat, CollectionName,
+    ConsumerGroupName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+    CorrelatorName, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
+    CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb,
+    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterAckWindow, EmitterPublishingMode,
-    EndpointIngestMode, EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy,
-    IcebergCatalog, IcebergStorageBackend, Identifier, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, InputCollectPolicy, JsonType,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy,
-    Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
-    NameError, NatsIngestMode, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope,
-    OtelSignal, OutputFlushPolicy, ParseAsType, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
-    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, SchemaField,
-    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
-    VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness,
-    ZeroMqIngestMode,
+    CreateWindowProcessor, CreateWireSchema, DeduplicatorName, EmitSink, EmitterAckWindow,
+    EmitterName, EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType,
+    ErrorPolicies, Expression, FieldName, GeneralErrorPolicy, GeneratorName, IcebergCatalog,
+    IcebergStorageBackend, InferencerName, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, IngestorName, InputCollectPolicy, JsonType, JunctionName,
+    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, LookupName, MaterializedRelayState,
+    MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos,
+    MqttSession, MySqlConflictAction, NameError, NatsIngestMode, OtelAggregationTemporality,
+    OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OutputFlushPolicy, ParseAsType,
+    PlacementName, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, PulsarIngestMode, PulsarSubscriptionName, QueueGroupName,
+    QueueName, RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayBranching,
+    RelayName, ReordererName, ResourceName, RetryPolicy, SchemaField, SchemaName,
+    SignalingProtobufConfig, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, SubjectName, TableName,
+    TopicName, UdfArgument, UdfLanguage, UdfName, UdfReturn, VhostName, VhostTlsResource,
+    WasmProcessorName, WebsocketsIngestMode, WindowBound, WindowProcessorName, WireSchemaField,
+    WireSchemaName, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -1684,9 +1690,6 @@ impl From<Model> for StoredModelVersioned {
             Model::Emitter(v) => Self::EmitterPublishing(v.into()),
             Model::Placement(v) => Self::Placement(v.into()),
             Model::Udf(v) => Self::Udf(v.into()),
-            Model::Materializer(_) => {
-                unreachable!("synthetic materializers must not be stored")
-            }
         }
     }
 }
@@ -1810,7 +1813,7 @@ impl TryFrom<StoredCreateUdf> for CreateUdf {
 
     fn try_from(value: StoredCreateUdf) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: UdfName::parse(&value.name)?,
             language: value.language.into(),
             arguments: value
                 .arguments
@@ -1856,7 +1859,7 @@ impl TryFrom<StoredUdfArgument> for UdfArgument {
 
     fn try_from(value: StoredUdfArgument) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: FieldName::parse(&value.name)?,
             ty: value.ty.into(),
             optional: value.optional,
         })
@@ -1895,7 +1898,7 @@ impl TryFrom<StoredCreateSchema> for CreateSchema {
 
     fn try_from(value: StoredCreateSchema) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: SchemaName::parse(&value.name)?,
             fields: value
                 .fields
                 .into_iter()
@@ -1921,7 +1924,7 @@ impl TryFrom<StoredSchemaField> for SchemaField {
 
     fn try_from(value: StoredSchemaField) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: FieldName::parse(&value.name)?,
             ty: value.ty.into(),
             optional: value.optional,
             sensitive: value.sensitive,
@@ -1954,7 +1957,7 @@ impl TryFrom<StoredCreateWireSchema<StoredJsonType>> for CreateWireSchema<JsonTy
 
     fn try_from(value: StoredCreateWireSchema<StoredJsonType>) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: WireSchemaName::parse(&value.name)?,
             strictness: value.strictness.into(),
             fields: value
                 .fields
@@ -1970,7 +1973,7 @@ impl TryFrom<StoredCreateWireSchema<StoredAvroType>> for CreateWireSchema<AvroTy
 
     fn try_from(value: StoredCreateWireSchema<StoredAvroType>) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: WireSchemaName::parse(&value.name)?,
             strictness: value.strictness.into(),
             fields: value
                 .fields
@@ -2024,7 +2027,7 @@ impl TryFrom<StoredWireSchemaField<StoredJsonType>> for WireSchemaField<JsonType
 
     fn try_from(value: StoredWireSchemaField<StoredJsonType>) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: FieldName::parse(&value.name)?,
             ty: value.ty.into(),
             optional: value.optional,
         })
@@ -2036,7 +2039,7 @@ impl TryFrom<StoredWireSchemaField<StoredAvroType>> for WireSchemaField<AvroType
 
     fn try_from(value: StoredWireSchemaField<StoredAvroType>) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: FieldName::parse(&value.name)?,
             ty: value.ty.into(),
             optional: value.optional,
         })
@@ -2202,10 +2205,10 @@ impl TryFrom<StoredCreateClientKafka> for CreateClientKafka {
 
     fn try_from(value: StoredCreateClientKafka) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2227,10 +2230,10 @@ impl TryFrom<StoredCreateClientPulsar> for CreateClientPulsar {
 
     fn try_from(value: StoredCreateClientPulsar) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2252,10 +2255,10 @@ impl TryFrom<StoredCreateClientHttp> for CreateClientHttp {
 
     fn try_from(value: StoredCreateClientHttp) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2277,10 +2280,10 @@ impl TryFrom<StoredCreateClientSentry> for CreateClientSentry {
 
     fn try_from(value: StoredCreateClientSentry) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2302,10 +2305,10 @@ impl TryFrom<StoredCreateClientOtel> for CreateClientOtel {
 
     fn try_from(value: StoredCreateClientOtel) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2327,10 +2330,10 @@ impl TryFrom<StoredCreateClientPrometheus> for CreateClientPrometheus {
 
     fn try_from(value: StoredCreateClientPrometheus) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2352,10 +2355,10 @@ impl TryFrom<StoredCreateClientRabbitMq> for CreateClientRabbitMq {
 
     fn try_from(value: StoredCreateClientRabbitMq) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2377,10 +2380,10 @@ impl TryFrom<StoredCreateClientRedis> for CreateClientRedis {
 
     fn try_from(value: StoredCreateClientRedis) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2402,10 +2405,10 @@ impl TryFrom<StoredCreateClientMqtt> for CreateClientMqtt {
 
     fn try_from(value: StoredCreateClientMqtt) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2427,10 +2430,10 @@ impl TryFrom<StoredCreateClientNats> for CreateClientNats {
 
     fn try_from(value: StoredCreateClientNats) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2452,10 +2455,10 @@ impl TryFrom<StoredCreateClientZeroMq> for CreateClientZeroMq {
 
     fn try_from(value: StoredCreateClientZeroMq) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2477,10 +2480,10 @@ impl TryFrom<StoredCreateClientSqs> for CreateClientSqs {
 
     fn try_from(value: StoredCreateClientSqs) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2505,14 +2508,14 @@ impl TryFrom<StoredCreateClientWebsockets> for CreateClientWebsockets {
 
     fn try_from(value: StoredCreateClientWebsockets) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             signaling_protocol: value
                 .signaling_protocol
-                .map(|signaling_protocol| Identifier::parse(&signaling_protocol))
+                .map(|signaling_protocol| SignalingProtocolName::parse(&signaling_protocol))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2534,10 +2537,10 @@ impl TryFrom<StoredCreateClientClickHouse> for CreateClientClickHouse {
 
     fn try_from(value: StoredCreateClientClickHouse) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2559,10 +2562,10 @@ impl TryFrom<StoredCreateClientPostgres> for CreateClientPostgres {
 
     fn try_from(value: StoredCreateClientPostgres) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2584,10 +2587,10 @@ impl TryFrom<StoredCreateClientMySql> for CreateClientMySql {
 
     fn try_from(value: StoredCreateClientMySql) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2609,10 +2612,10 @@ impl TryFrom<StoredCreateClientMongoDb> for CreateClientMongoDb {
 
     fn try_from(value: StoredCreateClientMongoDb) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2634,10 +2637,10 @@ impl TryFrom<StoredCreateClientS3> for CreateClientS3 {
 
     fn try_from(value: StoredCreateClientS3) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2659,10 +2662,10 @@ impl TryFrom<StoredCreateClientGcs> for CreateClientGcs {
 
     fn try_from(value: StoredCreateClientGcs) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2684,10 +2687,10 @@ impl TryFrom<StoredCreateClientAzureBlob> for CreateClientAzureBlob {
 
     fn try_from(value: StoredCreateClientAzureBlob) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2709,10 +2712,10 @@ impl TryFrom<StoredCreateClientIcebergRest> for CreateClientIcebergRest {
 
     fn try_from(value: StoredCreateClientIcebergRest) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2734,10 +2737,10 @@ impl TryFrom<StoredCreateClientSyslog> for CreateClientSyslog {
 
     fn try_from(value: StoredCreateClientSyslog) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ClientName::parse(&value.name)?,
             mount: value
                 .mount
-                .map(|mount| Identifier::parse(&mount))
+                .map(|mount| ResourceName::parse(&mount))
                 .transpose()?,
             config: value.config.into_iter().map(Into::into).collect(),
         })
@@ -2759,7 +2762,7 @@ impl TryFrom<StoredCreateVhost> for CreateVhost {
 
     fn try_from(value: StoredCreateVhost) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: VhostName::parse(&value.name)?,
             hostnames: value.hostnames,
             tls: value.tls.map(TryInto::try_into).transpose()?,
         })
@@ -2780,7 +2783,7 @@ impl TryFrom<StoredVhostTlsResource> for VhostTlsResource {
 
     fn try_from(value: StoredVhostTlsResource) -> Result<Self, Self::Error> {
         Ok(Self {
-            resource: Identifier::parse(&value.resource)?,
+            resource: ResourceName::parse(&value.resource)?,
             version: value.version,
         })
     }
@@ -2805,13 +2808,13 @@ impl TryFrom<StoredCreateEndpoint> for CreateEndpoint {
 
     fn try_from(value: StoredCreateEndpoint) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
-            on_vhost: Identifier::parse(&value.on_vhost)?,
+            name: EndpointName::parse(&value.name)?,
+            on_vhost: VhostName::parse(&value.on_vhost)?,
             path: value.path,
             endpoint_type: value.endpoint_type.into(),
             signaling_protocol: value
                 .signaling_protocol
-                .map(|signaling_protocol| Identifier::parse(&signaling_protocol))
+                .map(|signaling_protocol| SignalingProtocolName::parse(&signaling_protocol))
                 .transpose()?,
         })
     }
@@ -2832,7 +2835,7 @@ impl TryFrom<StoredCreateSignalingProtocol> for CreateSignalingProtocol {
 
     fn try_from(value: StoredCreateSignalingProtocol) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: SignalingProtocolName::parse(&value.name)?,
             format: value.format.try_into()?,
             on_connect: value.on_connect.into(),
         })
@@ -2874,7 +2877,7 @@ impl TryFrom<StoredSignalingWireFormat> for SignalingWireFormat {
             StoredSignalingWireFormat::Raw => Self::Raw,
             StoredSignalingWireFormat::Protobuf(config) => {
                 Self::Protobuf(SignalingProtobufConfig {
-                    resource: Identifier::parse(&config.resource)?,
+                    resource: ResourceName::parse(&config.resource)?,
                     resource_version: config.resource_version,
                     config: config.config.into_iter().map(Into::into).collect(),
                     send_message: config.send_message,
@@ -2964,8 +2967,8 @@ impl TryFrom<StoredCreateGenerator> for CreateGenerator {
 
     fn try_from(value: StoredCreateGenerator) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
-            materialized_relay: Identifier::parse(&value.materialized_relay)?,
+            name: GeneratorName::parse(&value.name)?,
+            materialized_relay: RelayName::parse(&value.materialized_relay)?,
             branched_by: value.branched_by.try_into()?,
             each: value.each,
             output_routes: value.output_routes.try_into()?,
@@ -2993,23 +2996,29 @@ impl TryFrom<StoredCreatePlacement> for CreatePlacement {
     type Error = Report<StoredModelConversionError>;
 
     fn try_from(value: StoredCreatePlacement) -> Result<Self, Self::Error> {
-        let name = Identifier::parse(&value.name)
+        let name = ModelName::parse(&value.name)
             .change_context(StoredModelConversionError::InvalidName)?;
         let from = value
             .from
             .iter()
-            .map(|raw| Identifier::parse(raw))
+            .map(|raw| ModelName::parse(raw))
             .collect::<Result<Vec<_>, _>>()
             .change_context(StoredModelConversionError::InvalidName)?;
         let to = value
             .to
             .iter()
-            .map(|raw| Identifier::parse(raw))
+            .map(|raw| ModelName::parse(raw))
             .collect::<Result<Vec<_>, _>>()
             .change_context(StoredModelConversionError::InvalidName)?;
-        CreatePlacement::new(name, from, to, value.policy.into(), value.rank)
-            .map_err(Report::new)
-            .change_context(StoredModelConversionError::InvalidPlacement)
+        CreatePlacement::new(
+            PlacementName::from(&name),
+            from,
+            to,
+            value.policy.into(),
+            value.rank,
+        )
+        .map_err(Report::new)
+        .change_context(StoredModelConversionError::InvalidPlacement)
     }
 }
 
@@ -3076,7 +3085,7 @@ impl TryFrom<StoredMessageErrorPolicy> for MessageErrorPolicy {
             StoredMessageErrorPolicy::Ignore => Ok(Self::Ignore),
             StoredMessageErrorPolicy::Log => Ok(Self::Log),
             StoredMessageErrorPolicy::Dlq { relay, assignments } => Ok(Self::Dlq {
-                relay: Identifier::parse(&relay)?,
+                relay: RelayName::parse(&relay)?,
                 assignments,
             }),
         }
@@ -3136,14 +3145,14 @@ impl TryFrom<StoredCreateCodec> for CreateCodec {
 
     fn try_from(value: StoredCreateCodec) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: CodecName::parse(&value.name)?,
             wire_format: value.wire_format.try_into()?,
             wire_schema: value
                 .wire_schema
                 .as_deref()
-                .map(Identifier::parse)
+                .map(WireSchemaName::parse)
                 .transpose()?,
-            schema: Identifier::parse(&value.schema)?,
+            schema: SchemaName::parse(&value.schema)?,
             encoding_rules: value
                 .encoding_rules
                 .into_iter()
@@ -3210,7 +3219,7 @@ impl TryFrom<StoredCodecProtobufConfig> for CodecProtobufConfig {
 
     fn try_from(value: StoredCodecProtobufConfig) -> Result<Self, Self::Error> {
         Ok(Self {
-            resource: Identifier::parse(&value.resource)?,
+            resource: ResourceName::parse(&value.resource)?,
             resource_version: value.resource_version,
             config: value.config.into_iter().map(Into::into).collect(),
             message: value.message,
@@ -3275,7 +3284,7 @@ impl TryFrom<StoredCodecEncodingRule> for CodecEncodingRule {
 
     fn try_from(value: StoredCodecEncodingRule) -> Result<Self, Self::Error> {
         Ok(Self {
-            field: Identifier::parse(&value.field)?,
+            field: FieldName::parse(&value.field)?,
             encoding: value.encoding.into(),
         })
     }
@@ -3343,8 +3352,8 @@ impl TryFrom<StoredCreateBranch> for CreateBranch {
 
     fn try_from(value: StoredCreateBranch) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
-            schema: Identifier::parse(&value.schema)?,
+            name: BranchName::parse(&value.name)?,
+            schema: SchemaName::parse(&value.schema)?,
             ttl: value.ttl,
             eviction: value.eviction.map(Into::into),
         })
@@ -3368,7 +3377,7 @@ impl TryFrom<StoredBranchSelection> for BranchSelection {
     fn try_from(value: StoredBranchSelection) -> Result<Self, Self::Error> {
         Ok(match value {
             StoredBranchSelection::BranchedBy { branch } => {
-                BranchSelection::branched_by(Identifier::parse(&branch)?)
+                BranchSelection::branched_by(BranchName::parse(&branch)?)
             }
             StoredBranchSelection::Unbranched => BranchSelection::unbranched(),
         })
@@ -3392,7 +3401,7 @@ impl TryFrom<StoredProcessorOutput> for ProcessorOutput {
 
     fn try_from(value: StoredProcessorOutput) -> Result<Self, Self::Error> {
         Ok(Self {
-            relay: Identifier::parse(&value.relay)?,
+            relay: RelayName::parse(&value.relay)?,
             construction: value.construction,
             flush_policy: value.flush_policy.map(Into::into),
             message_error_policy: value.message_error_policy.try_into()?,
@@ -3433,7 +3442,7 @@ impl TryFrom<StoredProcessorInputWhere> for ProcessorInputWhere {
 
     fn try_from(value: StoredProcessorInputWhere) -> Result<Self, Self::Error> {
         Ok(Self {
-            relay: Identifier::parse(&value.relay)?,
+            relay: RelayName::parse(&value.relay)?,
             where_clause: value.where_clause,
         })
     }
@@ -3479,7 +3488,7 @@ impl TryFrom<StoredProcessorInputs> for ProcessorInputs {
             from: value
                 .from
                 .into_iter()
-                .map(|relay| Identifier::parse(&relay))
+                .map(|relay| RelayName::parse(&relay))
                 .collect::<Result<Vec<_>, _>>()?,
             r#where: value
                 .r#where
@@ -3518,9 +3527,9 @@ impl TryFrom<StoredCreateIngestor> for CreateIngestor {
 
     fn try_from(value: StoredCreateIngestor) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: IngestorName::parse(&value.name)?,
             output_routes: value.output_routes.try_into()?,
-            decode_using_codec: Identifier::parse(&value.decode_using_codec)?,
+            decode_using_codec: CodecName::parse(&value.decode_using_codec)?,
             timestamp_source: value.timestamp_source.map(TryInto::try_into).transpose()?,
             source: value.source.try_into()?,
             general_error_policy: value.general_error_policy.into(),
@@ -3544,7 +3553,7 @@ impl TryFrom<StoredIngestTimestampSource> for IngestTimestampSource {
     fn try_from(value: StoredIngestTimestampSource) -> Result<Self, Self::Error> {
         match value {
             StoredIngestTimestampSource::Now => Ok(Self::Now),
-            StoredIngestTimestampSource::At(field) => Ok(Self::At(Identifier::parse(&field)?)),
+            StoredIngestTimestampSource::At(field) => Ok(Self::At(FieldName::parse(&field)?)),
         }
     }
 }
@@ -3567,7 +3576,7 @@ impl TryFrom<StoredCreateReingestor> for CreateReingestor {
 
     fn try_from(value: StoredCreateReingestor) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ReingestorName::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
             mode: value.mode,
@@ -3601,11 +3610,11 @@ impl TryFrom<StoredCreateInferencer> for CreateInferencer {
 
     fn try_from(value: StoredCreateInferencer) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: InferencerName::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
             branched_by: value.branched_by.try_into()?,
-            resource: Identifier::parse(&value.resource)?,
+            resource: ResourceName::parse(&value.resource)?,
             resource_version: value.resource_version,
             file: value.file,
             inputs: value
@@ -3650,11 +3659,11 @@ impl TryFrom<StoredCreateWasmProcessor> for CreateWasmProcessor {
 
     fn try_from(value: StoredCreateWasmProcessor) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: WasmProcessorName::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
             branched_by: value.branched_by.try_into()?,
-            resource: Identifier::parse(&value.resource)?,
+            resource: ResourceName::parse(&value.resource)?,
             resource_version: value.resource_version,
             file: value.file,
             limits: nervix_models::WasmProcessorLimits {
@@ -3926,7 +3935,7 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 every,
                 quiesce,
             } => Ok(Self::Http {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
                 every,
                 quiesce: quiesce.into(),
             }),
@@ -3938,8 +3947,8 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::Kafka {
-                client: Identifier::parse(&client)?,
-                topic: Identifier::parse(&topic)?,
+                client: ClientName::parse(&client)?,
+                topic: TopicName::parse(&topic)?,
                 offset_mode: offset_mode.try_into()?,
                 instances,
                 mode: mode.into(),
@@ -3953,9 +3962,9 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::Pulsar {
-                client: Identifier::parse(&client)?,
-                topic: Identifier::parse(&topic)?,
-                subscription: Identifier::parse(&subscription)?,
+                client: ClientName::parse(&client)?,
+                topic: TopicName::parse(&topic)?,
+                subscription: PulsarSubscriptionName::parse(&subscription)?,
                 instances,
                 mode: PulsarIngestMode::from(mode),
                 quiesce: quiesce.into(),
@@ -3967,8 +3976,8 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::RabbitMq {
-                client: Identifier::parse(&client)?,
-                queue: Identifier::parse(&queue)?,
+                client: ClientName::parse(&client)?,
+                queue: QueueName::parse(&queue)?,
                 instances,
                 mode: mode.into(),
                 quiesce: quiesce.into(),
@@ -3979,8 +3988,8 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::RedisPubSub {
-                client: Identifier::parse(&client)?,
-                channel: Identifier::parse(&channel)?,
+                client: ClientName::parse(&client)?,
+                channel: ChannelName::parse(&channel)?,
                 mode: mode.into(),
                 quiesce: quiesce.into(),
             }),
@@ -3991,7 +4000,7 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::Mqtt {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
                 topic,
                 instances,
                 mode: mode.into(),
@@ -4005,9 +4014,9 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::Nats {
-                client: Identifier::parse(&client)?,
-                subject: Identifier::parse(&subject)?,
-                queue_group: Identifier::parse(&queue_group)?,
+                client: ClientName::parse(&client)?,
+                subject: SubjectName::parse(&subject)?,
+                queue_group: QueueGroupName::parse(&queue_group)?,
                 instances,
                 mode: mode.into(),
                 quiesce: quiesce.into(),
@@ -4018,7 +4027,7 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 every,
                 quiesce,
             } => Ok(Self::Prometheus {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
                 query,
                 every,
                 quiesce: quiesce.into(),
@@ -4028,7 +4037,7 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::ZeroMq {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
                 mode: mode.into(),
                 quiesce: quiesce.into(),
             }),
@@ -4039,8 +4048,8 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::Sqs {
-                client: Identifier::parse(&client)?,
-                queue: Identifier::parse(&queue)?,
+                client: ClientName::parse(&client)?,
+                queue: QueueName::parse(&queue)?,
                 instances,
                 mode: mode.into(),
                 quiesce: quiesce.into(),
@@ -4050,7 +4059,7 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::Endpoint {
-                endpoint: Identifier::parse(&endpoint)?,
+                endpoint: EndpointName::parse(&endpoint)?,
                 mode: mode.into(),
                 quiesce: quiesce.into(),
             }),
@@ -4059,12 +4068,12 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 mode,
                 quiesce,
             } => Ok(Self::Websockets {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
                 mode: mode.into(),
                 quiesce: quiesce.into(),
             }),
             StoredIngestSource::Syslog { client, quiesce } => Ok(Self::Syslog {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
                 quiesce: quiesce.into(),
             }),
         }
@@ -4124,7 +4133,7 @@ impl TryFrom<StoredKafkaOffsetMode> for KafkaOffsetMode {
     fn try_from(value: StoredKafkaOffsetMode) -> Result<Self, Self::Error> {
         match value {
             StoredKafkaOffsetMode::ConsumerGroup(group) => {
-                Ok(Self::ConsumerGroup(Identifier::parse(&group)?))
+                Ok(Self::ConsumerGroup(ConsumerGroupName::parse(&group)?))
             }
             StoredKafkaOffsetMode::Domain => Ok(Self::Domain),
         }
@@ -4493,13 +4502,13 @@ impl TryFrom<StoredCreateRelay> for CreateRelay {
     fn try_from(value: StoredCreateRelay) -> Result<Self, Self::Error> {
         let branching = match value.branching {
             StoredRelayBranching::BranchedBy { branch } => {
-                RelayBranching::branched_by(Identifier::parse(&branch)?)
+                RelayBranching::branched_by(BranchName::parse(&branch)?)
             }
             StoredRelayBranching::Unbranched => RelayBranching::unbranched(),
         };
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
-            schema: Identifier::parse(&value.schema)?,
+            name: RelayName::parse(&value.name)?,
+            schema: SchemaName::parse(&value.schema)?,
             buffer: value.buffer,
             branching,
             materialized_state: value.materialized_state.map(Into::into),
@@ -4540,11 +4549,11 @@ impl TryFrom<StoredCreateLookup> for CreateLookup {
 
     fn try_from(value: StoredCreateLookup) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
-            key_field: Identifier::parse(&value.key_field)?,
-            resource: Identifier::parse(&value.resource)?,
+            name: LookupName::parse(&value.name)?,
+            key_field: FieldName::parse(&value.key_field)?,
+            resource: ResourceName::parse(&value.resource)?,
             path: value.path,
-            decode_using_codec: Identifier::parse(&value.decode_using_codec)?,
+            decode_using_codec: CodecName::parse(&value.decode_using_codec)?,
         })
     }
 }
@@ -4570,7 +4579,7 @@ impl TryFrom<StoredCreateDeduplicator> for CreateDeduplicator {
 
     fn try_from(value: StoredCreateDeduplicator) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: DeduplicatorName::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
             branched_by: value.branched_by.try_into()?,
@@ -4607,7 +4616,7 @@ impl TryFrom<StoredCreateCorrelator> for CreateCorrelator {
 
     fn try_from(value: StoredCreateCorrelator) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: CorrelatorName::parse(&value.name)?,
             left: value.left.try_into()?,
             right: value.right.try_into()?,
             output_routes: value.output_routes.try_into()?,
@@ -4679,7 +4688,7 @@ impl TryFrom<StoredCorrelationTimeoutAction> for CorrelationTimeoutAction {
         match value {
             StoredCorrelationTimeoutAction::Drop => Ok(Self::Drop),
             StoredCorrelationTimeoutAction::SendTo { relay } => Ok(Self::SendTo {
-                relay: Identifier::parse(&relay)?,
+                relay: RelayName::parse(&relay)?,
             }),
         }
     }
@@ -4706,7 +4715,7 @@ impl TryFrom<StoredCreateReorderer> for CreateReorderer {
 
     fn try_from(value: StoredCreateReorderer) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: ReordererName::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
             branched_by: value.branched_by.try_into()?,
@@ -4740,7 +4749,7 @@ impl TryFrom<StoredCreateWindowProcessor> for CreateWindowProcessor {
 
     fn try_from(value: StoredCreateWindowProcessor) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: WindowProcessorName::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
             branched_by: value.branched_by.try_into()?,
@@ -4790,7 +4799,7 @@ impl TryFrom<StoredCreateJunction> for CreateJunction {
 
     fn try_from(value: StoredCreateJunction) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: JunctionName::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
             branched_by: value.branched_by.try_into()?,
@@ -4824,11 +4833,11 @@ impl TryFrom<StoredCreateEmitterPublishing> for CreateEmitter {
 
     fn try_from(value: StoredCreateEmitterPublishing) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: Identifier::parse(&value.name)?,
+            name: EmitterName::parse(&value.name)?,
             from: value.from.try_into()?,
             encode_using_codec: value
                 .encode_using_codec
-                .map(|codec| Identifier::parse(&codec))
+                .map(|codec| CodecName::parse(&codec))
                 .transpose()?,
             sink: Box::new(value.sink.try_into()?),
             flush_each: value.flush_each,
@@ -5223,41 +5232,41 @@ impl TryFrom<StoredEmitSink> for EmitSink {
     fn try_from(value: StoredEmitSink) -> Result<Self, Self::Error> {
         match value {
             StoredEmitSink::Kafka { client, topic } => Ok(Self::Kafka {
-                client: Identifier::parse(&client)?,
-                topic: Identifier::parse(&topic)?,
+                client: ClientName::parse(&client)?,
+                topic: TopicName::parse(&topic)?,
             }),
             StoredEmitSink::Pulsar { client, topic } => Ok(Self::Pulsar {
-                client: Identifier::parse(&client)?,
-                topic: Identifier::parse(&topic)?,
+                client: ClientName::parse(&client)?,
+                topic: TopicName::parse(&topic)?,
             }),
             StoredEmitSink::RemovedIntegration { .. } => Err(Report::new(NameError::Empty)
                 .attach_printable("stored model uses the removed Kinesis integration")),
             StoredEmitSink::RabbitMq { client, queue } => Ok(Self::RabbitMq {
-                client: Identifier::parse(&client)?,
-                queue: Identifier::parse(&queue)?,
+                client: ClientName::parse(&client)?,
+                queue: QueueName::parse(&queue)?,
             }),
             StoredEmitSink::Redis { client, channel } => Ok(Self::Redis {
-                client: Identifier::parse(&client)?,
-                channel: Identifier::parse(&channel)?,
+                client: ClientName::parse(&client)?,
+                channel: ChannelName::parse(&channel)?,
             }),
             StoredEmitSink::Mqtt { client, topic } => Ok(Self::Mqtt {
-                client: Identifier::parse(&client)?,
-                topic: Identifier::parse(&topic)?,
+                client: ClientName::parse(&client)?,
+                topic: TopicName::parse(&topic)?,
             }),
             StoredEmitSink::Nats { client, subject } => Ok(Self::Nats {
-                client: Identifier::parse(&client)?,
-                subject: Identifier::parse(&subject)?,
+                client: ClientName::parse(&client)?,
+                subject: SubjectName::parse(&subject)?,
             }),
             StoredEmitSink::ZeroMq { client } => Ok(Self::ZeroMq {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
             }),
             StoredEmitSink::Syslog { client } => Ok(Self::Syslog {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
             }),
             StoredEmitSink::Sqs { .. } => Err(Report::new(NameError::Empty)
                 .attach_printable("stored SQS emitter sink has no FIFO group contract")),
             StoredEmitSink::Sentry { client } => Ok(Self::Sentry {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
             }),
             StoredEmitSink::Otel {
                 client,
@@ -5267,7 +5276,7 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 resource,
                 scope,
             } => Ok(Self::Otel {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
                 signal: signal.into(),
                 values: values.into_iter().map(Into::into).collect(),
                 attributes: attributes.into_iter().map(Into::into).collect(),
@@ -5284,8 +5293,8 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 max_batch,
                 flush_each,
             } => Ok(Self::Postgres {
-                client: Identifier::parse(&client)?,
-                table: Identifier::parse(&table)?,
+                client: ClientName::parse(&client)?,
+                table: TableName::parse(&table)?,
                 values: values.into_iter().map(Into::into).collect(),
                 conflict_action: conflict_action.into(),
                 max_batch,
@@ -5299,8 +5308,8 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 max_batch,
                 flush_each,
             } => Ok(Self::MySql {
-                client: Identifier::parse(&client)?,
-                table: Identifier::parse(&table)?,
+                client: ClientName::parse(&client)?,
+                table: TableName::parse(&table)?,
                 values: values.into_iter().map(Into::into).collect(),
                 conflict_action: conflict_action.into(),
                 max_batch,
@@ -5314,8 +5323,8 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 max_batch,
                 flush_each,
             } => Ok(Self::MongoDb {
-                client: Identifier::parse(&client)?,
-                collection: Identifier::parse(&collection)?,
+                client: ClientName::parse(&client)?,
+                collection: CollectionName::parse(&collection)?,
                 values: values.into_iter().map(Into::into).collect(),
                 conflict_action: conflict_action.into(),
                 max_batch,
@@ -5334,8 +5343,8 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 max_commit_size,
             } => Ok(Self::Iceberg {
                 backend: backend.into(),
-                client: Identifier::parse(&client)?,
-                table: Identifier::parse(&table)?,
+                client: ClientName::parse(&client)?,
+                table: TableName::parse(&table)?,
                 values: values.into_iter().map(Into::into).collect(),
                 location,
                 catalog: catalog.into(),
@@ -5349,7 +5358,7 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 queue,
                 fifo_group,
             } => Ok(Self::Sqs {
-                client: Identifier::parse(&client)?,
+                client: ClientName::parse(&client)?,
                 queue,
                 fifo_group: fifo_group.map(Into::into),
             }),
@@ -5360,8 +5369,8 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 max_batch,
                 flush_each,
             } => Ok(Self::ClickHouse {
-                client: Identifier::parse(&client)?,
-                table: Identifier::parse(&table)?,
+                client: ClientName::parse(&client)?,
+                table: TableName::parse(&table)?,
                 values: values.into_iter().map(Into::into).collect(),
                 max_batch,
                 flush_each,
@@ -5384,8 +5393,8 @@ impl From<StoredIcebergCatalog> for IcebergCatalog {
     fn from(value: StoredIcebergCatalog) -> Self {
         match value {
             StoredIcebergCatalog::Rest { client } => Self::Rest {
-                client: Identifier::parse(&client)
-                    .expect("stored Iceberg REST catalog client must be a valid identifier"),
+                client: ClientName::parse(&client)
+                    .verified("the identifier was validated before it was stored"),
             },
         }
     }
@@ -5547,44 +5556,48 @@ impl From<StoredOtelScope> for OtelScope {
 mod tests {
     use super::*;
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::parse(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn processor_branched_by(schema: &str) -> BranchSelection {
-        BranchSelection::branched_by(identifier(&format!("by_{schema}")))
+        BranchSelection::branched_by(named(&format!("by_{schema}")))
     }
 
     #[test]
     fn stored_model_envelope_roundtrips_multiple_model_variants() {
         let models = vec![
             Model::Schema(CreateSchema {
-                name: identifier("events"),
+                name: named("events"),
                 fields: vec![SchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: ParseAsType::U32,
                     optional: false,
                     sensitive: false,
                 }],
             }),
             Model::WireJsonSchema(CreateWireSchema {
-                name: identifier("events_json"),
+                name: named("events_json"),
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: JsonType::Integer,
                     optional: false,
                 }],
             }),
             Model::Codec(CreateCodec {
-                name: identifier("syslog_codec"),
+                name: named("syslog_codec"),
                 wire_format: CodecWireFormat::Syslog,
                 wire_schema: None,
-                schema: identifier("events"),
+                schema: named("events"),
                 encoding_rules: Vec::new(),
             }),
             Model::ClientHttp(CreateClientHttp {
-                name: identifier("http_client"),
+                name: named("http_client"),
                 mount: None,
                 config: vec![
                     StoredClientConfigEntry {
@@ -5595,7 +5608,7 @@ mod tests {
                 ],
             }),
             Model::ClientSentry(CreateClientSentry {
-                name: identifier("sentry_client"),
+                name: named("sentry_client"),
                 mount: None,
                 config: vec![
                     StoredClientConfigEntry {
@@ -5606,7 +5619,7 @@ mod tests {
                 ],
             }),
             Model::ClientOtel(CreateClientOtel {
-                name: identifier("otel_client"),
+                name: named("otel_client"),
                 mount: None,
                 config: vec![
                     StoredClientConfigEntry {
@@ -5622,8 +5635,8 @@ mod tests {
                 ],
             }),
             Model::ClientSyslog(CreateClientSyslog {
-                name: identifier("syslog_client"),
-                mount: Some(identifier("syslog_tls")),
+                name: named("syslog_client"),
+                mount: Some(named("syslog_tls")),
                 config: vec![
                     StoredClientConfigEntry {
                         key: "protocol".to_string(),
@@ -5638,14 +5651,14 @@ mod tests {
                 ],
             }),
             Model::Endpoint(CreateEndpoint {
-                name: identifier("events_http"),
-                on_vhost: identifier("public"),
+                name: named("events_http"),
+                on_vhost: named("public"),
                 path: "/ingest".to_string(),
                 endpoint_type: EndpointType::Http,
                 signaling_protocol: None,
             }),
             Model::SignalingProtocol(CreateSignalingProtocol {
-                name: identifier("binance_ws"),
+                name: named("binance_ws"),
                 format: SignalingWireFormat::Json,
                 on_connect: SignalingProtocolOnConnect {
                     accept_data: false,
@@ -5660,9 +5673,9 @@ mod tests {
                 },
             }),
             Model::SignalingProtocol(CreateSignalingProtocol {
-                name: identifier("proto_ws"),
+                name: named("proto_ws"),
                 format: SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                    resource: identifier("proto_bundle"),
+                    resource: named("proto_bundle"),
                     resource_version: Some(1),
                     config: vec![nervix_models::ClientConfigEntry {
                         key: "file".to_string(),
@@ -5689,13 +5702,13 @@ mod tests {
                 },
             }),
             Model::Ingestor(CreateIngestor {
-                name: identifier("events_ingestor"),
-                output_routes: (ProcessorOutputs::single(identifier("events_stream")))
+                name: named("events_ingestor"),
+                output_routes: (ProcessorOutputs::single(named("events_stream")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                decode_using_codec: identifier("events_codec"),
+                decode_using_codec: named("events_codec"),
                 timestamp_source: None,
                 source: IngestSource::Http {
-                    client: identifier("http_client"),
+                    client: named("http_client"),
                     every: "5s".to_string(),
                     quiesce: IngestQuiesceMode::Suspend,
                 },
@@ -5704,13 +5717,13 @@ mod tests {
                 filter_where: None,
             }),
             Model::Ingestor(CreateIngestor {
-                name: identifier("syslog_ingestor"),
-                output_routes: (ProcessorOutputs::single(identifier("events_stream")))
+                name: named("syslog_ingestor"),
+                output_routes: (ProcessorOutputs::single(named("events_stream")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                decode_using_codec: identifier("syslog_codec"),
+                decode_using_codec: named("syslog_codec"),
                 timestamp_source: None,
                 source: IngestSource::Syslog {
-                    client: identifier("syslog_client"),
+                    client: named("syslog_client"),
                     quiesce: IngestQuiesceMode::Buffer {
                         max_size: "1MiB".to_string(),
                         overflow: IngestQuiesceOverflow::DropNewest,
@@ -5720,13 +5733,10 @@ mod tests {
                 filter_where: None,
             }),
             Model::Junction(CreateJunction {
-                name: identifier("events_junction"),
-                from: ProcessorInputs::new(
-                    vec![identifier("events_a"), identifier("events_b")],
-                    Vec::new(),
-                )
-                .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
-                output_routes: (ProcessorOutputs::single(identifier("events_stream")))
+                name: named("events_junction"),
+                from: ProcessorInputs::new(vec![named("events_a"), named("events_b")], Vec::new())
+                    .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
+                output_routes: (ProcessorOutputs::single(named("events_stream")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: processor_branched_by("events"),
                 mode: AckMode::Attached,
@@ -5734,11 +5744,11 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Reingestor(CreateReingestor {
-                name: identifier("events_splitter"),
-                from: ProcessorInputs::single(identifier("events_stream")),
+                name: named("events_splitter"),
+                from: ProcessorInputs::single(named("events_stream")),
                 output_routes: (ProcessorOutputs::new(vec![
                     ProcessorOutput {
-                        relay: identifier("events_errors"),
+                        relay: named("events_errors"),
                         construction: nervix_nspl::parse_route_construction(
                             r#"SET severity = lower(input.level) WHERE output.level = "error""#,
                         )
@@ -5747,7 +5757,7 @@ mod tests {
                         message_error_policy: MessageErrorPolicy::Log,
                         branch: None,
                     },
-                    ProcessorOutput::new(identifier("events_other")),
+                    ProcessorOutput::new(named("events_other")),
                 ]))
                 .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 mode: AckMode::Attached,
@@ -5755,10 +5765,10 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Reingestor(CreateReingestor {
-                name: identifier("events_forwarder"),
-                from: ProcessorInputs::single(identifier("events_stream")),
+                name: named("events_forwarder"),
+                from: ProcessorInputs::single(named("events_stream")),
                 output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
-                    relay: identifier("events_projected"),
+                    relay: named("events_projected"),
                     construction: nervix_nspl::parse_route_construction(
                         "INHERIT ALL EXCEPT raw SET normalized = lower(input.raw) WHERE \
                          output.active",
@@ -5777,10 +5787,10 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::WindowProcessor(CreateWindowProcessor {
-                name: identifier("events_window"),
-                from: ProcessorInputs::single(identifier("events_stream")),
+                name: named("events_window"),
+                from: ProcessorInputs::single(named("events_stream")),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
-                    relay: identifier("events_summary"),
+                    relay: named("events_summary"),
                     construction: nervix_nspl::parse_route_construction(
                         "SET count = COUNT(input.id)",
                     )
@@ -5803,11 +5813,11 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::WasmProcessor(CreateWasmProcessor {
-                name: identifier("events_guest"),
-                from: ProcessorInputs::single(identifier("events_stream")),
-                output_routes: ProcessorOutputs::single(identifier("events_projected")),
+                name: named("events_guest"),
+                from: ProcessorInputs::single(named("events_stream")),
+                output_routes: ProcessorOutputs::single(named("events_projected")),
                 branched_by: processor_branched_by("events"),
-                resource: identifier("events_guest_resource"),
+                resource: named("events_guest_resource"),
                 resource_version: Some(3),
                 file: "processor.wasm".to_string(),
                 limits: nervix_models::WasmProcessorLimits {
@@ -5820,13 +5830,13 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Emitter(CreateEmitter {
-                name: identifier("events_emitter"),
-                from: ProcessorInputs::single(identifier("events_stream"))
+                name: named("events_emitter"),
+                from: ProcessorInputs::single(named("events_stream"))
                     .with_collect_policy("50ms".to_string(), None),
-                encode_using_codec: Some(identifier("events_codec")),
+                encode_using_codec: Some(named("events_codec")),
                 sink: Box::new(EmitSink::Nats {
-                    client: identifier("nats_client"),
-                    subject: identifier("events_subject"),
+                    client: named("nats_client"),
+                    subject: named("events_subject"),
                 }),
                 publishing_mode: EmitterPublishingMode::NoAck {
                     retry_policy: RetryPolicy {
@@ -5843,11 +5853,11 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Emitter(CreateEmitter {
-                name: identifier("syslog_emitter"),
-                from: ProcessorInputs::single(identifier("events_stream")),
-                encode_using_codec: Some(identifier("syslog_codec")),
+                name: named("syslog_emitter"),
+                from: ProcessorInputs::single(named("events_stream")),
+                encode_using_codec: Some(named("syslog_codec")),
                 sink: Box::new(EmitSink::Syslog {
-                    client: identifier("syslog_client"),
+                    client: named("syslog_client"),
                 }),
                 publishing_mode: EmitterPublishingMode::NoAck {
                     retry_policy: RetryPolicy {
@@ -5863,11 +5873,11 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             Model::Emitter(CreateEmitter {
-                name: identifier("otel_metric_emitter"),
-                from: ProcessorInputs::single(identifier("events_stream")),
+                name: named("otel_metric_emitter"),
+                from: ProcessorInputs::single(named("events_stream")),
                 encode_using_codec: None,
                 sink: Box::new(EmitSink::Otel {
-                    client: identifier("otel_client"),
+                    client: named("otel_client"),
                     signal: OtelSignal::Metric(OtelMetric {
                         name: "request.duration".to_string(),
                         unit: "ms".to_string(),
@@ -5920,9 +5930,9 @@ mod tests {
             }),
             Model::Placement(
                 CreatePlacement::new(
-                    identifier("critical_corridor"),
-                    vec![identifier("events_ingestor"), identifier("events_junction")],
-                    vec![identifier("events_emitter")],
+                    named("critical_corridor"),
+                    vec![named("events_ingestor"), named("events_junction")],
+                    vec![named("events_emitter")],
                     PlacementPolicy::RequireColocation,
                     Some(1),
                 )
@@ -5941,16 +5951,16 @@ mod tests {
     fn stored_model_roundtrip_preserves_optional_schema_fields() {
         let models = vec![
             Model::Schema(CreateSchema {
-                name: identifier("events"),
+                name: named("events"),
                 fields: vec![
                     SchemaField {
-                        name: identifier("user_id"),
+                        name: named("user_id"),
                         ty: ParseAsType::U32,
                         optional: false,
                         sensitive: false,
                     },
                     SchemaField {
-                        name: identifier("nickname"),
+                        name: named("nickname"),
                         ty: ParseAsType::String,
                         optional: true,
                         sensitive: false,
@@ -5958,16 +5968,16 @@ mod tests {
                 ],
             }),
             Model::WireJsonSchema(CreateWireSchema {
-                name: identifier("events_json"),
+                name: named("events_json"),
                 strictness: Default::default(),
                 fields: vec![
                     WireSchemaField {
-                        name: identifier("user_id"),
+                        name: named("user_id"),
                         ty: JsonType::Integer,
                         optional: false,
                     },
                     WireSchemaField {
-                        name: identifier("nickname"),
+                        name: named("nickname"),
                         ty: JsonType::String,
                         optional: true,
                     },

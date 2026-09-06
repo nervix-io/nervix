@@ -51,7 +51,7 @@ Build configuration in dependency order:
    UDFs as needed.
 5. Define relays before nodes that read or write them.
 6. Define ingestors, processors, generators, and emitters in graph order.
-7. Define placement rules after every referenced runtime node and materialized relay exists.
+7. Define placement rules after every referenced runtime node, including each relay, exists.
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
 Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
@@ -130,6 +130,18 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
   separation policy exists. Lower `RANK` values are stronger, unranked rules are the weakest rule
   tier, and equal-rank different-policy claims conflict.
+- Treat every relay as a scheduled runtime node with one owner. `CAPACITY` bounds its one owner
+  buffer cluster-wide, while each producer node and remote consumer node contributes one fixed
+  in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
+  separate runtime-node kind. All relays are valid placement members and corridor hops.
+- Treat Endpoint and Syslog ingestors as cluster-wide listeners. Every client-source ingestor,
+  including an outbound WebSocket client, is single-owner and keeps its live assignment across
+  ordinary schedule recomputation; use drain, `RELOCATE`, or a hard colocation requirement when it
+  must move.
+- Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
+  chosen work onto a named cluster node. The selection is a kind-qualified list or a
+  `FROM ... TO ...` corridor, hard colocation groups always move whole, and the whole unit moves in
+  one gated handoff or not at all. It is a one-time move, not pinning.
 - An emitter may list multiple `FROM <relay> [WHERE <expr>]` inputs when every relay declares the
   same payload schema. Unlike ordinary processors, those inputs may use differently named
   branches. Keep collection separate per source relay and concrete branch, and remember that one
@@ -158,7 +170,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
   one-message batch guarantee. `MAX BATCH SIZE` counts logical Arrow value, offset, and validity
   bytes, not unused buffer capacity or object overhead. Windows use `WIDTH` and `STEP`; WASM output
-  cadence is controlled by the guest.
+  cadence is controlled by the guest. Choose `FLUSH` values as latency and boundary-cost controls,
+  not as a throughput lever: `MAX BATCH SIZE` only clamps a batch, and the flush tuning guidance
+  in the docs records which sinks benefit from larger batches.
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; `NO_ACK` has no in-flight ACK window and
   never accepts `MAX`.
 - End every ingestor source specification with an explicit source-supported `ON QUIESCE` body
@@ -199,11 +213,15 @@ When authoring a graph, provide:
 4. A short verification sequence using the relevant `SHOW`, `DESCRIBE`, lookup, or subscription
    commands.
 
-Use `DESCRIBE JUNCTION <junction>;` when the verification should include a junction's stored
+Use `DESCRIBE RELAY <relay>;` to verify its owner and optional state replicas; an ordinary relay
+reports no replicas. Use `DESCRIBE JUNCTION <junction>;` when the verification should include a junction's stored
 routing contract, scheduled placement, and local edge metrics.
 
 Use `SHOW PLACEMENTS;`, `DESCRIBE PLACEMENT <placement>;`, and `DESCRIBE DOMAIN;` to verify rule
-coverage, effective claims, colocation groups, and the domain default.
+coverage, effective claims, colocation groups, and the domain default. Use
+`DESCRIBE RELOCATION ...;` with the clauses of a planned `RELOCATE` to inspect the unit it would
+move, its quiesce level, the relays its hold would gate, and the preferences it would leave
+unsatisfied.
 
 Before returning the configuration, trace every reference to its declaration and check schema,
 branch, construction, flush, error, sensitivity, transaction, and external-provisioning contracts.

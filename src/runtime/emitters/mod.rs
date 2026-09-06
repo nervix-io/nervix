@@ -89,8 +89,8 @@ impl Default for EmitterBufferedMessages {
 #[derive(Clone)]
 pub(in crate::runtime) struct EmitterSinkContext {
     runtime: Runtime,
-    domain: Domain,
-    emitter: Identifier,
+    domain: DomainName,
+    emitter: EmitterName,
     error_policies: ErrorPolicies,
     temp_dir: Arc<PathBuf>,
     events: broadcast::Sender<RuntimeEvent>,
@@ -181,8 +181,8 @@ struct EmitterPublishingSettings {
 
 impl EmitterPublishingSettings {
     fn parse(
-        domain: &Domain,
-        emitter: &Identifier,
+        domain: &DomainName,
+        emitter: &EmitterName,
         sink: &EmitSink,
         mode: &EmitterPublishingMode,
     ) -> Result<Self, RuntimeError> {
@@ -327,8 +327,8 @@ impl EmitterPublishingSettings {
     }
 
     fn invalid_setting(
-        domain: &Domain,
-        emitter: &Identifier,
+        domain: &DomainName,
+        emitter: &EmitterName,
         reason: impl Into<String>,
     ) -> RuntimeError {
         RuntimeError::BuildDomainExecution {
@@ -342,8 +342,8 @@ impl EmitterPublishingSettings {
     }
 
     fn parse_confirmation(
-        domain: &Domain,
-        emitter: &Identifier,
+        domain: &DomainName,
+        emitter: &EmitterName,
         window: &EmitterAckWindow,
         ack_timeout: &str,
     ) -> Result<(usize, Duration), RuntimeError> {
@@ -404,11 +404,11 @@ impl EmitterPublishingSettings {
 
 struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
-    domain: &'a Domain,
-    emitter: &'a Identifier,
-    metric_relay: Option<&'a Identifier>,
+    domain: &'a DomainName,
+    emitter: &'a EmitterName,
+    metric_relay: Option<&'a RelayName>,
     error_policies: &'a ErrorPolicies,
-    source_filters: &'a HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
+    source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     sqs_fifo_group: Option<&'a CompiledSqsFifoGroup>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
@@ -1062,8 +1062,8 @@ impl EmitterRetrySchedule {
 fn compile_sql_values_program(
     label: &'static str,
     namespace: &'static str,
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[ClickHouseValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1083,7 +1083,7 @@ fn compile_sql_values_program(
         .map(|(index, mapping)| {
             Ok(nervix_models::Assignment {
                 target: nervix_models::AssignmentTarget::bare(
-                    Identifier::parse(&format!("c{index}")).map_err(|error| error.to_string())?,
+                    FieldName::parse(&format!("c{index}")).map_err(|error| error.to_string())?,
                 ),
                 value: mapping.expression.clone(),
             })
@@ -1214,8 +1214,8 @@ fn compile_sql_values_program(
 }
 
 fn compile_clickhouse_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[ClickHouseValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1232,8 +1232,8 @@ fn compile_clickhouse_values_program(
 }
 
 fn compile_postgres_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[PostgresValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1250,8 +1250,8 @@ fn compile_postgres_values_program(
 }
 
 fn compile_mysql_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[MySqlValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1268,8 +1268,8 @@ fn compile_mysql_values_program(
 }
 
 fn compile_mongodb_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[MongoDbValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1286,8 +1286,8 @@ fn compile_mongodb_values_program(
 }
 
 fn compile_iceberg_values_program(
-    domain: &Domain,
-    emitter: &Identifier,
+    domain: &DomainName,
+    emitter: &EmitterName,
     values: &[IcebergValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -1658,14 +1658,13 @@ impl SinkEmitter {
             buffered_messages,
         } = runtime;
         match (sink, client, catalog_client) {
-            (EmitSink::Kafka { .. }, Some(Model::ClientKafka(client)), _) => Self::from_result(
-                "kafka",
-                context,
-                publishing
-                    .broker_mode()
-                    .and_then(|mode| KafkaEmitter::new(client, resolved, mode)),
-            )
-            .map(Self::Kafka),
+            (EmitSink::Kafka { .. }, Some(Model::ClientKafka(client)), _) => {
+                let result = match publishing.broker_mode() {
+                    Ok(mode) => KafkaEmitter::new(client, resolved, mode),
+                    Err(error) => Err(error),
+                };
+                Self::from_result("kafka", context, result).map(Self::Kafka)
+            }
             (EmitSink::Pulsar { topic, .. }, Some(Model::ClientPulsar(client)), _) => {
                 let mode = match publishing.broker_mode() {
                     Ok(mode) => mode,
@@ -1699,21 +1698,18 @@ impl SinkEmitter {
                 }
             }
             (EmitSink::Mqtt { topic, .. }, Some(Model::ClientMqtt(client)), _) => {
-                Self::from_result(
-                    "mqtt",
-                    context,
-                    publishing.mqtt_mode().and_then(|mode| {
-                        MqttEmitter::new(
-                            client,
-                            resolved,
-                            topic,
-                            context,
-                            mode,
-                            publishing.retry_policy,
-                        )
-                    }),
-                )
-                .map(Self::Mqtt)
+                let result = match publishing.mqtt_mode() {
+                    Ok(mode) => MqttEmitter::new(
+                        client,
+                        resolved,
+                        topic,
+                        context,
+                        mode,
+                        publishing.retry_policy,
+                    ),
+                    Err(error) => Err(error),
+                };
+                Self::from_result("mqtt", context, result).map(Self::Mqtt)
             }
             (EmitSink::Nats { subject, .. }, Some(Model::ClientNats(client)), _) => {
                 let mode = match publishing.nats_mode() {
@@ -2734,7 +2730,7 @@ impl SinkEmitter {
                     .handle_structured_message_error(MessageErrorHandling {
                         domain: &context.domain,
                         node_kind: "emitter",
-                        node: &context.emitter,
+                        node: &ModelName::from(&context.emitter),
                         source_route: None,
                         policy: &context.error_policies.message,
                         message,
@@ -2771,15 +2767,16 @@ fn emitter_error_message(error: &Report<EmitterRuntimeError>) -> String {
 fn emitter_unavailable_reason(
     sink: &SinkEmitter,
     fault_injector: &EmitterFaultInjector,
-    emitter: &Identifier,
+    emitter: &EmitterName,
 ) -> Option<String> {
-    sink.missing_reason().map(str::to_owned).or_else(|| {
-        if let Some(EmitterFaultMode::Stall) = fault_injector.fault_mode(emitter) {
-            Some("fault injector stalled emitter publish".to_string())
-        } else {
-            None
-        }
-    })
+    if let Some(reason) = sink.missing_reason() {
+        return Some(reason.to_owned());
+    }
+    if let Some(EmitterFaultMode::Stall) = fault_injector.fault_mode(emitter) {
+        Some("fault injector stalled emitter publish".to_string())
+    } else {
+        None
+    }
 }
 
 async fn wait_for_emitter_work_cancel(work_cancel_rx: &mut watch::Receiver<bool>) {
@@ -2972,7 +2969,9 @@ async fn finish_rejected_records(
     for rejected in rejected {
         tokio::task::consume_budget().await;
         let (batch_index, row_index) = rejected.position;
-        let error = rejected.structured_error.unwrap_or_else(|| {
+        let error = if let Some(error) = rejected.structured_error {
+            error
+        } else {
             structured_message_error(
                 MessageErrorCode::External,
                 rejected.reason,
@@ -2980,7 +2979,7 @@ async fn finish_rejected_records(
                 None,
                 std::iter::empty(),
             )
-        });
+        };
         let batch = batches.get_mut(batch_index).ok_or_else(|| {
             Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
                 "record rejection references missing emitter batch {batch_index}"
@@ -3007,7 +3006,7 @@ async fn finish_rejected_records(
                     .handle_structured_message_error(MessageErrorHandling {
                         domain: &context.domain,
                         node_kind: "emitter",
-                        node: &context.emitter,
+                        node: &ModelName::from(&context.emitter),
                         source_route: None,
                         policy: &context.error_policies.message,
                         message: RelayMessage { key, record, acks },
@@ -3078,7 +3077,7 @@ impl EmitterTask {
         runtime: &Runtime,
         build: EmitterTaskBuildDeps<'_>,
         emitter: CreateEmitter,
-        inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
+        inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     ) -> Result<ScheduledEmitterTask, RuntimeError> {
         let EmitterTaskBuildDeps {
             domain,
@@ -3154,7 +3153,7 @@ impl EmitterTask {
             let program = compile_scoped_filter_program(
                 RuntimeCompileTarget {
                     domain,
-                    identifier: &emitter.name,
+                    identifier: &ModelName::from(&emitter.name),
                 },
                 Some(&source_filter.where_clause),
                 RuntimeVmSchema {
@@ -3176,7 +3175,10 @@ impl EmitterTask {
                     allow_metadata: false,
                 },
             )?
-            .expect("an emitter FROM WHERE expression must compile to a program");
+            .verified(
+                "a FROM WHERE clause is present here, and a present clause always compiles to a \
+                 program",
+            );
             source_filters.insert(source_filter.relay.clone(), program);
         }
         let client = clients.get(emitter.sink.client()).cloned();
@@ -3263,7 +3265,10 @@ impl EmitterTask {
                 Some(quiesce_counters),
                 command_rx,
             )
-            .expect("validated emitter inputs must build a relay interaction");
+            .verified(
+                "the registry validated this emitter's inputs, and a non-empty input list builds \
+                 an interaction",
+            );
             let context = EmitterSinkContext {
                 runtime: runtime.clone(),
                 domain: task_domain.clone(),
@@ -3345,7 +3350,7 @@ impl EmitterTask {
                         continue;
                     }
                 };
-                let (input_event, _work) = work.into_parts();
+                let (input_event, mut work) = work.into_parts();
                 match input_event {
                     RelayInteractionEvent::Command(EmitterTaskCommand::Reconfigure {
                         config,
@@ -3717,9 +3722,9 @@ impl EmitterTask {
                             .observe_global_node_received(NodeBatchObservation {
                                 domain: &task_domain,
                                 kind: ModelKind::Emitter,
-                                node: &task_emitter,
+                                node: &ModelName::from(&task_emitter),
                                 relay: &input_relay,
-                                physical_node_id: physical_node_id.as_deref(),
+                                physical_node_id: physical_node_id.as_ref(),
                                 messages: batch.message_count(),
                                 bytes: batch.estimated_bytes(),
                                 domain_timestamp: delivery_observation.domain_timestamp,
@@ -3736,9 +3741,9 @@ impl EmitterTask {
                                     NodeLatencyObservation {
                                         domain: &task_domain,
                                         kind: ModelKind::Emitter,
-                                        node: &task_emitter,
+                                        node: &ModelName::from(&task_emitter),
                                         relay: &input_relay,
-                                        physical_node_id: physical_node_id.as_deref(),
+                                        physical_node_id: physical_node_id.as_ref(),
                                         seconds,
                                         domain_timestamp: delivery_observation.domain_timestamp,
                                     },
@@ -3751,6 +3756,7 @@ impl EmitterTask {
                                 batch,
                                 &mut work_cancel_rx,
                                 wait_for_required_state,
+                                work.as_mut(),
                             )
                             .await
                         {
@@ -3831,7 +3837,7 @@ impl EmitterTask {
                                 &mut emitter_buffer,
                                 pending_batch
                                     .as_ref()
-                                    .expect("pending emitter batch must exist")
+                                    .verified("this branch only runs while a batch is pending")
                                     .clone(),
                             )
                             .await;
@@ -3921,7 +3927,7 @@ impl EmitterTask {
 
 fn resolve_emitter_client(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     sink: &EmitSink,
     client: Option<&Model>,
 ) -> Result<Option<ResolvedClientConfig>, RuntimeError> {
@@ -3947,23 +3953,21 @@ fn resolve_emitter_client(
         (EmitSink::ZeroMq { .. }, Some(Model::ClientZeroMq(client))) => {
             Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
-        (EmitSink::Syslog { .. }, Some(Model::ClientSyslog(client))) => Some(
-            runtime
-                .resolve_client_config(domain, client.mount.as_ref(), &client.config)
-                .and_then(|resolved| {
-                    let config = crate::runtime::syslog::SyslogClientConfig::parse(
-                        &resolved.entries,
-                        crate::runtime::syslog::SyslogDirection::Emit,
-                    )
+        (EmitSink::Syslog { .. }, Some(Model::ClientSyslog(client))) => Some((|| {
+            let resolved =
+                runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config)?;
+            let config = crate::runtime::syslog::SyslogClientConfig::parse(
+                &resolved.entries,
+                crate::runtime::syslog::SyslogDirection::Emit,
+            )
+            .map_err(|error| error.to_string())?;
+            if config.protocol == crate::runtime::syslog::SyslogProtocol::Tls {
+                config
+                    .tls_client_config()
                     .map_err(|error| error.to_string())?;
-                    if config.protocol == crate::runtime::syslog::SyslogProtocol::Tls {
-                        config
-                            .tls_client_config()
-                            .map_err(|error| error.to_string())?;
-                    }
-                    Ok(resolved)
-                }),
-        ),
+            }
+            Ok(resolved)
+        })()),
         (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client))) => {
             Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
@@ -4022,7 +4026,7 @@ fn resolve_emitter_client(
 
 fn resolve_emitter_catalog_client(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     sink: &EmitSink,
     client: Option<&Model>,
 ) -> Result<Option<ResolvedClientConfig>, RuntimeError> {
@@ -4059,9 +4063,9 @@ impl EmitterBatchContext<'_> {
                 .observe_global_node_sent(NodeBatchObservation {
                     domain: self.domain,
                     kind: ModelKind::Emitter,
-                    node: self.emitter,
+                    node: &ModelName::from(self.emitter),
                     relay,
-                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    physical_node_id: self.runtime.local_node_id.read().as_ref(),
                     messages: report.messages,
                     bytes: report.bytes,
                     domain_timestamp: Some(report.domain_timestamp),
@@ -4072,8 +4076,8 @@ impl EmitterBatchContext<'_> {
                 .observe_global_node_without_stream_sent(NodeWithoutRelayObservation {
                     domain: self.domain,
                     kind: ModelKind::Emitter,
-                    node: self.emitter,
-                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    node: &ModelName::from(self.emitter),
+                    physical_node_id: self.runtime.local_node_id.read().as_ref(),
                     messages: report.messages,
                     bytes: report.bytes,
                     domain_timestamp: Some(report.domain_timestamp),
@@ -4128,7 +4132,7 @@ impl EmitterBatchContext<'_> {
                 .handle_structured_message_error(MessageErrorHandling {
                     domain: self.domain,
                     node_kind: "emitter",
-                    node: self.emitter,
+                    node: &ModelName::from(self.emitter),
                     source_route: None,
                     policy: &self.error_policies.message,
                     message,
@@ -4149,10 +4153,11 @@ impl EmitterBatchContext<'_> {
 
     async fn process(
         &self,
-        input_relay: &Identifier,
+        input_relay: &RelayName,
         batch: RelayRecordBatch,
         shutdown_rx: &mut watch::Receiver<bool>,
         wait_for_required_state: bool,
+        quiesce_work: Option<&mut NodeQuiesceWorkGuard>,
     ) -> Option<EmitterPublishBatch> {
         let dependency_error_acks = batch.acks.clone();
         let batch = match self
@@ -4162,8 +4167,11 @@ impl EmitterBatchContext<'_> {
                 input_relay,
                 self.materialized_state,
                 batch,
-                shutdown_rx,
-                wait_for_required_state,
+                MaterializedBatchWaitContext {
+                    shutdown_rx,
+                    wait_for_required_state,
+                    quiesce_work,
+                },
             )
             .await
         {
@@ -4268,12 +4276,11 @@ impl EmitterBatchContext<'_> {
                 let selected_sqs_message_groups = plan
                     .source_rows
                     .iter()
-                    .map(|row| {
-                        sqs_message_groups.get(*row).cloned().unwrap_or_else(|| {
-                            Err(format!(
-                                "SQS FIFO group source row {row} is outside the source batch"
-                            ))
-                        })
+                    .map(|row| match sqs_message_groups.get(*row) {
+                        Some(group) => group.clone(),
+                        None => Err(format!(
+                            "SQS FIFO group source row {row} is outside the source batch"
+                        )),
                     })
                     .collect::<Vec<_>>();
                 self.runtime
@@ -4323,7 +4330,7 @@ impl EmitterBatchContext<'_> {
 
     async fn filter_source_batch(
         &self,
-        input_relay: &Identifier,
+        input_relay: &RelayName,
         batch: RelayRecordBatch,
         side_inputs: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
@@ -4375,8 +4382,12 @@ impl EmitterBatchContext<'_> {
 mod publishing_mode_tests {
     use super::*;
 
-    fn identifier(value: &str) -> Identifier {
-        Identifier::try_from(value).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn retry(backoff: &str, max_backoff: &str) -> RetryPolicy {
@@ -4388,15 +4399,15 @@ mod publishing_mode_tests {
 
     fn kafka_sink() -> EmitSink {
         EmitSink::Kafka {
-            client: identifier("kafka_client"),
-            topic: identifier("events"),
+            client: named("kafka_client"),
+            topic: named("events"),
         }
     }
 
     #[test]
     fn parses_declared_emitter_retry_confirmation_window_and_timeout() {
-        let domain = Domain::try_from("test").expect("valid domain");
-        let emitter = identifier("out");
+        let domain = DomainName::try_from("test").expect("valid domain");
+        let emitter = named("out");
         let settings = EmitterPublishingSettings::parse(
             &domain,
             &emitter,
@@ -4422,14 +4433,14 @@ mod publishing_mode_tests {
 
     #[test]
     fn parses_transport_specific_mqtt_and_jetstream_confirmation_modes() {
-        let domain = Domain::try_from("test").expect("valid domain");
-        let emitter = identifier("out");
+        let domain = DomainName::try_from("test").expect("valid domain");
+        let emitter = named("out");
         let mqtt = EmitterPublishingSettings::parse(
             &domain,
             &emitter,
             &EmitSink::Mqtt {
-                client: identifier("mqtt_client"),
-                topic: identifier("events"),
+                client: named("mqtt_client"),
+                topic: named("events"),
             },
             &EmitterPublishingMode::MqttQos2 {
                 window: EmitterAckWindow::Sequential,
@@ -4450,8 +4461,8 @@ mod publishing_mode_tests {
             &domain,
             &emitter,
             &EmitSink::Nats {
-                client: identifier("nats_client"),
-                subject: identifier("events"),
+                client: named("nats_client"),
+                subject: named("events"),
             },
             &EmitterPublishingMode::NatsJetStream {
                 window: EmitterAckWindow::Parallel { max: 23 },
@@ -4471,8 +4482,8 @@ mod publishing_mode_tests {
 
     #[test]
     fn rejects_zero_window_foreign_mode_and_inverted_retry_bounds() {
-        let domain = Domain::try_from("test").expect("valid domain");
-        let emitter = identifier("out");
+        let domain = DomainName::try_from("test").expect("valid domain");
+        let emitter = named("out");
         let zero_window = EmitterPublishingSettings::parse(
             &domain,
             &emitter,
@@ -4614,9 +4625,9 @@ mod publishing_mode_tests {
     #[tokio::test]
     async fn cancelled_message_error_delivery_keeps_the_record_pending() {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
-            name: identifier("events"),
+            name: named("events"),
             fields: vec![nervix_models::SchemaField {
-                name: identifier("value"),
+                name: named("value"),
                 ty: nervix_models::ParseAsType::String,
                 optional: false,
                 sensitive: false,
@@ -4659,9 +4670,9 @@ mod publishing_mode_tests {
     #[tokio::test]
     async fn rejected_record_ack_remains_held_for_message_error_delivery() {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
-            name: identifier("events"),
+            name: named("events"),
             fields: vec![nervix_models::SchemaField {
-                name: identifier("value"),
+                name: named("value"),
                 ty: nervix_models::ParseAsType::String,
                 optional: false,
                 sensitive: false,
@@ -4703,17 +4714,22 @@ mod publishing_mode_tests {
 mod tests {
     use std::sync::OnceLock;
 
-    use nervix_models::{CreateSchema, ParseAsType};
+    use nervix_models::{
+        ChannelName, ClientName, CollectionName, CreateSchema, DomainName, EmitterName, ModelName,
+        ParseAsType, QueueName, RelayName, SchemaName, SubjectName, TableName, TopicName,
+    };
 
     use super::*;
 
     fn input_schema() -> Arc<CompiledSchema> {
         static SCHEMA: OnceLock<Arc<CompiledSchema>> = OnceLock::new();
-        let value = Identifier::parse("value").expect("valid field name");
+        let value = FieldName::parse("value").expect("valid field name");
         SCHEMA
             .get_or_init(|| {
                 Arc::new(compile_schema(&CreateSchema {
-                    name: Identifier::parse("emitter_input").expect("valid schema name"),
+                    name: SchemaName::from(
+                        &ModelName::parse("emitter_input").expect("valid schema name"),
+                    ),
                     fields: vec![nervix_models::SchemaField {
                         name: value,
                         ty: ParseAsType::I64,
@@ -4752,8 +4768,8 @@ mod tests {
         let (events, _) = broadcast::channel(4);
         EmitterSinkContext {
             runtime: Runtime::default(),
-            domain: Domain::parse("emitter_tests").expect("valid domain"),
-            emitter: Identifier::parse("output").expect("valid emitter name"),
+            domain: DomainName::parse("emitter_tests").expect("valid domain"),
+            emitter: EmitterName::parse("output").expect("valid emitter name"),
             error_policies: ErrorPolicies::handled_by_log(),
             temp_dir: Arc::new(PathBuf::new()),
             events,
@@ -4926,8 +4942,8 @@ mod tests {
         };
         let context = sink_context();
         let sink_config = EmitSink::Nats {
-            client: Identifier::parse("client").expect("valid client name"),
-            subject: Identifier::parse("subject").expect("valid subject name"),
+            client: ClientName::parse("client").expect("valid client name"),
+            subject: SubjectName::parse("subject").expect("valid subject name"),
         };
         let mut sink = SinkEmitter::Missing {
             reason: "test sink intentionally has no client".to_string(),
@@ -5168,8 +5184,8 @@ mod tests {
         };
         let context = sink_context();
         let sink_config = EmitSink::Nats {
-            client: Identifier::parse("client").expect("valid client name"),
-            subject: Identifier::parse("subject").expect("valid subject name"),
+            client: ClientName::parse("client").expect("valid client name"),
+            subject: SubjectName::parse("subject").expect("valid subject name"),
         };
         let mut sink = SinkEmitter::Missing {
             reason: "test sink intentionally has no client".to_string(),
@@ -5403,8 +5419,8 @@ mod tests {
             backoff: &mut backoff,
         };
         let context = sink_context();
-        let client = Identifier::parse("client").expect("valid client name");
-        let subject = Identifier::parse("subject").expect("valid subject name");
+        let client = ClientName::parse("client").expect("valid client name");
+        let subject = SubjectName::parse("subject").expect("valid subject name");
         let sink_config = EmitSink::Nats { client, subject };
         let mut sink = SinkEmitter::Missing {
             reason: "test sink intentionally has no client".to_string(),
@@ -5533,65 +5549,82 @@ mod tests {
 
     #[test]
     fn every_sink_has_a_stable_diagnostic_label() {
-        let id = Identifier::parse("target").expect("valid identifier");
-        let catalog = IcebergCatalog::Rest { client: id.clone() };
+        let id = RelayName::parse("target").expect("valid relay name");
+        let catalog = IcebergCatalog::Rest {
+            client: ClientName::parse("target").expect("valid name"),
+        };
         let sinks = vec![
             (
                 EmitSink::Kafka {
-                    client: id.clone(),
-                    topic: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    topic: TopicName::parse("target").expect("valid name"),
                 },
                 "kafka",
             ),
             (
                 EmitSink::Pulsar {
-                    client: id.clone(),
-                    topic: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    topic: TopicName::parse("target").expect("valid name"),
                 },
                 "pulsar",
             ),
             (
                 EmitSink::RabbitMq {
-                    client: id.clone(),
-                    queue: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    queue: QueueName::parse("target").expect("valid name"),
                 },
                 "rabbitmq",
             ),
             (
                 EmitSink::Redis {
-                    client: id.clone(),
-                    channel: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    channel: ChannelName::parse("target").expect("valid name"),
                 },
                 "redis",
             ),
             (
                 EmitSink::Mqtt {
-                    client: id.clone(),
-                    topic: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    topic: TopicName::parse("target").expect("valid name"),
                 },
                 "mqtt",
             ),
             (
                 EmitSink::Nats {
-                    client: id.clone(),
-                    subject: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    subject: SubjectName::parse("target").expect("valid name"),
                 },
                 "nats",
             ),
-            (EmitSink::ZeroMq { client: id.clone() }, "zeromq"),
-            (EmitSink::Syslog { client: id.clone() }, "syslog"),
+            (
+                EmitSink::ZeroMq {
+                    client: ClientName::parse("target").expect("valid name"),
+                },
+                "zeromq",
+            ),
+            (
+                EmitSink::Syslog {
+                    client: ClientName::parse("target").expect("valid name"),
+                },
+                "syslog",
+            ),
             (
                 EmitSink::Sqs {
-                    client: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
                     queue: id.as_str().to_string(),
                     fifo_group: None,
                 },
                 "sqs",
             ),
-            (EmitSink::Sentry { client: id.clone() }, "sentry"),
+            (
+                EmitSink::Sentry {
+                    client: ClientName::parse("target").expect("valid name"),
+                },
+                "sentry",
+            ),
             (
                 EmitSink::Otel {
-                    client: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
                     signal: OtelSignal::Logs,
                     values: Vec::new(),
                     attributes: Vec::new(),
@@ -5602,8 +5635,8 @@ mod tests {
             ),
             (
                 EmitSink::ClickHouse {
-                    client: id.clone(),
-                    table: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    table: TableName::parse("target").expect("valid name"),
                     values: Vec::new(),
                     max_batch: 1,
                     flush_each: "1s".to_string(),
@@ -5612,8 +5645,8 @@ mod tests {
             ),
             (
                 EmitSink::Postgres {
-                    client: id.clone(),
-                    table: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    table: TableName::parse("target").expect("valid name"),
                     values: Vec::new(),
                     conflict_action: PostgresConflictAction::None,
                     max_batch: 1,
@@ -5623,8 +5656,8 @@ mod tests {
             ),
             (
                 EmitSink::MySql {
-                    client: id.clone(),
-                    table: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    table: TableName::parse("target").expect("valid name"),
                     values: Vec::new(),
                     conflict_action: MySqlConflictAction::None,
                     max_batch: 1,
@@ -5634,8 +5667,8 @@ mod tests {
             ),
             (
                 EmitSink::MongoDb {
-                    client: id.clone(),
-                    collection: id.clone(),
+                    client: ClientName::parse("target").expect("valid name"),
+                    collection: CollectionName::parse("target").expect("valid name"),
                     values: Vec::new(),
                     conflict_action: MongoDbConflictAction::None,
                     max_batch: 1,
@@ -5646,8 +5679,8 @@ mod tests {
             (
                 EmitSink::Iceberg {
                     backend: IcebergStorageBackend::S3,
-                    client: id.clone(),
-                    table: id,
+                    client: ClientName::parse("target").expect("valid name"),
+                    table: TableName::parse("target").expect("valid name"),
                     values: Vec::new(),
                     location: "s3://bucket/table".to_string(),
                     catalog,
@@ -5694,8 +5727,8 @@ mod tests {
 
     #[test]
     fn sql_value_compilers_reject_empty_mappings_before_compilation() {
-        let domain = Domain::parse("emitter_tests").expect("valid domain");
-        let emitter = Identifier::parse("output").expect("valid emitter name");
+        let domain = DomainName::parse("emitter_tests").expect("valid domain");
+        let emitter = EmitterName::parse("output").expect("valid emitter name");
         let schema = input_schema().arrow_schema();
 
         let errors = [

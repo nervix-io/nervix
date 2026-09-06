@@ -15,5 +15,5 @@ fn main() {
             &["../../proto/io/nervix/api/v1/nervix.proto"],
             &["../../proto"],
         )
-        .expect("failed to compile protobuf definitions");
+        .unwrap_or_else(|error| panic!("failed to compile the protobuf definitions: {error}"));
 }

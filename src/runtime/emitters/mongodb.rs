@@ -10,6 +10,7 @@ use ::mongodb::{
         UpdateOneModel as MongoDbUpdateOneModel, WriteModel as MongoDbWriteModel,
     },
 };
+use nervix_models::CollectionName;
 
 use super::*;
 
@@ -313,7 +314,7 @@ impl MongoDbEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        collection: &Identifier,
+        collection: &CollectionName,
         values: &[MongoDbValueMapping],
         conflict_action: &MongoDbConflictAction,
         batch: &RelayRecordBatch,
@@ -397,17 +398,23 @@ impl MongoDbEmitter {
             let chunk_documents = match chunk
                 .iter()
                 .map(|row| {
-                    documents
-                        .get(*row)
-                        .and_then(|document| document.as_ref().ok())
-                        .cloned()
-                        .ok_or_else(|| {
-                            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    let Some(document) = documents.get(*row) else {
+                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                            .attach_printable(format!(
                                 "mongodb pending row {row} has no mapped document in batch with \
                                  {} rows",
                                 documents.len()
-                            ))
-                        })
+                            )));
+                    };
+                    let Ok(document) = document else {
+                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                            .attach_printable(format!(
+                                "mongodb pending row {row} has no mapped document in batch with \
+                                 {} rows",
+                                documents.len()
+                            )));
+                    };
+                    Ok(document.clone())
                 })
                 .collect::<EmitterRuntimeResult<Vec<_>>>()
             {

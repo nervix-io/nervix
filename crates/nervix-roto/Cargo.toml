@@ -15,6 +15,7 @@ arrow-cast = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
 fastrand = { workspace = true }
+meticulous = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
 nervix-vm = { workspace = true }

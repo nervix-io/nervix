@@ -1,18 +1,41 @@
+use std::borrow::Cow;
+
 use lapin::{
     Connection, ConnectionProperties,
     options::{BasicAckOptions, BasicConsumeOptions, BasicQosOptions},
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
+use nervix_models::DomainName;
 
 use super::super::*;
 
 pub(in crate::runtime) struct RabbitMqIngestor;
 
+/// The AMQP headers of one borrowed delivery.
+///
+/// Appending reads them out of the delivery properties, so a delivery without headers
+/// costs nothing and a value only allocates when its AMQP type is not already a string.
+struct RabbitMqDeliveryHeaders<'a>(&'a lapin::message::Delivery);
+
+impl IngestMessageHeaders for RabbitMqDeliveryHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        let Some(headers) = self.0.properties.headers().as_ref() else {
+            return;
+        };
+        for (name, value) in headers {
+            visit(
+                name.as_str(),
+                RabbitMqIngestor::header_value(value).as_ref(),
+            );
+        }
+    }
+}
+
 impl RabbitMqIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientRabbitMq,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -57,7 +80,9 @@ impl RabbitMqIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled RabbitMQ ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
         let ack_timeout = match &ack_mode {
             RabbitMqIngestMode::AckSequential { timeout, .. } => {
                 Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?
@@ -223,7 +248,7 @@ impl RabbitMqIngestor {
                                 match delivery {
                                     Some(Ok(delivery)) => {
                                         let key = delivery.routing_key.as_str().to_string();
-                                        let headers = Self::headers_from_delivery(&delivery);
+                                        let headers = RabbitMqDeliveryHeaders(&delivery);
                                         let payload = delivery.data.as_slice();
 
                                         trace!(
@@ -248,8 +273,11 @@ impl RabbitMqIngestor {
                                                         let metadata = [IngestMetadataRow::Headers {
                                                             headers: &headers,
                                                         }];
-                                                        let (acks, completion) =
-                                                            task_runtime.tracked_ack_root(&task_domain);
+                                                        let (acks, completion) = task_runtime
+                                                            .tracked_ingestor_ack_root(
+                                                                &task_domain,
+                                                                &task_ingestor,
+                                                            );
                                                         let dispatch_result = task_runtime
                                                             .dispatch_ingested_records(IngestGroupDispatch {
                                                                 collector: &mut collector,
@@ -277,10 +305,11 @@ impl RabbitMqIngestor {
                                                                 &mut collector,
                                                             )
                                                             .await;
-                                                        let dispatched = dispatch_result
+                                                        let dispatched = match dispatch_result
                                                             .and(flush_result)
-                                                            .map(|()| true)
-                                                            .unwrap_or_else(|error| {
+                                                        {
+                                                            Ok(()) => true,
+                                                            Err(error) => {
                                                                 let _ = task_events.send(RuntimeEvent::Error(format!(
                                                                     "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
@@ -288,7 +317,8 @@ impl RabbitMqIngestor {
                                                                     error
                                                                 )));
                                                                 false
-                                                            });
+                                                            }
+                                                        };
                                                         if dispatched {
                                                             acks.ack_success();
                                                             match Runtime::await_ack_completion(
@@ -449,56 +479,41 @@ impl RabbitMqIngestor {
         }
     }
 
-    fn headers_from_delivery(delivery: &lapin::message::Delivery) -> IngestHeaders {
-        delivery
-            .properties
-            .headers()
-            .as_ref()
-            .map(|headers| {
-                headers
-                    .into_iter()
-                    .map(|(name, value)| {
-                        (
-                            name.as_str().to_string(),
-                            Self::header_value_to_string(value),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn header_value_to_string(value: &AMQPValue) -> String {
+    fn header_value(value: &AMQPValue) -> Cow<'_, str> {
         match value {
-            AMQPValue::Boolean(value) => value.to_string(),
-            AMQPValue::ShortShortInt(value) => value.to_string(),
-            AMQPValue::ShortShortUInt(value) => value.to_string(),
-            AMQPValue::ShortInt(value) => value.to_string(),
-            AMQPValue::ShortUInt(value) => value.to_string(),
-            AMQPValue::LongInt(value) => value.to_string(),
-            AMQPValue::LongUInt(value) => value.to_string(),
-            AMQPValue::LongLongInt(value) => value.to_string(),
-            AMQPValue::Float(value) => value.to_string(),
-            AMQPValue::Double(value) => value.to_string(),
-            AMQPValue::DecimalValue(value) => format!("{}:{}", value.scale, value.value),
-            AMQPValue::ShortString(value) => value.as_str().to_string(),
-            AMQPValue::LongString(value) => value.to_string(),
-            AMQPValue::FieldArray(value) => value
-                .as_slice()
-                .iter()
-                .map(Self::header_value_to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-            AMQPValue::FieldTable(value) => value
-                .into_iter()
-                .map(|(name, value)| {
-                    format!("{}={}", name.as_str(), Self::header_value_to_string(value))
-                })
-                .collect::<Vec<_>>()
-                .join(","),
-            AMQPValue::Timestamp(value) => value.to_string(),
-            AMQPValue::ByteArray(value) => String::from_utf8_lossy(value.as_slice()).to_string(),
-            AMQPValue::Void => String::new(),
+            AMQPValue::Boolean(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ShortShortInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ShortShortUInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ShortInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ShortUInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::LongInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::LongUInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::LongLongInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::Float(value) => Cow::Owned(value.to_string()),
+            AMQPValue::Double(value) => Cow::Owned(value.to_string()),
+            AMQPValue::DecimalValue(value) => {
+                Cow::Owned(format!("{}:{}", value.scale, value.value))
+            }
+            AMQPValue::ShortString(value) => Cow::Borrowed(value.as_str()),
+            AMQPValue::LongString(value) => String::from_utf8_lossy(value.as_bytes()),
+            AMQPValue::FieldArray(value) => Cow::Owned(
+                value
+                    .as_slice()
+                    .iter()
+                    .map(|value| Self::header_value(value).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            AMQPValue::FieldTable(value) => Cow::Owned(
+                value
+                    .into_iter()
+                    .map(|(name, value)| format!("{}={}", name.as_str(), Self::header_value(value)))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            AMQPValue::Timestamp(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ByteArray(value) => String::from_utf8_lossy(value.as_slice()),
+            AMQPValue::Void => Cow::Borrowed(""),
         }
     }
 }

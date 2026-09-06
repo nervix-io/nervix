@@ -1,18 +1,38 @@
+use std::borrow::Cow;
+
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
     Client as SqsClient,
     types::{Message as SqsMessage, MessageAttributeValue},
 };
+use nervix_models::DomainName;
 
 use super::super::*;
 
 pub(in crate::runtime) struct SqsIngestor;
 
+/// The message attributes of one borrowed SQS message.
+///
+/// Appending reads them out of the source message, so a message without attributes costs
+/// nothing and a value only allocates when its type is not already a string.
+struct SqsMessageAttributes<'a>(&'a SqsMessage);
+
+impl IngestMessageHeaders for SqsMessageAttributes<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        let Some(attributes) = self.0.message_attributes() else {
+            return;
+        };
+        for (name, value) in attributes {
+            visit(name, SqsIngestor::attribute_value(value).as_ref());
+        }
+    }
+}
+
 impl SqsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientSqs,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -50,7 +70,9 @@ impl SqsIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled SQS ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
         let ack_timeout = match &ack_mode {
             SqsIngestMode::AckSequential { timeout, .. } => {
                 Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?
@@ -155,7 +177,7 @@ impl SqsIngestor {
                                     backoff.reset();
                                     for message in response.messages() {
                                         tokio::task::consume_budget().await;
-                                        let headers = Self::headers_from_message(message);
+                                        let headers = SqsMessageAttributes(message);
                                         let payload = message.body().unwrap_or_default().as_bytes();
 
                                         trace!(
@@ -178,8 +200,11 @@ impl SqsIngestor {
                                                         let metadata = [IngestMetadataRow::Headers {
                                                             headers: &headers,
                                                         }];
-                                                        let (acks, completion) =
-                                                            task_runtime.tracked_ack_root(&task_domain);
+                                                        let (acks, completion) = task_runtime
+                                                            .tracked_ingestor_ack_root(
+                                                                &task_domain,
+                                                                &task_ingestor,
+                                                            );
                                                         let dispatch_result = task_runtime
                                                             .dispatch_ingested_records(IngestGroupDispatch {
                                                                 collector: &mut collector,
@@ -206,10 +231,11 @@ impl SqsIngestor {
                                                                 &mut collector,
                                                             )
                                                             .await;
-                                                        let dispatched = dispatch_result
+                                                        let dispatched = match dispatch_result
                                                             .and(flush_result)
-                                                            .map(|()| true)
-                                                            .unwrap_or_else(|error| {
+                                                        {
+                                                            Ok(()) => true,
+                                                            Err(error) => {
                                                                 let _ = task_events.send(RuntimeEvent::Error(format!(
                                                                     "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
@@ -217,7 +243,8 @@ impl SqsIngestor {
                                                                     error
                                                                 )));
                                                                 false
-                                                            });
+                                                            }
+                                                        };
                                                         if dispatched {
                                                             acks.ack_success();
                                                             match Runtime::await_ack_completion(
@@ -390,36 +417,26 @@ impl SqsIngestor {
             .ok_or_else(|| format!("SQS queue '{queue}' has no URL"))
     }
 
-    fn headers_from_message(message: &SqsMessage) -> IngestHeaders {
-        message
-            .message_attributes()
-            .map(|attributes| {
-                attributes
-                    .iter()
-                    .map(|(name, value)| (name.clone(), Self::attribute_value_to_string(value)))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn attribute_value_to_string(value: &MessageAttributeValue) -> String {
+    fn attribute_value(value: &MessageAttributeValue) -> Cow<'_, str> {
         if let Some(value) = value.string_value() {
-            return value.to_string();
+            return Cow::Borrowed(value);
         }
         if let Some(value) = value.binary_value() {
-            return String::from_utf8_lossy(value.as_ref()).to_string();
+            return String::from_utf8_lossy(value.as_ref());
         }
         if !value.string_list_values().is_empty() {
-            return value.string_list_values().join(",");
+            return Cow::Owned(value.string_list_values().join(","));
         }
         if !value.binary_list_values().is_empty() {
-            return value
-                .binary_list_values()
-                .iter()
-                .map(|value| String::from_utf8_lossy(value.as_ref()).to_string())
-                .collect::<Vec<_>>()
-                .join(",");
+            return Cow::Owned(
+                value
+                    .binary_list_values()
+                    .iter()
+                    .map(|value| String::from_utf8_lossy(value.as_ref()).to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
-        String::new()
+        Cow::Borrowed("")
     }
 }

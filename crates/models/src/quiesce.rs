@@ -4,8 +4,8 @@ use strum::{AsRefStr, IntoStaticStr};
 use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
-    Identifier, MessageErrorPolicy, Model, ModelKind, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs,
+    EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayName,
 };
 
 #[derive(
@@ -49,15 +49,15 @@ impl QuiesceLevel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DynamicModelUpdate {
     RelayCapacity {
-        relay: Identifier,
+        relay: RelayName,
         capacity: usize,
     },
     Processor {
         kind: ModelKind,
-        processor: Identifier,
+        processor: ModelName,
     },
     Emitter {
-        emitter: Identifier,
+        emitter: EmitterName,
         config: Box<CreateEmitter>,
     },
 }
@@ -152,6 +152,13 @@ pub enum StatePurge {
 }
 
 impl ModelChangeAspect {
+    /// True when this change only redefines a control-plane scheduling input. Placement
+    /// definitions decide where runtime nodes execute; the runtime learns the outcome from the
+    /// published schedule's assignments and has nothing else to apply.
+    pub const fn is_control_plane_only(self) -> bool {
+        matches!(self, Self::PlacementDefinition)
+    }
+
     /// The runtime state this change invalidates, if any. Schema-driven staleness is already
     /// handled by keying persisted state on the schema fingerprint; this covers the changes that
     /// keep the schema identical but redefine what the retained state means.
@@ -280,6 +287,18 @@ impl ModelChangeAspects {
 
     pub fn is_empty(&self) -> bool {
         self.aspects.is_empty()
+    }
+
+    /// True when the change set only redefines control-plane scheduling inputs. Such a change has
+    /// no runtime work of its own: whatever it decides reaches the runtime as the published
+    /// schedule's assignments.
+    pub fn is_control_plane_only(&self) -> bool {
+        !self.aspects.is_empty()
+            && self
+                .aspects
+                .iter()
+                .copied()
+                .all(ModelChangeAspect::is_control_plane_only)
     }
 
     pub fn quiesce_level(&self) -> QuiesceLevel {
@@ -444,7 +463,7 @@ impl Model {
             | (Self::ClientGcs(_), Self::ClientGcs(_))
             | (Self::ClientAzureBlob(_), Self::ClientAzureBlob(_))
             | (Self::ClientIcebergRest(_), Self::ClientIcebergRest(_)) => {
-                if self.identifier() == candidate.identifier() {
+                if self.name() == candidate.name() {
                     definition_change_aspect(ModelChangeAspect::ClientConfig)
                 } else {
                     ModelChangeAspects::replaced()
@@ -482,7 +501,6 @@ impl Model {
             | (Self::WasmProcessor(_), _)
             | (Self::Ingestor(_), _)
             | (Self::Reingestor(_), _)
-            | (Self::Materializer(_), _)
             | (Self::Lookup(_), _)
             | (Self::Deduplicator(_), _)
             | (Self::Correlator(_), _)
@@ -727,7 +745,7 @@ fn junction_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Junction,
-            processor: candidate_name.clone(),
+            processor: candidate_name.into(),
         });
     }
     changes
@@ -796,7 +814,7 @@ fn deduplicator_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Deduplicator,
-            processor: candidate_name.clone(),
+            processor: candidate_name.into(),
         });
     }
     changes
@@ -865,7 +883,7 @@ fn reorderer_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Reorderer,
-            processor: candidate_name.clone(),
+            processor: candidate_name.into(),
         });
     }
     changes
@@ -929,7 +947,7 @@ fn correlator_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Correlator,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -971,7 +989,7 @@ fn window_processor_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::WindowProcessor,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -1019,7 +1037,7 @@ fn inferencer_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Inferencer,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -1070,7 +1088,7 @@ fn wasm_processor_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::WasmProcessor,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -1272,7 +1290,7 @@ fn routes_are_permutation(base: &[ProcessorOutput], candidate: &[ProcessorOutput
     true
 }
 
-fn message_error_targets(routes: &[ProcessorOutput]) -> Vec<&Identifier> {
+fn message_error_targets(routes: &[ProcessorOutput]) -> Vec<&RelayName> {
     let mut targets = routes
         .iter()
         .filter_map(|route| match &route.message_error_policy {
@@ -1628,21 +1646,25 @@ mod tests {
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, Identifier,
-        IngestSource, IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, IngestSource,
+        IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
         MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
         ModelChangeAspect, ModelKind, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
         ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
     };
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::parse(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn relay() -> CreateRelay {
         CreateRelay {
-            name: identifier("events"),
-            schema: identifier("event"),
+            name: named("events"),
+            schema: named("event"),
             buffer: 1,
             branching: RelayBranching::unbranched(),
             materialized_state: None,
@@ -1651,10 +1673,10 @@ mod tests {
 
     fn junction() -> CreateJunction {
         CreateJunction {
-            name: identifier("merge"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("merge"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
+                named("output"),
                 "1s".to_string(),
                 Some("1MiB".to_string()),
             )]),
@@ -1667,10 +1689,10 @@ mod tests {
 
     fn deduplicator() -> CreateDeduplicator {
         CreateDeduplicator {
-            name: identifier("dedup"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("dedup"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
+                named("output"),
                 "1s".to_string(),
                 Some("1MiB".to_string()),
             )]),
@@ -1685,10 +1707,10 @@ mod tests {
 
     fn reorderer() -> CreateReorderer {
         CreateReorderer {
-            name: identifier("order"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("order"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
+                named("output"),
                 "1s".to_string(),
                 Some("1MiB".to_string()),
             )]),
@@ -1703,11 +1725,11 @@ mod tests {
 
     fn emitter() -> CreateEmitter {
         CreateEmitter {
-            name: identifier("emit"),
-            from: ProcessorInputs::single(identifier("events")),
-            encode_using_codec: Some(identifier("event_codec")),
+            name: named("emit"),
+            from: ProcessorInputs::single(named("events")),
+            encode_using_codec: Some(named("event_codec")),
             sink: Box::new(EmitSink::ZeroMq {
-                client: identifier("sink"),
+                client: named("sink"),
             }),
             flush_each: "1s".to_string(),
             max_batch_size: Some("1MiB".to_string()),
@@ -1726,10 +1748,10 @@ mod tests {
 
     fn reingestor() -> CreateReingestor {
         CreateReingestor {
-            name: identifier("repartition"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("repartition"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
+                named("output"),
                 "1s".to_string(),
                 Some("1MiB".to_string()),
             )]),
@@ -1741,12 +1763,12 @@ mod tests {
 
     fn generator() -> CreateGenerator {
         CreateGenerator {
-            name: identifier("synth"),
-            materialized_relay: identifier("state"),
+            name: named("synth"),
+            materialized_relay: named("state"),
             branched_by: BranchSelection::unbranched(),
             each: "1s".to_string(),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
+                named("output"),
                 "1s".to_string(),
                 Some("1MiB".to_string()),
             )]),
@@ -1755,16 +1777,16 @@ mod tests {
 
     fn ingestor() -> CreateIngestor {
         CreateIngestor {
-            name: identifier("ingest"),
+            name: named("ingest"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("events"),
+                named("events"),
                 "1s".to_string(),
                 Some("1MiB".to_string()),
             )]),
-            decode_using_codec: identifier("event_codec"),
+            decode_using_codec: named("event_codec"),
             timestamp_source: None,
             source: IngestSource::Endpoint {
-                endpoint: identifier("ingress_a"),
+                endpoint: named("ingress_a"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
@@ -1808,7 +1830,7 @@ mod tests {
         );
 
         let mut schema = base.clone();
-        schema.schema = identifier("event_v2");
+        schema.schema = named("event_v2");
         assert_single_aspect(
             Model::Relay(base.clone()),
             Model::Relay(schema),
@@ -1817,7 +1839,7 @@ mod tests {
         );
 
         let mut branching = base.clone();
-        branching.branching = RelayBranching::branched_by(identifier("tenant"));
+        branching.branching = RelayBranching::branched_by(named("tenant"));
         assert_single_aspect(
             Model::Relay(base.clone()),
             Model::Relay(branching),
@@ -1850,7 +1872,7 @@ mod tests {
 
         let mut input_where = base.clone();
         input_where.from.r#where.push(ProcessorInputWhere {
-            relay: identifier("input"),
+            relay: named("input"),
             where_clause: crate::Expression::Literal(crate::Literal::Bool(true)),
         });
         assert_single_aspect(
@@ -1910,7 +1932,7 @@ mod tests {
         let base = junction();
 
         let mut inputs = base.clone();
-        inputs.from.from.push(identifier("input_two"));
+        inputs.from.from.push(named("input_two"));
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(inputs),
@@ -1922,7 +1944,7 @@ mod tests {
         routes
             .output_routes
             .routes
-            .push(ProcessorOutput::new(identifier("other")));
+            .push(ProcessorOutput::new(named("other")));
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(routes),
@@ -1934,7 +1956,7 @@ mod tests {
         reordered
             .output_routes
             .routes
-            .push(ProcessorOutput::new(identifier("other")));
+            .push(ProcessorOutput::new(named("other")));
         let mut reordered_candidate = reordered.clone();
         reordered_candidate.output_routes.routes.swap(0, 1);
         assert_single_aspect(
@@ -1954,7 +1976,7 @@ mod tests {
         );
 
         let mut branching = base.clone();
-        branching.branched_by = BranchSelection::branched_by(identifier("tenant"));
+        branching.branched_by = BranchSelection::branched_by(named("tenant"));
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(branching),
@@ -1966,7 +1988,7 @@ mod tests {
         materialized
             .materialized_state
             .push(MaterializedStateDependency {
-                relay: identifier("state"),
+                relay: named("state"),
                 policy: MaterializedStatePolicy::RequiredSkip,
             });
         assert_single_aspect(
@@ -1978,7 +2000,7 @@ mod tests {
 
         let mut dlq = base;
         dlq.output_routes.routes[0].message_error_policy = MessageErrorPolicy::Dlq {
-            relay: identifier("errors"),
+            relay: named("errors"),
             assignments: Vec::new(),
         };
         assert_single_aspect(
@@ -2003,7 +2025,7 @@ mod tests {
             changes.dynamic_updates(),
             &[super::DynamicModelUpdate::Processor {
                 kind: ModelKind::Deduplicator,
-                processor: identifier("dedup"),
+                processor: named("dedup"),
             }]
         );
 
@@ -2031,7 +2053,7 @@ mod tests {
             changes.dynamic_updates(),
             &[super::DynamicModelUpdate::Processor {
                 kind: ModelKind::Reorderer,
-                processor: identifier("order"),
+                processor: named("order"),
             }]
         );
 
@@ -2063,7 +2085,7 @@ mod tests {
 
         let mut client = base.clone();
         client.sink = Box::new(EmitSink::ZeroMq {
-            client: identifier("sink_two"),
+            client: named("sink_two"),
         });
         assert_single_aspect(
             Model::Emitter(base.clone()),
@@ -2074,8 +2096,8 @@ mod tests {
 
         let mut sink = base.clone();
         sink.sink = Box::new(EmitSink::Nats {
-            client: identifier("sink"),
-            subject: identifier("events"),
+            client: named("sink"),
+            subject: named("events"),
         });
         assert_single_aspect(
             Model::Emitter(base.clone()),
@@ -2085,7 +2107,7 @@ mod tests {
         );
 
         let mut codec = base.clone();
-        codec.encode_using_codec = Some(identifier("event_codec_v2"));
+        codec.encode_using_codec = Some(named("event_codec_v2"));
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(codec),
@@ -2107,7 +2129,7 @@ mod tests {
 
         let mut source_where = base.clone();
         source_where.from.r#where = vec![ProcessorInputWhere {
-            relay: identifier("events"),
+            relay: named("events"),
             where_clause: crate::Expression::Literal(Literal::Bool(true)),
         }];
         assert_single_aspect(
@@ -2141,7 +2163,7 @@ mod tests {
         );
 
         let mut source = base;
-        source.from.from = vec![identifier("other_events")];
+        source.from.from = vec![named("other_events")];
         assert_single_aspect(
             Model::Emitter(emitter()),
             Model::Emitter(source),
@@ -2171,7 +2193,7 @@ mod tests {
                 {
                     let mut candidate = base.clone();
                     candidate.source = IngestSource::Endpoint {
-                        endpoint: identifier("ingress_b"),
+                        endpoint: named("ingress_b"),
                         mode: EndpointIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
@@ -2184,7 +2206,7 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.decode_using_codec = identifier("event_codec_v2");
+                    candidate.decode_using_codec = named("event_codec_v2");
                     candidate
                 },
                 ModelChangeAspect::IngestorCodec,
@@ -2245,7 +2267,7 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.from.from.push(identifier("secondary"));
+                    candidate.from.from.push(named("secondary"));
                     candidate
                 },
                 ModelChangeAspect::ReingestorInputs,
@@ -2285,7 +2307,7 @@ mod tests {
                     candidate
                         .materialized_state
                         .push(MaterializedStateDependency {
-                            relay: identifier("state"),
+                            relay: named("state"),
                             policy: MaterializedStatePolicy::RequiredSkip,
                         });
                     candidate
@@ -2316,7 +2338,7 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.materialized_relay = identifier("state_v2");
+                    candidate.materialized_relay = named("state_v2");
                     candidate
                 },
                 ModelChangeAspect::GeneratorMaterializedState,
@@ -2332,7 +2354,7 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.branched_by = BranchSelection::branched_by(identifier("tenant"));
+                    candidate.branched_by = BranchSelection::branched_by(named("tenant"));
                     candidate
                 },
                 ModelChangeAspect::GeneratorBranching,
@@ -2373,13 +2395,17 @@ mod catch_all_kind_tests {
         AckMode, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
         CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateCodec,
         CreateCorrelator, CreateInferencer, CreateVhost, CreateWasmProcessor,
-        CreateWindowProcessor, GeneralErrorPolicy, Identifier, Literal, Model, ModelChangeAspect,
+        CreateWindowProcessor, GeneralErrorPolicy, Literal, Model, ModelChangeAspect,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, VhostTlsResource,
         WasmProcessorLimits, WindowBound,
     };
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::parse(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn expression(value: i64) -> crate::Expression {
@@ -2388,7 +2414,7 @@ mod catch_all_kind_tests {
 
     fn outputs() -> ProcessorOutputs {
         ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-            identifier("output"),
+            named("output"),
             "1s".to_string(),
             Some("1MiB".to_string()),
         )])
@@ -2407,9 +2433,9 @@ mod catch_all_kind_tests {
 
     fn correlator() -> CreateCorrelator {
         CreateCorrelator {
-            name: identifier("correlate"),
-            left: ProcessorInputs::single(identifier("left_input")),
-            right: ProcessorInputs::single(identifier("right_input")),
+            name: named("correlate"),
+            left: ProcessorInputs::single(named("left_input")),
+            right: ProcessorInputs::single(named("right_input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
             correlate_where: expression(1),
@@ -2427,10 +2453,10 @@ mod catch_all_kind_tests {
 
     fn codec() -> CreateCodec {
         CreateCodec {
-            name: identifier("event_codec"),
+            name: named("event_codec"),
             wire_format: CodecWireFormat::Json,
-            wire_schema: Some(identifier("event_wire")),
-            schema: identifier("event"),
+            wire_schema: Some(named("event_wire")),
+            schema: named("event"),
             encoding_rules: Vec::new(),
         }
     }
@@ -2458,7 +2484,7 @@ mod catch_all_kind_tests {
         );
 
         let mut right = base.clone();
-        right.right = ProcessorInputs::single(identifier("other_right"));
+        right.right = ProcessorInputs::single(named("other_right"));
         assert_single_aspect(
             Model::Correlator(base),
             Model::Correlator(right),
@@ -2470,8 +2496,8 @@ mod catch_all_kind_tests {
     #[test]
     fn window_bound_changes_pause_only_the_entity() {
         let base = CreateWindowProcessor {
-            name: identifier("window"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("window"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
             width: WindowBound {
@@ -2502,11 +2528,11 @@ mod catch_all_kind_tests {
     #[test]
     fn wasm_binding_changes_pause_only_the_entity() {
         let base = CreateWasmProcessor {
-            name: identifier("guest"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("guest"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
-            resource: identifier("guest_bundle"),
+            resource: named("guest_bundle"),
             resource_version: Some(1),
             file: "processors/guest.wasm".to_string(),
             limits: WasmProcessorLimits {
@@ -2531,11 +2557,11 @@ mod catch_all_kind_tests {
     #[test]
     fn wasm_limit_changes_pause_only_the_entity_without_purging_guest_state() {
         let base = CreateWasmProcessor {
-            name: identifier("guest"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("guest"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
-            resource: identifier("guest_bundle"),
+            resource: named("guest_bundle"),
             resource_version: Some(1),
             file: "processors/guest.wasm".to_string(),
             limits: WasmProcessorLimits {
@@ -2561,11 +2587,11 @@ mod catch_all_kind_tests {
     #[test]
     fn inferencer_binding_changes_pause_only_the_entity() {
         let base = CreateInferencer {
-            name: identifier("score"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("score"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
-            resource: identifier("model_bundle"),
+            resource: named("model_bundle"),
             resource_version: Some(1),
             file: "models/score.onnx".to_string(),
             inputs: Vec::new(),
@@ -2588,7 +2614,7 @@ mod catch_all_kind_tests {
     fn config_entity_definitions_pause_the_domain() {
         let base_codec = codec();
         let mut recoded = base_codec.clone();
-        recoded.schema = identifier("event_v2");
+        recoded.schema = named("event_v2");
         assert_single_aspect(
             Model::Codec(base_codec),
             Model::Codec(recoded),
@@ -2597,7 +2623,7 @@ mod catch_all_kind_tests {
         );
 
         let base_vhost = CreateVhost {
-            name: identifier("edge"),
+            name: named("edge"),
             hostnames: vec!["edge.example.com".to_string()],
             tls: None,
         };
@@ -2612,7 +2638,7 @@ mod catch_all_kind_tests {
 
         let mut secured = base_vhost.clone();
         secured.tls = Some(VhostTlsResource {
-            resource: identifier("edge_tls"),
+            resource: named("edge_tls"),
             version: Some(1),
         });
         assert_single_aspect(
@@ -2623,8 +2649,8 @@ mod catch_all_kind_tests {
         );
 
         let base_branch = CreateBranch {
-            name: identifier("by_tenant"),
-            schema: identifier("tenant_branch"),
+            name: named("by_tenant"),
+            schema: named("tenant_branch"),
             ttl: "5m".to_string(),
             eviction: None,
         };
@@ -2638,7 +2664,7 @@ mod catch_all_kind_tests {
         );
 
         let mut reschemad = base_branch.clone();
-        reschemad.schema = identifier("tenant_branch_v2");
+        reschemad.schema = named("tenant_branch_v2");
         assert_single_aspect(
             Model::Branch(base_branch),
             Model::Branch(reschemad),
@@ -2664,7 +2690,7 @@ mod catch_all_kind_tests {
 
         let unchanged = codec();
         let mut recoded = unchanged.clone();
-        recoded.schema = identifier("event_v2");
+        recoded.schema = named("event_v2");
         assert!(
             Model::Codec(unchanged)
                 .change_aspects_against(&Model::Codec(recoded))
@@ -2678,7 +2704,7 @@ mod catch_all_kind_tests {
     fn a_renamed_entity_of_any_kind_is_a_replacement() {
         let base = codec();
         let mut renamed = base.clone();
-        renamed.name = identifier("other_codec");
+        renamed.name = named("other_codec");
         assert_single_aspect(
             Model::Codec(base),
             Model::Codec(renamed),

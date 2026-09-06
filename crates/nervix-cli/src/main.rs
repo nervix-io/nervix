@@ -17,6 +17,7 @@ use nervix_client_core::{
     ConnectOptions, Diagnostic, SubscriptionDeliveryBehavior, SubscriptionRequest,
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionState,
 };
+use nervix_models::ClusterNodeName;
 use nervix_nspl::client_statement::{
     parse_client_statements, parse_upload_resource_query, upload_resource_path_fragment,
 };
@@ -89,22 +90,22 @@ enum Command {
     /// Remove a node from the cluster membership
     RemoveNode {
         /// Node id to remove
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Prevent the scheduler from placing new tasks on a node
     CordonNode {
         /// Node id to cordon
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Allow the scheduler to place new tasks on a node
     UncordonNode {
         /// Node id to uncordon
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Move scheduled graph nodes away from a node and keep it cordoned
     DrainNode {
         /// Node id to drain
-        node_id: String,
+        node_id: ClusterNodeName,
     },
 }
 
@@ -402,37 +403,48 @@ fn complete_local_upload_paths(
                 .unwrap_or_default(),
         )
     };
-    let mut suggestions = std::fs::read_dir(&base_dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !partial_name.is_empty() && !name.starts_with(&partial_name) {
-                return None;
-            }
-            let value = if uses_home_prefix(path_fragment) {
-                let relative_base = strip_home_prefix(&base_dir)?;
-                if relative_base.as_os_str().is_empty() {
-                    format!("~/{name}")
-                } else {
-                    format!("~/{}/{}", relative_base.display(), name)
-                }
-            } else if base_dir == Path::new(".") {
-                name.clone()
-            } else {
-                base_dir.join(&name).display().to_string()
+    let Ok(entries) = std::fs::read_dir(&base_dir) else {
+        return None;
+    };
+    let mut suggestions = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !partial_name.is_empty() && !name.starts_with(&partial_name) {
+            continue;
+        }
+        let value = if uses_home_prefix(path_fragment) {
+            let Some(relative_base) = strip_home_prefix(&base_dir) else {
+                continue;
             };
-            let is_dir = entry.file_type().ok()?.is_dir();
-            Some(Suggestion {
-                value: if is_dir { format!("{value}/") } else { value },
-                description: None,
-                style: None,
-                extra: None,
-                span: reedline::Span::new(span_start, pos),
-                append_whitespace: false,
-            })
-        })
-        .collect::<Vec<_>>();
+            if relative_base.as_os_str().is_empty() {
+                format!("~/{name}")
+            } else {
+                format!("~/{}/{}", relative_base.display(), name)
+            }
+        } else if base_dir == Path::new(".") {
+            name.clone()
+        } else {
+            base_dir.join(&name).display().to_string()
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        suggestions.push(Suggestion {
+            value: if file_type.is_dir() {
+                format!("{value}/")
+            } else {
+                value
+            },
+            description: None,
+            style: None,
+            extra: None,
+            span: reedline::Span::new(span_start, pos),
+            append_whitespace: false,
+        });
+    }
     suggestions.sort_by(|left, right| left.value.cmp(&right.value));
     Some(suggestions)
 }
@@ -897,7 +909,10 @@ mod tests {
     fn remove_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "remove-node", "node-2"]);
         match args.subcommand {
-            Some(Command::RemoveNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::RemoveNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -906,7 +921,10 @@ mod tests {
     fn cordon_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "cordon-node", "node-2"]);
         match args.subcommand {
-            Some(Command::CordonNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::CordonNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -915,7 +933,10 @@ mod tests {
     fn uncordon_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "uncordon-node", "node-2"]);
         match args.subcommand {
-            Some(Command::UncordonNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::UncordonNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -924,7 +945,10 @@ mod tests {
     fn drain_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "drain-node", "node-2"]);
         match args.subcommand {
-            Some(Command::DrainNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::DrainNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }

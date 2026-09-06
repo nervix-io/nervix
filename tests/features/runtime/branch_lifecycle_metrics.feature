@@ -27,7 +27,7 @@ Feature: Branch lifecycle metrics
       );
 
       CREATE BRANCH by_metric_users
-        SCHEMA user_id_branch TTL 500ms MAX INSTANCES 1 EVICT LRU;
+        SCHEMA user_id_branch TTL 5s MAX INSTANCES 1 EVICT LRU;
 
       CREATE RELAY notifications
         SCHEMA notification

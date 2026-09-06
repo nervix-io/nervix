@@ -2,10 +2,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::RandomState;
 use dashmap::DashMap;
+use nervix_models::ClusterNodeName;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tokio::sync::Notify;
 
-use super::{PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement};
+use super::{
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+    StateReplicationRoles,
+};
 use crate::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -16,8 +20,8 @@ pub(super) struct BranchAggregatedRuntimeStateSnapshot {
 #[derive(Debug)]
 pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) placement: RuntimeStatePlacement,
-    pub(super) primary_node: Option<String>,
-    pub(super) physical_node_id: String,
+    roles: parking_lot::RwLock<StateReplicationRoles>,
+    pub(super) physical_node_id: ClusterNodeName,
     pub(super) current_lsm: AtomicU64,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
@@ -28,9 +32,9 @@ pub(super) struct ReplicatedBranchAggregatedState {
 impl ReplicatedBranchAggregatedState {
     pub(super) fn new(
         placement: RuntimeStatePlacement,
-        primary_node: Option<String>,
-        physical_node_id: String,
-        _replica_nodes: Vec<String>,
+        primary_node: Option<ClusterNodeName>,
+        physical_node_id: ClusterNodeName,
+        _replica_nodes: Vec<ClusterNodeName>,
         _required_replica_acks: usize,
         metrics: &RuntimeMetrics,
         initial: Option<PersistedRuntimeStateEntry>,
@@ -51,7 +55,7 @@ impl ReplicatedBranchAggregatedState {
         }
         Ok(Self {
             placement,
-            primary_node,
+            roles: parking_lot::RwLock::new(StateReplicationRoles::owned_by(primary_node)),
             physical_node_id,
             current_lsm: AtomicU64::new(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
@@ -59,6 +63,14 @@ impl ReplicatedBranchAggregatedState {
             replica_progress: DashMap::default(),
             replication_notify: Notify::new(),
         })
+    }
+
+    pub(super) fn primary_node(&self) -> Option<ClusterNodeName> {
+        self.roles.read().primary_node.clone()
+    }
+
+    pub(super) fn rebind_roles(&self, roles: StateReplicationRoles) {
+        *self.roles.write() = roles;
     }
 
     pub(super) fn mark_metrics_updated(&self) -> u64 {
@@ -140,7 +152,7 @@ impl ReplicatedBranchAggregatedState {
         Ok(())
     }
 
-    pub(super) fn mark_replica_progress(&self, node_id: &str, lsm: u64) {
+    pub(super) fn mark_replica_progress(&self, node_id: &ClusterNodeName, lsm: u64) {
         self.replica_progress.insert(node_id.to_string(), lsm);
         self.replication_notify.notify_waiters();
     }

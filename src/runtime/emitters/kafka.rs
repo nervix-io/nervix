@@ -1,4 +1,5 @@
 use futures_util::FutureExt;
+use nervix_models::TopicName;
 use rdkafka::{
     config::ClientConfig,
     error::{KafkaError, RDKafkaErrorCode},
@@ -49,7 +50,7 @@ impl KafkaEmitter {
 
     pub(super) async fn publish(
         &self,
-        topic: &Identifier,
+        topic: &TopicName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -122,7 +123,7 @@ impl KafkaEmitter {
 
     fn enqueue(
         producer: &FutureProducer,
-        topic: &Identifier,
+        topic: &TopicName,
         message: &EncodedBrokerRecord,
     ) -> Result<DeliveryFuture, KafkaError> {
         let mut record =
@@ -221,9 +222,10 @@ impl KafkaEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready Kafka confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(Ok(_delivery)) => outcome.deliver(confirmation.position),
                 Ok(Err((source, _message))) if Self::is_record_rejection(&source) => outcome

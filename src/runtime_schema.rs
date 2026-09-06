@@ -26,9 +26,10 @@ use arrow_select::{
     concat::concat as concat_arrow_arrays, filter::filter_record_batch, take::take,
 };
 use chrono::{DateTime, FixedOffset};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AvroType, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
-    CreateWireSchema, Identifier, JsonType, ParseAsType, RemoteRuntimeElementValue,
+    CreateWireSchema, JsonType, ModelName, ParseAsType, RemoteRuntimeElementValue,
     RemoteRuntimeField, RemoteRuntimeRecord, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
     Timestamp, WireSchemaDefinition, WireSchemaField, WireSchemaStrictness,
 };
@@ -67,7 +68,7 @@ pub(crate) struct CompiledSchemaField {
 
 #[derive(Debug, Clone)]
 pub struct CompiledCodec {
-    pub name: Identifier,
+    pub name: ModelName,
     schema: Arc<CompiledSchema>,
     wire_schema: CompiledWireSchema,
 }
@@ -522,14 +523,14 @@ pub(crate) fn test_runtime_row(
                 .map(|data_type| ArrowField::new(name, data_type, false))
         })
         .collect::<Result<Vec<_>, _>>()
-        .expect("test Arrow row fields must have inferable types");
+        .verified("the columns are built from the very types inferred from these same values");
     let schema = StdArc::new(ArrowSchema::new(arrow_fields));
     let columns = fields
         .iter()
         .zip(schema.fields())
         .map(|((_, value), field)| runtime_value_arrow_array(field.data_type(), Some(value), 1))
         .collect::<Result<Vec<_>, _>>()
-        .expect("test Arrow row values must match their inferred types");
+        .verified("the columns are built from the very types inferred from these same values");
     let batch = if columns.is_empty() {
         RecordBatch::try_new_with_options(
             schema.clone(),
@@ -539,10 +540,10 @@ pub(crate) fn test_runtime_row(
     } else {
         RecordBatch::try_new(schema.clone(), columns)
     }
-    .expect("test Arrow row batch must be valid");
+    .verified("the columns are built from the very types inferred from these same values");
     RuntimeRecordBatch::from_record_batch(schema, batch)
         .and_then(|batch| batch.runtime_row(0, RuntimeRecordMetadata::test()))
-        .expect("test Arrow row view must be valid")
+        .verified("the columns are built from the very types inferred from these same values")
 }
 
 #[cfg(test)]
@@ -748,12 +749,10 @@ impl RuntimeRecordBatch {
             .columns()
             .iter()
             .map(|column| {
-                column
-                    .to_data()
-                    .get_slice_memory_size()
-                    .ok()
-                    .and_then(|bytes| u64::try_from(bytes).ok())
-                    .unwrap_or(u64::MAX)
+                let Ok(bytes) = column.to_data().get_slice_memory_size() else {
+                    return u64::MAX;
+                };
+                u64::try_from(bytes).unwrap_or(u64::MAX)
             })
             .fold(0_u64, u64::saturating_add)
     }
@@ -1559,7 +1558,7 @@ impl RuntimeValue {
             RemoteRuntimeValue::String(v) => Self::String(v),
             RemoteRuntimeValue::Datetime(v) => Self::Datetime(
                 DateTime::parse_from_rfc3339(&v)
-                    .expect("remote runtime values must contain valid rfc3339 strings"),
+                    .assured("the peer renders these with to_rfc3339, which this parser accepts"),
             ),
             RemoteRuntimeValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeValue::F64(v) => Self::F64(OrderedFloat(v)),
@@ -1610,7 +1609,7 @@ impl RuntimeValue {
             RemoteRuntimeElementValue::String(v) => Self::String(v),
             RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(
                 DateTime::parse_from_rfc3339(&v)
-                    .expect("remote runtime values must contain valid rfc3339 strings"),
+                    .assured("the peer renders these with to_rfc3339, which this parser accepts"),
             ),
             RemoteRuntimeElementValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeElementValue::F64(v) => Self::F64(OrderedFloat(v)),
@@ -1644,13 +1643,16 @@ impl RuntimeValue {
             Self::Bool(v) => JsonValue::Bool(*v),
             Self::String(v) => JsonValue::String(v.clone()),
             Self::Datetime(v) => JsonValue::String(v.to_rfc3339()),
-            Self::F32(v) => JsonValue::Number(
-                JsonNumber::from_f64(v.into_inner() as f64)
-                    .expect("finite f32 must map to json number"),
-            ),
-            Self::F64(v) => JsonValue::Number(
-                JsonNumber::from_f64(v.into_inner()).expect("finite f64 must map to json number"),
-            ),
+            Self::F32(v) => {
+                JsonValue::Number(JsonNumber::from_f64(v.into_inner() as f64).verified(
+                    "the VM turns a non-finite float result into a row error, so a stored float \
+                     is finite",
+                ))
+            }
+            Self::F64(v) => JsonValue::Number(JsonNumber::from_f64(v.into_inner()).verified(
+                "the VM turns a non-finite float result into a row error, so a stored float is \
+                 finite",
+            )),
             Self::Array(values) | Self::Vec(values) => {
                 JsonValue::Array(values.iter().map(RuntimeValue::to_json_value).collect())
             }
@@ -1926,7 +1928,7 @@ pub fn compile_codec_with_protobuf(
     };
 
     Ok(Arc::new(CompiledCodec {
-        name: codec.name.clone(),
+        name: ModelName::from(&codec.name),
         schema,
         wire_schema,
     }))
@@ -2812,10 +2814,13 @@ fn append_json_value_to_arrow(
         ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
         ParseAsType::Datetime => append_primitive!(
             TimestampNanosecondBuilder,
-            value
-                .as_str()
-                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                .and_then(|value| value.timestamp_nanos_opt())
+            if let Some(value) = value.as_str()
+                && let Ok(value) = DateTime::parse_from_rfc3339(value)
+            {
+                value.timestamp_nanos_opt()
+            } else {
+                None
+            }
         ),
         ParseAsType::F32 => {
             append_primitive!(Float32Builder, value.as_f64().map(|value| value as f32))
@@ -2921,9 +2926,11 @@ fn append_avro_value_to_arrow(
         ParseAsType::Datetime => append_primitive!(
             TimestampNanosecondBuilder,
             if let AvroValue::String(value) = value {
-                DateTime::parse_from_rfc3339(value)
-                    .ok()
-                    .and_then(|value| value.timestamp_nanos_opt())
+                if let Ok(value) = DateTime::parse_from_rfc3339(value) {
+                    value.timestamp_nanos_opt()
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -3025,7 +3032,10 @@ pub(crate) fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
         ParseAsType::F64 => ArrowDataType::Float64,
         ParseAsType::Array { element, len } => ArrowDataType::FixedSizeList(
             ArrowFieldRef::new(ArrowField::new("item", arrow_data_type(element), false)),
-            i32::try_from(*len).expect("array length must fit Arrow fixed-size list"),
+            i32::try_from(*len).verified(
+                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
+                 list",
+            ),
         ),
         ParseAsType::Vec { element } => ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
             "item",
@@ -3486,45 +3496,49 @@ mod tests {
     use chrono::{DateTime, Datelike, Utc};
     use nervix_models::{
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema,
-        CreateWireSchema, Identifier, SchemaField,
+        CreateWireSchema, SchemaField,
     };
 
     use super::*;
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::try_from(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn schema() -> CreateSchema {
         CreateSchema {
-            name: identifier("notification"),
+            name: named("notification"),
             fields: vec![
                 SchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: ParseAsType::U32,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("tenant"),
+                    name: named("tenant"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("created_at"),
+                    name: named("created_at"),
                     ty: ParseAsType::Datetime,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("latency"),
+                    name: named("latency"),
                     ty: ParseAsType::F64,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("active"),
+                    name: named("active"),
                     ty: ParseAsType::Bool,
                     optional: false,
                     sensitive: false,
@@ -3535,31 +3549,31 @@ mod tests {
 
     fn json_wire_schema() -> WireSchemaDefinition {
         WireSchemaDefinition::Json(CreateWireSchema {
-            name: identifier("notification_wire"),
+            name: named("notification_wire"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: JsonType::Integer,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("tenant"),
+                    name: named("tenant"),
                     ty: JsonType::String,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("created_at"),
+                    name: named("created_at"),
                     ty: JsonType::String,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("latency"),
+                    name: named("latency"),
                     ty: JsonType::Number,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("active"),
+                    name: named("active"),
                     ty: JsonType::Boolean,
                     optional: false,
                 },
@@ -3578,31 +3592,31 @@ mod tests {
 
     fn cbor_wire_schema(strictness: WireSchemaStrictness) -> WireSchemaDefinition {
         WireSchemaDefinition::Cbor(CreateWireSchema {
-            name: identifier("notification_wire"),
+            name: named("notification_wire"),
             strictness,
             fields: vec![
                 WireSchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: JsonType::Integer,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("tenant"),
+                    name: named("tenant"),
                     ty: JsonType::String,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("created_at"),
+                    name: named("created_at"),
                     ty: JsonType::String,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("latency"),
+                    name: named("latency"),
                     ty: JsonType::Number,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("active"),
+                    name: named("active"),
                     ty: JsonType::Boolean,
                     optional: false,
                 },
@@ -3612,31 +3626,31 @@ mod tests {
 
     fn avro_wire_schema() -> WireSchemaDefinition {
         WireSchemaDefinition::Avro(CreateWireSchema {
-            name: identifier("notification_avro"),
+            name: named("notification_avro"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: AvroType::Long,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("tenant"),
+                    name: named("tenant"),
                     ty: AvroType::String,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("created_at"),
+                    name: named("created_at"),
                     ty: AvroType::String,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("latency"),
+                    name: named("latency"),
                     ty: AvroType::Double,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("active"),
+                    name: named("active"),
                     ty: AvroType::Boolean,
                     optional: false,
                 },
@@ -3646,16 +3660,16 @@ mod tests {
 
     fn optional_schema() -> CreateSchema {
         CreateSchema {
-            name: identifier("optional_notification"),
+            name: named("optional_notification"),
             fields: vec![
                 SchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: ParseAsType::U32,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("nickname"),
+                    name: named("nickname"),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
@@ -3666,16 +3680,16 @@ mod tests {
 
     fn optional_json_wire_schema() -> WireSchemaDefinition {
         WireSchemaDefinition::Json(CreateWireSchema {
-            name: identifier("optional_notification_wire"),
+            name: named("optional_notification_wire"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: JsonType::Integer,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("nickname"),
+                    name: named("nickname"),
                     ty: JsonType::String,
                     optional: true,
                 },
@@ -3685,16 +3699,16 @@ mod tests {
 
     fn optional_avro_wire_schema() -> WireSchemaDefinition {
         WireSchemaDefinition::Avro(CreateWireSchema {
-            name: identifier("optional_notification_avro"),
+            name: named("optional_notification_avro"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: AvroType::Long,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("nickname"),
+                    name: named("nickname"),
                     ty: AvroType::String,
                     optional: true,
                 },
@@ -3704,10 +3718,10 @@ mod tests {
 
     fn array_schema() -> CreateSchema {
         CreateSchema {
-            name: identifier("metrics"),
+            name: named("metrics"),
             fields: vec![
                 SchemaField {
-                    name: identifier("cpu_last_64"),
+                    name: named("cpu_last_64"),
                     ty: ParseAsType::Array {
                         element: Box::new(ParseAsType::F32),
                         len: 3,
@@ -3716,7 +3730,7 @@ mod tests {
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("labels"),
+                    name: named("labels"),
                     ty: ParseAsType::Vec {
                         element: Box::new(ParseAsType::String),
                     },
@@ -3729,16 +3743,16 @@ mod tests {
 
     fn array_json_wire_schema() -> WireSchemaDefinition {
         WireSchemaDefinition::Json(CreateWireSchema {
-            name: identifier("metrics_json"),
+            name: named("metrics_json"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("cpu_last_64"),
+                    name: named("cpu_last_64"),
                     ty: JsonType::Array,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("labels"),
+                    name: named("labels"),
                     ty: JsonType::Array,
                     optional: true,
                 },
@@ -3748,16 +3762,16 @@ mod tests {
 
     fn array_avro_wire_schema() -> WireSchemaDefinition {
         WireSchemaDefinition::Avro(CreateWireSchema {
-            name: identifier("metrics_avro"),
+            name: named("metrics_avro"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("cpu_last_64"),
+                    name: named("cpu_last_64"),
                     ty: AvroType::Array,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("labels"),
+                    name: named("labels"),
                     ty: AvroType::Array,
                     optional: true,
                 },
@@ -3767,14 +3781,14 @@ mod tests {
 
     fn array_codec(name: &str) -> CreateCodec {
         CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: if name.contains("avro") {
                 CodecWireFormat::Avro
             } else {
                 CodecWireFormat::Json
             },
-            wire_schema: Some(identifier("metrics_wire")),
-            schema: identifier("metrics"),
+            wire_schema: Some(named("metrics_wire")),
+            schema: named("metrics"),
             encoding_rules: Vec::new(),
         }
     }
@@ -3801,10 +3815,10 @@ mod tests {
 
     fn multidimensional_array_schema() -> CreateSchema {
         CreateSchema {
-            name: identifier("shaped_metrics"),
+            name: named("shaped_metrics"),
             fields: vec![
                 SchemaField {
-                    name: identifier("matrix"),
+                    name: named("matrix"),
                     ty: ParseAsType::Array {
                         len: 2,
                         element: Box::new(ParseAsType::Array {
@@ -3816,7 +3830,7 @@ mod tests {
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("samples"),
+                    name: named("samples"),
                     ty: ParseAsType::Vec {
                         element: Box::new(ParseAsType::Array {
                             len: 2,
@@ -3853,12 +3867,12 @@ mod tests {
 
     fn multidimensional_avro_wire_schema() -> WireSchemaDefinition {
         WireSchemaDefinition::Avro(CreateWireSchema {
-            name: identifier("shaped_metrics_wire"),
+            name: named("shaped_metrics_wire"),
             strictness: Default::default(),
             fields: ["matrix", "samples"]
                 .into_iter()
                 .map(|name| WireSchemaField {
-                    name: identifier(name),
+                    name: named(name),
                     ty: AvroType::Array,
                     optional: false,
                 })
@@ -3975,7 +3989,7 @@ mod tests {
         let mut fields = Vec::new();
         for (name, ty, _, _) in primitive_array_cases() {
             fields.push(SchemaField {
-                name: identifier(&format!("{name}_array")),
+                name: named(&format!("{name}_array")),
                 ty: ParseAsType::Array {
                     element: Box::new(ty.clone()),
                     len: 2,
@@ -3984,7 +3998,7 @@ mod tests {
                 sensitive: false,
             });
             fields.push(SchemaField {
-                name: identifier(&format!("{name}_vec")),
+                name: named(&format!("{name}_vec")),
                 ty: ParseAsType::Vec {
                     element: Box::new(ty),
                 },
@@ -3993,14 +4007,14 @@ mod tests {
             });
         }
         CreateSchema {
-            name: identifier("primitive_arrays"),
+            name: named("primitive_arrays"),
             fields,
         }
     }
 
     fn primitive_arrays_json_wire_schema() -> WireSchemaDefinition {
         WireSchemaDefinition::Json(CreateWireSchema {
-            name: identifier("primitive_arrays_wire"),
+            name: named("primitive_arrays_wire"),
             strictness: Default::default(),
             fields: primitive_arrays_schema()
                 .fields
@@ -4016,7 +4030,7 @@ mod tests {
 
     fn primitive_arrays_avro_wire_schema() -> WireSchemaDefinition {
         WireSchemaDefinition::Avro(CreateWireSchema {
-            name: identifier("primitive_arrays_wire"),
+            name: named("primitive_arrays_wire"),
             strictness: Default::default(),
             fields: primitive_arrays_schema()
                 .fields
@@ -4032,14 +4046,14 @@ mod tests {
 
     fn primitive_arrays_codec(name: &str) -> CreateCodec {
         CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: if name.contains("avro") {
                 CodecWireFormat::Avro
             } else {
                 CodecWireFormat::Json
             },
-            wire_schema: Some(identifier("primitive_arrays_wire")),
-            schema: identifier("primitive_arrays"),
+            wire_schema: Some(named("primitive_arrays_wire")),
+            schema: named("primitive_arrays"),
             encoding_rules: Vec::new(),
         }
     }
@@ -4052,7 +4066,7 @@ mod tests {
         on_emitting: Option<&str>,
     ) -> CreateCodec {
         CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: CodecWireFormat::JaqNative {
                 format,
                 transformations: CodecJaqTransformations {
@@ -4061,7 +4075,7 @@ mod tests {
                 },
             },
             wire_schema: None,
-            schema: identifier(schema),
+            schema: named(schema),
             encoding_rules: Vec::new(),
         }
     }
@@ -4072,22 +4086,22 @@ mod tests {
 
     fn protobuf_schema() -> CreateSchema {
         CreateSchema {
-            name: identifier("protobuf_notification"),
+            name: named("protobuf_notification"),
             fields: vec![
                 SchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: ParseAsType::U32,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("tenant"),
+                    name: named("tenant"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("payload"),
+                    name: named("payload"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -4102,9 +4116,9 @@ mod tests {
         on_emitting: Option<&str>,
     ) -> CreateCodec {
         CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
-                resource: identifier("proto_bundle"),
+                resource: named("proto_bundle"),
                 resource_version: Some(1),
                 config: vec![nervix_models::ClientConfigEntry {
                     key: "file".to_string(),
@@ -4117,7 +4131,7 @@ mod tests {
                 },
             }),
             wire_schema: None,
-            schema: identifier("protobuf_notification"),
+            schema: named("protobuf_notification"),
             encoding_rules: Vec::new(),
         }
     }
@@ -4167,86 +4181,86 @@ mod tests {
 
     fn optional_codec(name: &str) -> CreateCodec {
         CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: if name.contains("avro") {
                 CodecWireFormat::Avro
             } else {
                 CodecWireFormat::Json
             },
-            wire_schema: Some(identifier("optional_notification_wire")),
-            schema: identifier("optional_notification"),
+            wire_schema: Some(named("optional_notification_wire")),
+            schema: named("optional_notification"),
             encoding_rules: Vec::new(),
         }
     }
 
     fn codec(name: &str) -> CreateCodec {
         CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: if name.contains("avro") {
                 CodecWireFormat::Avro
             } else {
                 CodecWireFormat::Json
             },
-            wire_schema: Some(identifier("notification_wire")),
-            schema: identifier("notification"),
+            wire_schema: Some(named("notification_wire")),
+            schema: named("notification"),
             encoding_rules: Vec::new(),
         }
     }
 
     fn syslog_schema() -> CreateSchema {
         CreateSchema {
-            name: identifier("syslog_event"),
+            name: named("syslog_event"),
             fields: vec![
                 SchemaField {
-                    name: identifier("facility"),
+                    name: named("facility"),
                     ty: ParseAsType::U8,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("severity"),
+                    name: named("severity"),
                     ty: ParseAsType::U8,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("timestamp"),
+                    name: named("timestamp"),
                     ty: ParseAsType::Datetime,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("hostname"),
+                    name: named("hostname"),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("app_name"),
+                    name: named("app_name"),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("proc_id"),
+                    name: named("proc_id"),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("msg_id"),
+                    name: named("msg_id"),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("structured_data"),
+                    name: named("structured_data"),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("message"),
+                    name: named("message"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -4257,10 +4271,10 @@ mod tests {
 
     fn syslog_codec() -> CreateCodec {
         CreateCodec {
-            name: identifier("syslog_codec"),
+            name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
             wire_schema: None,
-            schema: identifier("syslog_event"),
+            schema: named("syslog_event"),
             encoding_rules: Vec::new(),
         }
     }
@@ -4276,10 +4290,10 @@ mod tests {
 
     fn schemaful_cbor_codec(name: &str) -> CreateCodec {
         CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: CodecWireFormat::Cbor,
-            wire_schema: Some(identifier("notification_wire")),
-            schema: identifier("notification"),
+            wire_schema: Some(named("notification_wire")),
+            schema: named("notification"),
             encoding_rules: Vec::new(),
         }
     }
@@ -4659,7 +4673,7 @@ mod tests {
     #[test]
     fn syslog_codec_encodes_rfc5424_with_nilvalues() {
         let schema_model = CreateSchema {
-            name: identifier("syslog_minimal"),
+            name: named("syslog_minimal"),
             fields: syslog_schema()
                 .fields
                 .into_iter()
@@ -4861,9 +4875,9 @@ mod tests {
     #[test]
     fn codec_batch_encoder_does_not_eagerly_encode_arrow_rows() {
         let schema_model = CreateSchema {
-            name: identifier("counter"),
+            name: named("counter"),
             fields: vec![SchemaField {
-                name: identifier("value"),
+                name: named("value"),
                 ty: ParseAsType::U64,
                 optional: false,
                 sensitive: false,
@@ -4871,17 +4885,17 @@ mod tests {
         };
         let compiled_schema = Arc::new(compile_schema(&schema_model));
         let codec_model = CreateCodec {
-            name: identifier("counter_avro"),
+            name: named("counter_avro"),
             wire_format: CodecWireFormat::Avro,
-            wire_schema: Some(identifier("counter_wire")),
+            wire_schema: Some(named("counter_wire")),
             schema: schema_model.name.clone(),
             encoding_rules: Vec::new(),
         };
         let wire_schema = WireSchemaDefinition::Avro(CreateWireSchema {
-            name: identifier("counter_wire"),
+            name: named("counter_wire"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
-                name: identifier("value"),
+                name: named("value"),
                 ty: AvroType::Long,
                 optional: false,
             }],
@@ -5067,10 +5081,10 @@ mod tests {
     fn avro_codec_roundtrips_multidimensional_fixed_and_variable_array_shapes() {
         let schema = Arc::new(compile_schema(&multidimensional_array_schema()));
         let codec = CreateCodec {
-            name: identifier("shaped_metrics_codec"),
+            name: named("shaped_metrics_codec"),
             wire_format: CodecWireFormat::Avro,
-            wire_schema: Some(identifier("shaped_metrics_wire")),
-            schema: identifier("shaped_metrics"),
+            wire_schema: Some(named("shaped_metrics_wire")),
+            schema: named("shaped_metrics"),
             encoding_rules: Vec::new(),
         };
         let codec = compile_codec(&codec, schema, Some(&multidimensional_avro_wire_schema()))
@@ -5509,16 +5523,16 @@ mod tests {
         assert!(matches!(err, CodecError::ExpectedObject { .. }));
 
         let missing_wire_schema = WireSchemaDefinition::Json(CreateWireSchema {
-            name: identifier("notification_wire_partial"),
+            name: named("notification_wire_partial"),
             strictness: WireSchemaStrictness::Loose,
             fields: vec![
                 WireSchemaField {
-                    name: identifier("user_id"),
+                    name: named("user_id"),
                     ty: JsonType::Integer,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("tenant"),
+                    name: named("tenant"),
                     ty: JsonType::String,
                     optional: false,
                 },
@@ -5526,10 +5540,10 @@ mod tests {
         });
         let missing_wire_codec = compile_codec(
             &CreateCodec {
-                name: identifier("json_partial"),
+                name: named("json_partial"),
                 wire_format: CodecWireFormat::Json,
-                wire_schema: Some(identifier("notification_wire_partial")),
-                schema: identifier("notification"),
+                wire_schema: Some(named("notification_wire_partial")),
+                schema: named("notification"),
                 encoding_rules: Vec::new(),
             },
             compiled_schema,

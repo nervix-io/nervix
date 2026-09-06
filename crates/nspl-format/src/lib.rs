@@ -8,6 +8,7 @@ pub mod diagnostics;
 pub mod document;
 
 use document::{Gap, GapItem};
+use meticulous::ResultExt as _;
 use nervix_models::CanonicalNsplError;
 use nervix_nspl::{
     client_statement::{ClientStatement, parse_client_statement_sources, parse_client_statements},
@@ -49,7 +50,7 @@ pub fn is_formatted(input: &str) -> Result<bool, FormatError> {
 fn render(input: &str) -> Result<String, FormatError> {
     let statements = parse_client_statement_sources(input)?;
     // Parsing above already lexed this input, so lexing cannot fail here.
-    let tokens = nervix_nspl::lex(input).expect("input lexed while it was parsed");
+    let tokens = nervix_nspl::lex(input).verified("parsing above lexed this same input");
 
     let mut lines: Vec<String> = Vec::new();
     let mut previous_end = 0usize;
@@ -136,10 +137,13 @@ fn verify(input: &str, formatted: &str) -> Result<(), FormatError> {
 }
 
 fn statement_line(input: &str, index: usize) -> usize {
-    parse_client_statement_sources(input)
-        .ok()
-        .and_then(|statements| statements.get(index).map(|s| line_of(input, s.span.start)))
-        .unwrap_or(1)
+    let Ok(statements) = parse_client_statement_sources(input) else {
+        return 1;
+    };
+    let Some(statement) = statements.get(index) else {
+        return 1;
+    };
+    line_of(input, statement.span.start)
 }
 
 /// The 1-based line number containing byte `offset`.

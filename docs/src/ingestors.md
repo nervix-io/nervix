@@ -53,7 +53,9 @@ buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-
 At runtime, the ingestor:
 
 - decodes inbound payloads into runtime records
-- collects decoded records into a bounded source ingest group
+- collects decoded records into a bounded source ingest group of at most 1,024 messages, closing
+  it earlier when the source goes quiet for 5 ms; this bound is independent of every route
+  `FLUSH` policy and caps the size of the first Arrow batch built from external input
 - executes `FILTER WHERE` once against that whole group
 - executes each route's ordered construction and `WHERE` program once against the surviving group
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
@@ -139,18 +141,28 @@ Only modes that the source can honor are accepted or offered by completion:
 | HTTP polling, Prometheus | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
 | Endpoint | `REJECT RETRY AFTER ...`, `BUFFER MAX SIZE ...` |
 
-The mode is consulted for resumable pauses on the same node: `ENTITY_PAUSE` holds,
-`DOMAIN_PAUSE` batches, and memory-pressure shedding. `STOP`, `DROP INGESTOR`, node drain or cordon
-moves, failover, and graceful shutdown terminate the source session instead. A graceful termination
-delivers payloads the ingestor already admitted, but any volatile quiesce buffer is lost if a
-termination or crash interrupts it. The gap until a later start is covered only by the external
-source's own retention; ephemeral sources provide none.
+The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMAIN_PAUSE` batches,
+and memory-pressure shedding. `STOP` and `DROP INGESTOR` terminate the source session. Unexpected
+owner loss also terminates it immediately; volatile quiesce buffers and in-memory ACK state do not
+survive, so recovery depends on the external source's retention and redelivery contract.
 
-Entering quiesce does not wait for downstream ACK chains. Already admitted route batches continue
-downstream. A source item not yet acknowledged, committed, or deleted is eligible for redelivery on
-resume, so existing at-least-once duplicate windows remain. A quiesced ingestor counts as drained
-even while a connected mode is reading into its quiesce buffer; those raw payloads are not runtime
-graph work yet. Ordinary relay backpressure is not quiesce and does not consult this policy.
+Node drain, graceful-shutdown drain, placement relocation, and explicit relocation with
+`RELOCATE` use a planned ownership handoff.
+That hold deliberately ignores `ON QUIESCE`: polling and new endpoint admission stop, an already
+admitted payload continues through its routes, and connected-source policy does not buffer or drop
+new work on behalf of the move. Nervix waits for the moved ingestor's admitted ACK roots to resolve
+before it commits the new owner. Kafka offsets, broker acknowledgements, queue deletes, and the
+corresponding downstream attached work therefore complete on the former owner before its source
+session stops. The destination starts only after the schedule revision commits.
+
+Only moved ingestors take this hold. Every other ingestor keeps its session open and continues
+ingesting, including ingestors on the former and destination cluster nodes. A failed fence or drain
+releases the former source and leaves the schedule unchanged.
+
+Ordinary model-alteration quiesce still does not wait for downstream ACK chains. Already admitted
+route batches continue downstream, and a source item not yet acknowledged, committed, or deleted is
+eligible for redelivery on resume. A connected mode's raw quiesce buffer is outside runtime graph
+work. Ordinary relay backpressure is also independent of `ON QUIESCE`.
 
 Buffered payloads drain in arrival order per instance before that instance admits new live intake.
 There is no total order across instances. Decode, timestamp selection, filters, construction,
@@ -163,9 +175,9 @@ drops and counts new payloads, polling sources skip polls, and endpoints reject.
 buffered by an overlapping alteration remain retained. `DROP` continues to discard and `SUSPEND`
 continues to hold at the source.
 
-`DESCRIBE INGESTOR` renders `quiesce:`, `quiesce state: none|entity hold|domain pause|memory
-pressure`, `status: quiesced` for every active mode, and the four quiesce counters. `SHOW CREATE`
-round-trips the full clause.
+`DESCRIBE INGESTOR` renders `quiesce:`, `quiesce state: none|entity hold|ownership handoff|domain
+pause|memory pressure`, `status: quiesced` for every active hold, and the four quiesce counters.
+`SHOW CREATE` round-trips the full clause.
 
 ## Branch Semantics
 
@@ -629,6 +641,16 @@ This opens an outbound WebSocket connection and decodes text or binary frames.
 Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
+
+A WebSocket-client ingestor is a single-owner ingestor. It keeps its existing primary and replica
+assignment through schedule recomputation while every assigned cluster node remains live, just
+like Kafka, MQTT, and the other client sources. Creating or changing another runtime node, a
+cluster node joining or being uncordoned, and a soft placement-policy change do not move its
+outbound session. Failover, draining its owner, an explicit `RELOCATE`, or a newly effective
+`REQUIRE COLOCATION` group can move it; a real move closes the former owner's session and opens a
+new session on the new owner.
+Endpoint and Syslog ingestors are different because their listeners execute on every live cluster
+node.
 
 Outbound WebSocket clients can declare `WITH SIGNALING PROTOCOL <name>` after
 `TYPE WEBSOCKETS`. Server-side WebSocket endpoints can declare the same clause

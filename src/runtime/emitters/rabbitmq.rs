@@ -6,6 +6,7 @@ use lapin::{
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
+use nervix_models::QueueName;
 
 use super::*;
 
@@ -25,7 +26,7 @@ impl RabbitMqEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientRabbitMq,
         resolved: Option<&ResolvedClientConfig>,
-        queue: &Identifier,
+        queue: &QueueName,
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
         let channel = Self::channel_from_config(
@@ -143,7 +144,7 @@ impl RabbitMqEmitter {
 
     pub(super) async fn publish_records(
         &self,
-        queue: &Identifier,
+        queue: &QueueName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -328,9 +329,10 @@ impl RabbitMqEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready RabbitMQ confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(Confirmation::Ack(None)) => outcome.deliver(confirmation.position),
                 Ok(Confirmation::Ack(Some(returned)) | Confirmation::Nack(Some(returned)))

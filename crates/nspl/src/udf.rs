@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     CreateStatement, CreateUdf, DescribeUdf, ShowUdfs, UdfArgument, UdfLanguage, UdfReturn,
 };
@@ -6,7 +7,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, completion_context, if_not_exists_clause,
+        ParseError, ParseFromSourceError, completion_context, field_ref, if_not_exists_clause,
         into_parse_error, kw, lex_input, string_lit, suggestions_from_errors, tok, udf_name,
         udf_ref,
     },
@@ -16,7 +17,7 @@ use crate::{
 pub fn create_udf_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateUdf>, extra::Err<ParseError<'src>>> + Clone
 {
-    let argument = udf_name()
+    let argument = field_ref()
         .then(nervix_type())
         .then(kw(Identifier::Optional).or_not())
         .map(|((name, ty), optional)| UdfArgument {
@@ -128,7 +129,7 @@ pub fn parse_create_udf(input: &str) -> Result<CreateStatement<CreateUdf>, Parse
     } else {
         Ok(output
             .into_output()
-            .expect("successful UDF parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

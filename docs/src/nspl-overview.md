@@ -335,11 +335,55 @@ out.
 
 Treat each required `FLUSH` clause as workload-specific operational tuning. `FLUSH IMMEDIATE`
 minimizes time spent waiting beyond the system-owned batching window, while `FLUSH EACH <duration>
-MAX BATCH SIZE <bytes>` emits when either configured boundary is reached. Shorter intervals and
-smaller batches generally reduce latency and per-buffer memory at the cost of throughput; longer
-intervals and larger batches generally improve throughput at the cost of latency and memory. Choose
-both values for the route's traffic, downstream behavior, and branch cardinality. Values in
-examples are illustrative, not recommended defaults.
+MAX BATCH SIZE <bytes>` emits when either configured boundary is reached. Choose both values for
+the route's traffic, downstream behavior, and branch cardinality. Values in examples are
+illustrative, not recommended defaults. Two measured facts decide what a `FLUSH` clause can buy.
+
+`MAX BATCH SIZE` only clamps a batch; it never grows one. The batch a route emits is roughly its
+arrival rate multiplied by the `FLUSH EACH` interval, cut off at the byte cap, so raising a cap
+that never fires changes nothing and the only way to grow batches is a longer interval, paid in
+latency. Upstream of every route, ingestors build their first Arrow batches from source groups of
+at most 1,024 messages, or fewer after a 5 ms idle gap, independent of any `FLUSH` policy; larger
+batches downstream come only from route buffering across an interval. Read actual batch sizes
+from the [`nervix_messages_per_batch` histogram](metrics-and-observability.md) instead of
+inferring them.
+
+Larger batches do not make program execution faster beyond about a thousand rows. Execution is
+columnar, so its fixed per-batch cost is amortized quickly. The table shows per-row throughput of
+the VM batch-size sweep (`crates/nervix-vm/benches/vm.rs`, criterion, one development machine,
+September 2026) relative to the 1,024-row value for each program shape: at 64 rows it is 12–60%
+of that value and climbs steeply; above 1,024 rows most shapes are flat within measurement noise,
+float arithmetic dips, and only the cheapest shape, nullable casts, keeps gaining, because batches
+above 1,024 rows execute on the blocking worker pool and its per-batch hand-off is no longer
+amortized by more work. Absolute rates are machine-specific; the shape is not.
+
+| program shape | 64 | 256 | 1,024 | 4,096 | 16,384 | 65,536 |
+|:--|--:|--:|--:|--:|--:|--:|
+| integer arithmetic + filter | 21% | 53% | 100% | 98% | 97% | 100% |
+| integer comparison | 19% | 52% | 100% | 96% | 98% | 108% |
+| float arithmetic | 28% | 64% | 100% | 84% | 71% | 77% |
+| nullable casts | 12% | 41% | 100% | 70% | 133% | 137% |
+| string kernels | 24% | 61% | 100% | 82% | 105% | 106% |
+| text transforms | 47% | 82% | 100% | 89% | 97% | 105% |
+| list builtins | 60% | 87% | 100% | 82% | 93% | 99% |
+
+Larger batches genuinely pay only at boundaries that do work per batch rather than per record:
+
+- OTEL emitters send one export request per batch, so batch size sets request count and the
+  compression ratio.
+- Iceberg emitters write one staging file per flush and one commit per `COMMIT EACH ... MAX SIZE`
+  boundary, so batch and commit sizes set file counts and Parquet file sizes.
+- Inferencers whose tensor shapes declare a batch dimension run one model invocation per batch.
+- WASM processors serialize one Arrow IPC payload per batch, and cluster interconnect sends one
+  frame per batch, with a fixed 8 MiB frame limit.
+
+Broker emitters — Kafka, Pulsar, NATS, RabbitMQ, MQTT, Redis, ZeroMQ, Sentry, and syslog — encode
+and publish one record at a time whatever the batch size; wire batching there belongs to the
+client, such as Kafka's `linger.ms` and `batch.size`. SQS `BATCH` groups at most ten records per
+request, and database sinks split every flush into statements of at most `WITH MAX BATCH <n>`
+records. On such routes a larger `MAX BATCH SIZE` or a longer interval buys only fewer flush
+cycles, at the cost of latency, memory, and coarser failure and retry granularity: prefer the
+shortest interval the sink tolerates and let the byte cap protect memory.
 
 `MAX BATCH SIZE` measures the logical Arrow data in the current batch slice: value buffers plus
 the offsets and validity data needed to represent those values. It does not count unused buffer
@@ -613,6 +657,9 @@ DESCRIBE REORDERER <reorderer>;
 DESCRIBE WINDOW PROCESSOR <window_processor>;
 DESCRIBE HASH MAP <hash_map>;
 DESCRIBE PLACEMENT <placement>;
+DESCRIBE RELOCATION <selection> ONTO NODE <node_id>
+  FOLLOW PREFERENCES | IGNORE PREFERENCES
+  [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
 DESCRIBE DOMAIN;
 LOOKUP <hash_map> KEY '<key>';
 ```
@@ -628,7 +675,13 @@ DROP NODE <node_id>;
 CORDON NODE <node_id>;
 UNCORDON NODE <node_id>;
 DRAIN NODE <node_id>;
+RELOCATE <selection> ONTO NODE <node_id>
+  FOLLOW PREFERENCES | IGNORE PREFERENCES
+  [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
 ```
+
+A relocation `<selection>` is a kind-qualified list, `<kind> <name>[, ...]`, or a directed corridor,
+`FROM <kind> <name>[, ...] TO <kind> <name>[, ...]`.
 
 For a wire schema, `<kind>` is the exact multi-word kind: `WIRE JSON SCHEMA`, `WIRE CBOR SCHEMA`,
 or `WIRE AVRO SCHEMA`. The same exact kind is required by `DROP`.
@@ -641,5 +694,12 @@ General notes:
 - native schema fields may use the `SENSITIVE` modifier; session subscription output masks those values as `<masked>`, while emitters may send sensitive values to their configured external sink
 - `CREATE SUBSCRIPTION` and `DELETE SUBSCRIPTION` are not persisted in the registry
 - session subscription names are unique within a connected session; one session may subscribe to relays from multiple domains, and `DELETE SUBSCRIPTION` uses the name rather than repeating subscription parameters
-- `RELAY` names a connection between runtime nodes; ingestors and reingestors create branch instances with runtime relay instances inside them
+- every `RELAY` is scheduled with one owner; only that owner instantiates its buffer, concrete
+  branch presence, fan-out, subscriptions, and metrics
+- relay `CAPACITY` bounds the single owner buffer cluster-wide; each producer node and remote
+  consumer node adds one fixed in-flight dispatch slot, independent of branch count
+- materialized state adds scheduler-selected state replicas to the relay rather than a separate
+  runtime-node kind; ordinary relays report no replicas
+- ingestors and reingestors construct branch identities, and a relay owner applies branch TTL and
+  `MAX INSTANCES` across all producers for that relay
 - `DESCRIBE INGESTOR` exposes runtime-facing ingestor state, including memory-backpressure state and committed Kafka `OFFSET BY DOMAIN` partition assignment

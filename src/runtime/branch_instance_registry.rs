@@ -1,6 +1,7 @@
 use std::{hash::Hash, time::Duration};
 
 use indexmap::IndexMap;
+use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
 
@@ -102,7 +103,7 @@ where
                 let entry = self
                     .entries
                     .get_index_mut(index)
-                    .expect("index from get_index_of must be valid")
+                    .verified("the index was just returned by get_index_of on this same map")
                     .1;
                 entry.last_ingestion = now;
                 entry.state.clone()
@@ -158,7 +159,7 @@ where
             let (_, entry) = self
                 .entries
                 .shift_remove_index(0)
-                .expect("front entry must be removable");
+                .verified("the loop above observed a front entry in this same map");
             expired.push((key, entry.state));
         }
         if !expired.is_empty() {
@@ -173,7 +174,7 @@ where
             let (key, entry) = self
                 .entries
                 .shift_remove_index(0)
-                .expect("front entry must be removable while over capacity");
+                .verified("the loop above observed a front entry in this same map");
             evicted.push((key, entry.state));
         }
         if !evicted.is_empty() {

@@ -255,6 +255,21 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   belong at `debug` or `trace`.
 - Hot-path logs and structured errors must not expose sensitive payload values.
 
+## Failure Handling and Panics
+
+- Use `meticulous`'s `ResultExt` and `OptionExt` instead of bare `unwrap` and `expect`, and pick the
+  method that states why the failure cannot happen: `assured` for a guarantee that holds by
+  construction or by target platform, `verified` for a condition already checked earlier in the same
+  code, `todo` for a path that is not implemented yet.
+- The reason is part of the call. Write the actual guarantee, not a restatement of the operation:
+  `verified("the has_errors branch above already returned")`, not `verified("parse must succeed")`.
+- Import the traits anonymously with `use meticulous::{OptionExt as _, ResultExt as _};` so they
+  never collide with the `ResultExt` that `error-stack` brings into the same module.
+- A site with no guarantee is a defect, not a renamed `unwrap`. Give it a typed error and propagate
+  it, or make the invariant hold in the type. Never invent a guarantee to retire a panic site.
+- A build script is the exception that stays a panic: a failed code generation is a real build
+  failure, so it panics with its cause rather than claiming a guarantee it does not have.
+
 ## Engineering Conventions
 
 - Keep Rust modules organized around coherent ownership boundaries, not broad technical categories.
@@ -375,6 +390,13 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   detailed syntax, semantic explanations, rationale, examples, and tuning guidance belong in
   `docs/src` and should be read from there rather than restated in the skill.
 - Use `just validate` for formatting and validation; do not invoke Cargo formatting directly.
+- Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
+  casts, bare `unwrap` and `expect`, `Result<_, String>`, signatures returning a Nervix error
+  without `Report`, node identities carried as `String`, struct fields gated on
+  `cfg(feature = "testing")`, parser references outside the language edges, and `Model` references
+  in the data plane, and CI fails when a count is above `debt-baseline.json`. A change may lower a
+  count and never raise one. When a count falls, run `just ratchet --update` and commit the
+  baseline in the same change; `just ratchet --show <count>` lists the sites behind one count.
 - Every Rust build, check, lint, and test invocation must use the repository-configured kache
   compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
   benchmarks, cache troubleshooting, or retries.
@@ -402,7 +424,9 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   state the explicit user-approved reason.
 - After completing requested repository changes, include a proposed Conventional Commit title and
   description in the final response. Follow Conventional Commits and select the title type from the
-  current `type-enum` in `./commitlint.config.js`.
+  current `type-enum` in `./commitlint.config.js`. Put the title and description together in one
+  fenced code block. Keep the title and each description paragraph on a single unwrapped line; do
+  not insert manual line breaks within them because Git and GitHub handle display wrapping.
 - When the user requests follow-up changes, regenerate both so the final response contains an
   updated title and description that reflect the complete resulting change instead of a stale
   earlier proposal.

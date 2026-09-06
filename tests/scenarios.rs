@@ -77,9 +77,9 @@ use crate::common::{
     },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
-        REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
+        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
+        MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
+        RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
 };
 
@@ -108,6 +108,9 @@ struct ScenarioWorld {
     last_subscription_payload: Option<String>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
+    /// The plan block `DESCRIBE RELOCATION` returned, so the executing `RELOCATE` can be compared
+    /// against it verbatim.
+    saved_relocation_plan: Option<String>,
     last_server_error: Option<String>,
     last_auth_attempts_elapsed: Option<Duration>,
     broker_observer: Option<BrokerObserver>,
@@ -2909,6 +2912,12 @@ async fn when_node_is_stopped(world: &mut ScenarioWorld, node_id: String) {
         .expect("failed to stop node");
 }
 
+#[when(expr = "node {string} begins stopping")]
+async fn when_node_begins_stopping(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.cluster_mut().begin_stopping_node(&node_id);
+}
+
 #[when(expr = "node {string} is gracefully stopped")]
 async fn when_node_is_gracefully_stopped(world: &mut ScenarioWorld, node_id: String) {
     assert!(
@@ -2987,7 +2996,7 @@ async fn given_leader_forgets_transaction_bindings(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
     world
         .runtime_test_hooks
-        .drop_transaction_bindings_on(leader);
+        .drop_transaction_bindings_on(crate::common::cluster::node_name(&leader));
 }
 
 #[given(expr = "transaction commit on node {string} pauses after {int} statement")]
@@ -2997,9 +3006,10 @@ async fn given_transaction_commit_pause(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    world
-        .runtime_test_hooks
-        .pause_transaction_commit_after(node_id, completed_statements);
+    world.runtime_test_hooks.pause_transaction_commit_after(
+        crate::common::cluster::node_name(&node_id),
+        completed_statements,
+    );
 }
 
 #[given(expr = "the entity gate for domain {string} pauses after engagement")]
@@ -3034,9 +3044,10 @@ async fn then_transaction_commit_pause_is_reached(
     let node_id = expand_placeholders(world, &node_id);
     tokio::time::timeout(
         Duration::from_secs(10),
-        world
-            .runtime_test_hooks
-            .wait_for_transaction_commit_pause(&node_id, completed_statements),
+        world.runtime_test_hooks.wait_for_transaction_commit_pause(
+            &crate::common::cluster::node_name(&node_id),
+            completed_statements,
+        ),
     )
     .await
     .expect("transaction commit did not reach the armed pause");
@@ -3049,9 +3060,10 @@ async fn when_transaction_commit_pause_is_released(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    world
-        .runtime_test_hooks
-        .release_transaction_commit_pause(&node_id, completed_statements);
+    world.runtime_test_hooks.release_transaction_commit_pause(
+        &crate::common::cluster::node_name(&node_id),
+        completed_statements,
+    );
 }
 
 #[when("the cluster is restarted")]
@@ -3800,6 +3812,27 @@ async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) 
         .expect("background NSPL task must not panic")
         .expect("background NSPL execution must succeed");
     world.last_command_output = Some(output);
+}
+
+#[then(expr = "the background NSPL execution fails with {string}")]
+async fn then_the_background_nspl_execution_fails_with(
+    world: &mut ScenarioWorld,
+    expected: String,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let task = world
+        .background_nspl
+        .take()
+        .expect("a background NSPL execution must be active");
+    let error = task
+        .await
+        .expect("background NSPL task must not panic")
+        .expect_err("background NSPL execution must fail");
+    assert!(
+        error.contains(&expected),
+        "background NSPL error must contain '{expected}', got: {error}"
+    );
+    world.last_command_error = Some(error);
 }
 
 #[then("the background NSPL execution is discarded")]
@@ -4929,6 +4962,7 @@ async fn when_these_nspl_commands_are_executed_on_node(
 ) {
     world.last_command_error = None;
     world.last_command_output = None;
+    let node_id = expand_placeholders(world, &node_id);
     let commands = expand_placeholders(world, docstring(step));
     let session = if commands_are_retry_safe_session_ops(&commands) {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -4997,6 +5031,45 @@ async fn when_these_nspl_commands_fail_with(
             );
             world.last_command_error = Some(error);
         }
+    }
+}
+
+#[when(expr = "within {string} these NSPL commands on node {string} eventually fail with {string}")]
+#[then(expr = "within {string} these NSPL commands on node {string} eventually fail with {string}")]
+async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
+    world: &mut ScenarioWorld,
+    within: String,
+    node_id: String,
+    expected_error: String,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_server_error = None;
+
+    let timeout = humantime::parse_duration(&within).expect("within must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let expected_error = expand_placeholders(world, &expected_error);
+    let commands = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + timeout;
+    let mut last_outcome;
+    loop {
+        match run_nspl_commands_on_node(world, &node_id, &commands).await {
+            Ok(output) => last_outcome = format!("command succeeded: {output}"),
+            Err(error) => {
+                if error.contains(&expected_error) {
+                    world.last_command_error = Some(error);
+                    return;
+                }
+                last_outcome = error;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected an error containing {expected_error:?} within {within}, last outcome: \
+             {last_outcome}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -5211,6 +5284,32 @@ async fn then_last_command_output_contains(world: &mut ScenarioWorld, #[step] st
         output.contains(expected.trim()),
         "expected command output fragment {} in output, got: {output}",
         expected.trim()
+    );
+}
+
+#[then("the last command output is saved as the relocation plan")]
+async fn then_last_command_output_is_saved_as_the_relocation_plan(world: &mut ScenarioWorld) {
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("a relocation plan must exist before it can be saved");
+    world.saved_relocation_plan = Some(output.trim().to_string());
+}
+
+#[then("the last command output contains the saved relocation plan")]
+async fn then_last_command_output_contains_the_saved_relocation_plan(world: &mut ScenarioWorld) {
+    let expected = world
+        .saved_relocation_plan
+        .as_deref()
+        .expect("a relocation plan must be saved before assertion");
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("a command output must exist before assertion");
+    assert!(
+        output.contains(expected),
+        "expected the executed relocation output to contain the described plan\n{expected}\ngot: \
+         {output}"
     );
 }
 
@@ -8220,13 +8319,16 @@ struct NumericMetricAssertion {
 
 impl NumericMetricAssertion {
     fn matches_metric_line(&self, line: &str) -> bool {
-        let Some(actual) = metric_line_value(line, &self.field).and_then(|value| {
-            value
-                .parse::<f64>()
-                .ok()
-                .or_else(|| (value == "-").then_some(f64::NAN))
-        }) else {
+        let Some(value) = metric_line_value(line, &self.field) else {
             return false;
+        };
+        let actual = if value == "-" {
+            f64::NAN
+        } else {
+            let Ok(actual) = value.parse::<f64>() else {
+                return false;
+            };
+            actual
         };
         self.op.matches(actual, self.expected)
     }
@@ -8445,6 +8547,11 @@ async fn then_last_cluster_status_scheduled_owner_is_saved_as_placeholder(
                 world.domain
             )
         });
+    assert_ne!(
+        owner, "-",
+        "scheduled {kind} {name} in domain '{}' must have an owner, got: {output}",
+        world.domain
+    );
     world.placeholders.insert(placeholder, owner.to_string());
 }
 
@@ -8819,6 +8926,49 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
             world.last_command_error
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
+    expr = "for {string} node {string} keeps reporting scheduled {string} {string} owner equal to \
+            placeholder {string}"
+)]
+async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeholder(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    placeholder: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let expected = world
+        .placeholders
+        .get(&placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{placeholder}' must be saved before assertion"))
+        .clone();
+    let deadline = Instant::now() + duration;
+
+    while Instant::now() < deadline {
+        tokio::task::consume_budget().await;
+        let output = run_nspl_commands_on_node(world, &node_id, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("cluster status must be readable while observing assignment stability");
+        world.last_command_output = Some(output.clone());
+        let owner = scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
+            .map(|(owner, _)| owner.to_string())
+            .unwrap_or_else(|| {
+                panic!("scheduled {kind} {name} must remain in the schedule, got: {output}")
+            });
+        assert_eq!(
+            owner, expected,
+            "scheduled {kind} {name} must keep owner '{expected}', got: {output}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -9886,6 +10036,34 @@ async fn when_kafka_message_is_published_to_partition(
         .expect("failed to publish kafka message");
 }
 
+#[when(expr = "Kafka message with headers {string} is published to topic {string} partition {int}")]
+async fn when_kafka_message_with_headers_is_published_to_partition(
+    world: &mut ScenarioWorld,
+    headers: String,
+    topic: String,
+    partition: usize,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let partition = i32::try_from(partition).expect("partition id must fit i32");
+    let payload = expand_placeholders(world, docstring(step));
+    let headers = headers
+        .split(',')
+        .map(str::trim)
+        .filter(|header| !header.is_empty())
+        .map(|header| {
+            header
+                .split_once('=')
+                .expect("kafka header must be written as 'name=value'")
+        })
+        .collect::<Vec<_>>();
+    world
+        .cluster()
+        .publish_kafka_partition_with_headers(&topic, partition, &payload, &headers)
+        .await
+        .expect("failed to publish kafka message with headers");
+}
+
 #[when(expr = "Kafka topic {string} partition count is changed to {int}")]
 async fn when_kafka_topic_partition_count_is_changed_to(
     world: &mut ScenarioWorld,
@@ -10249,6 +10427,46 @@ async fn when_websocket_message_is_published(
         .publish_websocket("node-1", &host, &path, &payload)
         .await
         .expect("failed to publish websocket message");
+}
+
+#[when("the websocket client test server sends a payload")]
+async fn when_websocket_client_test_server_sends_a_payload(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let base = world
+        .dependencies
+        .endpoints()
+        .get(MOCK_HTTP_ADDR)
+        .expect("HTTP mock server endpoint must be available");
+    let mut url = url::Url::parse(base).expect("HTTP mock server endpoint must be a valid URL");
+    url.set_path(&format!("/ws/{}", world.test_id));
+    let payload = expand_placeholders(world, docstring(step));
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        tokio::task::consume_budget().await;
+        match client.post(url.clone()).body(payload.clone()).send().await {
+            Ok(response) if response.status().is_success() => {
+                world.last_server_error = None;
+                return;
+            }
+            Ok(response) => {
+                world.last_server_error = Some(format!(
+                    "websocket client test server returned {}",
+                    response.status()
+                ))
+            }
+            Err(error) => world.last_server_error = Some(error.to_string()),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for an outbound WebSocket client connection. last error: {:?}",
+            world.last_server_error
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[when(expr = "websocket frames are exchanged with host {string} path {string}")]
@@ -12509,19 +12727,22 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
             .try_collect::<Vec<_>>()
             .await
             .expect("failed to read MongoDB insert command profiles");
-        let command_sizes = profile_documents
-            .iter()
-            .filter_map(|profile_document| match profile_document.get("ninserted") {
-                Some(MongoDbBson::Int32(value)) => usize::try_from(*value).ok(),
-                Some(MongoDbBson::Int64(value)) => usize::try_from(*value).ok(),
+        let mut command_sizes = Vec::with_capacity(profile_documents.len());
+        for profile_document in &profile_documents {
+            let size = match profile_document.get("ninserted") {
+                Some(MongoDbBson::Int32(value)) => usize::try_from(*value),
+                Some(MongoDbBson::Int64(value)) => usize::try_from(*value),
                 Some(MongoDbBson::Double(value))
                     if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 =>
                 {
-                    usize::try_from(*value as u64).ok()
+                    usize::try_from(*value as u64)
                 }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+                _ => continue,
+            };
+            if let Ok(size) = size {
+                command_sizes.push(size);
+            }
+        }
         let observed_inserts = profile_documents.len();
         let largest_insert = command_sizes.iter().copied().max().unwrap_or(0);
         if observed_documents == expected_documents
@@ -12710,13 +12931,19 @@ async fn then_object_storage_path_does_not_exist(world: &mut ScenarioWorld, path
 
 fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
     path_contains_staged_iceberg_batch(root, |path, name| {
-        name.starts_with("batch-")
-            && name.ends_with(".arrow")
-            && std::fs::File::open(path)
-                .ok()
-                .and_then(|file| StreamReader::try_new(file, None).ok())
-                .and_then(|reader| reader.collect::<Result<Vec<_>, _>>().ok())
-                .is_some_and(|batches| !batches.is_empty())
+        if !name.starts_with("batch-") || !name.ends_with(".arrow") {
+            return false;
+        }
+        let Ok(file) = std::fs::File::open(path) else {
+            return false;
+        };
+        let Ok(reader) = StreamReader::try_new(file, None) else {
+            return false;
+        };
+        let Ok(batches) = reader.collect::<Result<Vec<_>, _>>() else {
+            return false;
+        };
+        !batches.is_empty()
     })
 }
 

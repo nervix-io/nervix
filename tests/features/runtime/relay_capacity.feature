@@ -136,7 +136,7 @@ Feature: Relay capacity
       | 3            | 1             |
 
   @relay_capacity_shrink_preserves_buffered_payloads
-  Scenario Outline: Shrinking relay CAPACITY preserves buffered runtime consumer payloads
+  Scenario Outline: Shrinking relay CAPACITY preserves owner-buffered and producer-slot payloads
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -187,8 +187,10 @@ Feature: Relay capacity
         ON GENERAL ERROR LOG;
 
       START;
+      SHOW CLUSTER STATUS;
       """
-    And emitter "zeromq_capacity_shrink_out" enters stall mode
+    Then the last cluster status owner for scheduled "relay" "notifications" is saved as placeholder "relay_capacity_owner"
+    When emitter "zeromq_capacity_shrink_out" enters stall mode
     And http payload is posted to node "node-1" with host "http-{{test_id}}-shrink.example.com" path "/relay-capacity-shrink"
       """
       {"seq":1}
@@ -205,7 +207,7 @@ Feature: Relay capacity
       """
       {"seq":4}
       """
-    Then node "node-1" observability metric "nervix_messages_total" with labels eventually equals 4
+    Then node "{{relay_capacity_owner}}" observability metric "nervix_messages_total" with labels eventually equals 3
       """
       target_kind="RELAY"
       target="notifications"

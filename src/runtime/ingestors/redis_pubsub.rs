@@ -1,3 +1,4 @@
+use nervix_models::DomainName;
 use redis::{Client as RedisClient, ClientTlsConfig, TlsCertificates as RedisTlsCertificates};
 
 use super::super::*;
@@ -7,7 +8,7 @@ pub(in crate::runtime) struct RedisPubSubIngestor;
 impl RedisPubSubIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientRedis,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -56,7 +57,9 @@ impl RedisPubSubIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled Redis Pub/Sub ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -265,7 +268,7 @@ impl RedisPubSubIngestor {
 
                                     let payload = BufferedIngestPayload::new(
                                         payload,
-                                        BufferedIngestMetadata::Headers(IngestHeaders::new()),
+                                        BufferedIngestMetadata::without_headers(),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         task_quiesce.intake(0, payload, false)

@@ -10,12 +10,13 @@ use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
 };
 use leptos::{ev, mount::mount_to_body, prelude::*};
+use meticulous::OptionExt as _;
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
     DataflowStatistics,
 };
-use nervix_models::Statement;
+use nervix_models::{ClusterNodeName, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
@@ -175,7 +176,7 @@ struct ResourceVersionView {
     manifest_checksum: Option<String>,
     file_count: Option<String>,
     total_bytes: Option<String>,
-    created_by_node: Option<String>,
+    created_by_node: Option<ClusterNodeName>,
     created_at: Option<String>,
     files: Vec<ResourceFileView>,
 }
@@ -735,26 +736,27 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                         let mut resend_pending_after_connect = !pending_requests.is_empty();
                         let mut waiting_for_transaction_attach = false;
                         if transaction_is_active(transaction_status.get_untracked()) {
-                            let existing_attach = pending_requests.front().and_then(|pending| {
-                                let PendingRequest::AttachTransaction { request } = pending else {
-                                    return None;
-                                };
-                                Some(request.clone())
-                            });
-                            let had_existing_attach = existing_attach.is_some();
-                            let request = existing_attach.unwrap_or_else(|| {
-                                let id = transaction_status
-                                    .get_untracked()
-                                    .map(|status| status.id)
-                                    .unwrap_or_default();
-                                nervix_proto::SessionRequest {
-                                    request: Some(
-                                        nervix_proto::session_request::Request::AttachTransaction(
-                                            nervix_proto::AttachTransactionRequest { id },
-                                        ),
-                                    ),
+                            let (request, had_existing_attach) = match pending_requests.front() {
+                                Some(PendingRequest::AttachTransaction { request }) => {
+                                    (request.clone(), true)
                                 }
-                            });
+                                _ => {
+                                    let id = transaction_status
+                                        .get_untracked()
+                                        .map(|status| status.id)
+                                        .unwrap_or_default();
+                                    (
+                                        nervix_proto::SessionRequest {
+                                            request: Some(
+                                                nervix_proto::session_request::Request::AttachTransaction(
+                                                    nervix_proto::AttachTransactionRequest { id },
+                                                ),
+                                            ),
+                                        },
+                                        false,
+                                    )
+                                }
+                            };
                             if socket
                                 .send(WebSocketMessage::Bytes(request.encode_to_vec()))
                                 .await
@@ -1145,7 +1147,9 @@ fn handle_session_response(
                     .map(|status| status.id)
                     .filter(|id| !id.is_empty())
             {
-                pending_requests.push_front(pending.take().expect("pending was checked above"));
+                pending_requests.push_front(pending.take().verified(
+                    "the condition above matched on this same pending request being present",
+                ));
                 return SessionResponseAction::ReattachTransaction { id };
             }
             let pending = pending;
@@ -1545,7 +1549,7 @@ fn parse_resource_version_detail(line: &str) -> Option<ResourceVersionView> {
             "manifest_checksum" => manifest_checksum = Some(value.to_string()),
             "file_count" => file_count = Some(value.to_string()),
             "total_bytes" => total_bytes = Some(value.to_string()),
-            "created_by_node" => created_by_node = Some(value.to_string()),
+            "created_by_node" => created_by_node = ClusterNodeName::parse(value).ok(),
             "created_at" => created_at = Some(value.to_string()),
             _ => {}
         }
@@ -1873,13 +1877,14 @@ fn Sidebar(
             .get()
             .into_iter()
             .find(|domain| Some(domain.id.clone()) == active);
-        found.or_else(|| {
-            active.map(|id| DomainView {
+        match found {
+            Some(domain) => Some(domain),
+            None => active.map(|id| DomainView {
                 id,
                 mode: "UNKNOWN".to_string(),
                 status: "UNKNOWN".to_string(),
-            })
-        })
+            }),
+        }
     };
     view! {
         <aside class="sidebar">
@@ -1892,26 +1897,22 @@ fn Sidebar(
                 >
                     <span class="status-dot"></span>
                     <span>{move || {
-                        selected_domain()
-                            .map(|domain| domain.id)
-                            .unwrap_or_else(|| {
-                                if domains_loaded.get() {
-                                    "no domain".to_string()
-                                } else {
-                                    "loading domains".to_string()
-                                }
-                            })
+                        if let Some(domain) = selected_domain() {
+                            domain.id
+                        } else if domains_loaded.get() {
+                            "no domain".to_string()
+                        } else {
+                            "loading domains".to_string()
+                        }
                     }}</span>
                     <span class="domain-mode">{move || {
-                        selected_domain()
-                            .map(|domain| domain.mode)
-                            .unwrap_or_else(|| {
-                                if domains_loaded.get() {
-                                    "NONE".to_string()
-                                } else {
-                                    "WAIT".to_string()
-                                }
-                            })
+                        if let Some(domain) = selected_domain() {
+                            domain.mode
+                        } else if domains_loaded.get() {
+                            "NONE".to_string()
+                        } else {
+                            "WAIT".to_string()
+                        }
                     }}</span>
                     <span class="chevron">{move || if domain_open.get() { "⌃" } else { "⌄" }}</span>
                 </button>
@@ -2374,7 +2375,7 @@ fn event_target_input(event: &ev::Event) -> web_sys::HtmlInputElement {
     event
         .target()
         .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-        .expect("upload input event target must be an input")
+        .verified("this handler is only bound to the upload input element")
 }
 
 async fn upload_resource_files(
@@ -2466,10 +2467,12 @@ fn web_console_resource_upload_url(
 }
 
 fn file_relative_path(file: &web_sys::File) -> String {
-    js_sys::Reflect::get(file, &wasm_bindgen::JsValue::from_str("webkitRelativePath"))
-        .ok()
-        .and_then(|value| value.as_string())
-        .unwrap_or_default()
+    let Ok(value) =
+        js_sys::Reflect::get(file, &wasm_bindgen::JsValue::from_str("webkitRelativePath"))
+    else {
+        return String::new();
+    };
+    value.as_string().unwrap_or_default()
 }
 
 fn encode_query_component(value: &str) -> String {
@@ -2549,18 +2552,24 @@ fn SidebarIcon(kind: &'static str) -> impl IntoView {
 }
 
 fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<(String, String, DataflowEdgeKind)> {
-    let hit = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| {
+    let pointer_hit = if let Some(window) = web_sys::window()
+        && let Some(document) = window.document()
+        && let Some(element) =
             document.element_from_point(event.client_x() as f32, event.client_y() as f32)
-        })
-        .and_then(graph_edge_hit_from_element)
-        .or_else(|| {
-            event
-                .target()
-                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-                .and_then(graph_edge_hit_from_element)
-        })?;
+    {
+        graph_edge_hit_from_element(element)
+    } else {
+        None
+    };
+    let hit = if let Some(hit) = pointer_hit {
+        hit
+    } else {
+        let target = event.target()?;
+        let Ok(element) = target.dyn_into::<web_sys::Element>() else {
+            return None;
+        };
+        graph_edge_hit_from_element(element)?
+    };
     let source = hit.get_attribute("data-source")?;
     let target = hit.get_attribute("data-target")?;
     let kind = graph_edge_kind_from_label(hit.get_attribute("data-kind")?.as_str())?;
@@ -2568,19 +2577,13 @@ fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<(String, String, D
 }
 
 fn graph_edge_hit_from_element(element: web_sys::Element) -> Option<web_sys::Element> {
-    element
-        .closest(".graph-edge-hit")
-        .ok()
-        .flatten()
-        .or_else(|| {
-            element
-                .closest(".graph-edge-group")
-                .ok()
-                .flatten()?
-                .query_selector(".graph-edge-hit")
-                .ok()
-                .flatten()
-        })
+    if let Ok(Some(hit)) = element.closest(".graph-edge-hit") {
+        return Some(hit);
+    }
+    let Ok(Some(group)) = element.closest(".graph-edge-group") else {
+        return None;
+    };
+    group.query_selector(".graph-edge-hit").unwrap_or_default()
 }
 
 fn graph_edge_kind_from_label(label: &str) -> Option<DataflowEdgeKind> {
@@ -2664,10 +2667,14 @@ fn GraphPanel(
             .filter(|graph| graph.id == selected_domain)
             .or_else(&visible_graph)
     };
-    let current_graph =
-        move || visible_graph().expect("graph view must exist when graph is visible");
-    let current_topology_graph =
-        move || visible_topology_graph().expect("graph topology must exist when graph is visible");
+    let current_graph = move || {
+        visible_graph()
+            .verified("the panel only renders while the visible graph signal holds a value")
+    };
+    let current_topology_graph = move || {
+        visible_topology_graph()
+            .verified("the panel only renders while the visible graph signal holds a value")
+    };
     let active_graph_search = move || {
         let query = graph_search.get().trim().to_ascii_lowercase();
         (query.chars().count() >= 2).then_some(query)
@@ -3359,7 +3366,9 @@ fn GraphPanel(
                                 <button
                                     type="button"
                                     on:click=move |_| {
-                                        if let Some(command) = selected_action_target.get().and_then(|target| target.describe_command) {
+                                        if let Some(target) = selected_action_target.get()
+                                            && let Some(command) = target.describe_command
+                                        {
                                             run_command(Some(command));
                                             selected_action_target.set(None);
                                         }
@@ -3383,7 +3392,9 @@ fn GraphPanel(
                                 <button
                                     type="button"
                                     on:click=move |_| {
-                                        if let Some(relay) = selected_action_target.get().and_then(|target| target.relay) {
+                                        if let Some(target) = selected_action_target.get()
+                                            && let Some(relay) = target.relay
+                                        {
                                             selected_relay.set(Some(relay));
                                             subscribe_filter.set(String::new());
                                             sample_rate.set(0);
@@ -4885,7 +4896,10 @@ impl GraphViewEdge {
                 current.0, current.1, exit.0, exit.1
             ));
         }
-        let end = self.points.last().expect("non-empty points checked above");
+        let end = self
+            .points
+            .last()
+            .verified("the empty-points branch above already returned");
         path.push_str(&format!(" L{} {}", end.0, end.1));
         path
     }

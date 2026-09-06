@@ -59,17 +59,17 @@ pub async fn provision_topics(
             let admin = StdArc::clone(&admin);
             let topic_name = topic.to_string();
             let observed = tokio::task::spawn_blocking(move || {
-                admin
+                let Ok(metadata) = admin
                     .inner()
                     .fetch_metadata(Some(&topic_name), request_timeout)
-                    .ok()
-                    .and_then(|metadata| {
-                        metadata
-                            .topics()
-                            .iter()
-                            .find(|metadata| metadata.name() == topic_name)
-                            .map(|metadata| metadata.partitions().len())
-                    })
+                else {
+                    return None;
+                };
+                metadata
+                    .topics()
+                    .iter()
+                    .find(|metadata| metadata.name() == topic_name)
+                    .map(|metadata| metadata.partitions().len())
             })
             .await
             .map_err(|error| io::Error::other(format!("Kafka metadata task failed: {error}")))?;

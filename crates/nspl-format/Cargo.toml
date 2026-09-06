@@ -11,6 +11,7 @@ workspace = true
 ariadne = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 ignore = { workspace = true }
+meticulous = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 tempfile = { workspace = true }

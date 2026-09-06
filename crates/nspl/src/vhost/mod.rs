@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{CreateStatement, CreateVhost, VhostTlsResource};
 
 use crate::{
@@ -61,7 +62,7 @@ pub fn parse_create_vhost_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -114,7 +115,7 @@ mod tests {
         assert_eq!(
             parsed.tls,
             Some(VhostTlsResource {
-                resource: nervix_models::Identifier::parse("my_cert").expect("valid resource"),
+                resource: nervix_models::ResourceName::parse("my_cert").expect("valid resource"),
                 version: None,
             })
         );
@@ -128,7 +129,7 @@ mod tests {
         assert_eq!(
             parsed.tls,
             Some(VhostTlsResource {
-                resource: nervix_models::Identifier::parse("my_cert").expect("valid resource"),
+                resource: nervix_models::ResourceName::parse("my_cert").expect("valid resource"),
                 version: Some(7),
             })
         );

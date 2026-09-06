@@ -1,3 +1,4 @@
+use nervix_models::DomainName;
 use zeromq::{PullSocket, Socket, SocketRecv};
 
 use super::super::*;
@@ -7,7 +8,7 @@ pub(in crate::runtime) struct ZeroMqIngestor;
 impl ZeroMqIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientZeroMq,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -42,7 +43,9 @@ impl ZeroMqIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled ZeroMQ ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
         let task_domain = domain.clone();
@@ -200,7 +203,7 @@ impl ZeroMqIngestor {
 
                                     let payload = BufferedIngestPayload::new(
                                         payload,
-                                        BufferedIngestMetadata::Headers(IngestHeaders::new()),
+                                        BufferedIngestMetadata::without_headers(),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         quiesce.intake(0, payload, false)

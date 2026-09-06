@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AlterIngestor, AlterIngestorOperation, CreateIngestor, CreateStatement, EndpointIngestMode,
     GeneralErrorPolicy, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
@@ -16,7 +17,7 @@ use crate::{
         flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
         into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
         parallel_ack_window, queue_ref, relay_ref, retry_policy, sequential_ack_window, string_lit,
-        subscription_ref, suggest_from, tok, topic_ref, u64_value, where_expression,
+        subject_ref, subscription_ref, suggest_from, tok, topic_ref, u64_value, where_expression,
     },
 };
 
@@ -299,7 +300,7 @@ fn positive_quiesce_buffer_size<'src>()
     byte_size_lit().try_map(|value, span| {
         let bytes = value
             .parse::<ubyte::ByteUnit>()
-            .expect("byte_size_lit must produce a valid byte size")
+            .verified("byte_size_lit only yields text the ByteUnit parser accepts")
             .as_u64();
         if bytes == 0 {
             Err(Rich::custom(
@@ -613,7 +614,7 @@ fn nats_ingest_source_parser<'src>()
     kw(Identifier::Nats)
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Subject))
-        .then(topic_ref())
+        .then(subject_ref())
         .then_ignore(kw_phrase2(Identifier::Queue, Identifier::Group))
         .then(nats_queue_group_ref())
         .then_ignore(kw(Identifier::Instances))
@@ -868,7 +869,7 @@ pub fn parse_create_ingestor_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -887,7 +888,7 @@ pub fn parse_alter_ingestor_tokens(tokens: &[Token]) -> Result<AlterIngestor, Ve
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -1183,12 +1184,12 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Kafka {
-                client: nervix_models::Identifier::try_from("kafka_main")
+                client: nervix_models::ClientName::try_from("kafka_main")
                     .expect("valid client identifier"),
-                topic: nervix_models::Identifier::try_from("notifications")
+                topic: nervix_models::TopicName::try_from("notifications")
                     .expect("valid topic identifier"),
                 offset_mode: KafkaOffsetMode::ConsumerGroup(
-                    nervix_models::Identifier::try_from("nervix_consumer")
+                    nervix_models::ConsumerGroupName::try_from("nervix_consumer")
                         .expect("valid consumer group identifier"),
                 ),
                 instances: 1,
@@ -1390,12 +1391,14 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Pulsar {
-                client: nervix_models::Identifier::try_from("pulsar_main")
+                client: nervix_models::ClientName::try_from("pulsar_main")
                     .expect("valid client identifier"),
-                topic: nervix_models::Identifier::try_from("notifications")
+                topic: nervix_models::TopicName::try_from("notifications")
                     .expect("valid topic identifier"),
-                subscription: nervix_models::Identifier::try_from("nervix_subscription")
-                    .expect("valid subscription identifier"),
+                subscription: nervix_models::PulsarSubscriptionName::try_from(
+                    "nervix_subscription"
+                )
+                .expect("valid subscription identifier"),
                 instances: 1,
                 mode: PulsarIngestMode::AckSequential {
                     timeout: "15s".to_string(),
@@ -1451,9 +1454,9 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::RabbitMq {
-                client: nervix_models::Identifier::try_from("rabbit_main")
+                client: nervix_models::ClientName::try_from("rabbit_main")
                     .expect("valid client identifier"),
-                queue: nervix_models::Identifier::try_from("notifications")
+                queue: nervix_models::QueueName::try_from("notifications")
                     .expect("valid queue identifier"),
                 instances: 1,
                 mode: RabbitMqIngestMode::AckSequential {
@@ -1486,9 +1489,9 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::RedisPubSub {
-                client: nervix_models::Identifier::try_from("redis_main")
+                client: nervix_models::ClientName::try_from("redis_main")
                     .expect("valid client identifier"),
-                channel: nervix_models::Identifier::try_from("notifications")
+                channel: nervix_models::ChannelName::try_from("notifications")
                     .expect("valid channel identifier"),
                 mode: RedisPubSubIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Drop,
@@ -1763,7 +1766,7 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Mqtt {
-                client: nervix_models::Identifier::try_from("mqtt_main")
+                client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: "notifications".to_string(),
                 instances: 1,
@@ -1826,7 +1829,7 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Mqtt {
-                client: nervix_models::Identifier::try_from("mqtt_main")
+                client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: "devices/+/notifications".to_string(),
                 instances: 3,
@@ -1951,11 +1954,11 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Nats {
-                client: nervix_models::Identifier::try_from("nats_main")
+                client: nervix_models::ClientName::try_from("nats_main")
                     .expect("valid client identifier"),
-                subject: nervix_models::Identifier::try_from("notifications")
+                subject: nervix_models::SubjectName::try_from("notifications")
                     .expect("valid topic identifier"),
-                queue_group: nervix_models::Identifier::try_from("nats_notifications_group")
+                queue_group: nervix_models::QueueGroupName::try_from("nats_notifications_group")
                     .expect("valid queue group identifier"),
                 instances: 3,
                 mode: NatsIngestMode::NoAckSequential,
@@ -2045,7 +2048,7 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Prometheus {
-                client: nervix_models::Identifier::try_from("prom_main")
+                client: nervix_models::ClientName::try_from("prom_main")
                     .expect("valid client identifier"),
                 query: r#"label_replace(vector(42.5), "source", "local", "", "")"#.to_string(),
                 every: "15s".to_string(),
@@ -2071,7 +2074,7 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Http {
-                client: nervix_models::Identifier::try_from("http_main")
+                client: nervix_models::ClientName::try_from("http_main")
                     .expect("valid client identifier"),
                 every: "1s".to_string(),
                 quiesce: IngestQuiesceMode::Suspend,
@@ -2096,7 +2099,7 @@ mod tests {
         assert_eq!(
             parsed.timestamp_source,
             Some(IngestTimestampSource::At(
-                nervix_models::Identifier::try_from("occurred_at").expect("valid field identifier")
+                nervix_models::FieldName::try_from("occurred_at").expect("valid field name")
             ))
         );
     }
@@ -2135,7 +2138,7 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Endpoint {
-                endpoint: nervix_models::Identifier::try_from("ws_notifications_endpoint")
+                endpoint: nervix_models::EndpointName::try_from("ws_notifications_endpoint")
                     .expect("valid endpoint identifier"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
@@ -2162,7 +2165,7 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Websockets {
-                client: nervix_models::Identifier::try_from("ws_main")
+                client: nervix_models::ClientName::try_from("ws_main")
                     .expect("valid client identifier"),
                 mode: WebsocketsIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Drop,
@@ -2187,7 +2190,7 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::ZeroMq {
-                client: nervix_models::Identifier::try_from("zmq_main")
+                client: nervix_models::ClientName::try_from("zmq_main")
                     .expect("valid client identifier"),
                 mode: ZeroMqIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Suspend,
@@ -2211,7 +2214,7 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Syslog {
-                client: nervix_models::Identifier::try_from("syslog_listener")
+                client: nervix_models::ClientName::try_from("syslog_listener")
                     .expect("valid client identifier"),
                 quiesce: IngestQuiesceMode::Buffer {
                     max_size: "1MiB".to_string(),
@@ -2267,9 +2270,9 @@ mod tests {
         assert_eq!(
             parsed.source,
             IngestSource::Sqs {
-                client: nervix_models::Identifier::try_from("sqs_main")
+                client: nervix_models::ClientName::try_from("sqs_main")
                     .expect("valid client identifier"),
-                queue: nervix_models::Identifier::try_from("notifications")
+                queue: nervix_models::QueueName::try_from("notifications")
                     .expect("valid queue identifier"),
                 instances: 1,
                 mode: SqsIngestMode::AckSequential {

@@ -1,7 +1,8 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterPlacement, AlterPlacementOperation, CreatePlacement, CreateStatement, DescribePlacement,
-    PlacementPolicy, ShowPlacements,
+    ModelName, PlacementPolicy, ShowPlacements,
 };
 
 use crate::{
@@ -28,8 +29,7 @@ pub fn placement_policy_parser<'src>()
 }
 
 fn placement_members<'src>()
--> impl Parser<'src, &'src [Token], Vec<nervix_models::Identifier>, extra::Err<ParseError<'src>>> + Clone
-{
+-> impl Parser<'src, &'src [Token], Vec<ModelName>, extra::Err<ParseError<'src>>> + Clone {
     runtime_node_ref()
         .separated_by(tok(Token::Comma))
         .at_least(1)
@@ -38,8 +38,7 @@ fn placement_members<'src>()
 }
 
 fn alter_placement_members<'src>()
--> impl Parser<'src, &'src [Token], Vec<nervix_models::Identifier>, extra::Err<ParseError<'src>>> + Clone
-{
+-> impl Parser<'src, &'src [Token], Vec<ModelName>, extra::Err<ParseError<'src>>> + Clone {
     runtime_node_ref()
         .then(
             tok(Token::Comma)
@@ -173,7 +172,7 @@ pub fn parse_create_placement(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -192,7 +191,7 @@ pub fn parse_alter_placement(input: &str) -> Result<AlterPlacement, ParseFromSou
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -225,7 +224,7 @@ mod tests {
             parsed
                 .from
                 .iter()
-                .map(nervix_models::Identifier::as_str)
+                .map(nervix_models::ModelName::as_str)
                 .collect::<Vec<_>>(),
             vec!["ingest", "enrich"]
         );

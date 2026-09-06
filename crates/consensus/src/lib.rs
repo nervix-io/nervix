@@ -9,10 +9,11 @@ use std::{
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use futures_util::StreamExt;
+use meticulous::OptionExt as _;
 use nervix_models::{
-    ClusterSchedule, Domain, DomainClockState, DomainId, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, Identifier, ResourceNodeStatus, ResourceVersion,
-    ResourceVersionStatus, Statement,
+    ClusterNodeName, ClusterSchedule, DomainClockState, DomainName, DomainSchedule,
+    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceVersion,
+    ResourceVersionStatus, Statement, UserName,
 };
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
@@ -56,7 +57,7 @@ pub use transaction::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsensusCommand {
     ReplaceDomainSchedule {
-        domain: Domain,
+        domain: DomainName,
         schedule: Option<Box<DomainSchedule>>,
     },
     PutDomainAndSchedule {
@@ -67,29 +68,29 @@ pub enum ConsensusCommand {
         domain: Box<DomainState>,
     },
     StartDomain {
-        domain_id: DomainId,
+        domain_id: DomainName,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
     },
     StopDomain {
-        domain_id: DomainId,
+        domain_id: DomainName,
     },
     PauseDomain {
-        domain_id: DomainId,
+        domain_id: DomainName,
     },
     ResumeDomain {
-        domain_id: DomainId,
+        domain_id: DomainName,
     },
     CreateUser {
         user: Box<UserCredentials>,
     },
     CreateResourceCatalog {
-        domain: DomainId,
-        identifier: Identifier,
+        domain: DomainName,
+        identifier: ResourceName,
     },
     AdvanceResourceVersion {
-        domain: DomainId,
-        identifier: Identifier,
+        domain: DomainName,
+        identifier: ResourceName,
     },
     PutResourceVersion {
         resource: Box<ResourceVersion>,
@@ -98,7 +99,7 @@ pub enum ConsensusCommand {
         replica: Box<ResourceNodeStatus>,
     },
     SetNodeCordoned {
-        node_id: String,
+        node_id: ClusterNodeName,
         cordoned: bool,
     },
     OpenTransaction {
@@ -107,20 +108,20 @@ pub enum ConsensusCommand {
     },
     QueueTransactionStatement {
         id: String,
-        owner: Identifier,
-        domain: Domain,
+        owner: UserName,
+        domain: DomainName,
         at: nervix_models::Timestamp,
         statement: Box<TransactionStatement>,
         limits: TransactionQueueLimits,
     },
     TouchTransaction {
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     },
     StartTransactionCommit {
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     },
     AdvanceTransactionCommit {
@@ -138,7 +139,7 @@ pub enum ConsensusCommand {
     },
     RevertTransaction {
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     },
     ExpireTransaction {
@@ -159,7 +160,7 @@ pub enum ConsensusResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserCredentials {
-    pub name: Identifier,
+    pub name: UserName,
     pub password_hash: String,
 }
 
@@ -265,12 +266,12 @@ openraft::declare_raft_types!(
     pub TypeConfig:
         D = ConsensusCommand,
         R = ConsensusResponse,
-        NodeId = String,
+        NodeId = ClusterNodeName,
         Node = BasicNode
 );
 
 pub type NervixRaft = Raft<TypeConfig, StdArc<FjallStore>>;
-pub type NodeId = String;
+pub type NodeId = ClusterNodeName;
 pub type Node = BasicNode;
 pub type LogIdOf = LogId<CommittedLeaderIdOf<TypeConfig>>;
 pub type VoteOf = Vote<LeaderIdOf<TypeConfig>>;
@@ -301,7 +302,7 @@ const HEARTBEAT_ERROR_REPORT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Clone)]
 pub struct ConsensusSettings {
     pub cluster_name: String,
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
     pub cluster_api_advertise_url: String,
     pub cluster_api_http_client: HttpClient,
     pub node_unavailability_timeout: Duration,
@@ -312,7 +313,7 @@ pub struct ConsensusSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GossipNode {
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
     pub cluster_api_advertise_addr: String,
     pub grpc_advertise_addr: String,
     pub web_console_advertise_addr: String,
@@ -324,7 +325,7 @@ pub struct GossipNode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GossipState {
     pub live_nodes: Vec<GossipNode>,
-    pub dead_node_ids: BTreeSet<String>,
+    pub dead_node_ids: BTreeSet<ClusterNodeName>,
 }
 
 impl GossipState {
@@ -339,7 +340,7 @@ impl GossipState {
 pub struct ConsensusRuntimeState {
     pub revision: u64,
     pub schedule: ClusterSchedule,
-    pub domains: BTreeMap<DomainId, DomainState>,
+    pub domains: BTreeMap<DomainName, DomainState>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,12 +349,12 @@ struct StateMachineData {
     last_membership: StoredMembershipOf,
     runtime_revision: u64,
     schedule: ClusterSchedule,
-    domains: BTreeMap<DomainId, DomainState>,
+    domains: BTreeMap<DomainName, DomainState>,
     #[serde(default)]
-    users: BTreeMap<Identifier, UserCredentials>,
+    users: BTreeMap<UserName, UserCredentials>,
     resources: ResourceVersionStatus,
     #[serde(default)]
-    cordoned_node_ids: BTreeSet<String>,
+    cordoned_node_ids: BTreeSet<ClusterNodeName>,
     transactions: BTreeMap<String, ReplicatedTransaction>,
 }
 
@@ -364,7 +365,7 @@ impl StateMachineData {
         }
     }
 
-    fn replace_domain_schedule(&mut self, domain: &Domain, schedule: Option<&DomainSchedule>) {
+    fn replace_domain_schedule(&mut self, domain: &DomainName, schedule: Option<&DomainSchedule>) {
         let Some(domain_schedule) = schedule else {
             self.schedule.domains.remove(domain);
             return;
@@ -435,7 +436,7 @@ pub struct ConsensusHandle {
     local_node: GossipNode,
     cluster_api_http_client: HttpClient,
     node_unavailability_timeout: Duration,
-    peer_health: Arc<RwLock<BTreeMap<String, PeerHealth>>>,
+    peer_health: Arc<RwLock<BTreeMap<ClusterNodeName, PeerHealth>>>,
     events: broadcast::Sender<String>,
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -506,8 +507,8 @@ impl ConsensusHandle {
                     metrics.current_term,
                     metrics
                         .current_leader
-                        .clone()
-                        .unwrap_or_else(|| "(none)".to_string()),
+                        .as_ref()
+                        .map_or_else(|| "(none)".to_string(), ClusterNodeName::to_string),
                 );
                 if last_transition.as_ref() != Some(&transition) {
                     let summary = format!(
@@ -557,7 +558,7 @@ impl ConsensusHandle {
         self.store.inner.schedule_tx.subscribe()
     }
 
-    pub fn subscribe_domains(&self) -> watch::Receiver<BTreeMap<DomainId, DomainState>> {
+    pub fn subscribe_domains(&self) -> watch::Receiver<BTreeMap<DomainName, DomainState>> {
         self.store.inner.domain_tx.subscribe()
     }
 
@@ -575,7 +576,7 @@ impl ConsensusHandle {
         self.store.inner.state_machine.read().await.schedule.clone()
     }
 
-    pub async fn current_domains(&self) -> BTreeMap<DomainId, DomainState> {
+    pub async fn current_domains(&self) -> BTreeMap<DomainName, DomainState> {
         self.store.inner.state_machine.read().await.domains.clone()
     }
 
@@ -609,7 +610,7 @@ impl ConsensusHandle {
         }
     }
 
-    pub async fn current_domain(&self, domain_id: &DomainId) -> Option<DomainState> {
+    pub async fn current_domain(&self, domain_id: &DomainName) -> Option<DomainState> {
         self.store
             .inner
             .state_machine
@@ -620,11 +621,11 @@ impl ConsensusHandle {
             .cloned()
     }
 
-    pub async fn current_users(&self) -> BTreeMap<Identifier, UserCredentials> {
+    pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
         self.store.inner.state_machine.read().await.users.clone()
     }
 
-    pub async fn current_user(&self, user: &Identifier) -> Option<UserCredentials> {
+    pub async fn current_user(&self, user: &UserName) -> Option<UserCredentials> {
         self.store
             .inner
             .state_machine
@@ -645,7 +646,7 @@ impl ConsensusHandle {
             .clone()
     }
 
-    pub async fn cordoned_node_ids(&self) -> BTreeSet<String> {
+    pub async fn cordoned_node_ids(&self) -> BTreeSet<ClusterNodeName> {
         self.store
             .inner
             .state_machine
@@ -664,7 +665,7 @@ impl ConsensusHandle {
         }
     }
 
-    pub fn local_node_id(&self) -> &str {
+    pub fn local_node_id(&self) -> &ClusterNodeName {
         &self.local_node.node_id
     }
 
@@ -843,13 +844,13 @@ impl ConsensusHandle {
         Ok(())
     }
 
-    pub async fn current_leader(&self) -> Option<String> {
+    pub async fn current_leader(&self) -> Option<ClusterNodeName> {
         self.raft.current_leader().await
     }
 
     pub async fn replace_domain_schedule(
         &self,
-        domain: Domain,
+        domain: DomainName,
         schedule: Option<DomainSchedule>,
     ) -> Result<(), ConsensusError> {
         self.raft
@@ -889,7 +890,7 @@ impl ConsensusHandle {
 
     pub async fn start_domain(
         &self,
-        domain_id: DomainId,
+        domain_id: DomainName,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
     ) -> Result<(), ConsensusError> {
@@ -904,7 +905,7 @@ impl ConsensusHandle {
             .map_err(Self::map_write_error)
     }
 
-    pub async fn stop_domain(&self, domain_id: DomainId) -> Result<(), ConsensusError> {
+    pub async fn stop_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::StopDomain { domain_id })
             .await
@@ -912,7 +913,7 @@ impl ConsensusHandle {
             .map_err(Self::map_write_error)
     }
 
-    pub async fn pause_domain(&self, domain_id: DomainId) -> Result<(), ConsensusError> {
+    pub async fn pause_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::PauseDomain { domain_id })
             .await
@@ -920,7 +921,7 @@ impl ConsensusHandle {
             .map_err(Self::map_write_error)
     }
 
-    pub async fn resume_domain(&self, domain_id: DomainId) -> Result<(), ConsensusError> {
+    pub async fn resume_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::ResumeDomain { domain_id })
             .await
@@ -940,8 +941,8 @@ impl ConsensusHandle {
 
     pub async fn allocate_resource_version(
         &self,
-        domain: &DomainId,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ResourceName,
     ) -> Result<u64, ConsensusError> {
         let resources = self.current_resources().await;
         if !resources.is_declared(domain, identifier) {
@@ -966,8 +967,8 @@ impl ConsensusHandle {
 
     pub async fn create_resource_catalog(
         &self,
-        domain: &DomainId,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ResourceName,
     ) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::CreateResourceCatalog {
@@ -1007,7 +1008,7 @@ impl ConsensusHandle {
 
     pub async fn set_node_cordoned(
         &self,
-        node_id: String,
+        node_id: ClusterNodeName,
         cordoned: bool,
     ) -> Result<(), ConsensusError> {
         self.raft
@@ -1047,8 +1048,8 @@ impl ConsensusHandle {
     pub async fn queue_transaction_statement(
         &self,
         id: String,
-        owner: Identifier,
-        domain: Domain,
+        owner: UserName,
+        domain: DomainName,
         at: nervix_models::Timestamp,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
@@ -1067,7 +1068,7 @@ impl ConsensusHandle {
     pub async fn touch_transaction(
         &self,
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::TouchTransaction { id, owner, at })
@@ -1077,7 +1078,7 @@ impl ConsensusHandle {
     pub async fn start_transaction_commit(
         &self,
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::StartTransactionCommit { id, owner, at })
@@ -1121,7 +1122,7 @@ impl ConsensusHandle {
     pub async fn revert_transaction(
         &self,
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::RevertTransaction { id, owner, at })
@@ -1154,18 +1155,17 @@ impl ConsensusHandle {
     }
 
     async fn ping_peer(&self, target_addr: &str) -> Result<(), ConsensusError> {
-        self.cluster_api_http_client
+        let response = self
+            .cluster_api_http_client
             .get(format!("{target_addr}/raft/ping"))
             .send()
             .await
-            .map_err(|_| ConsensusError::Transport)
-            .and_then(|response| {
-                if response.status().is_success() {
-                    Ok(())
-                } else {
-                    Err(ConsensusError::Transport)
-                }
-            })
+            .map_err(|_| ConsensusError::Transport)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ConsensusError::Transport)
+        }
     }
 
     pub async fn status_lines(&self) -> Vec<String> {
@@ -1176,7 +1176,7 @@ impl ConsensusHandle {
             "raft.current_leader: {}",
             metrics
                 .current_leader
-                .unwrap_or_else(|| "(none)".to_string())
+                .map_or_else(|| "(none)".to_string(), |leader| leader.to_string())
         ));
         lines.push(format!("raft.current_term: {}", metrics.current_term));
         lines.push(format!("raft.state: {:?}", metrics.state));
@@ -1251,7 +1251,7 @@ impl ConsensusHandle {
         lines
     }
 
-    pub async fn membership_nodes(&self) -> BTreeMap<String, String> {
+    pub async fn membership_nodes(&self) -> BTreeMap<ClusterNodeName, String> {
         let metrics = self.raft.metrics().borrow_watched().clone();
         metrics
             .membership_config
@@ -1260,15 +1260,15 @@ impl ConsensusHandle {
             .collect()
     }
 
-    pub async fn membership_voter_ids(&self) -> BTreeSet<String> {
+    pub async fn membership_voter_ids(&self) -> BTreeSet<ClusterNodeName> {
         let metrics = self.raft.metrics().borrow_watched().clone();
         metrics.membership_config.membership().voter_ids().collect()
     }
 
     pub async fn live_voter_ids(
         &self,
-        live_node_ids: impl IntoIterator<Item = String>,
-    ) -> Vec<String> {
+        live_node_ids: impl IntoIterator<Item = ClusterNodeName>,
+    ) -> Vec<ClusterNodeName> {
         let voters = self.membership_voter_ids().await;
         let mut live_voters = live_node_ids
             .into_iter()
@@ -1281,8 +1281,8 @@ impl ConsensusHandle {
 
     pub async fn schedulable_live_voter_ids(
         &self,
-        live_node_ids: impl IntoIterator<Item = String>,
-    ) -> Vec<String> {
+        live_node_ids: impl IntoIterator<Item = ClusterNodeName>,
+    ) -> Vec<ClusterNodeName> {
         let cordoned = self.cordoned_node_ids().await;
         self.live_voter_ids(live_node_ids)
             .await
@@ -1291,8 +1291,8 @@ impl ConsensusHandle {
             .collect()
     }
 
-    pub async fn drop_node(&self, node_id: &str) -> Result<(), ConsensusError> {
-        if node_id == self.local_node.node_id {
+    pub async fn drop_node(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
+        if *node_id == self.local_node.node_id {
             return Err(ConsensusError::RemoveLocalLeader(node_id.to_string()));
         }
 
@@ -1358,7 +1358,7 @@ impl ConsensusHandle {
 
     pub async fn transfer_leadership_to(
         &self,
-        target_node_id: String,
+        target_node_id: ClusterNodeName,
     ) -> Result<(), openraft::error::Fatal<TypeConfig>> {
         self.raft.trigger().transfer_leader(target_node_id).await
     }
@@ -1611,7 +1611,7 @@ struct StoreInner {
     state_machine: RwLock<StateMachineData>,
     current_snapshot: RwLock<Option<StoredSnapshotData>>,
     schedule_tx: watch::Sender<ClusterSchedule>,
-    domain_tx: watch::Sender<BTreeMap<DomainId, DomainState>>,
+    domain_tx: watch::Sender<BTreeMap<DomainName, DomainState>>,
     resource_tx: watch::Sender<ResourceVersionStatus>,
     transaction_tx: watch::Sender<BTreeMap<String, ReplicatedTransaction>>,
 }
@@ -2169,10 +2169,10 @@ fn apply_consensus_command(
             if let Some(effect) = effect {
                 if let Err(error) = validate_transaction_step_effect(
                     state,
-                    state
-                        .transactions
-                        .get(id)
-                        .expect("transaction was read from replicated state"),
+                    state.transactions.get(id).verified(
+                        "the branch above resolved this transaction id in the same replicated \
+                         state",
+                    ),
                     *expected_next_statement,
                     *next_statement,
                     result,
@@ -2183,10 +2183,9 @@ fn apply_consensus_command(
                 }
                 apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
             } else if let Err(error) = validate_transaction_step_without_effect(
-                state
-                    .transactions
-                    .get(id)
-                    .expect("transaction was read from replicated state"),
+                state.transactions.get(id).verified(
+                    "the branch above resolved this transaction id in the same replicated state",
+                ),
                 *expected_next_statement,
                 *next_statement,
                 result,
@@ -2478,7 +2477,7 @@ fn validate_transaction_step_effect(
 
 fn apply_transaction_step_effect(
     state: &mut StateMachineData,
-    domain: &DomainId,
+    domain: &DomainName,
     effect: &TransactionStepEffect,
     changes: &mut StateMachineChanges,
 ) {
@@ -2529,8 +2528,8 @@ fn apply_transaction_step_effect(
 
 fn ensure_resource_catalog(
     resources: &mut ResourceVersionStatus,
-    domain: &DomainId,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ResourceName,
 ) {
     if let Err(index) = resources.resource_slot(domain, identifier) {
         resources
@@ -2541,8 +2540,8 @@ fn ensure_resource_catalog(
 
 fn advance_resource_version(
     resources: &mut ResourceVersionStatus,
-    domain: &DomainId,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ResourceName,
 ) {
     match resources.resource_slot(domain, identifier) {
         Ok(index) => {
@@ -2627,8 +2626,8 @@ mod tests {
 
     use fjall::Database;
     use nervix_models::{
-        Domain, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
-        DomainStatus, Identifier, ResourceId, ResourceNodeState, ResourceNodeStatus,
+        DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
+        DomainStatus, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus,
         ResourceReplicaKey, ResourceVersion, ResourceVersionStatus, Statement,
     };
     use openraft::{
@@ -2645,10 +2644,13 @@ mod tests {
         UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame, io_error,
         load_value, read_key, write_key,
     };
-    use crate::{ConsensusError, ReplicatedTransaction, TransactionQueueLimits, VoteOf};
+    use crate::{
+        ClusterNodeName, ConsensusError, ReplicatedTransaction, TransactionQueueLimits, UserName,
+        VoteOf,
+    };
 
-    fn domain(raw: &str) -> Domain {
-        Domain::try_from(raw).expect("valid domain")
+    fn domain(raw: &str) -> DomainName {
+        DomainName::try_from(raw).expect("valid domain")
     }
 
     #[test]
@@ -2656,7 +2658,7 @@ mod tests {
         let state = GossipState {
             live_nodes: vec![
                 GossipNode {
-                    node_id: "node-2".to_string(),
+                    node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                     cluster_api_advertise_addr: "http://node-2".to_string(),
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
@@ -2665,7 +2667,7 @@ mod tests {
                     interconnect_public_key: String::new(),
                 },
                 GossipNode {
-                    node_id: "node-3".to_string(),
+                    node_id: ClusterNodeName::parse("node-3").expect("valid name"),
                     cluster_api_advertise_addr: "http://node-3".to_string(),
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
@@ -2674,7 +2676,9 @@ mod tests {
                     interconnect_public_key: String::new(),
                 },
             ],
-            dead_node_ids: ["node-3".to_string()].into_iter().collect(),
+            dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
+                .into_iter()
+                .collect(),
         };
 
         assert_eq!(
@@ -2710,7 +2714,7 @@ mod tests {
         ResourceVersion {
             id: ResourceId::new(
                 domain(domain_id),
-                Identifier::parse(identifier).expect("valid identifier"),
+                ResourceName::parse(identifier).expect("valid resource name"),
                 version,
             ),
             root_checksum: format!("root-{version}"),
@@ -2718,7 +2722,7 @@ mod tests {
             file_count: 2,
             total_bytes: 128,
             created_at: nervix_models::Timestamp::from_unix_nanos(42),
-            created_by_node: "node-1".to_string(),
+            created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
         }
     }
 
@@ -2763,7 +2767,7 @@ mod tests {
     #[test]
     fn snapshot_relay_header_roundtrips_in_length_delimited_cbor_frame() {
         let header = SnapshotRelayHeader {
-            vote: VoteOf::new(7, "node-1".to_string()),
+            vote: VoteOf::new(7, ClusterNodeName::parse("node-1").expect("valid name")),
             meta: SnapshotMeta {
                 last_log_id: None,
                 last_membership: StoredMembershipOf::default(),
@@ -2809,7 +2813,7 @@ mod tests {
                 .schedule
                 .domains
                 .keys()
-                .map(Domain::as_str)
+                .map(DomainName::as_str)
                 .collect::<Vec<_>>(),
             vec!["alpha", "zeta"]
         );
@@ -2835,7 +2839,7 @@ mod tests {
                 .schedule
                 .domains
                 .keys()
-                .map(Domain::as_str)
+                .map(DomainName::as_str)
                 .collect::<Vec<_>>(),
             vec!["alpha"]
         );
@@ -2876,7 +2880,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::CreateUser {
                 user: Box::new(UserCredentials {
-                    name: Identifier::parse("app_user").expect("valid identifier"),
+                    name: UserName::parse("app_user").expect("valid user name"),
                     password_hash: "argon2-hash".to_string(),
                 }),
             },
@@ -2897,7 +2901,7 @@ mod tests {
 
     #[test]
     fn transaction_step_effect_and_progress_are_applied_once() {
-        let owner = Identifier::parse("app_user").expect("valid owner");
+        let owner = UserName::parse("app_user").expect("valid owner");
         let domain_id = domain("tenant");
         let mut stopped = running_domain_state("tenant");
         stopped.status = DomainStatus::Stopped;
@@ -2965,6 +2969,7 @@ mod tests {
                 first_statement: 0,
                 statement_count: 1,
                 quiesce_level: None,
+                planned_relocations: None,
                 result: TransactionCommandResult {
                     success: true,
                     message: "started".to_string(),
@@ -3015,6 +3020,7 @@ mod tests {
                     first_statement: 1,
                     statement_count: 1,
                     quiesce_level: None,
+                    planned_relocations: None,
                     result: TransactionCommandResult {
                         success: false,
                         message: "validation failed".to_string(),
@@ -3081,7 +3087,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::AdvanceResourceVersion {
                 domain: domain("tenant"),
-                identifier: Identifier::parse("fraud_model").expect("valid identifier"),
+                identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
             },
         );
         assert_eq!(
@@ -3093,14 +3099,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(
                 domain("tenant"),
-                Identifier::parse("fraud_model").expect("valid identifier"),
+                ResourceName::parse("fraud_model").expect("valid resource name"),
                 2
             )]
         );
         assert!(
             !state.resources.is_declared(
                 &domain("other"),
-                &Identifier::parse("fraud_model").expect("valid identifier")
+                &ResourceName::parse("fraud_model").expect("valid resource name")
             ),
             "a resource declared in one domain must not appear in another"
         );
@@ -3120,14 +3126,14 @@ mod tests {
         let replica = ResourceNodeStatus {
             key: ResourceReplicaKey::new(
                 domain("tenant"),
-                Identifier::parse("fraud_model").expect("valid identifier"),
+                ResourceName::parse("fraud_model").expect("valid resource name"),
                 1,
-                "node-2",
+                ClusterNodeName::parse("node-2").expect("valid name"),
             ),
             state: ResourceNodeState::Ready,
             root_checksum: Some("root-1".to_string()),
             last_verified_at: Some(nervix_models::Timestamp::from_unix_nanos(77)),
-            source_node_id: Some("node-1".to_string()),
+            source_node_id: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             error: None,
         };
         apply_consensus_command(
@@ -3149,7 +3155,7 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::SetNodeCordoned {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                 cordoned: true,
             },
         );
@@ -3158,7 +3164,7 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::SetNodeCordoned {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                 cordoned: false,
             },
         );
@@ -3168,7 +3174,7 @@ mod tests {
     #[test]
     fn apply_consensus_command_tracks_users_without_overwriting_existing_password_hash() {
         let mut state = StateMachineData::default();
-        let name = Identifier::parse("app_user").expect("valid identifier");
+        let name = UserName::parse("app_user").expect("valid user name");
 
         apply_consensus_command(
             &mut state,
@@ -3217,14 +3223,17 @@ mod tests {
                 .schedule
                 .domains
                 .keys()
-                .map(Domain::as_str)
+                .map(DomainName::as_str)
                 .collect::<Vec<_>>(),
             vec!["tenant"]
         );
         assert!(!store.has_raft_state().await);
 
         store
-            .write_vote(&VoteOf::new(7, "node-1".to_string()))
+            .write_vote(&VoteOf::new(
+                7,
+                ClusterNodeName::parse("node-1").expect("valid name"),
+            ))
             .await
             .expect("vote should persist");
         assert!(store.has_raft_state().await);

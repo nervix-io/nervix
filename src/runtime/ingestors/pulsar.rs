@@ -1,3 +1,4 @@
+use nervix_models::{DomainName, IngestorName};
 use pulsar::{
     Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
     SubType as PulsarSubType, TlsOptions as PulsarTlsOptions, TokioExecutor,
@@ -8,10 +9,24 @@ use super::super::*;
 
 pub(in crate::runtime) struct PulsarIngestor;
 
+/// The properties of one borrowed Pulsar message.
+///
+/// Appending reads them out of the source message, so a message without properties costs
+/// nothing and no property key or value is copied before it reaches the builders.
+struct PulsarMessageProperties<'a>(&'a PulsarMessage<Vec<u8>>);
+
+impl IngestMessageHeaders for PulsarMessageProperties<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        for property in &self.0.metadata().properties {
+            visit(&property.key, &property.value);
+        }
+    }
+}
+
 impl PulsarIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientPulsar,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -80,7 +95,9 @@ impl PulsarIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled Pulsar ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
         let resolved_client = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
             .map_err(|reason| RuntimeError::StartIngestor {
@@ -148,12 +165,11 @@ impl PulsarIngestor {
 
                 /// One decoded message of an acknowledged group.
                 ///
-                /// The group dispatches after its messages have moved, so it keeps the
-                /// header values it will append rather than a built Arrow batch.
+                /// The group holds its messages until it dispatches, so the entry appends
+                /// their properties straight from them rather than from copies.
                 struct PulsarBatchEntry {
                     message: PulsarMessage<Vec<u8>>,
                     record: RuntimeRecordBatch,
-                    headers: IngestHeaders,
                 }
 
                 info!(
@@ -297,8 +313,7 @@ impl PulsarIngestor {
                                             .await
                                             {
                                                 Ok(record) => {
-                                                    let headers =
-                                                        Self::headers_from_message(&message);
+                                                    let headers = PulsarMessageProperties(&message);
                                                     let metadata = [IngestMetadataRow::Headers {
                                                         headers: &headers,
                                                     }];
@@ -398,15 +413,7 @@ impl PulsarIngestor {
                                             )
                                             .await
                                             {
-                                                Ok(record) => {
-                                                    let headers =
-                                                        Self::headers_from_message(&message);
-                                                    PulsarBatchEntry {
-                                                        message,
-                                                        record,
-                                                        headers,
-                                                    }
-                                                }
+                                                Ok(record) => PulsarBatchEntry { message, record },
                                                 Err(error) => {
                                                     let _ = task_events.send(RuntimeEvent::Error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
@@ -428,14 +435,18 @@ impl PulsarIngestor {
                                                 }
                                             };
 
+                                            let headers = PulsarMessageProperties(&entry.message);
                                             let metadata = [IngestMetadataRow::Headers {
-                                                headers: &entry.headers,
+                                                headers: &headers,
                                             }];
 
                                             loop {
                                                 tokio::task::consume_budget().await;
-                                                let (acks, completion) =
-                                                    task_runtime.tracked_ack_root(&task_domain);
+                                                let (acks, completion) = task_runtime
+                                                    .tracked_ingestor_ack_root(
+                                                        &task_domain,
+                                                        &task_ingestor,
+                                                    );
                                                 // One acknowledged message is one group.
                                                 let mut collector = IngestRouteCollector::new(
                                                     IngestMetadataKind::Headers,
@@ -468,10 +479,11 @@ impl PulsarIngestor {
                                                         &mut collector,
                                                     )
                                                     .await;
-                                                let dispatched = dispatch_result
+                                                let dispatched = match dispatch_result
                                                     .and(flush_result)
-                                                    .map(|()| true)
-                                                    .unwrap_or_else(|error| {
+                                                {
+                                                    Ok(()) => true,
+                                                    Err(error) => {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                                             "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
@@ -479,13 +491,14 @@ impl PulsarIngestor {
                                                             error
                                                         )));
                                                         false
-                                                    });
+                                                    }
+                                                };
                                                 if dispatched {
                                                     acks.ack_success();
                                                     match Runtime::await_ack_completion(
                                                         &mut shutdown_rx,
                                                         completion,
-                                                        ack_timeout.expect("ack timeout must exist"),
+                                                        ack_timeout.verified("this branch runs only for an ACK mode, and every ACK mode parses a timeout above"),
                                                     ).await {
                                                         Some(AckOutcome::Ack) => {
                                                             if let Err(error) = consumer.ack(&entry.message).await {
@@ -546,15 +559,7 @@ impl PulsarIngestor {
                                             )
                                             .await
                                             {
-                                                Ok(record) => {
-                                                    let headers =
-                                                        Self::headers_from_message(&message);
-                                                    PulsarBatchEntry {
-                                                        message,
-                                                        record,
-                                                        headers,
-                                                    }
-                                                }
+                                                Ok(record) => PulsarBatchEntry { message, record },
                                                 Err(error) => {
                                                     let _ = task_events.send(RuntimeEvent::Error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
@@ -577,7 +582,7 @@ impl PulsarIngestor {
                                             };
                                             batch.push(first);
                                             let batch_deadline =
-                                                Instant::now() + batch_timeout.expect("batch timeout must exist");
+                                                Instant::now() + batch_timeout.verified("this branch runs only for the parallel ACK mode, which parses a batch timeout above");
 
                                             while batch.len() < ack_parallel_limit {
                                                 tokio::task::consume_budget().await;
@@ -603,14 +608,9 @@ impl PulsarIngestor {
                                                                 .await
                                                                 {
                                                                     Ok(record) => {
-                                                                        let headers =
-                                                                            Self::headers_from_message(
-                                                                                &next_message,
-                                                                            );
                                                                         batch.push(PulsarBatchEntry {
                                                                             message: next_message,
                                                                             record,
-                                                                            headers,
                                                                         });
                                                                     }
                                                                     Err(error) => {
@@ -648,11 +648,14 @@ impl PulsarIngestor {
                                                 }
                                             }
 
+                                            // The group holds its poll's messages while it
+                                            // dispatches, so properties are appended from
+                                            // them instead of copies taken per message.
                                             let mut messages = Vec::with_capacity(batch.len());
                                             let mut records = Vec::with_capacity(batch.len());
                                             for entry in batch {
                                                 messages.push(entry.message);
-                                                records.push((entry.record, entry.headers));
+                                                records.push(entry.record);
                                             }
                                                 tokio::task::consume_budget().await;
                                                 let mut completions = Vec::with_capacity(records.len());
@@ -669,12 +672,14 @@ impl PulsarIngestor {
                                                 // message.
                                                 let mut roots = Vec::with_capacity(records.len());
                                                 let mut group_records = Vec::with_capacity(records.len());
-                                                let mut group_headers = Vec::with_capacity(records.len());
                                                 let mut dispatch_acks = Vec::with_capacity(records.len());
-                                                for (record, headers) in records {
+                                                for record in records {
                                                     tokio::task::consume_budget().await;
-                                                    let (acks, completion) =
-                                                        task_runtime.tracked_ack_root(&task_domain);
+                                                    let (acks, completion) = task_runtime
+                                                        .tracked_ingestor_ack_root(
+                                                            &task_domain,
+                                                            &task_ingestor,
+                                                        );
                                                     dispatch_acks.push(
                                                         if !task_branched_senders.is_empty() {
                                                             acks.attached()
@@ -685,9 +690,12 @@ impl PulsarIngestor {
                                                     roots.push(acks);
                                                     completions.push(completion);
                                                     group_records.push(record);
-                                                    group_headers.push(headers);
                                                 }
-                                                let metadata = group_headers
+                                                let headers = messages
+                                                    .iter()
+                                                    .map(PulsarMessageProperties)
+                                                    .collect::<Vec<_>>();
+                                                let metadata = headers
                                                     .iter()
                                                     .map(|headers| IngestMetadataRow::Headers { headers })
                                                     .collect::<Vec<_>>();
@@ -706,9 +714,9 @@ impl PulsarIngestor {
                                                         ingested_at,
                                                     })
                                                     .await;
-                                                let dispatched = dispatch_result
-                                                    .map(|()| true)
-                                                    .unwrap_or_else(|error| {
+                                                let dispatched = match dispatch_result {
+                                                    Ok(()) => true,
+                                                    Err(error) => {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                                             "failed to dispatch message group for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
@@ -716,7 +724,8 @@ impl PulsarIngestor {
                                                             error
                                                         )));
                                                         false
-                                                    });
+                                                    }
+                                                };
                                                 // Dispatch has taken its own reference to every message,
                                                 // so the root each one was created with is released here.
                                                 for acks in roots {
@@ -745,7 +754,7 @@ impl PulsarIngestor {
                                                         match Runtime::await_ack_completion(
                                                             &mut shutdown_rx,
                                                             completion,
-                                                            ack_timeout.expect("ack timeout must exist"),
+                                                            ack_timeout.verified("this branch runs only for an ACK mode, and every ACK mode parses a timeout above"),
                                                         ).await {
                                                             Some(AckOutcome::Ack) => {}
                                                             Some(AckOutcome::NoAck(error)) => {
@@ -925,8 +934,8 @@ impl PulsarIngestor {
 
     async fn decode_message(
         codec: Arc<CompiledCodec>,
-        domain: &Domain,
-        ingestor: &Identifier,
+        domain: &DomainName,
+        ingestor: &IngestorName,
         message: &PulsarMessage<Vec<u8>>,
     ) -> Result<RuntimeRecordBatch, CodecError> {
         let key = message.key().unwrap_or_default();
@@ -946,9 +955,9 @@ impl PulsarIngestor {
 
     async fn flush_no_ack_group(
         runtime: &Runtime,
-        domain: &Domain,
-        ingestor: &Identifier,
-        branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        branched_senders: &HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
         consumer: &mut PulsarConsumer<Vec<u8>, TokioExecutor>,
         collector: &mut IngestRouteCollector,
         messages: &mut Vec<PulsarMessage<Vec<u8>>>,
@@ -974,14 +983,5 @@ impl PulsarIngestor {
             }
         }
         first_error.map_or(Ok(()), Err)
-    }
-
-    fn headers_from_message(message: &PulsarMessage<Vec<u8>>) -> IngestHeaders {
-        message
-            .metadata()
-            .properties
-            .iter()
-            .map(|property| (property.key.clone(), property.value.clone()))
-            .collect()
     }
 }
