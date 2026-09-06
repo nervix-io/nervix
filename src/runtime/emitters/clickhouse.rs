@@ -252,17 +252,23 @@ impl ClickHouseEmitter {
             let chunk_lines = match chunk
                 .iter()
                 .map(|row| {
-                    lines
-                        .get(*row)
-                        .and_then(|line| line.as_ref().ok())
-                        .map(String::as_str)
-                        .ok_or_else(|| {
-                            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    let Some(line) = lines.get(*row) else {
+                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                            .attach_printable(format!(
                                 "clickhouse pending row {row} has no mapped line in batch with {} \
                                  rows",
                                 lines.len()
-                            ))
-                        })
+                            )));
+                    };
+                    let Ok(line) = line else {
+                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                            .attach_printable(format!(
+                                "clickhouse pending row {row} has no mapped line in batch with {} \
+                                 rows",
+                                lines.len()
+                            )));
+                    };
+                    Ok(line.as_str())
                 })
                 .collect::<EmitterRuntimeResult<Vec<_>>>()
             {
@@ -291,21 +297,20 @@ impl ClickHouseEmitter {
                 Err(error) if error.is_record_error() && chunk.len() > 1 => {
                     for row in chunk {
                         tokio::task::consume_budget().await;
-                        let Some(line) = lines
-                            .get(*row)
-                            .and_then(|line| line.as_ref().ok())
-                            .map(String::as_str)
-                        else {
-                            outcome.fail(
-                                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(
-                                    format!(
-                                        "clickhouse pending row {row} is outside mapped batch \
-                                         with {} rows",
-                                        lines.len()
+                        let line = match lines.get(*row) {
+                            Some(Ok(line)) => line.as_str(),
+                            Some(Err(_)) | None => {
+                                outcome.fail(
+                                    Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(
+                                        format!(
+                                            "clickhouse pending row {row} is outside mapped batch \
+                                             with {} rows",
+                                            lines.len()
+                                        ),
                                     ),
-                                ),
-                            );
-                            return outcome;
+                                );
+                                return outcome;
+                            }
                         };
                         match await_emitter_confirmation(
                             &request_acks,

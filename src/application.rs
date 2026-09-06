@@ -1375,14 +1375,13 @@ async fn handle_http_request(
         // once here and appended from that copy for every later frame.
         let headers = RetainedIngestHeaders::capture(&HyperRequestHeaders(request.headers()));
 
-        let Some(sec_websocket_key) = request
-            .headers()
-            .get(SEC_WEBSOCKET_KEY)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned)
-        else {
+        let Some(sec_websocket_key) = request.headers().get(SEC_WEBSOCKET_KEY) else {
             return Ok(response_with_status(StatusCode::BAD_REQUEST));
         };
+        let Ok(sec_websocket_key) = sec_websocket_key.to_str() else {
+            return Ok(response_with_status(StatusCode::BAD_REQUEST));
+        };
+        let sec_websocket_key = sec_websocket_key.to_owned();
 
         let response = HyperResponse::builder()
             .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -1965,17 +1964,19 @@ async fn handle_web_console_request(
             ));
         }
 
-        let Some(sec_websocket_key) = request
-            .headers()
-            .get(SEC_WEBSOCKET_KEY)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned)
-        else {
+        let Some(sec_websocket_key) = request.headers().get(SEC_WEBSOCKET_KEY) else {
             return Ok(text_response(
                 StatusCode::BAD_REQUEST,
                 "missing websocket key",
             ));
         };
+        let Ok(sec_websocket_key) = sec_websocket_key.to_str() else {
+            return Ok(text_response(
+                StatusCode::BAD_REQUEST,
+                "missing websocket key",
+            ));
+        };
+        let sec_websocket_key = sec_websocket_key.to_owned();
 
         let response = HyperResponse::builder()
             .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -2400,24 +2401,24 @@ fn credentials_from_basic_authorization(value: &str) -> Option<BasicAuthCredenti
 }
 
 fn credentials_from_metadata(metadata: &MetadataMap) -> Option<BasicAuthCredentials> {
-    metadata
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(credentials_from_basic_authorization)
+    let value = metadata.get("authorization")?;
+    let Ok(value) = value.to_str() else {
+        return None;
+    };
+    credentials_from_basic_authorization(value)
 }
 
 fn credentials_from_web_console_request(
     request: &HyperRequest<HyperIncoming>,
 ) -> Option<BasicAuthCredentials> {
-    request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(credentials_from_basic_authorization)
-        .or_else(|| {
-            web_console_query_param(request.uri().query(), WEB_CONSOLE_AUTH_QUERY_PARAM)
-                .and_then(|token| credentials_from_basic_token(&token))
-        })
+    if let Some(value) = request.headers().get(AUTHORIZATION)
+        && let Ok(value) = value.to_str()
+        && let Some(credentials) = credentials_from_basic_authorization(value)
+    {
+        return Some(credentials);
+    }
+    let token = web_console_query_param(request.uri().query(), WEB_CONSOLE_AUTH_QUERY_PARAM)?;
+    credentials_from_basic_token(&token)
 }
 
 fn unauthorized_basic_response() -> HyperResponse<Full<Bytes>> {
@@ -5198,12 +5199,14 @@ impl SessionServiceImpl {
         };
 
         let schedule = self.consensus.current_schedule().await;
-        let scheduled_relay = schedule.domain(domain).and_then(|domain_schedule| {
+        let scheduled_relay = if let Some(domain_schedule) = schedule.domain(domain) {
             domain_schedule
                 .nodes
                 .iter()
                 .find(|node| node.kind == ModelKind::Relay && node.identifier == describe.relay)
-        });
+        } else {
+            None
+        };
         if describe.bindings.is_empty() {
             let metrics = match self
                 .describe_metrics_for_scheduled_node(
@@ -5734,12 +5737,14 @@ impl SessionServiceImpl {
                     Err(_) if tokio::time::Instant::now() < deadline => {}
                     Err(_) => {
                         self.pending_cluster_commands.remove(&correlation_id);
-                        break Err(dispatch_result.err().unwrap_or_else(|| {
-                            format!(
+                        let error = match dispatch_result {
+                            Err(error) => error,
+                            Ok(()) => format!(
                                 "timed out waiting for DESCRIBE INGESTOR response from '{}'",
                                 owner
-                            )
-                        }));
+                            ),
+                        };
+                        break Err(error);
                     }
                 }
             }
@@ -6535,8 +6540,9 @@ impl SessionServiceImpl {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
-                let (pending_node, last_status) = last_status.unwrap_or_else(|| {
-                    (
+                let (pending_node, last_status) = match last_status {
+                    Some(status) => status,
+                    None => (
                         gate.nodes
                             .first()
                             .cloned()
@@ -6547,8 +6553,8 @@ impl SessionServiceImpl {
                             outstanding_acks: 0,
                             emitter_publishing: Vec::new(),
                         },
-                    )
-                });
+                    ),
+                };
                 return Err(Report::new(DomainAlterError::EntityQuiesceTimeout {
                     domain: domain.clone(),
                     operation: purpose.operation_name(),
@@ -7494,13 +7500,12 @@ impl SessionServiceImpl {
         identifier: &Identifier,
     ) -> Option<ScheduledNode> {
         let schedule = self.consensus.current_schedule().await;
-        schedule.domain(domain).and_then(|domain_schedule| {
-            domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == kind && node.identifier == *identifier)
-                .cloned()
-        })
+        let domain_schedule = schedule.domain(domain)?;
+        domain_schedule
+            .nodes
+            .iter()
+            .find(|node| node.kind == kind && node.identifier == *identifier)
+            .cloned()
     }
 
     async fn prepare_owner_control_request(
@@ -7739,11 +7744,14 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result.and_then(|record| {
-                record
-                    .map(|bytes| runtime_schema::RuntimeRecordBatch::from_arrow_ipc_bytes(&bytes))
-                    .transpose()
-            }));
+            let result = match response.result {
+                Ok(Some(bytes)) => {
+                    runtime_schema::RuntimeRecordBatch::from_arrow_ipc_bytes(&bytes).map(Some)
+                }
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            };
+            let _ = sender.send(result);
         }
     }
 
@@ -7879,13 +7887,11 @@ impl SessionServiceImpl {
                 && !expects_runtime_node_ref)
         {
             let domains = self.consensus.current_domains().await;
-            suggestions.extend(domains.into_keys().filter_map(|id| {
+            for id in domains.into_keys() {
                 if prefix.is_empty() || id.as_str().starts_with(&prefix) {
-                    Some(id.to_string())
-                } else {
-                    None
+                    suggestions.push(id.to_string());
                 }
-            }));
+            }
         }
 
         let mut response_suggestions = SortedSet::from_unsorted(suggestions)
@@ -8781,9 +8787,9 @@ impl SessionServiceImpl {
                 error: result.message.clone(),
             })
         };
-        let effect = result.success.then_some(effect).flatten();
-        let planned_relocations = effect.as_ref().and_then(|effect| {
-            let count = match effect {
+        let effect = if result.success { effect } else { None };
+        let planned_relocations = match effect.as_ref() {
+            Some(
                 TransactionStepEffect::ReplaceDomainSchedule {
                     expected_schedule,
                     schedule,
@@ -8793,13 +8799,15 @@ impl SessionServiceImpl {
                     expected_schedule,
                     schedule,
                     ..
-                } => {
-                    planned_ownership_moves(expected_schedule.as_deref(), schedule.as_deref()).len()
-                }
-                _ => 0,
-            };
-            (count > 0).then_some(count)
-        });
+                },
+            ) => {
+                let count =
+                    planned_ownership_moves(expected_schedule.as_deref(), schedule.as_deref())
+                        .len();
+                (count > 0).then_some(count)
+            }
+            _ => None,
+        };
         self.consensus
             .advance_transaction_commit(TransactionCommitAdvance {
                 id: transaction.id.clone(),
@@ -9878,10 +9886,14 @@ impl SessionServiceImpl {
                             if let Some(gate) = cluster_entity_gate.take() {
                                 self.release_cluster_entity_gates(gate).await;
                             }
-                            let rollback_error = rollback_plan
-                                .take()
-                                .and_then(|plan| self.registry.rollback_committed(plan).err())
-                                .map(|rollback| rollback.to_string());
+                            let rollback_error = if let Some(plan) = rollback_plan.take() {
+                                match self.registry.rollback_committed(plan) {
+                                    Ok(_) => None,
+                                    Err(rollback) => Some(rollback.to_string()),
+                                }
+                            } else {
+                                None
+                            };
                             if requires_domain_pause {
                                 let _ = self.resume_domain_after_alter(&domain).await;
                             }
@@ -10031,9 +10043,11 @@ impl SessionServiceImpl {
             ));
         }
 
-        let result = completed_result.unwrap_or_else(|| {
+        let result = if let Some(result) = completed_result {
+            result
+        } else {
             model_mutation_success_result(&results, &applied, QuiesceLevel::Dynamic, 0)
-        });
+        };
         if let Some(transaction_step) = transaction_step
             && transaction_step.outcome.lock().is_none()
         {
@@ -11343,28 +11357,27 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let references = self
-            .registry
-            .active_graph(domain)
-            .map(|graph| {
-                let mut references = graph
-                    .edges()
-                    .into_iter()
-                    .filter_map(|(from, to, edge)| {
-                        (edge == crate::registry::EdgeKind::RequiredBy && from == model.name)
-                            .then_some(to)
-                    })
-                    .collect::<Vec<_>>();
-                references.sort();
-                references.dedup();
+        let references = if let Some(graph) = self.registry.active_graph(domain) {
+            let mut references = Vec::new();
+            for (from, to, edge) in graph.edges() {
+                if edge == crate::registry::EdgeKind::RequiredBy && from == model.name {
+                    references.push(to);
+                }
+            }
+            references.sort();
+            references.dedup();
+            if references.is_empty() {
+                "(none)".to_string()
+            } else {
                 references
                     .iter()
                     .map(Identifier::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
-            })
-            .filter(|references| !references.is_empty())
-            .unwrap_or_else(|| "(none)".to_string());
+            }
+        } else {
+            "(none)".to_string()
+        };
         command_ok(format!(
             "name: {}\nlanguage: {}\nsignature: ({arguments}) -> {}{}\nvolatile: {}\ncode_hash: \
              {}\nreferencing_nodes: {references}",
@@ -11560,24 +11573,31 @@ impl SessionServiceImpl {
                     },
                     |replica| replica.state.as_ref(),
                 );
+                let checksum = if let Some(replica) = replica {
+                    replica.root_checksum.as_deref().unwrap_or("-")
+                } else {
+                    "-"
+                };
+                let verified_at = if let Some(replica) = replica
+                    && let Some(value) = replica.last_verified_at
+                {
+                    value.to_string()
+                } else {
+                    "-".to_string()
+                };
+                let source = if let Some(replica) = replica {
+                    replica.source_node_id.as_deref().unwrap_or("-")
+                } else {
+                    "-"
+                };
+                let error = if let Some(replica) = replica {
+                    replica.error.as_deref().unwrap_or("-")
+                } else {
+                    "-"
+                };
                 lines.push(format!(
                     "- {} topology={} state={} checksum={} verified_at={} source={} error={}",
-                    node_id,
-                    topology,
-                    state,
-                    replica
-                        .and_then(|replica| replica.root_checksum.as_deref())
-                        .unwrap_or("-"),
-                    replica
-                        .and_then(|replica| replica.last_verified_at)
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "-".to_string()),
-                    replica
-                        .and_then(|replica| replica.source_node_id.as_deref())
-                        .unwrap_or("-"),
-                    replica
-                        .and_then(|replica| replica.error.as_deref())
-                        .unwrap_or("-"),
+                    node_id, topology, state, checksum, verified_at, source, error,
                 ));
             }
         }
@@ -12448,16 +12468,18 @@ impl SessionServiceImpl {
             .iter()
             .map(|member| scheduled_node_for_placement_member(desired, member).cloned())
             .collect::<Option<Vec<_>>>()?;
-        let old_primary = schedule
+        let old_primary = if let Some(candidate) = schedule
             .placement_groups
             .iter()
             .find(|candidate| placement_group_members_equal(&candidate.members, &group.members))
-            .and_then(|candidate| candidate.primary_node.clone())
-            .or_else(|| {
-                current_nodes
-                    .first()
-                    .and_then(|node| node.primary_node.clone())
-            });
+            && let Some(primary) = candidate.primary_node.as_ref()
+        {
+            Some(primary.clone())
+        } else if let Some(node) = current_nodes.first() {
+            node.primary_node.clone()
+        } else {
+            None
+        };
         let preserved_primary = old_primary.as_ref().filter(|primary| {
             primary.as_str() != unavailable_node_id
                 && live_nodes.contains(*primary)
@@ -12466,27 +12488,23 @@ impl SessionServiceImpl {
                         && node.assigned_nodes.contains(*primary)
                 })
         });
-        let desired_target = group
-            .primary_node
-            .as_ref()
-            .filter(|node_id| target_nodes.contains(*node_id))
-            .cloned()
-            .or_else(|| {
-                desired_nodes
-                    .first()
-                    .and_then(|node| node.primary_node.clone())
-                    .filter(|node_id| target_nodes.contains(node_id))
-            })
-            .or_else(|| {
-                desired_nodes
-                    .first()
-                    .and_then(|node| {
-                        node.assigned_nodes
-                            .iter()
-                            .find(|node_id| target_nodes.contains(*node_id))
-                    })
-                    .cloned()
-            });
+        let desired_target = if let Some(node_id) = group.primary_node.as_ref()
+            && target_nodes.contains(node_id)
+        {
+            Some(node_id.clone())
+        } else if let Some(node) = desired_nodes.first()
+            && let Some(node_id) = node.primary_node.as_ref()
+            && target_nodes.contains(node_id)
+        {
+            Some(node_id.clone())
+        } else if let Some(node) = desired_nodes.first() {
+            node.assigned_nodes
+                .iter()
+                .find(|node_id| target_nodes.contains(*node_id))
+                .cloned()
+        } else {
+            None
+        };
         let mut common_replicas = current_nodes
             .first()?
             .assigned_nodes
@@ -12500,10 +12518,15 @@ impl SessionServiceImpl {
                 .iter()
                 .all(|node| node.assigned_nodes.contains(candidate))
         });
-        let target = preserved_primary
-            .cloned()
-            .or_else(|| relocation.target(desired_target, common_replicas.first().cloned()))
-            .or_else(|| target_nodes.first().cloned())?;
+        let target = if let Some(primary) = preserved_primary {
+            primary.clone()
+        } else if let Some(target) =
+            relocation.target(desired_target, common_replicas.first().cloned())
+        {
+            target
+        } else {
+            target_nodes.first()?.clone()
+        };
         let primary_changed = old_primary.as_ref() != Some(&target);
         let promoted_replica = (primary_changed
             && current_nodes
@@ -12587,27 +12610,30 @@ impl SessionServiceImpl {
                 primary.as_str() != unavailable_node_id && live_nodes.contains(*primary)
             })
             .cloned();
-        let desired_target = desired_node
-            .primary_node
-            .as_ref()
-            .filter(|node_id| target_nodes.contains(*node_id))
-            .cloned()
-            .or_else(|| {
-                desired_node
-                    .assigned_nodes
-                    .iter()
-                    .find(|node_id| target_nodes.contains(*node_id))
-                    .cloned()
-            });
+        let desired_target = if let Some(node_id) = desired_node.primary_node.as_ref()
+            && target_nodes.contains(node_id)
+        {
+            Some(node_id.clone())
+        } else {
+            desired_node
+                .assigned_nodes
+                .iter()
+                .find(|node_id| target_nodes.contains(*node_id))
+                .cloned()
+        };
         let existing_replica = node
             .assigned_nodes
             .iter()
             .filter(|assigned| assigned.as_str() != unavailable_node_id)
             .find(|assigned| target_nodes.contains(*assigned))
             .cloned();
-        let target = preserved_primary
-            .or_else(|| relocation.target(desired_target, existing_replica))
-            .or_else(|| target_nodes.first().cloned())?;
+        let target = if let Some(primary) = preserved_primary {
+            primary
+        } else if let Some(target) = relocation.target(desired_target, existing_replica) {
+            target
+        } else {
+            target_nodes.first()?.clone()
+        };
         let replica_slots = node
             .assigned_nodes
             .len()
@@ -12695,18 +12721,17 @@ impl SessionServiceImpl {
             if !has_unavailable_assignment {
                 continue;
             }
-            let unavailable_node_id = group
-                .primary_node
-                .as_ref()
-                .filter(|node_id| !live_nodes.contains(*node_id))
-                .cloned()
-                .or_else(|| {
-                    current_nodes
-                        .iter()
-                        .flat_map(|node| node.assigned_nodes.iter())
-                        .find(|node_id| !live_nodes.contains(*node_id))
-                        .cloned()
-                });
+            let unavailable_node_id = if let Some(node_id) = group.primary_node.as_ref()
+                && !live_nodes.contains(node_id)
+            {
+                Some(node_id.clone())
+            } else {
+                current_nodes
+                    .iter()
+                    .flat_map(|node| node.assigned_nodes.iter())
+                    .find(|node_id| !live_nodes.contains(*node_id))
+                    .cloned()
+            };
             let Some(unavailable_node_id) = unavailable_node_id else {
                 continue;
             };
@@ -12797,15 +12822,18 @@ impl SessionServiceImpl {
                 .iter()
                 .map(|member| scheduled_node_for_placement_member(existing, member))
                 .collect::<Option<Vec<_>>>();
-            let common_primary = existing_nodes.as_ref().and_then(|nodes| {
-                let primary = nodes.first()?.primary_node.as_ref()?;
-                (live_node_ids.contains(primary)
-                    && nodes.iter().all(|node| {
-                        node.primary_node.as_ref() == Some(primary)
-                            && node.assigned_nodes.contains(primary)
-                    }))
-                .then(|| primary.clone())
-            });
+            let common_primary = if let Some(nodes) = existing_nodes.as_ref()
+                && let Some(first) = nodes.first()
+                && let Some(primary) = first.primary_node.as_ref()
+                && live_node_ids.contains(primary)
+                && nodes.iter().all(|node| {
+                    node.primary_node.as_ref() == Some(primary)
+                        && node.assigned_nodes.contains(primary)
+                }) {
+                Some(primary.clone())
+            } else {
+                None
+            };
 
             if let (Some(existing_nodes), Some(primary)) = (existing_nodes, common_primary) {
                 for (member, existing_node) in members.iter().zip(existing_nodes) {
@@ -12834,10 +12862,14 @@ impl SessionServiceImpl {
                     node.assigned_nodes = assigned_nodes;
                 }
             }
-            schedule.placement_groups[group_index].primary_node = members
-                .first()
-                .and_then(|member| scheduled_node_for_placement_member(schedule, member))
-                .and_then(|node| node.primary_node.clone());
+            schedule.placement_groups[group_index].primary_node = if let Some(member) =
+                members.first()
+                && let Some(node) = scheduled_node_for_placement_member(schedule, member)
+            {
+                node.primary_node.clone()
+            } else {
+                None
+            };
         }
 
         for node in &mut schedule.nodes {
@@ -13045,16 +13077,12 @@ impl SessionServiceImpl {
             })
             .collect::<HashMap<_, _>>();
 
-        let stale_keys = tasks
-            .iter()
-            .filter_map(|(key, (spec, _, _))| {
-                desired
-                    .get(key)
-                    .filter(|desired_spec| *desired_spec == spec)
-                    .is_none()
-                    .then_some(key.clone())
-            })
-            .collect::<Vec<_>>();
+        let mut stale_keys = Vec::new();
+        for (key, (spec, _, _)) in tasks.iter() {
+            if desired.get(key) != Some(spec) {
+                stale_keys.push(key.clone());
+            }
+        }
         for key in stale_keys {
             if let Some((_, cancel, handle)) = tasks.remove(&key) {
                 cancel.cancel();
@@ -14275,20 +14303,15 @@ fn format_relay_describe_output(
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
         format!("schema: {}", relay.schema.as_str()),
-        format!(
-            "branched by: {}",
-            relay
-                .branching
-                .branch()
-                .map(Identifier::as_str)
-                .unwrap_or_else(|| {
-                    if relay.branching.is_unbranched() {
-                        "UNBRANCHED"
-                    } else {
-                        "-"
-                    }
-                })
-        ),
+        format!("branched by: {}", {
+            if let Some(branch) = relay.branching.branch() {
+                branch.as_str()
+            } else if relay.branching.is_unbranched() {
+                "UNBRANCHED"
+            } else {
+                "-"
+            }
+        }),
         format!(
             "branch fields: {}",
             if branching.is_empty() {
@@ -15176,18 +15199,17 @@ fn placement_member_model_is_eligible(model: &Model) -> bool {
 }
 
 fn ordered_placement_corridor(endpoint: &PlacementEndpointPairPlan) -> Vec<PlacementRuntimeNode> {
-    let mut ordered = endpoint
+    let longest_witness = endpoint
         .witnesses
         .iter()
-        .max_by_key(|witness| witness.path.len())
-        .map(|witness| witness.path.clone())
-        .unwrap_or_else(|| {
-            if endpoint.source == endpoint.destination {
-                vec![endpoint.source.clone()]
-            } else {
-                vec![endpoint.source.clone(), endpoint.destination.clone()]
-            }
-        });
+        .max_by_key(|witness| witness.path.len());
+    let mut ordered = if let Some(witness) = longest_witness {
+        witness.path.clone()
+    } else if endpoint.source == endpoint.destination {
+        vec![endpoint.source.clone()]
+    } else {
+        vec![endpoint.source.clone(), endpoint.destination.clone()]
+    };
     let mut unique = Vec::with_capacity(endpoint.corridor.len());
     for node in ordered.drain(..).chain(endpoint.corridor.iter().cloned()) {
         if !unique.contains(&node) {
@@ -15236,14 +15258,12 @@ fn placement_group_host<'a>(
     schedule: Option<&'a nervix_models::DomainSchedule>,
     members: &[PlacementRuntimeNode],
 ) -> Option<&'a str> {
-    schedule
-        .and_then(|schedule| {
-            schedule
-                .placement_groups
-                .iter()
-                .find(|group| placement_group_members_equal(&group.members, members))
-        })
-        .and_then(|group| group.primary_node.as_deref())
+    let schedule = schedule?;
+    let group = schedule
+        .placement_groups
+        .iter()
+        .find(|group| placement_group_members_equal(&group.members, members))?;
+    group.primary_node.as_deref()
 }
 
 fn placement_groups_claimed_by_rule<'a>(
@@ -15324,35 +15344,38 @@ fn planned_ownership_moves(
     let (Some(current), Some(planned)) = (current, planned) else {
         return Vec::new();
     };
-    let mut moves = planned
-        .nodes
-        .iter()
-        .filter_map(|planned_node| {
-            let current_node = current.nodes.iter().find(|current_node| {
-                current_node.kind == planned_node.kind
-                    && current_node.identifier == planned_node.identifier
-            })?;
-            let former_owner = current_node.execution_node()?;
-            let destination = planned_node.execution_node()?;
-            if former_owner == destination {
-                return None;
-            }
-            Some(PlannedOwnershipMove {
-                entity: crate::registry::RegistryEntity {
-                    kind: planned_node.kind,
-                    identifier: planned_node.identifier.clone(),
-                },
-                former_owner: former_owner.to_string(),
-                destination: destination.to_string(),
-                replicas: planned_node
-                    .replica_nodes()
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-                promoted_replica: current_node.is_assigned_to(destination),
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut moves = Vec::new();
+    for planned_node in &planned.nodes {
+        let Some(current_node) = current.nodes.iter().find(|current_node| {
+            current_node.kind == planned_node.kind
+                && current_node.identifier == planned_node.identifier
+        }) else {
+            continue;
+        };
+        let Some(former_owner) = current_node.execution_node() else {
+            continue;
+        };
+        let Some(destination) = planned_node.execution_node() else {
+            continue;
+        };
+        if former_owner == destination {
+            continue;
+        }
+        moves.push(PlannedOwnershipMove {
+            entity: crate::registry::RegistryEntity {
+                kind: planned_node.kind,
+                identifier: planned_node.identifier.clone(),
+            },
+            former_owner: former_owner.to_string(),
+            destination: destination.to_string(),
+            replicas: planned_node
+                .replica_nodes()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            promoted_replica: current_node.is_assigned_to(destination),
+        });
+    }
     moves.sort_by(|left, right| left.entity.cmp(&right.entity));
     moves
 }
@@ -16286,10 +16309,10 @@ fn create_registry_error_response(
             }
         }
         RegistryError::MissingReference { reference, .. } => {
-            let span = Identifier::try_from(reference.as_str())
-                .ok()
-                .and_then(|id| find_identifier_span(query, &id))
-                .unwrap_or(0..0);
+            let span = match Identifier::try_from(reference.as_str()) {
+                Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
+                Err(_) => 0..0,
+            };
             CommandResult {
                 success: false,
                 message: format!("{err}"),
@@ -16303,10 +16326,10 @@ fn create_registry_error_response(
             }
         }
         RegistryError::InvalidReferenceKind { reference, .. } => {
-            let span = Identifier::try_from(reference.as_str())
-                .ok()
-                .and_then(|id| find_identifier_span(query, &id))
-                .unwrap_or(0..0);
+            let span = match Identifier::try_from(reference.as_str()) {
+                Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
+                Err(_) => 0..0,
+            };
             CommandResult {
                 success: false,
                 message: format!("{err}"),
@@ -16589,19 +16612,14 @@ fn resource_ref_suggestions(
     domain: &Domain,
     prefix: &str,
 ) -> Vec<String> {
-    resources
-        .next_version_by_resource
-        .iter()
-        .filter_map(|(known_domain, identifier, _)| {
-            if known_domain == domain
-                && (prefix.is_empty() || identifier.as_str().starts_with(prefix))
-            {
-                Some(identifier.to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut suggestions = Vec::new();
+    for (known_domain, identifier, _) in &resources.next_version_by_resource {
+        if known_domain == domain && (prefix.is_empty() || identifier.as_str().starts_with(prefix))
+        {
+            suggestions.push(identifier.to_string());
+        }
+    }
+    suggestions
 }
 
 fn resource_version_suggestions(
@@ -16610,19 +16628,17 @@ fn resource_version_suggestions(
     identifier: &Identifier,
     prefix: &str,
 ) -> Vec<String> {
-    resources
-        .versions
-        .iter()
-        .filter(|resource| resource.id.domain == *domain && resource.id.identifier == *identifier)
-        .filter_map(|resource| {
-            let version = resource.id.version.to_string();
-            if prefix.is_empty() || version.starts_with(prefix) {
-                Some(version)
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut suggestions = Vec::new();
+    for resource in &resources.versions {
+        if resource.id.domain != *domain || resource.id.identifier != *identifier {
+            continue;
+        }
+        let version = resource.id.version.to_string();
+        if prefix.is_empty() || version.starts_with(prefix) {
+            suggestions.push(version);
+        }
+    }
+    suggestions
 }
 
 fn requested_resource_versions(input: &str, cursor: usize) -> Option<Identifier> {
@@ -18696,16 +18712,17 @@ impl Application {
                             Envelope::Control(ControlEnvelope::LookupRequest(request)) => {
                                 let result =
                                     service_for_interconnect.handle_lookup_request(request.clone()).await;
+                                let result = match result {
+                                    Ok(Some(record)) => record.to_arrow_ipc_bytes().map(Some),
+                                    Ok(None) => Ok(None),
+                                    Err(error) => Err(error),
+                                };
                                 if let Err(error) = service_for_interconnect
                                     .dispatch_interconnect_control(
                                         &message.peer_node_id,
                                         ControlEnvelope::LookupResponse(RemoteLookupResponse {
                                             correlation_id: request.correlation_id,
-                                            result: result.and_then(|record| {
-                                                record
-                                                    .map(|record| record.to_arrow_ipc_bytes())
-                                                    .transpose()
-                                            }),
+                                            result,
                                         }),
                                     )
                                     .await

@@ -1646,14 +1646,13 @@ impl SinkEmitter {
             buffered_messages,
         } = runtime;
         match (sink, client, catalog_client) {
-            (EmitSink::Kafka { .. }, Some(Model::ClientKafka(client)), _) => Self::from_result(
-                "kafka",
-                context,
-                publishing
-                    .broker_mode()
-                    .and_then(|mode| KafkaEmitter::new(client, resolved, mode)),
-            )
-            .map(Self::Kafka),
+            (EmitSink::Kafka { .. }, Some(Model::ClientKafka(client)), _) => {
+                let result = match publishing.broker_mode() {
+                    Ok(mode) => KafkaEmitter::new(client, resolved, mode),
+                    Err(error) => Err(error),
+                };
+                Self::from_result("kafka", context, result).map(Self::Kafka)
+            }
             (EmitSink::Pulsar { topic, .. }, Some(Model::ClientPulsar(client)), _) => {
                 let mode = match publishing.broker_mode() {
                     Ok(mode) => mode,
@@ -1687,21 +1686,18 @@ impl SinkEmitter {
                 }
             }
             (EmitSink::Mqtt { topic, .. }, Some(Model::ClientMqtt(client)), _) => {
-                Self::from_result(
-                    "mqtt",
-                    context,
-                    publishing.mqtt_mode().and_then(|mode| {
-                        MqttEmitter::new(
-                            client,
-                            resolved,
-                            topic,
-                            context,
-                            mode,
-                            publishing.retry_policy,
-                        )
-                    }),
-                )
-                .map(Self::Mqtt)
+                let result = match publishing.mqtt_mode() {
+                    Ok(mode) => MqttEmitter::new(
+                        client,
+                        resolved,
+                        topic,
+                        context,
+                        mode,
+                        publishing.retry_policy,
+                    ),
+                    Err(error) => Err(error),
+                };
+                Self::from_result("mqtt", context, result).map(Self::Mqtt)
             }
             (EmitSink::Nats { subject, .. }, Some(Model::ClientNats(client)), _) => {
                 let mode = match publishing.nats_mode() {
@@ -2761,13 +2757,14 @@ fn emitter_unavailable_reason(
     fault_injector: &EmitterFaultInjector,
     emitter: &Identifier,
 ) -> Option<String> {
-    sink.missing_reason().map(str::to_owned).or_else(|| {
-        if let Some(EmitterFaultMode::Stall) = fault_injector.fault_mode(emitter) {
-            Some("fault injector stalled emitter publish".to_string())
-        } else {
-            None
-        }
-    })
+    if let Some(reason) = sink.missing_reason() {
+        return Some(reason.to_owned());
+    }
+    if let Some(EmitterFaultMode::Stall) = fault_injector.fault_mode(emitter) {
+        Some("fault injector stalled emitter publish".to_string())
+    } else {
+        None
+    }
 }
 
 async fn wait_for_emitter_work_cancel(work_cancel_rx: &mut watch::Receiver<bool>) {
@@ -2960,7 +2957,9 @@ async fn finish_rejected_records(
     for rejected in rejected {
         tokio::task::consume_budget().await;
         let (batch_index, row_index) = rejected.position;
-        let error = rejected.structured_error.unwrap_or_else(|| {
+        let error = if let Some(error) = rejected.structured_error {
+            error
+        } else {
             structured_message_error(
                 MessageErrorCode::External,
                 rejected.reason,
@@ -2968,7 +2967,7 @@ async fn finish_rejected_records(
                 None,
                 std::iter::empty(),
             )
-        });
+        };
         let batch = batches.get_mut(batch_index).ok_or_else(|| {
             Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
                 "record rejection references missing emitter batch {batch_index}"
@@ -3942,23 +3941,21 @@ fn resolve_emitter_client(
         (EmitSink::ZeroMq { .. }, Some(Model::ClientZeroMq(client))) => {
             Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
-        (EmitSink::Syslog { .. }, Some(Model::ClientSyslog(client))) => Some(
-            runtime
-                .resolve_client_config(domain, client.mount.as_ref(), &client.config)
-                .and_then(|resolved| {
-                    let config = crate::runtime::syslog::SyslogClientConfig::parse(
-                        &resolved.entries,
-                        crate::runtime::syslog::SyslogDirection::Emit,
-                    )
+        (EmitSink::Syslog { .. }, Some(Model::ClientSyslog(client))) => Some((|| {
+            let resolved =
+                runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config)?;
+            let config = crate::runtime::syslog::SyslogClientConfig::parse(
+                &resolved.entries,
+                crate::runtime::syslog::SyslogDirection::Emit,
+            )
+            .map_err(|error| error.to_string())?;
+            if config.protocol == crate::runtime::syslog::SyslogProtocol::Tls {
+                config
+                    .tls_client_config()
                     .map_err(|error| error.to_string())?;
-                    if config.protocol == crate::runtime::syslog::SyslogProtocol::Tls {
-                        config
-                            .tls_client_config()
-                            .map_err(|error| error.to_string())?;
-                    }
-                    Ok(resolved)
-                }),
-        ),
+            }
+            Ok(resolved)
+        })()),
         (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client))) => {
             Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
         }
@@ -4267,12 +4264,11 @@ impl EmitterBatchContext<'_> {
                 let selected_sqs_message_groups = plan
                     .source_rows
                     .iter()
-                    .map(|row| {
-                        sqs_message_groups.get(*row).cloned().unwrap_or_else(|| {
-                            Err(format!(
-                                "SQS FIFO group source row {row} is outside the source batch"
-                            ))
-                        })
+                    .map(|row| match sqs_message_groups.get(*row) {
+                        Some(group) => group.clone(),
+                        None => Err(format!(
+                            "SQS FIFO group source row {row} is outside the source batch"
+                        )),
                     })
                     .collect::<Vec<_>>();
                 self.runtime

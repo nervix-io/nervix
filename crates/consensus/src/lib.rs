@@ -1165,18 +1165,17 @@ impl ConsensusHandle {
     }
 
     async fn ping_peer(&self, target_addr: &str) -> Result<(), ConsensusError> {
-        self.cluster_api_http_client
+        let response = self
+            .cluster_api_http_client
             .get(format!("{target_addr}/raft/ping"))
             .send()
             .await
-            .map_err(|_| ConsensusError::Transport)
-            .and_then(|response| {
-                if response.status().is_success() {
-                    Ok(())
-                } else {
-                    Err(ConsensusError::Transport)
-                }
-            })
+            .map_err(|_| ConsensusError::Transport)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ConsensusError::Transport)
+        }
     }
 
     pub async fn status_lines(&self) -> Vec<String> {

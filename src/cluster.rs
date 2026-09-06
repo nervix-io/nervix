@@ -351,16 +351,16 @@ impl ClusterHandle {
         let self_id = chitchat.self_chitchat_id().clone();
         let cluster_id = chitchat.cluster_id().to_string();
         let self_state = chitchat.node_state(&self_id).cloned();
-        let live_nodes = chitchat
-            .live_nodes()
-            .filter(|node_id| **node_id != self_id)
-            .filter_map(|node_id| {
-                chitchat
-                    .node_state(node_id)
-                    .cloned()
-                    .map(|state| (node_id.clone(), state))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut live_nodes = BTreeMap::new();
+        for node_id in chitchat.live_nodes() {
+            if *node_id == self_id {
+                continue;
+            }
+            let Some(state) = chitchat.node_state(node_id) else {
+                continue;
+            };
+            live_nodes.insert(node_id.clone(), state.clone());
+        }
         let seed_nodes = chitchat
             .seed_nodes()
             .into_iter()
@@ -609,14 +609,16 @@ impl ClusterHandle {
     fn unavailable_interconnect_nodes(&self) -> BTreeSet<String> {
         let peers = self.interconnect_state.read();
         let now = Instant::now();
-        peers
-            .iter()
-            .filter_map(|(node_id, state)| {
-                let since = state.unavailable_since?;
-                let elapsed = now.saturating_duration_since(since);
-                (elapsed >= self.node_unavailability_timeout).then(|| node_id.clone())
-            })
-            .collect()
+        let mut unavailable = BTreeSet::new();
+        for (node_id, state) in peers.iter() {
+            let Some(since) = state.unavailable_since else {
+                continue;
+            };
+            if now.saturating_duration_since(since) >= self.node_unavailability_timeout {
+                unavailable.insert(node_id.clone());
+            }
+        }
+        unavailable
     }
 
     pub fn is_interconnect_unavailable(&self, node_id: &str) -> bool {

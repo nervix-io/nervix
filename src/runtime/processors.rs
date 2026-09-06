@@ -687,23 +687,22 @@ impl CompiledWindowAggregateProgram {
                     .map(|_| format!("demand_{}", demand.id))
             })
             .collect::<Vec<_>>();
-        let set = aggregate
-            .demands()
-            .iter()
-            .filter_map(|demand| {
-                let input = demand.input.as_ref()?;
-                Some((
-                    FieldRef {
-                        relay: OUTPUT_NAMESPACE.to_string(),
-                        field: format!("demand_{}", demand.id),
-                    },
-                    SpannedNode {
-                        inner: input.clone(),
-                        span,
-                    },
-                ))
-            })
-            .collect::<Vec<_>>();
+        let mut set = Vec::new();
+        for demand in aggregate.demands() {
+            let Some(input) = demand.input.as_ref() else {
+                continue;
+            };
+            set.push((
+                FieldRef {
+                    relay: OUTPUT_NAMESPACE.to_string(),
+                    field: format!("demand_{}", demand.id),
+                },
+                SpannedNode {
+                    inner: input.clone(),
+                    span,
+                },
+            ));
+        }
         let program = SpannedNode {
             inner: VmProgram {
                 filter: None,

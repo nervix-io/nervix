@@ -230,14 +230,14 @@ fn benchmark_batch() -> RelayRecordBatch {
     builder
         .finish_row()
         .assured("the single I64 value is built here against the schema declared beside it");
-    let record = builder
+    let batch = builder
         .finish()
-        .and_then(|batch| {
-            batch.runtime_row(
-                0,
-                RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
-            )
-        })
+        .assured("the single I64 value is built here against the schema declared beside it");
+    let record = batch
+        .runtime_row(
+            0,
+            RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
+        )
         .assured("the single I64 value is built here against the schema declared beside it");
     RelayRecordBatch::single(schema, None, record, AckSet::empty())
         .assured("the single I64 value is built here against the schema declared beside it")

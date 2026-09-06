@@ -1031,29 +1031,23 @@ impl IcebergEmitter {
             );
         }
         let mut rejected = Vec::new();
-        let accepted_rows = result
-            .batch
-            .errors()
-            .iter()
-            .enumerate()
-            .filter_map(|(row, errors)| {
-                if let Some(side_error) = errors.first() {
-                    let reason = format!(
-                        "Iceberg VALUES side error {}: {} at {}",
-                        side_error.code.as_str(),
-                        side_error.message,
-                        side_error.span
-                    );
-                    rejected.push(IcebergRejectedRow {
-                        row,
-                        error: program.structured_side_error(reason, side_error.span),
-                    });
-                    None
-                } else {
-                    Some(row)
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut accepted_rows = Vec::new();
+        for (row, errors) in result.batch.errors().iter().enumerate() {
+            let Some(side_error) = errors.first() else {
+                accepted_rows.push(row);
+                continue;
+            };
+            let reason = format!(
+                "Iceberg VALUES side error {}: {} at {}",
+                side_error.code.as_str(),
+                side_error.message,
+                side_error.span
+            );
+            rejected.push(IcebergRejectedRow {
+                row,
+                error: program.structured_side_error(reason, side_error.span),
+            });
+        }
         if accepted_rows.is_empty() {
             return Ok(IcebergMappedBatch {
                 accepted: None,

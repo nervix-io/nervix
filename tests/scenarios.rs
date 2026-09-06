@@ -8316,13 +8316,16 @@ struct NumericMetricAssertion {
 
 impl NumericMetricAssertion {
     fn matches_metric_line(&self, line: &str) -> bool {
-        let Some(actual) = metric_line_value(line, &self.field).and_then(|value| {
-            value
-                .parse::<f64>()
-                .ok()
-                .or_else(|| (value == "-").then_some(f64::NAN))
-        }) else {
+        let Some(value) = metric_line_value(line, &self.field) else {
             return false;
+        };
+        let actual = if value == "-" {
+            f64::NAN
+        } else {
+            let Ok(actual) = value.parse::<f64>() else {
+                return false;
+            };
+            actual
         };
         self.op.matches(actual, self.expected)
     }
@@ -12696,19 +12699,22 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
             .try_collect::<Vec<_>>()
             .await
             .expect("failed to read MongoDB insert command profiles");
-        let command_sizes = profile_documents
-            .iter()
-            .filter_map(|profile_document| match profile_document.get("ninserted") {
-                Some(MongoDbBson::Int32(value)) => usize::try_from(*value).ok(),
-                Some(MongoDbBson::Int64(value)) => usize::try_from(*value).ok(),
+        let mut command_sizes = Vec::with_capacity(profile_documents.len());
+        for profile_document in &profile_documents {
+            let size = match profile_document.get("ninserted") {
+                Some(MongoDbBson::Int32(value)) => usize::try_from(*value),
+                Some(MongoDbBson::Int64(value)) => usize::try_from(*value),
                 Some(MongoDbBson::Double(value))
                     if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 =>
                 {
-                    usize::try_from(*value as u64).ok()
+                    usize::try_from(*value as u64)
                 }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+                _ => continue,
+            };
+            if let Ok(size) = size {
+                command_sizes.push(size);
+            }
+        }
         let observed_inserts = profile_documents.len();
         let largest_insert = command_sizes.iter().copied().max().unwrap_or(0);
         if observed_documents == expected_documents
@@ -12897,13 +12903,19 @@ async fn then_object_storage_path_does_not_exist(world: &mut ScenarioWorld, path
 
 fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
     path_contains_staged_iceberg_batch(root, |path, name| {
-        name.starts_with("batch-")
-            && name.ends_with(".arrow")
-            && std::fs::File::open(path)
-                .ok()
-                .and_then(|file| StreamReader::try_new(file, None).ok())
-                .and_then(|reader| reader.collect::<Result<Vec<_>, _>>().ok())
-                .is_some_and(|batches| !batches.is_empty())
+        if !name.starts_with("batch-") || !name.ends_with(".arrow") {
+            return false;
+        }
+        let Ok(file) = std::fs::File::open(path) else {
+            return false;
+        };
+        let Ok(reader) = StreamReader::try_new(file, None) else {
+            return false;
+        };
+        let Ok(batches) = reader.collect::<Result<Vec<_>, _>>() else {
+            return false;
+        };
+        !batches.is_empty()
     })
 }
 

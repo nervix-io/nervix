@@ -68,21 +68,22 @@ pub(super) fn matching_message_error_output<'a>(
     error_relay: &Identifier,
     assignments: &[Assignment],
 ) -> Option<&'a ProcessorOutput> {
-    source_route
-        .and_then(|route| outputs.routes.iter().find(|output| &output.relay == route))
-        .or_else(|| {
-            outputs.routes.iter().find(|output| {
-                if let MessageErrorPolicy::Dlq {
-                    relay,
-                    assignments: configured,
-                } = &output.message_error_policy
-                {
-                    relay == error_relay && configured == assignments
-                } else {
-                    false
-                }
-            })
-        })
+    if let Some(route) = source_route
+        && let Some(output) = outputs.routes.iter().find(|output| &output.relay == route)
+    {
+        return Some(output);
+    }
+    outputs.routes.iter().find(|output| {
+        if let MessageErrorPolicy::Dlq {
+            relay,
+            assignments: configured,
+        } = &output.message_error_policy
+        {
+            relay == error_relay && configured == assignments
+        } else {
+            false
+        }
+    })
 }
 
 impl MessageErrorRouteRuntime {

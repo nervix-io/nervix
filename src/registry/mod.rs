@@ -416,20 +416,20 @@ impl Registry {
     pub fn startup_runtime_changes(&self) -> Result<Vec<RuntimeChanges>, Report<RegistryError>> {
         let state = self.state.read();
         let domains = SortedSet::from_unsorted(state.domains.keys().cloned().collect()).into_vec();
-
-        Ok(domains
-            .into_iter()
-            .filter_map(|domain| {
-                let domain_state = state.domains.get(&domain)?;
-                let changes = runtime_changes_for_domain(
-                    &domain,
-                    Some(domain_state.graph.clone()),
-                    &HashMap::new(),
-                    &domain_state.models,
-                );
-                (changes.graph.is_some() || !changes.changes.is_empty()).then_some(changes)
-            })
-            .collect())
+        let mut startup_changes = Vec::new();
+        for domain in domains {
+            let domain_state = &state.domains[&domain];
+            let changes = runtime_changes_for_domain(
+                &domain,
+                Some(domain_state.graph.clone()),
+                &HashMap::new(),
+                &domain_state.models,
+            );
+            if changes.graph.is_some() || !changes.changes.is_empty() {
+                startup_changes.push(changes);
+            }
+        }
+        Ok(startup_changes)
     }
 
     pub fn synchronize_cluster_schedule(
@@ -3932,20 +3932,20 @@ fn ensure_placement_member_shape_change_allowed(
     }
 
     let member = after.identifier();
-    let mut placements = candidate_models
-        .values()
-        .filter_map(|model| {
-            let Model::Placement(placement) = model else {
-                return None;
-            };
-            placement
-                .from
-                .iter()
-                .chain(&placement.to)
-                .any(|candidate| candidate == member)
-                .then_some(placement.name.clone())
-        })
-        .collect::<Vec<_>>();
+    let mut placements = Vec::new();
+    for model in candidate_models.values() {
+        let Model::Placement(placement) = model else {
+            continue;
+        };
+        if placement
+            .from
+            .iter()
+            .chain(&placement.to)
+            .any(|candidate| candidate == member)
+        {
+            placements.push(placement.name.clone());
+        }
+    }
     placements.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     placements.dedup();
     if placements.is_empty() {
@@ -4484,12 +4484,15 @@ impl ActiveGraph {
                     .iter()
                     .map(placement_runtime_node)
                     .collect::<Vec<_>>();
-                let primary_node = members.first().and_then(|first| {
-                    scheduled_nodes
+                let primary_node = if let Some(first) = members.first()
+                    && let Some(node) = scheduled_nodes
                         .iter()
                         .find(|node| node.kind == first.kind && node.identifier == first.identifier)
-                        .and_then(|node| node.primary_node.clone())
-                });
+                {
+                    node.primary_node.clone()
+                } else {
+                    None
+                };
                 PlacementGroupSchedule {
                     members: runtime_members,
                     primary_node,
@@ -4538,19 +4541,17 @@ impl ActiveGraph {
             })
             .collect::<Vec<_>>();
 
-        let schemas =
-            self.graph
-                .node_indices()
-                .filter_map(|index| {
-                    let node = self.graph.node_weight(index).verified(
-                        "this index came from the same graph, which is not modified here",
-                    );
-                    let Model::Schema(schema) = node.config.as_ref() else {
-                        return None;
-                    };
-                    Some((node.identifier.clone(), schema.clone()))
-                })
-                .collect::<HashMap<_, _>>();
+        let mut schemas = HashMap::default();
+        for index in self.graph.node_indices() {
+            let node = self
+                .graph
+                .node_weight(index)
+                .verified("this index came from the same graph, which is not modified here");
+            let Model::Schema(schema) = node.config.as_ref() else {
+                continue;
+            };
+            schemas.insert(node.identifier.clone(), schema.clone());
+        }
 
         let mut nodes = included_nodes
             .iter()
@@ -6386,7 +6387,10 @@ fn placement_affinity_scores(
             PlacementPolicy::SuggestSeparation => -1,
             PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => continue,
         };
-        let Some(primary) = assigned_by_key.get(other).and_then(|nodes| nodes.first()) else {
+        let Some(nodes) = assigned_by_key.get(other) else {
+            continue;
+        };
+        let Some(primary) = nodes.first() else {
             continue;
         };
         *scores.entry(primary.clone()).or_insert(0) += adjustment;
@@ -10284,41 +10288,23 @@ fn infer_stream_branchings(
         changed = false;
 
         for producer_id in &producer_ids {
-            let Some(model) = models
-                .get(&RegistryKey::new(ModelKind::Generator, producer_id.clone()))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::Inferencer,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::WasmProcessor,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| models.get(&RegistryKey::new(ModelKind::Ingestor, producer_id.clone())))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::Reingestor,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::Deduplicator,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| models.get(&RegistryKey::new(ModelKind::Junction, producer_id.clone())))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::WindowProcessor,
-                        producer_id.clone(),
-                    ))
-                })
-            else {
+            let mut model = None;
+            for kind in [
+                ModelKind::Generator,
+                ModelKind::Inferencer,
+                ModelKind::WasmProcessor,
+                ModelKind::Ingestor,
+                ModelKind::Reingestor,
+                ModelKind::Deduplicator,
+                ModelKind::Junction,
+                ModelKind::WindowProcessor,
+            ] {
+                if let Some(candidate) = models.get(&RegistryKey::new(kind, producer_id.clone())) {
+                    model = Some(candidate);
+                    break;
+                }
+            }
+            let Some(model) = model else {
                 continue;
             };
 
@@ -11671,21 +11657,20 @@ fn ensure_drop_targets_are_not_in_use(
             continue;
         };
 
-        let mut blockers = graph
-            .graph
-            .edges_directed(index, Direction::Outgoing)
-            .filter_map(|blocker_index| {
-                if *blocker_index.weight() != EdgeKind::RequiredBy {
-                    return None;
-                }
-                let blocker = graph
-                    .graph
-                    .node_weight(blocker_index.target())
-                    .verified("this endpoint comes from an edge of the same graph")
-                    .clone();
-                (!drops_in_batch.contains(&blocker.key())).then_some(blocker.identifier)
-            })
-            .collect::<Vec<_>>();
+        let mut blockers = Vec::new();
+        for blocker_index in graph.graph.edges_directed(index, Direction::Outgoing) {
+            if *blocker_index.weight() != EdgeKind::RequiredBy {
+                continue;
+            }
+            let blocker = graph
+                .graph
+                .node_weight(blocker_index.target())
+                .verified("this endpoint comes from an edge of the same graph")
+                .clone();
+            if !drops_in_batch.contains(&blocker.key()) {
+                blockers.push(blocker.identifier);
+            }
+        }
         blockers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         blockers.dedup_by(|a, b| a.as_str() == b.as_str());
 

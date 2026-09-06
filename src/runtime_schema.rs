@@ -749,12 +749,10 @@ impl RuntimeRecordBatch {
             .columns()
             .iter()
             .map(|column| {
-                column
-                    .to_data()
-                    .get_slice_memory_size()
-                    .ok()
-                    .and_then(|bytes| u64::try_from(bytes).ok())
-                    .unwrap_or(u64::MAX)
+                let Ok(bytes) = column.to_data().get_slice_memory_size() else {
+                    return u64::MAX;
+                };
+                u64::try_from(bytes).unwrap_or(u64::MAX)
             })
             .fold(0_u64, u64::saturating_add)
     }
@@ -2816,10 +2814,13 @@ fn append_json_value_to_arrow(
         ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
         ParseAsType::Datetime => append_primitive!(
             TimestampNanosecondBuilder,
-            value
-                .as_str()
-                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                .and_then(|value| value.timestamp_nanos_opt())
+            if let Some(value) = value.as_str()
+                && let Ok(value) = DateTime::parse_from_rfc3339(value)
+            {
+                value.timestamp_nanos_opt()
+            } else {
+                None
+            }
         ),
         ParseAsType::F32 => {
             append_primitive!(Float32Builder, value.as_f64().map(|value| value as f32))
@@ -2925,9 +2926,11 @@ fn append_avro_value_to_arrow(
         ParseAsType::Datetime => append_primitive!(
             TimestampNanosecondBuilder,
             if let AvroValue::String(value) = value {
-                DateTime::parse_from_rfc3339(value)
-                    .ok()
-                    .and_then(|value| value.timestamp_nanos_opt())
+                if let Ok(value) = DateTime::parse_from_rfc3339(value) {
+                    value.timestamp_nanos_opt()
+                } else {
+                    None
+                }
             } else {
                 None
             }

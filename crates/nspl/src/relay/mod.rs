@@ -18,15 +18,14 @@ fn positive_usize<'src>()
 -> impl Parser<'src, &'src [Token], usize, extra::Err<ParseError<'src>>> + Clone {
     choice((select! { Token::NumberLiteral(v) => v }, word_raw()))
         .try_map(|raw, span| {
-            raw.parse::<usize>()
-                .map_err(|_| Rich::custom(span, format!("invalid usize literal '{raw}'")))
-                .and_then(|value| {
-                    if value == 0 {
-                        Err(Rich::custom(span, "capacity must be greater than 0"))
-                    } else {
-                        Ok(value)
-                    }
-                })
+            let value = raw
+                .parse::<usize>()
+                .map_err(|_| Rich::custom(span, format!("invalid usize literal '{raw}'")))?;
+            if value == 0 {
+                Err(Rich::custom(span, "capacity must be greater than 0"))
+            } else {
+                Ok(value)
+            }
         })
         .labelled("relay_capacity")
 }

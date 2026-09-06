@@ -402,37 +402,48 @@ fn complete_local_upload_paths(
                 .unwrap_or_default(),
         )
     };
-    let mut suggestions = std::fs::read_dir(&base_dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !partial_name.is_empty() && !name.starts_with(&partial_name) {
-                return None;
-            }
-            let value = if uses_home_prefix(path_fragment) {
-                let relative_base = strip_home_prefix(&base_dir)?;
-                if relative_base.as_os_str().is_empty() {
-                    format!("~/{name}")
-                } else {
-                    format!("~/{}/{}", relative_base.display(), name)
-                }
-            } else if base_dir == Path::new(".") {
-                name.clone()
-            } else {
-                base_dir.join(&name).display().to_string()
+    let Ok(entries) = std::fs::read_dir(&base_dir) else {
+        return None;
+    };
+    let mut suggestions = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !partial_name.is_empty() && !name.starts_with(&partial_name) {
+            continue;
+        }
+        let value = if uses_home_prefix(path_fragment) {
+            let Some(relative_base) = strip_home_prefix(&base_dir) else {
+                continue;
             };
-            let is_dir = entry.file_type().ok()?.is_dir();
-            Some(Suggestion {
-                value: if is_dir { format!("{value}/") } else { value },
-                description: None,
-                style: None,
-                extra: None,
-                span: reedline::Span::new(span_start, pos),
-                append_whitespace: false,
-            })
-        })
-        .collect::<Vec<_>>();
+            if relative_base.as_os_str().is_empty() {
+                format!("~/{name}")
+            } else {
+                format!("~/{}/{}", relative_base.display(), name)
+            }
+        } else if base_dir == Path::new(".") {
+            name.clone()
+        } else {
+            base_dir.join(&name).display().to_string()
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        suggestions.push(Suggestion {
+            value: if file_type.is_dir() {
+                format!("{value}/")
+            } else {
+                value
+            },
+            description: None,
+            style: None,
+            extra: None,
+            span: reedline::Span::new(span_start, pos),
+            append_whitespace: false,
+        });
+    }
     suggestions.sort_by(|left, right| left.value.cmp(&right.value));
     Some(suggestions)
 }

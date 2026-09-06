@@ -478,10 +478,11 @@ impl PulsarIngestor {
                                                         &mut collector,
                                                     )
                                                     .await;
-                                                let dispatched = dispatch_result
+                                                let dispatched = match dispatch_result
                                                     .and(flush_result)
-                                                    .map(|()| true)
-                                                    .unwrap_or_else(|error| {
+                                                {
+                                                    Ok(()) => true,
+                                                    Err(error) => {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                                             "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
@@ -489,7 +490,8 @@ impl PulsarIngestor {
                                                             error
                                                         )));
                                                         false
-                                                    });
+                                                    }
+                                                };
                                                 if dispatched {
                                                     acks.ack_success();
                                                     match Runtime::await_ack_completion(
@@ -711,9 +713,9 @@ impl PulsarIngestor {
                                                         ingested_at,
                                                     })
                                                     .await;
-                                                let dispatched = dispatch_result
-                                                    .map(|()| true)
-                                                    .unwrap_or_else(|error| {
+                                                let dispatched = match dispatch_result {
+                                                    Ok(()) => true,
+                                                    Err(error) => {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                                             "failed to dispatch message group for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
@@ -721,7 +723,8 @@ impl PulsarIngestor {
                                                             error
                                                         )));
                                                         false
-                                                    });
+                                                    }
+                                                };
                                                 // Dispatch has taken its own reference to every message,
                                                 // so the root each one was created with is released here.
                                                 for acks in roots {

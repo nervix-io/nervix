@@ -527,19 +527,17 @@ fn max_batch<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseEr
     kw_phrase3(Identifier::With, Identifier::Max, Identifier::Batch)
         .ignore_then(select! { Token::NumberLiteral(value) => value }.labelled("batch_size"))
         .try_map(|value, span| {
-            value
+            let value = value
                 .parse::<u64>()
-                .map_err(|_| Rich::custom(span, format!("invalid max batch size '{value}'")))
-                .and_then(|value| {
-                    if value == 0 {
-                        Err(Rich::custom(
-                            span,
-                            "max batch size must be greater than zero",
-                        ))
-                    } else {
-                        Ok(value)
-                    }
-                })
+                .map_err(|_| Rich::custom(span, format!("invalid max batch size '{value}'")))?;
+            if value == 0 {
+                Err(Rich::custom(
+                    span,
+                    "max batch size must be greater than zero",
+                ))
+            } else {
+                Ok(value)
+            }
         })
 }
 

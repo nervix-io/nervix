@@ -575,31 +575,32 @@ impl Runtime {
         affected_entities: &[RegistryEntity],
     ) -> Vec<Identifier> {
         let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
-        let mut relays = affected_entities
-            .iter()
-            .flat_map(|entity| {
-                if entity.kind == ModelKind::Relay {
-                    return vec![entity.identifier.clone()];
+        let mut relays = Vec::new();
+        for entity in affected_entities {
+            if entity.kind == ModelKind::Relay {
+                relays.push(entity.identifier.clone());
+                continue;
+            }
+            if let Some(processor) = processor_specs.processor(entity.kind, &entity.identifier) {
+                relays.extend(processor.spec.input_relays.clone());
+                continue;
+            }
+            let Some(node) = schedule
+                .nodes
+                .iter()
+                .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
+            else {
+                continue;
+            };
+            match node.config.as_ref() {
+                Model::Emitter(emitter) => relays.extend(emitter.from.from.clone()),
+                Model::Reingestor(reingestor) => relays.extend(reingestor.from.from.clone()),
+                Model::Generator(generator) => {
+                    relays.push(generator.materialized_relay.clone());
                 }
-                if let Some(processor) = processor_specs.processor(entity.kind, &entity.identifier)
-                {
-                    return processor.spec.input_relays.clone();
-                }
-                schedule
-                    .nodes
-                    .iter()
-                    .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
-                    .and_then(|node| match node.config.as_ref() {
-                        Model::Emitter(emitter) => Some(emitter.from.from.clone()),
-                        Model::Reingestor(reingestor) => Some(reingestor.from.from.clone()),
-                        Model::Generator(generator) => {
-                            Some(vec![generator.materialized_relay.clone()])
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>();
+                _ => {}
+            }
+        }
         relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         relays.dedup();
         relays
@@ -850,21 +851,23 @@ impl Runtime {
                 quiesce_work.saturating_add(emitter_work)
             })
             .sum();
-        let outstanding_acks = affected_entities
-            .iter()
-            .filter(|entity| entity.kind == ModelKind::Ingestor)
-            .filter_map(|entity| {
-                self.in_flight_by_ingestor
-                    .get(&RuntimeKey::new(domain.clone(), entity.identifier.clone()))
-                    .map(|tracker| {
-                        if purpose == EntityGatePurpose::OwnershipHandoff {
-                            tracker.outstanding_for_ownership_handoff()
-                        } else {
-                            tracker.outstanding()
-                        }
-                    })
-            })
-            .sum();
+        let mut outstanding_acks = 0;
+        for entity in affected_entities {
+            if entity.kind != ModelKind::Ingestor {
+                continue;
+            }
+            let Some(tracker) = self
+                .in_flight_by_ingestor
+                .get(&RuntimeKey::new(domain.clone(), entity.identifier.clone()))
+            else {
+                continue;
+            };
+            outstanding_acks += if purpose == EntityGatePurpose::OwnershipHandoff {
+                tracker.outstanding_for_ownership_handoff()
+            } else {
+                tracker.outstanding()
+            };
+        }
         let mut emitter_publishing = affected_entities
             .iter()
             .filter(|entity| entity.kind == ModelKind::Emitter)
@@ -2782,50 +2785,51 @@ impl Runtime {
                 .filter(|entry| &entry.key().domain == domain)
                 .map(|entry| entry.key().clone()),
         );
-        let mut emitter_publishing = publishing_keys
-            .into_iter()
-            .filter_map(|key| {
-                let pending_messages = self
-                    .emitter_buffers
-                    .get(&key)
-                    .map(|buffered| buffered.load(Ordering::Acquire))
-                    .unwrap_or(0);
-                let awaiting_confirmation = self
-                    .emitter_confirmation_waits
-                    .get(&key)
-                    .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
-                if awaiting_confirmation {
-                    return Some(EmitterPublishingDrainStatus {
-                        emitter: key.identifier,
-                        state: EmitterPublishingDrainState::AwaitingConfirmation,
-                        pending_messages,
-                        retry_backoff: None,
-                        retry_wait: None,
-                    });
-                }
-                let retry = self.emitter_retry_statuses.get(&key)?;
-                let state = match retry.kind {
-                    EmitterRetryKind::Infrastructure => {
-                        EmitterPublishingDrainState::RetryingInfrastructure
-                    }
-                    EmitterRetryKind::IcebergCommit => {
-                        EmitterPublishingDrainState::RetryingIcebergCommit
-                    }
-                };
-                Some(EmitterPublishingDrainStatus {
+        let mut emitter_publishing = Vec::new();
+        for key in publishing_keys {
+            let pending_messages = self
+                .emitter_buffers
+                .get(&key)
+                .map(|buffered| buffered.load(Ordering::Acquire))
+                .unwrap_or(0);
+            let awaiting_confirmation = self
+                .emitter_confirmation_waits
+                .get(&key)
+                .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
+            if awaiting_confirmation {
+                emitter_publishing.push(EmitterPublishingDrainStatus {
                     emitter: key.identifier,
-                    state,
+                    state: EmitterPublishingDrainState::AwaitingConfirmation,
                     pending_messages,
-                    retry_backoff: Some(retry.reconnect.backoff),
-                    retry_wait: Some(
-                        retry
-                            .reconnect
-                            .retry_at
-                            .saturating_duration_since(Instant::now()),
-                    ),
-                })
-            })
-            .collect::<Vec<_>>();
+                    retry_backoff: None,
+                    retry_wait: None,
+                });
+                continue;
+            }
+            let Some(retry) = self.emitter_retry_statuses.get(&key) else {
+                continue;
+            };
+            let state = match retry.kind {
+                EmitterRetryKind::Infrastructure => {
+                    EmitterPublishingDrainState::RetryingInfrastructure
+                }
+                EmitterRetryKind::IcebergCommit => {
+                    EmitterPublishingDrainState::RetryingIcebergCommit
+                }
+            };
+            emitter_publishing.push(EmitterPublishingDrainStatus {
+                emitter: key.identifier,
+                state,
+                pending_messages,
+                retry_backoff: Some(retry.reconnect.backoff),
+                retry_wait: Some(
+                    retry
+                        .reconnect
+                        .retry_at
+                        .saturating_duration_since(Instant::now()),
+                ),
+            });
+        }
         emitter_publishing.sort_by(|left, right| left.emitter.cmp(&right.emitter));
         DomainDrainStatus {
             active_ingestors,
@@ -5088,14 +5092,17 @@ impl Runtime {
         } else {
             (0, nervix_models::DomainStartPoint::Resume)
         };
-        let scheduled_partition_schedule = self.executions.get(domain).and_then(|execution| {
-            execution
+        let scheduled_partition_schedule = if let Some(execution) = self.executions.get(domain)
+            && let Some(node) = execution
                 .schedule
                 .nodes
                 .iter()
                 .find(|node| node.kind == ModelKind::Ingestor && node.identifier == *ingestor)
-                .and_then(|node| node.kafka_partition_schedule.clone())
-        });
+        {
+            node.kafka_partition_schedule.clone()
+        } else {
+            None
+        };
 
         let offsets = if let nervix_models::DomainStartPoint::Resume = &last_start {
             let missing_partition_timestamp = self.current_paced_domain_time(domain)?;
@@ -5554,21 +5561,22 @@ impl Runtime {
                     .is_some_and(|existing| existing.executes_on(local_node_id))
             });
             let executes_locally = desired_node.executes_on(local_node_id);
-            let relay_runtime = (entity.kind == ModelKind::Relay)
-                .then(|| {
-                    self.executions.get(domain).and_then(|execution| {
-                        Some((
-                            execution.relay_registries.get(&entity.identifier)?.clone(),
-                            execution.relay_services.get(&entity.identifier)?.clone(),
-                        ))
-                    })
-                })
-                .flatten();
+            let relay_runtime = if entity.kind == ModelKind::Relay
+                && let Some(execution) = self.executions.get(domain)
+                && let Some(registry) = execution.relay_registries.get(&entity.identifier)
+                && let Some(service) = execution.relay_services.get(&entity.identifier)
+            {
+                Some((registry.clone(), service.clone()))
+            } else {
+                None
+            };
 
             if entity.kind == ModelKind::Relay && was_local && !executes_locally {
-                let previous = self.executions.get_mut(domain).and_then(|mut execution| {
+                let previous = if let Some(mut execution) = self.executions.get_mut(domain) {
                     execution.relay_owner_tasks.remove(&entity.identifier)
-                });
+                } else {
+                    None
+                };
                 if let Some(task) = previous {
                     task.stop(
                         self.domain_drain_timeout()
@@ -5584,10 +5592,11 @@ impl Runtime {
                     })?;
                 }
             }
-            let previous_tasks = self
-                .executions
-                .get_mut(domain)
-                .and_then(|mut execution| execution.placement_tasks.remove(entity));
+            let previous_tasks = if let Some(mut execution) = self.executions.get_mut(domain) {
+                execution.placement_tasks.remove(entity)
+            } else {
+                None
+            };
             for task in previous_tasks.unwrap_or_default() {
                 tokio::task::consume_budget().await;
                 task.abort();
@@ -5600,14 +5609,14 @@ impl Runtime {
                 }
                 _ => None,
             };
-            let materialized_schema = materialized_relay.as_ref().and_then(|relay| {
-                self.executions.get(domain).and_then(|execution| {
-                    execution
-                        .relay_schemas
-                        .get(relay)
-                        .map(|schema| schema.arrow_schema())
-                })
-            });
+            let materialized_schema = if let Some(relay) = materialized_relay.as_ref()
+                && let Some(execution) = self.executions.get(domain)
+                && let Some(schema) = execution.relay_schemas.get(relay)
+            {
+                Some(schema.arrow_schema())
+            } else {
+                None
+            };
             let placement = self.build_scheduled_node_placement(
                 domain,
                 &shutdown,
@@ -6066,19 +6075,12 @@ impl Runtime {
                             reason: "domain execution is unavailable for emitter swap".to_string(),
                         }
                     })?;
-                    let old_emitter = execution
+                    let old_node = execution
                         .schedule
                         .nodes
                         .iter()
                         .find(|node| {
                             node.kind == ModelKind::Emitter && node.identifier == entity.identifier
-                        })
-                        .and_then(|node| {
-                            if let Model::Emitter(emitter) = node.config.as_ref() {
-                                Some(emitter.clone())
-                            } else {
-                                None
-                            }
                         })
                         .ok_or_else(|| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -6087,6 +6089,16 @@ impl Runtime {
                                 entity.identifier.as_str()
                             ),
                         })?;
+                    let Model::Emitter(old_emitter) = old_node.config.as_ref() else {
+                        return Err(RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing existing emitter '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        });
+                    };
+                    let old_emitter = old_emitter.clone();
                     let old_task = execution.emitter_tasks.remove(entity);
                     (old_emitter, old_task)
                 };
@@ -6224,20 +6236,13 @@ impl Runtime {
                                 .to_string(),
                         }
                     })?;
-                    let old_reingestor = execution
+                    let old_node = execution
                         .schedule
                         .nodes
                         .iter()
                         .find(|node| {
                             node.kind == ModelKind::Reingestor
                                 && node.identifier == entity.identifier
-                        })
-                        .and_then(|node| {
-                            if let Model::Reingestor(reingestor) = node.config.as_ref() {
-                                Some(reingestor.clone())
-                            } else {
-                                None
-                            }
                         })
                         .ok_or_else(|| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -6246,6 +6251,16 @@ impl Runtime {
                                 entity.identifier.as_str()
                             ),
                         })?;
+                    let Model::Reingestor(old_reingestor) = old_node.config.as_ref() else {
+                        return Err(RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing existing reingestor '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        });
+                    };
+                    let old_reingestor = old_reingestor.clone();
                     let old_tasks = execution
                         .reingestor_tasks
                         .remove(entity)
@@ -6581,29 +6596,21 @@ impl Runtime {
             };
             // The change aspects own which node-local state a swap invalidates, so the runtime
             // applies that contract rather than re-deriving it per processor kind.
-            let state_purges = self
-                .executions
-                .get(domain)
-                .and_then(|execution| {
-                    execution
-                        .schedule
-                        .nodes
-                        .iter()
-                        .find(|node| {
-                            node.kind == entity.kind && node.identifier == entity.identifier
-                        })
-                        .map(|node| (*node.config).clone())
-                })
-                .and_then(|old_model| {
-                    desired_model_index
-                        .get(&(entity.kind, entity.identifier.clone()))
-                        .map(|desired_model| {
-                            old_model
-                                .change_aspects_against(desired_model)
-                                .state_purges()
-                        })
-                })
-                .unwrap_or_default();
+            let state_purges = if let Some(execution) = self.executions.get(domain)
+                && let Some(old_node) =
+                    execution.schedule.nodes.iter().find(|node| {
+                        node.kind == entity.kind && node.identifier == entity.identifier
+                    })
+                && let Some(desired_model) =
+                    desired_model_index.get(&(entity.kind, entity.identifier.clone()))
+            {
+                old_node
+                    .config
+                    .change_aspects_against(desired_model)
+                    .state_purges()
+            } else {
+                Vec::new()
+            };
             for purge in state_purges {
                 match purge {
                     nervix_models::StatePurge::DeduplicatorKeyspace => {
@@ -6720,12 +6727,16 @@ impl Runtime {
                 let remote_consumers =
                     Self::remote_runtime_consumers_for_schedule(&schedule, local_node_id);
                 for (relay, services) in &execution.relay_services {
-                    let owner_node = schedule
+                    let owner_node = if let Some(node) = schedule
                         .nodes
                         .iter()
                         .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
-                        .and_then(ScheduledNode::execution_node)
-                        .map(str::to_string);
+                        && let Some(owner) = node.execution_node()
+                    {
+                        Some(owner.to_string())
+                    } else {
+                        None
+                    };
                     services.replace_owner_node(owner_node);
                     services.replace_remote_runtime_consumers(
                         remote_consumers.get(relay).cloned().unwrap_or_default(),
@@ -6855,15 +6866,15 @@ impl Runtime {
                 }
                 nervix_models::DynamicModelUpdate::Processor { .. } => {}
                 nervix_models::DynamicModelUpdate::Emitter { emitter, config } => {
-                    let commands = self.executions.get(domain).and_then(|execution| {
-                        execution
-                            .emitter_tasks
-                            .get(&RegistryEntity {
-                                kind: ModelKind::Emitter,
-                                identifier: emitter.clone(),
-                            })
-                            .map(|task| task.commands.clone())
-                    });
+                    let commands = if let Some(execution) = self.executions.get(domain)
+                        && let Some(task) = execution.emitter_tasks.get(&RegistryEntity {
+                            kind: ModelKind::Emitter,
+                            identifier: emitter.clone(),
+                        }) {
+                        Some(task.commands.clone())
+                    } else {
+                        None
+                    };
                     if let Some(commands) = commands {
                         ScheduledEmitterTask::reconfigure_via(&commands, config.clone())
                             .await
@@ -6901,17 +6912,17 @@ impl Runtime {
         path: &str,
     ) -> Option<Arc<CompiledSignalingProtocol>> {
         let host = normalize_http_host(host);
-        self.executions.iter().find_map(|execution| {
-            execution
-                .endpoint_routes
-                .values()
-                .find(|route| {
-                    route.endpoint_type == EndpointType::Websockets
-                        && route.path == path
-                        && route.hostnames.iter().any(|hostname| hostname == &host)
-                })
-                .and_then(|route| route.signaling_protocol.clone())
-        })
+        for execution in self.executions.iter() {
+            if let Some(route) = execution.endpoint_routes.values().find(|route| {
+                route.endpoint_type == EndpointType::Websockets
+                    && route.path == path
+                    && route.hostnames.iter().any(|hostname| hostname == &host)
+            }) && let Some(protocol) = route.signaling_protocol.clone()
+            {
+                return Some(protocol);
+            }
+        }
+        None
     }
 
     pub(in crate::runtime) async fn signaling_protocol(
@@ -6919,12 +6930,11 @@ impl Runtime {
         domain: &Domain,
         signaling_protocol: &Identifier,
     ) -> Option<Arc<CompiledSignalingProtocol>> {
-        self.executions.get(domain).and_then(|execution| {
-            execution
-                .signaling_protocols
-                .get(signaling_protocol)
-                .cloned()
-        })
+        let execution = self.executions.get(domain)?;
+        execution
+            .signaling_protocols
+            .get(signaling_protocol)
+            .cloned()
     }
 
     pub async fn has_http_endpoint(&self, host: &str, path: &str) -> bool {
@@ -7730,12 +7740,16 @@ impl Runtime {
             })
             .collect::<HashMap<_, _>>();
         for (relay, services) in &relay_services {
-            let owner_node = schedule
+            let owner_node = if let Some(node) = schedule
                 .nodes
                 .iter()
                 .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
-                .and_then(ScheduledNode::execution_node)
-                .map(str::to_string);
+                && let Some(owner) = node.execution_node()
+            {
+                Some(owner.to_string())
+            } else {
+                None
+            };
             services.replace_owner_node(owner_node);
         }
         let mut relay_owner_tasks = HashMap::new();
@@ -8654,33 +8668,29 @@ impl Runtime {
             None
         };
         let detail = if kind.eq_ignore_ascii_case("INGESTOR") {
-            self.ingestor_transient_error(domain, identifier)
-                .map(|error| {
-                    if let Some(backoff) = self.ingestor_reconnect_backoff(domain, identifier) {
-                        format!("{error}; reconnect backoff: {backoff}")
-                    } else {
-                        error
-                    }
-                })
-                .or_else(|| {
-                    self.ingestor_faults
-                        .is_failed(identifier)
-                        .then(|| "ingestor fault injector failed source".to_string())
-                })
+            if let Some(error) = self.ingestor_transient_error(domain, identifier) {
+                if let Some(backoff) = self.ingestor_reconnect_backoff(domain, identifier) {
+                    Some(format!("{error}; reconnect backoff: {backoff}"))
+                } else {
+                    Some(error)
+                }
+            } else if self.ingestor_faults.is_failed(identifier) {
+                Some("ingestor fault injector failed source".to_string())
+            } else {
+                None
+            }
         } else if kind.eq_ignore_ascii_case("EMITTER") {
-            self.emitter_transient_error(domain, identifier)
-                .map(|error| {
-                    if let Some(backoff) = self.emitter_reconnect_backoff(domain, identifier) {
-                        format!("{error}; reconnect backoff: {backoff}")
-                    } else {
-                        error
-                    }
-                })
-                .or_else(|| {
-                    self.emitter_faults
-                        .fault_mode(identifier)
-                        .map(|_| "emitter fault injector failed publish".to_string())
-                })
+            if let Some(error) = self.emitter_transient_error(domain, identifier) {
+                if let Some(backoff) = self.emitter_reconnect_backoff(domain, identifier) {
+                    Some(format!("{error}; reconnect backoff: {backoff}"))
+                } else {
+                    Some(error)
+                }
+            } else if self.emitter_faults.fault_mode(identifier).is_some() {
+                Some("emitter fault injector failed publish".to_string())
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -8733,21 +8743,16 @@ impl Runtime {
         let Some(store) = &self.state_store else {
             return Ok(());
         };
-        let placements = self
-            .replicated_branch_aggregated_states
-            .iter()
-            .filter_map(|entry| {
-                let placement = entry.key();
-                if &placement.domain == domain
-                    && placement.kind == kind
-                    && &placement.identifier == identifier
-                {
-                    Some(placement.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut placements = Vec::new();
+        for entry in self.replicated_branch_aggregated_states.iter() {
+            let placement = entry.key();
+            if &placement.domain == domain
+                && placement.kind == kind
+                && &placement.identifier == identifier
+            {
+                placements.push(placement.clone());
+            }
+        }
         for placement in placements {
             let Some(state) = self.replicated_branch_aggregated_states.get(&placement) else {
                 continue;
@@ -8808,17 +8813,21 @@ impl Runtime {
 
         let key = RuntimeKey::new(domain.clone(), ingestor.clone());
         let Some(runtime) = self.ingestors.get(&key) else {
+            let transient_error =
+                if let Some(error) = self.ingestor_transient_error(domain, ingestor) {
+                    Some(error)
+                } else {
+                    self.domain_instantiation_errors
+                        .get(domain)
+                        .map(|error| error.value().clone())
+                };
             return Ok(IngestorDescribe {
                 running: false,
                 ready: false,
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
                 memory_backpressure_paused,
-                transient_error: self.ingestor_transient_error(domain, ingestor).or_else(|| {
-                    self.domain_instantiation_errors
-                        .get(domain)
-                        .map(|error| error.value().clone())
-                }),
+                transient_error,
                 reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
                 reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
                 kafka_domain_offsets: None,
@@ -8849,21 +8858,23 @@ impl Runtime {
         });
         let kafka_domain_offsets = match runtime.value() {
             IngestorRuntime::Background { .. } => {
-                scheduled_ingestor.and_then(|(node, ingestor)| match &ingestor.source {
-                    IngestSource::Kafka {
+                if let Some((node, ingestor)) = scheduled_ingestor
+                    && let IngestSource::Kafka {
                         topic,
                         offset_mode: KafkaOffsetMode::Domain,
                         instances,
                         ..
-                    } => node.kafka_partition_schedule.as_ref().map(|schedule| {
-                        kafka_domain_offset_describe_from_schedule(
-                            topic.as_str(),
-                            *instances,
-                            schedule,
-                        )
-                    }),
-                    _ => None,
-                })
+                    } = &ingestor.source
+                    && let Some(schedule) = node.kafka_partition_schedule.as_ref()
+                {
+                    Some(kafka_domain_offset_describe_from_schedule(
+                        topic.as_str(),
+                        *instances,
+                        schedule,
+                    ))
+                } else {
+                    None
+                }
             }
             IngestorRuntime::Endpoint { .. } => None,
         };
@@ -9182,17 +9193,15 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         key: &Option<BranchKey>,
     ) -> bool {
-        let scheduled = self
-            .executions
-            .get(&placement.domain)
-            .and_then(|execution| {
-                execution
-                    .materialized_stream_owner_nodes
-                    .get(&placement.identifier)
-                    .cloned()
-            })
-            .flatten()
-            .is_some();
+        let scheduled = if let Some(execution) = self.executions.get(&placement.domain)
+            && let Some(owner) = execution
+                .materialized_stream_owner_nodes
+                .get(&placement.identifier)
+        {
+            owner.is_some()
+        } else {
+            false
+        };
         if scheduled {
             return true;
         }
@@ -9260,16 +9269,13 @@ impl Runtime {
         domain: &Domain,
         relay: &Identifier,
     ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
-        let owner = self
-            .executions
-            .get(domain)
-            .and_then(|execution| {
-                execution
-                    .materialized_stream_owner_nodes
-                    .get(relay)
-                    .cloned()
-            })
-            .flatten();
+        let owner = if let Some(execution) = self.executions.get(domain)
+            && let Some(owner) = execution.materialized_stream_owner_nodes.get(relay)
+        {
+            owner.clone()
+        } else {
+            None
+        };
         let local_node_id = self.local_node_id.read().clone();
         if let Some(owner) = owner
             && local_node_id.as_deref() != Some(owner.as_str())
@@ -11219,22 +11225,22 @@ impl Runtime {
                             state.routes.iter().filter_map(|route| route.next_flush)
                         }))
                         .min();
-                let sleep_duration = next_deadline
-                    .map(|next| {
-                        if is_paced {
-                            paced_state
-                                .as_ref()
-                                .and_then(|(_, clock, _)| clock.as_ref())
-                                .map(|clock| {
-                                    wall_duration_until_logical_target(clock, execution_now, next)
-                                        .unwrap_or(Duration::from_millis(100))
-                                })
-                                .unwrap_or(Duration::from_millis(50))
+                let sleep_duration = if let Some(next) = next_deadline {
+                    if is_paced {
+                        if let Some((_, Some(clock), _)) = paced_state.as_ref() {
+                            match wall_duration_until_logical_target(clock, execution_now, next) {
+                                Ok(duration) => duration,
+                                Err(_) => Duration::from_millis(100),
+                            }
                         } else {
-                            wall_duration_until_timestamp(execution_now, next)
+                            Duration::from_millis(50)
                         }
-                    })
-                    .unwrap_or(interval);
+                    } else {
+                        wall_duration_until_timestamp(execution_now, next)
+                    }
+                } else {
+                    interval
+                };
 
                 tokio::select! {
                     changed = shutdown_rx.changed() => {

@@ -3567,18 +3567,15 @@ fn kafka_topic_partition_count(
     let metadata = consumer
         .fetch_metadata(Some(topic), Duration::from_secs(5))
         .map_err(io::Error::other)?;
-    Ok(metadata
-        .topics()
-        .iter()
-        .find(|entry| entry.name() == topic)
-        .and_then(|entry| {
-            let partitions = entry.partitions().len();
-            if partitions == 0 {
-                None
-            } else {
-                Some(partitions)
-            }
-        }))
+    let Some(entry) = metadata.topics().iter().find(|entry| entry.name() == topic) else {
+        return Ok(None);
+    };
+    let partitions = entry.partitions().len();
+    if partitions == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(partitions))
+    }
 }
 
 async fn wait_for_kafka_topic_partitions(
@@ -3750,18 +3747,17 @@ fn kafka_consumer_group_next_offset(
     let committed = consumer
         .committed_offsets(partitions, Duration::from_secs(1))
         .map_err(io::Error::other)?;
-    let offset = committed
-        .find_partition(topic, partition)
-        .map(|element| element.offset())
-        .and_then(|offset| match offset {
-            Offset::Offset(offset) => Some(offset),
-            Offset::Beginning
-            | Offset::End
-            | Offset::Stored
-            | Offset::Invalid
-            | Offset::OffsetTail(_) => None,
-        });
-    Ok(offset)
+    let Some(element) = committed.find_partition(topic, partition) else {
+        return Ok(None);
+    };
+    match element.offset() {
+        Offset::Offset(offset) => Ok(Some(offset)),
+        Offset::Beginning
+        | Offset::End
+        | Offset::Stored
+        | Offset::Invalid
+        | Offset::OffsetTail(_) => Ok(None),
+    }
 }
 
 async fn ensure_sqs_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
@@ -4083,18 +4079,20 @@ async fn observe_kafka(
                     let headers = message
                         .headers()
                         .map(|headers| {
-                            (0..headers.count())
-                                .filter_map(|index| {
-                                    let header = headers.try_get(index)?;
-                                    Some((
-                                        header.key.to_string(),
-                                        header
-                                            .value
-                                            .map(|value| String::from_utf8_lossy(value).to_string())
-                                            .unwrap_or_default(),
-                                    ))
-                                })
-                                .collect::<Vec<_>>()
+                            let mut values = Vec::new();
+                            for index in 0..headers.count() {
+                                let Some(header) = headers.try_get(index) else {
+                                    continue;
+                                };
+                                values.push((
+                                    header.key.to_string(),
+                                    header
+                                        .value
+                                        .map(|value| String::from_utf8_lossy(value).to_string())
+                                        .unwrap_or_default(),
+                                ));
+                            }
+                            values
                         })
                         .unwrap_or_default();
                     let _ = payload_tx.send(BrokerMessage { payload, headers }).await;
