@@ -288,6 +288,7 @@ mod tests {
         SubscriptionLiteral, UncordonNode, WasmProcessorName, WindowProcessorName, WireSchemaField,
         ZeroMqIngestMode,
     };
+    use rstest::rstest;
 
     use super::*;
 
@@ -2278,273 +2279,130 @@ mod tests {
         assert!(!suggestions.contains(&"ref:client".to_string()));
     }
 
-    #[test]
-    fn canonical_roundtrip_schema() {
-        let input = r#"
+    #[rstest]
+    #[case::schema(
+        r#"
             CREATE SCHEMA notification (
                 user_id U32,
                 created_at DATETIME,
                 payload STRING
             );
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_wire_schema() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::wire_schema(
+        r#"
             CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
                 user_id integer,
                 created_at string,
                 payload object
             );
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_schema() {
-        let parsed = parse_statement(
-            "ALTER SCHEMA events ADD FIELD note STRING OPTIONAL SENSITIVE, RENAME FIELD id TO \
+        "#,
+        None,
+        &[]
+    )]
+    #[case::alter_schema(
+        "ALTER SCHEMA events ADD FIELD note STRING OPTIONAL SENSITIVE, RENAME FIELD id TO \
              event_id, ALTER FIELD event_id SET TYPE I64, ALTER FIELD event_id DROP OPTIONAL, \
              ALTER FIELD note DROP SENSITIVE;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterSchema(alter) = parsed else {
-            panic!("expected ALTER SCHEMA");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterSchema(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_wire_schema() {
-        let parsed = parse_statement(
-            "ALTER WIRE AVRO SCHEMA payload ADD FIELD note STRING OPTIONAL, ALTER FIELD id SET \
+        None,
+        &[]
+    )]
+    #[case::alter_wire_schema(
+        "ALTER WIRE AVRO SCHEMA payload ADD FIELD note STRING OPTIONAL, ALTER FIELD id SET \
              TYPE LONG, ALTER FIELD note DROP OPTIONAL;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterWireAvroSchema(alter) = parsed else {
-            panic!("expected ALTER WIRE SCHEMA");
-        };
-
-        let canonical = nervix_models::alter_avro_wire_schema_to_canonical_nspl(&alter)
-            .expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterWireAvroSchema(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_wire_schema_mode() {
-        let parsed = parse_statement("ALTER WIRE JSON SCHEMA payload MODE LOOSE;")
-            .expect("parse should succeed");
-        let Statement::AlterWireJsonSchema(alter) = parsed else {
-            panic!("expected wire-schema mode ALTER");
-        };
-
-        let canonical = nervix_models::alter_json_wire_schema_to_canonical_nspl(&alter)
-            .expect("must render canonical");
-        assert_eq!(canonical, "ALTER WIRE JSON SCHEMA payload MODE LOOSE;");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterWireJsonSchema(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_relay() {
-        let parsed = parse_statement(
-            "ALTER RELAY notifications SET CAPACITY 8, SET SCHEMA event_v2, SET BRANCHED BY \
+        None,
+        &[]
+    )]
+    #[case::alter_wire_schema_mode(
+        "ALTER WIRE JSON SCHEMA payload MODE LOOSE;",
+        Some("ALTER WIRE JSON SCHEMA payload MODE LOOSE;"),
+        &[]
+    )]
+    #[case::alter_relay(
+        "ALTER RELAY notifications SET CAPACITY 8, SET SCHEMA event_v2, SET BRANCHED BY \
              by_tenant, SET MATERIALIZED STATE LAST BY TIMESTAMP;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterRelay(alter) = parsed else {
-            panic!("expected ALTER RELAY");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterRelay(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_junction() {
-        let parsed = parse_statement(
-            "ALTER JUNCTION route_events ADD FROM incoming_b WHERE input.kind = 'event', SET \
+        None,
+        &[]
+    )]
+    #[case::alter_junction(
+        "ALTER JUNCTION route_events ADD FROM incoming_b WHERE input.kind = 'event', SET \
              COLLECT FOR 10ms MAX BATCH SIZE 1MiB, SET FILTER WHERE input.kind != '', ADD \
              MATERIALIZED STATE profiles REQUIRED WAIT, ADD ROUTE TO projected INHERIT ALL FLUSH \
              IMMEDIATE ON MESSAGE ERROR SEND TO errors SET code = error.code, SET DETACHED;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterJunction(alter) = parsed else {
-            panic!("expected ALTER JUNCTION");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterJunction(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_deduplicator() {
-        let parsed = parse_statement(
-            "ALTER DEDUPLICATOR dedup_events ADD FROM incoming_b WHERE input.active, SET \
+        None,
+        &[]
+    )]
+    #[case::alter_deduplicator(
+        "ALTER DEDUPLICATOR dedup_events ADD FROM incoming_b WHERE input.active, SET \
              DEDUPLICATE ON concat(input.tenant, ','), input.id, SET MAX TIME 20m, ADD ROUTE TO \
              audit INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterDeduplicator(alter) = parsed else {
-            panic!("expected ALTER DEDUPLICATOR");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterDeduplicator(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_reorderer() {
-        let parsed = parse_statement(
-            "ALTER REORDERER order_events ADD FROM incoming_b WHERE input.active, SET BY \
+        None,
+        &[]
+    )]
+    #[case::alter_reorderer(
+        "ALTER REORDERER order_events ADD FROM incoming_b WHERE input.active, SET BY \
              concat(input.tenant, ','), input.id, SET MAX TIME 20m, ADD ROUTE TO audit INHERIT \
              ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterReorderer(alter) = parsed else {
-            panic!("expected ALTER REORDERER");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterReorderer(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_emitter() {
-        let parsed = parse_statement(
-            "ALTER EMITTER event_sink SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms \
+        None,
+        &[]
+    )]
+    #[case::alter_emitter(
+        "ALTER EMITTER event_sink SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms \
              MAX 30s, SET CLIENT sink_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
              BATCH SIZE 1MiB, SET DETACHED, SET FLUSH IMMEDIATE;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterEmitter(alter) = parsed else {
-            panic!("expected ALTER EMITTER");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterEmitter(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_ingestor() {
-        let parsed = parse_statement(
-            "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON \
+        None,
+        &[]
+    )]
+    #[case::alter_ingestor(
+        "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON \
              QUIESCE BUFFER MAX SIZE 1MiB, SET DECODE USING event_codec_v2, SET TIMESTAMP AT \
              occurred_at, SET FILTER WHERE input.active, REPLACE ROUTE TO events INHERIT ALL \
              UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterIngestor(alter) = parsed else {
-            panic!("expected ALTER INGESTOR");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterIngestor(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_reingestor() {
-        let parsed = parse_statement(
-            "ALTER REINGESTOR repartition ADD FROM incoming_b WHERE input.active, SET FILTER \
+        None,
+        &[]
+    )]
+    #[case::alter_reingestor(
+        "ALTER REINGESTOR repartition ADD FROM incoming_b WHERE input.active, SET FILTER \
              WHERE concat(input.tenant, ',') != '', SET DETACHED, REPLACE ROUTE TO outgoing \
              INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterReingestor(alter) = parsed else {
-            panic!("expected ALTER REINGESTOR");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterReingestor(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_generator() {
-        let parsed = parse_statement(
-            "ALTER GENERATOR synth SET MATERIALIZED STATE state_v2, SET EACH 250ms, SET \
+        None,
+        &[]
+    )]
+    #[case::alter_generator(
+        "ALTER GENERATOR synth SET MATERIALIZED STATE state_v2, SET EACH 250ms, SET \
              UNBRANCHED, REPLACE ROUTE TO outgoing SET value = relay_state.state_v2.value FLUSH \
              IMMEDIATE ON MESSAGE ERROR LOG;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterGenerator(alter) = parsed else {
-            panic!("expected ALTER GENERATOR");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterGenerator(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_transport() {
-        let input = r#"
+        None,
+        &[]
+    )]
+    #[case::transport(
+        r#"
             CREATE CLIENT kafka_main
               TYPE KAFKA
               CONFIG {
                 'bootstrap.servers' = 'host1:9092,host2:9092',
                 'enable.auto.commit' = true
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_http_client() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::http_client(
+        r#"
             CREATE CLIENT http_main
               TYPE HTTP
               CONFIG {
                 'endpoint' = 'https://api.example.com/events',
                 'method' = 'POST'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_otel_client() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::otel_client(
+        r#"
             CREATE CLIENT otel_main
               TYPE OTEL
               CONFIG {
@@ -2554,170 +2412,98 @@ mod tests {
                 'compression' = 'gzip',
                 'timeout_ms' = 5000
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_rabbitmq_transport() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::rabbitmq_transport(
+        r#"
             CREATE CLIENT rabbit_main
               TYPE RABBITMQ
               CONFIG {
                 'addr' = 'amqp://guest:guest@localhost:5672/%2f',
                 'connection_name' = 'nervix-rabbit'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_websockets_client() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::websockets_client(
+        r#"
             CREATE CLIENT ws_main
               TYPE WEBSOCKETS
               CONFIG {
                 'endpoint' = 'wss://api.example.com/ws',
                 'subprotocol' = 'notifications'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_redis_transport() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::redis_transport(
+        r#"
             CREATE CLIENT redis_main
               TYPE REDIS
               CONFIG {
                 'addr' = 'redis://127.0.0.1:6379/',
                 'read_timeout_ms' = 5000
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_mqtt_transport() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::mqtt_transport(
+        r#"
             CREATE CLIENT mqtt_main
               TYPE MQTT
               CONFIG {
                 'addr' = 'mqtt://127.0.0.1:1883',
                 'client_id' = 'nervix-mqtt'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_prometheus_transport() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::prometheus_transport(
+        r#"
             CREATE CLIENT prom_main
               TYPE PROMETHEUS
               CONFIG {
                 'addr' = 'http://127.0.0.1:9090'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_vhost() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::vhost(
+        r#"
             CREATE VHOST my_vhost api.example.com, foo-bar.localhost WITH TLS tls_bundle VERSION 3;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_endpoint() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::endpoint(
+        r#"
             CREATE ENDPOINT my_ws_endpoint
                 ON edge
                 PATH '/ws'
                 TYPE WEBSOCKETS;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_http_endpoint() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::http_endpoint(
+        r#"
             CREATE ENDPOINT my_http_endpoint
                 ON edge
                 PATH '/ingest'
                 TYPE HTTP;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_ingestor() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::ingestor(
+        r#"
             CREATE INGESTOR kafka_notifications
                 FROM
                     KAFKA kafka_main
@@ -2731,20 +2517,12 @@ mod tests {
                     FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                     ON MESSAGE ERROR LOG
                 ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_prometheus_ingestor() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::prometheus_ingestor(
+        r#"
             CREATE INGESTOR prom_samples
                 FROM PROMETHEUS prom_main
                 QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
@@ -2755,35 +2533,19 @@ mod tests {
                     FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                     ON MESSAGE ERROR LOG
                 ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_stream() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::stream(
+        r#"
             CREATE RELAY p99_latency SCHEMA notification_schema UNBRANCHED;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_wasm_processor_preserves_exact_limits() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::wasm_processor_preserves_exact_limits(
+        r#"
             CREATE WASM PROCESSOR normalize_events
                 FROM events
                 USING RESOURCE normalizer VERSION 1
@@ -2793,41 +2555,24 @@ mod tests {
                 UNBRANCHED
                 TO normalized_events ON MESSAGE ERROR LOG
                 ON GLOBAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        assert!(canonical.contains("MAX FUEL 1000000\n  MAX MEMORY 64MiB"));
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_junction() {
-        let input = r#"
+        "#,
+        None,
+        &["MAX FUEL 1000000\n  MAX MEMORY 64MiB"]
+    )]
+    #[case::junction(
+        r#"
             CREATE JUNCTION join_streams
                 FROM ss1, ss2, ss3
                 COLLECT FOR 25ms MAX BATCH SIZE 2MiB
                 BRANCHED BY tenant
                 TO ss10 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_correlator_input_collection() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::correlator_input_collection(
+        r#"
             CREATE CORRELATOR correlate
                 LEFT FROM left_current, left_archive
                 COLLECT FOR 10ms
@@ -2842,20 +2587,12 @@ mod tests {
                     SET id = left.id
                     FLUSH IMMEDIATE
                     ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_preserves_conditional_surface_forms() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::preserves_conditional_surface_forms(
+        r#"
             CREATE JUNCTION conditional
                 FROM source
                 UNBRANCHED
@@ -2872,23 +2609,16 @@ mod tests {
                         END
                     FLUSH IMMEDIATE
                     ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        assert!(canonical.contains("IF input.active THEN 1 ELSE 0 END"));
-        assert!(canonical.contains("CASE input.kind WHEN"));
-        assert!(canonical.contains("CASE WHEN input.active THEN 1 END"));
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_deduplicator() {
-        let input = r#"
+        "#,
+        None,
+        &[
+            "IF input.active THEN 1 ELSE 0 END",
+            "CASE input.kind WHEN",
+            "CASE WHEN input.active THEN 1 END",
+        ]
+    )]
+    #[case::deduplicator(
+        r#"
             CREATE DEDUPLICATOR dedup_txns
                 FROM ss1
                 DEDUPLICATE ON input.transaction_id
@@ -2896,20 +2626,12 @@ mod tests {
                 BRANCHED BY tenant
                 TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_expression_string_spanning_lines() {
-        let input = "
+        "#,
+        None,
+        &[]
+    )]
+    #[case::expression_string_spanning_lines(
+        "
             CREATE DEDUPLICATOR dedup_txns
                 FROM ss1
                 DEDUPLICATE ON input.transaction_id
@@ -2918,20 +2640,12 @@ mod tests {
                 TO ss2 INHERIT ALL WHERE note = $s$line\nbreak$s$
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG;
-        ";
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_codec_with_multiline_jaq_program() {
-        let input = r#"
+        ",
+        None,
+        &[]
+    )]
+    #[case::codec_with_multiline_jaq_program(
+        r#"
             CREATE CODEC binance_ws_event_codec
                 FROM JSON
                 TO SCHEMA binance_ws_event
@@ -2939,20 +2653,12 @@ mod tests {
                     event_type: .e,
                     price: (if .e == "aggTrade" then .p else null end)
                 }$jaq$;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_preserves_float_literal_types() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::preserves_float_literal_types(
+        r#"
             CREATE DEDUPLICATOR dedup_txns
                 FROM ss1
                 DEDUPLICATE ON input.transaction_id
@@ -2961,94 +2667,72 @@ mod tests {
                 TO ss2 INHERIT ALL WHERE battery_pct < 15.0 AND score >= 80.0
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_emitter() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::emitter(
+        r#"
             CREATE EMITTER emit
                 FROM p99
                 COLLECT FOR 50ms
                 TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_pulsar_emitter() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::pulsar_emitter(
+        r#"
             CREATE EMITTER emit
                 FROM p99
                 TO PULSAR pulsar_main TOPIC topic MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s
                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_rabbitmq_emitter() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::rabbitmq_emitter(
+        r#"
             CREATE EMITTER emit
                 FROM p99
                 TO RABBITMQ broker1 QUEUE outbox MODE ACK SEQUENTIAL ACK TIMEOUT 30s
                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_redis_emitter() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::redis_emitter(
+        r#"
             CREATE EMITTER emit
                 FROM p99
                 TO REDIS PUBSUB broker1 CHANNEL outbox MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#;
-
+        "#,
+        None,
+        &[]
+    )]
+    fn canonical_statements_roundtrip(
+        #[case] input: &str,
+        #[case] expected_canonical: Option<&str>,
+        #[case] expected_fragments: &[&str],
+    ) {
         let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
         let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        if let Some(expected_canonical) = expected_canonical {
+            assert_eq!(canonical, expected_canonical);
+        }
+        for expected_fragment in expected_fragments {
+            assert!(canonical.contains(expected_fragment));
+        }
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
+        assert_eq!(parsed, reparsed);
     }
 
     #[test]
