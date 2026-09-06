@@ -1,6 +1,6 @@
 use nervix_models::{
-    Domain, DomainClockState, DomainSchedule, DomainStartPoint, DomainState, Identifier,
-    QuiesceLevel, Statement, Timestamp,
+    DomainClockState, DomainName, DomainSchedule, DomainStartPoint, DomainState, QuiesceLevel,
+    ResourceName, Statement, Timestamp, UserName,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -119,8 +119,8 @@ impl TransactionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicatedTransaction {
     pub id: String,
-    pub domain: Domain,
-    pub owner: Identifier,
+    pub domain: DomainName,
+    pub owner: UserName,
     pub created_at: Timestamp,
     pub last_activity_at: Timestamp,
     pub state: TransactionState,
@@ -130,7 +130,7 @@ pub struct ReplicatedTransaction {
 }
 
 impl ReplicatedTransaction {
-    pub fn open(id: String, domain: Domain, owner: Identifier, now: Timestamp) -> Self {
+    pub fn open(id: String, domain: DomainName, owner: UserName, now: Timestamp) -> Self {
         Self {
             id,
             domain,
@@ -182,7 +182,7 @@ impl ReplicatedTransaction {
         }
     }
 
-    pub(crate) fn ensure_owner(&self, owner: &Identifier) -> Result<(), TransactionMutationError> {
+    pub(crate) fn ensure_owner(&self, owner: &UserName) -> Result<(), TransactionMutationError> {
         if &self.owner == owner {
             Ok(())
         } else {
@@ -192,7 +192,10 @@ impl ReplicatedTransaction {
         }
     }
 
-    pub(crate) fn ensure_domain(&self, domain: &Domain) -> Result<(), TransactionMutationError> {
+    pub(crate) fn ensure_domain(
+        &self,
+        domain: &DomainName,
+    ) -> Result<(), TransactionMutationError> {
         if &self.domain == domain {
             Ok(())
         } else {
@@ -206,8 +209,8 @@ impl ReplicatedTransaction {
 
     pub fn validate_queue_admission(
         &self,
-        owner: &Identifier,
-        domain: &Domain,
+        owner: &UserName,
+        domain: &DomainName,
         statement: &TransactionStatement,
         limits: TransactionQueueLimits,
     ) -> Result<(), TransactionMutationError> {
@@ -239,8 +242,8 @@ impl ReplicatedTransaction {
 
     pub(crate) fn queue(
         &mut self,
-        owner: &Identifier,
-        domain: &Domain,
+        owner: &UserName,
+        domain: &DomainName,
         at: Timestamp,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
@@ -258,7 +261,7 @@ impl ReplicatedTransaction {
 
     pub(crate) fn start_commit(
         &mut self,
-        owner: &Identifier,
+        owner: &UserName,
         at: Timestamp,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
@@ -278,7 +281,7 @@ impl ReplicatedTransaction {
 
     pub(crate) fn touch(
         &mut self,
-        owner: &Identifier,
+        owner: &UserName,
         at: Timestamp,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
@@ -362,7 +365,7 @@ impl ReplicatedTransaction {
 
     pub(crate) fn revert(
         &mut self,
-        owner: &Identifier,
+        owner: &UserName,
         at: Timestamp,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
@@ -411,7 +414,7 @@ impl ReplicatedTransaction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransactionStepEffect {
     ReplaceDomainSchedule {
-        domain: Domain,
+        domain: DomainName,
         expected_schedule: Option<Box<DomainSchedule>>,
         schedule: Option<Box<DomainSchedule>>,
     },
@@ -422,17 +425,17 @@ pub enum TransactionStepEffect {
         schedule: Option<Box<DomainSchedule>>,
     },
     StartDomain {
-        domain_id: Domain,
+        domain_id: DomainName,
         expected_start_version: u64,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
     },
     StopDomain {
-        domain_id: Domain,
+        domain_id: DomainName,
         expected_start_version: u64,
     },
     CreateResourceCatalog {
-        identifier: Identifier,
+        identifier: ResourceName,
     },
 }
 
@@ -455,8 +458,8 @@ pub enum TransactionMutationError {
     )]
     DomainMismatch {
         id: String,
-        expected: Domain,
-        requested: Domain,
+        expected: DomainName,
+        requested: DomainName,
     },
     #[error("transaction '{id}' is not open (state {state})")]
     NotOpen { id: String, state: String },

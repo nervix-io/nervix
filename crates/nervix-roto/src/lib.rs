@@ -1446,16 +1446,16 @@ fn typed_array_from_ref(array: ArrayRef) -> Result<TypedArray, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{Identifier, UdfArgument, UdfLanguage, UdfReturn};
+    use nervix_models::{FieldName, UdfArgument, UdfLanguage, UdfName, UdfReturn};
 
     use super::*;
 
     fn add_one_model() -> CreateUdf {
         CreateUdf::new(
-            Identifier::parse("add_one").expect("valid identifier"),
+            UdfName::parse("add_one").expect("valid udf name"),
             UdfLanguage::Roto0_11,
             vec![UdfArgument {
-                name: Identifier::parse("value").expect("valid identifier"),
+                name: FieldName::parse("value").expect("valid field name"),
                 ty: ParseAsType::I64,
                 optional: false,
             }],
@@ -1476,12 +1476,12 @@ mod tests {
         code: &str,
     ) -> CreateUdf {
         CreateUdf::new(
-            Identifier::parse(name).expect("valid identifier"),
+            UdfName::parse(name).expect("valid udf name"),
             UdfLanguage::Roto0_11,
             arguments
                 .into_iter()
                 .map(|(name, ty, optional)| UdfArgument {
-                    name: Identifier::parse(name).expect("valid identifier"),
+                    name: FieldName::parse(name).expect("valid field name"),
                     ty,
                     optional,
                 })

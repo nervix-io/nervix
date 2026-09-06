@@ -1,3 +1,4 @@
+// Only the seams the `testing` feature compiles in use these.
 #[cfg(feature = "testing")]
 use std::net::SocketAddr;
 use std::{
@@ -9,8 +10,8 @@ use std::{
 use ahash::RandomState;
 use dashmap::DashMap;
 #[cfg(feature = "testing")]
-use nervix_models::Domain;
-use nervix_models::Identifier;
+use nervix_models::DomainName;
+use nervix_models::{ClusterNodeName, EmitterName, IngestorName};
 use tokio::sync::{Notify, broadcast};
 use triomphe::Arc;
 
@@ -38,19 +39,19 @@ pub struct SchedulePublicationFaultInjector {
 
 #[derive(Debug, Default)]
 pub(crate) struct SyslogIngestorBindAddressOverrides {
-    hosts: DashMap<String, IpAddr, RandomState>,
+    hosts: DashMap<ClusterNodeName, IpAddr, RandomState>,
 }
 
 /// Drops a node's leader-local transaction session bindings on its next transaction command, so
 /// tests can reproduce the soft state a node does not have after a leadership change.
 #[derive(Debug, Default)]
 pub struct TransactionBindingDropInjector {
-    nodes: DashMap<String, (), RandomState>,
+    nodes: DashMap<ClusterNodeName, (), RandomState>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct TransactionCommitPauseInjector {
-    pauses: DashMap<(String, usize), Arc<TransactionCommitPause>, RandomState>,
+    pauses: DashMap<(ClusterNodeName, usize), Arc<TransactionCommitPause>, RandomState>,
 }
 
 #[derive(Debug, Default)]
@@ -98,8 +99,8 @@ pub struct RuntimeTestHooks {
 
 #[derive(Clone, Debug)]
 pub struct LeadershipTransferRequest {
-    pub from_node_id: String,
-    pub to_node_id: String,
+    pub from_node_id: ClusterNodeName,
+    pub to_node_id: ClusterNodeName,
 }
 
 impl Default for RuntimeTestHooks {
@@ -123,32 +124,34 @@ impl Default for RuntimeTestHooks {
 }
 
 impl RuntimeTestHooks {
-    pub fn set_syslog_ingestor_bind_ip(&self, node_id: impl Into<String>, host: IpAddr) {
+    pub fn set_syslog_ingestor_bind_ip(&self, node_id: ClusterNodeName, host: IpAddr) {
         self.syslog_ingestor_bind_address_overrides
             .hosts
-            .insert(node_id.into(), host);
+            .insert(node_id, host);
     }
 
-    pub fn request_leadership_transfer(&self, from_node_id: String, to_node_id: String) {
+    pub fn request_leadership_transfer(
+        &self,
+        from_node_id: ClusterNodeName,
+        to_node_id: ClusterNodeName,
+    ) {
         let _ = self.leadership_transfers.send(LeadershipTransferRequest {
             from_node_id,
             to_node_id,
         });
     }
 
-    pub fn drop_transaction_bindings_on(&self, node_id: impl Into<String>) {
-        self.transaction_binding_drops
-            .nodes
-            .insert(node_id.into(), ());
+    pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {
+        self.transaction_binding_drops.nodes.insert(node_id, ());
     }
 
     pub fn pause_transaction_commit_after(
         &self,
-        node_id: impl Into<String>,
+        node_id: ClusterNodeName,
         completed_statements: usize,
     ) {
         self.transaction_commit_pauses.pauses.insert(
-            (node_id.into(), completed_statements),
+            (node_id, completed_statements),
             Arc::new(TransactionCommitPause::default()),
         );
     }
@@ -192,10 +195,10 @@ impl RuntimeTestHooks {
 
     pub async fn wait_for_transaction_commit_pause(
         &self,
-        node_id: &str,
+        node_id: &ClusterNodeName,
         completed_statements: usize,
     ) {
-        let key = (node_id.to_string(), completed_statements);
+        let key = (node_id.clone(), completed_statements);
         let pause = self
             .transaction_commit_pauses
             .pauses
@@ -217,8 +220,12 @@ impl RuntimeTestHooks {
         }
     }
 
-    pub fn release_transaction_commit_pause(&self, node_id: &str, completed_statements: usize) {
-        let key = (node_id.to_string(), completed_statements);
+    pub fn release_transaction_commit_pause(
+        &self,
+        node_id: &ClusterNodeName,
+        completed_statements: usize,
+    ) {
+        let key = (node_id.clone(), completed_statements);
         let pause = self
             .transaction_commit_pauses
             .pauses
@@ -237,7 +244,7 @@ impl RuntimeTestHooks {
 
 #[cfg(feature = "testing")]
 impl SyslogIngestorBindAddressOverrides {
-    pub(crate) fn resolve(&self, node_id: &str, configured: &str) -> String {
+    pub(crate) fn resolve(&self, node_id: &ClusterNodeName, configured: &str) -> String {
         let Some(host) = self.hosts.get(node_id).map(|host| *host.value()) else {
             return configured.to_string();
         };
@@ -253,15 +260,19 @@ impl TransactionBindingDropInjector {
     /// Consumes an armed drop for `node_id`, returning whether the node should forget its
     /// transaction session bindings now.
     #[cfg(feature = "testing")]
-    pub(crate) fn take(&self, node_id: &str) -> bool {
+    pub(crate) fn take(&self, node_id: &ClusterNodeName) -> bool {
         self.nodes.remove(node_id).is_some()
     }
 }
 
 impl TransactionCommitPauseInjector {
     #[cfg(feature = "testing")]
-    pub(crate) async fn pause_if_armed(&self, node_id: &str, completed_statements: usize) {
-        let key = (node_id.to_string(), completed_statements);
+    pub(crate) async fn pause_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        completed_statements: usize,
+    ) {
+        let key = (node_id.clone(), completed_statements);
         let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
             return;
         };
@@ -281,7 +292,7 @@ impl TransactionCommitPauseInjector {
 
 impl EntityGatePauseInjector {
     #[cfg(feature = "testing")]
-    pub(crate) async fn pause_if_armed(&self, domain: &Domain) {
+    pub(crate) async fn pause_if_armed(&self, domain: &DomainName) {
         let key = domain.as_str().to_ascii_lowercase();
         let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
             return;
@@ -309,7 +320,7 @@ impl IngestorFaultInjector {
         self.ingestors.remove(&ingestor.to_ascii_lowercase());
     }
 
-    pub(super) fn is_failed(&self, ingestor: &Identifier) -> bool {
+    pub(super) fn is_failed(&self, ingestor: &IngestorName) -> bool {
         self.ingestors
             .contains_key(&ingestor.as_str().to_ascii_lowercase())
     }
@@ -323,7 +334,7 @@ impl SchedulePublicationFaultInjector {
     /// Consumes an armed fault so the rollback republication that follows a failed publication can
     /// still reach the cluster.
     #[cfg(feature = "testing")]
-    pub(crate) fn take_armed_fault(&self, domain: &Domain) -> bool {
+    pub(crate) fn take_armed_fault(&self, domain: &DomainName) -> bool {
         self.domains
             .remove(&domain.as_str().to_ascii_lowercase())
             .is_some()
@@ -341,7 +352,7 @@ impl OtelClientFaultInjector {
             .remove(&emitter.to_ascii_lowercase());
     }
 
-    pub(super) fn is_unavailable(&self, emitter: &Identifier) -> bool {
+    pub(super) fn is_unavailable(&self, emitter: &EmitterName) -> bool {
         self.unavailable_emitters
             .contains_key(&emitter.as_str().to_ascii_lowercase())
     }
@@ -366,7 +377,7 @@ impl EmitterFaultInjector {
         self.emitters.clear();
     }
 
-    pub(super) fn fault_mode(&self, emitter: &Identifier) -> Option<EmitterFaultMode> {
+    pub(super) fn fault_mode(&self, emitter: &EmitterName) -> Option<EmitterFaultMode> {
         self.emitters
             .get(&emitter.as_str().to_ascii_lowercase())
             .map(|mode| *mode)

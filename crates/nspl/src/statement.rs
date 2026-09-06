@@ -268,31 +268,34 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 mod tests {
     use bolero::check;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchSelection, ClientConfigEntry,
-        CodecWireFormat, CordonNode, CreateClientAzureBlob, CreateClientGcs,
-        CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
-        CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-        CreateClientS3, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec,
-        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor,
-        CreateJunction, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema,
-        DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EmitterPublishingMode,
-        EndpointIngestMode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
-        Identifier as ModelIdentifier, IngestQuiesceMode, IngestSource, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession,
-        NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy,
-        SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchName, BranchSelection,
+        ClientConfigEntry, ClusterNodeName, CodecWireFormat, CordonNode, CorrelatorName,
+        CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest, CreateClientKafka,
+        CreateClientMqtt, CreateClientNats, CreateClientPrometheus, CreateClientPulsar,
+        CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
+        CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter,
+        CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
+        CreateSignalingProtocol, CreateWireSchema, DeduplicatorName, DescribeRelay, DrainNode,
+        DropModel, DropNode, EmitSink, EmitterName, EmitterPublishingMode, EndpointIngestMode,
+        EndpointName, EndpointType, ErrorPolicies, FieldName, GeneralErrorPolicy,
+        IngestQuiesceMode, IngestSource, IngestorName, JsonType, JunctionName, KafkaConfigEntry,
+        KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, ModelName, MqttIngestMode, MqttQos,
+        MqttSession, NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode,
+        ReingestorName, RelayName, ReordererName, ResourceName, RetryPolicy, SchemaField,
+        SchemaName, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
         SignalingWaitStep, SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding,
-        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
+        SubscriptionLiteral, UncordonNode, WasmProcessorName, WindowProcessorName, WireSchemaField,
+        ZeroMqIngestMode,
     };
 
     use super::*;
 
-    fn processor_branched_by(schema: ModelIdentifier) -> BranchSelection {
+    fn processor_branched_by(schema: BranchName) -> BranchSelection {
         BranchSelection::branched_by(schema)
     }
 
-    fn flushed_output(relay: ModelIdentifier, filter_map: Option<String>) -> ProcessorOutput {
+    fn flushed_output(relay: RelayName, filter_map: Option<String>) -> ProcessorOutput {
         let mut output = ProcessorOutput::with_flush_policy(
             relay,
             "100ms".to_string(),
@@ -307,11 +310,11 @@ mod tests {
         output
     }
 
-    fn flushed_outputs(relay: ModelIdentifier) -> ProcessorOutputs {
+    fn flushed_outputs(relay: RelayName) -> ProcessorOutputs {
         ProcessorOutputs::new(vec![flushed_output(relay, None)])
     }
 
-    fn flushed_ingestor_outputs(relay: ModelIdentifier) -> ProcessorOutputs {
+    fn flushed_ingestor_outputs(relay: RelayName) -> ProcessorOutputs {
         ProcessorOutputs::new(vec![
             flushed_output(relay, None).with_branch(OutputBranch::Unbranched),
         ])
@@ -363,7 +366,22 @@ mod tests {
             min + (self.next_u8() as u64 % span)
         }
 
-        fn ident(&mut self) -> ModelIdentifier {
+        /// A generated name of whatever kind the position needs.
+        fn name<N>(&mut self) -> N
+        where
+            N: std::str::FromStr,
+            <N as std::str::FromStr>::Err: std::fmt::Debug,
+        {
+            self.raw_name()
+                .parse()
+                .expect("generator must produce a valid name")
+        }
+
+        fn ident(&mut self) -> ModelName {
+            self.name()
+        }
+
+        fn raw_name(&mut self) -> String {
             // Keep identifiers parser-valid and deterministic after canonical render.
             let len = (self.next_u8() as usize % 8) + 1;
             let mut s = String::with_capacity(len);
@@ -381,7 +399,7 @@ mod tests {
                 s.push(ch);
             }
 
-            ModelIdentifier::try_from(s.as_str()).expect("generator must produce valid identifier")
+            s
         }
 
         fn transport_literal(&mut self) -> String {
@@ -407,7 +425,9 @@ mod tests {
 
     /// Builds an expression tree deep enough to exercise every precedence boundary.
     fn gen_expression(g: &mut ByteGen, depth: u8) -> nervix_models::Expression {
-        use nervix_models::{BinaryOperator, Expression, FieldReference, Literal, UnaryOperator};
+        use nervix_models::{
+            BinaryOperator, Expression, FieldName, FieldReference, Literal, UnaryOperator,
+        };
 
         if depth == 0 {
             return match g.next_u8() % 4 {
@@ -416,7 +436,7 @@ mod tests {
                 2 => Expression::Literal(Literal::Null),
                 // Prefixed so a generated name can never collide with a language keyword.
                 _ => Expression::Field(FieldReference::bare(
-                    ModelIdentifier::try_from(format!("f_{}", g.ident().as_str()).as_str())
+                    FieldName::try_from(format!("f_{}", g.ident().as_str()).as_str())
                         .expect("prefixed identifier must be valid"),
                 )),
             };
@@ -473,7 +493,7 @@ mod tests {
                 let mut fields = Vec::with_capacity(field_count);
                 for _ in 0..field_count {
                     fields.push(SchemaField {
-                        name: g.ident(),
+                        name: g.name(),
                         ty: g.choose(&[
                             ParseAsType::U8,
                             ParseAsType::I8,
@@ -495,13 +515,13 @@ mod tests {
                 }
 
                 Model::Schema(CreateSchema {
-                    name: g.ident(),
+                    name: g.name(),
                     fields,
                 })
             }
             25 => {
-                let materialized_relay = g.ident();
-                let output_relay = g.ident();
+                let materialized_relay: RelayName = g.name();
+                let output_relay: RelayName = g.name();
                 let output = flushed_output(
                     output_relay,
                     Some(format!(
@@ -510,9 +530,9 @@ mod tests {
                     )),
                 );
                 Model::Generator(CreateGenerator {
-                    name: g.ident(),
+                    name: g.name(),
                     materialized_relay,
-                    branched_by: processor_branched_by(g.ident()),
+                    branched_by: processor_branched_by(g.name()),
                     each: format!("{}ms", g.bounded_u64(1, 5000)),
                     output_routes: ProcessorOutputs::new(vec![output]),
                 })
@@ -524,7 +544,7 @@ mod tests {
                     let mut fields = Vec::with_capacity(field_count);
                     for _ in 0..field_count {
                         fields.push(WireSchemaField {
-                            name: g.ident(),
+                            name: g.name(),
                             ty: g.choose(&[
                                 JsonType::String,
                                 JsonType::Number,
@@ -538,7 +558,7 @@ mod tests {
                         });
                     }
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: g.ident(),
+                        name: g.name(),
                         strictness: Default::default(),
                         fields,
                     })
@@ -546,7 +566,7 @@ mod tests {
                     let mut fields = Vec::with_capacity(field_count);
                     for _ in 0..field_count {
                         fields.push(WireSchemaField {
-                            name: g.ident(),
+                            name: g.name(),
                             ty: g.choose(&[
                                 AvroType::Null,
                                 AvroType::Boolean,
@@ -566,17 +586,17 @@ mod tests {
                         });
                     }
                     Model::WireAvroSchema(CreateWireSchema {
-                        name: g.ident(),
+                        name: g.name(),
                         strictness: Default::default(),
                         fields,
                     })
                 }
             }
             2 => Model::Codec(CreateCodec {
-                name: g.ident(),
+                name: g.name(),
                 wire_format: CodecWireFormat::Json,
-                wire_schema: Some(g.ident()),
-                schema: g.ident(),
+                wire_schema: Some(g.name()),
+                schema: g.name(),
                 encoding_rules: Vec::new(),
             }),
             3 => {
@@ -591,13 +611,13 @@ mod tests {
 
                 if g.bool() {
                     Model::ClientKafka(CreateClientKafka {
-                        name: g.ident(),
+                        name: g.name(),
                         mount: None,
                         config,
                     })
                 } else {
                     Model::ClientPulsar(CreateClientPulsar {
-                        name: g.ident(),
+                        name: g.name(),
                         mount: None,
                         config: vec![
                             KafkaConfigEntry {
@@ -636,14 +656,14 @@ mod tests {
 
                     if g.bool() {
                         Model::Ingestor(CreateIngestor {
-                            name: g.ident(),
-                            output_routes: flushed_ingestor_outputs(g.ident()),
-                            decode_using_codec: g.ident(),
+                            name: g.name(),
+                            output_routes: flushed_ingestor_outputs(g.name()),
+                            decode_using_codec: g.name(),
                             timestamp_source: None,
                             source: IngestSource::Kafka {
-                                client: g.ident(),
-                                topic: g.ident(),
-                                offset_mode: KafkaOffsetMode::ConsumerGroup(g.ident()),
+                                client: g.name(),
+                                topic: g.name(),
+                                offset_mode: KafkaOffsetMode::ConsumerGroup(g.name()),
                                 instances: 1,
                                 mode,
                                 quiesce: IngestQuiesceMode::Suspend,
@@ -653,14 +673,14 @@ mod tests {
                         })
                     } else {
                         Model::Ingestor(CreateIngestor {
-                            name: g.ident(),
-                            output_routes: flushed_ingestor_outputs(g.ident()),
-                            decode_using_codec: g.ident(),
+                            name: g.name(),
+                            output_routes: flushed_ingestor_outputs(g.name()),
+                            decode_using_codec: g.name(),
                             timestamp_source: None,
                             source: IngestSource::Pulsar {
-                                client: g.ident(),
-                                topic: g.ident(),
-                                subscription: g.ident(),
+                                client: g.name(),
+                                topic: g.name(),
+                                subscription: g.name(),
                                 instances: 1,
                                 mode: match mode {
                                     KafkaIngestMode::AckParallel {
@@ -693,13 +713,13 @@ mod tests {
                     }
                 } else {
                     Model::Ingestor(CreateIngestor {
-                        name: g.ident(),
-                        output_routes: flushed_ingestor_outputs(g.ident()),
-                        decode_using_codec: g.ident(),
+                        name: g.name(),
+                        output_routes: flushed_ingestor_outputs(g.name()),
+                        decode_using_codec: g.name(),
                         timestamp_source: None,
                         source: IngestSource::RabbitMq {
-                            client: g.ident(),
-                            queue: g.ident(),
+                            client: g.name(),
+                            queue: g.name(),
                             instances: 1,
                             mode: RabbitMqIngestMode::AckSequential {
                                 timeout: format!("{}s", g.bounded_u64(1, 300)),
@@ -716,7 +736,7 @@ mod tests {
                 }
             }
             5 => Model::ClientRabbitMq(CreateClientRabbitMq {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -724,7 +744,7 @@ mod tests {
                 }],
             }),
             6 => Model::ClientRedis(CreateClientRedis {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -732,14 +752,14 @@ mod tests {
                 }],
             }),
             7 => Model::Relay(CreateRelay {
-                name: g.ident(),
-                schema: g.ident(),
+                name: g.name(),
+                schema: g.name(),
                 buffer: g.bounded_u64(1, 1024) as usize,
                 branching: nervix_models::RelayBranching::unbranched(),
                 materialized_state: None,
             }),
             8 => Model::ClientMqtt(CreateClientMqtt {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -747,10 +767,10 @@ mod tests {
                 }],
             }),
             9 => Model::Junction(CreateJunction {
-                name: g.ident(),
-                from: ProcessorInputs::new(vec![g.ident(), g.ident(), g.ident()], Vec::new()),
-                output_routes: flushed_outputs(g.ident()),
-                branched_by: processor_branched_by(g.ident()),
+                name: g.name(),
+                from: ProcessorInputs::new(vec![g.name(), g.name(), g.name()], Vec::new()),
+                output_routes: flushed_outputs(g.name()),
+                branched_by: processor_branched_by(g.name()),
                 mode: if g.bool() {
                     AckMode::Attached
                 } else {
@@ -760,12 +780,12 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             10 => Model::Deduplicator(CreateDeduplicator {
-                name: g.ident(),
-                from: ProcessorInputs::single(g.ident()),
-                output_routes: flushed_outputs(g.ident()),
-                branched_by: processor_branched_by(g.ident()),
+                name: g.name(),
+                from: ProcessorInputs::single(g.name()),
+                output_routes: flushed_outputs(g.name()),
+                branched_by: processor_branched_by(g.name()),
                 deduplicate_on: vec![nervix_models::Expression::Field(
-                    nervix_models::FieldReference::bare(g.ident()),
+                    nervix_models::FieldReference::bare(g.name()),
                 )],
                 max_time: "10m".to_string(),
                 mode: if g.bool() {
@@ -777,7 +797,7 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             11 => Model::ClientPrometheus(CreateClientPrometheus {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -785,13 +805,13 @@ mod tests {
                 }],
             }),
             12 => Model::Ingestor(CreateIngestor {
-                name: g.ident(),
-                output_routes: flushed_ingestor_outputs(g.ident()),
-                decode_using_codec: g.ident(),
+                name: g.name(),
+                output_routes: flushed_ingestor_outputs(g.name()),
+                decode_using_codec: g.name(),
                 timestamp_source: None,
                 source: IngestSource::RedisPubSub {
-                    client: g.ident(),
-                    channel: g.ident(),
+                    client: g.name(),
+                    channel: g.name(),
                     mode: RedisPubSubIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::Drop,
                 },
@@ -801,12 +821,12 @@ mod tests {
             13 => {
                 if g.bool() {
                     Model::Ingestor(CreateIngestor {
-                        name: g.ident(),
-                        output_routes: flushed_ingestor_outputs(g.ident()),
-                        decode_using_codec: g.ident(),
+                        name: g.name(),
+                        output_routes: flushed_ingestor_outputs(g.name()),
+                        decode_using_codec: g.name(),
                         timestamp_source: None,
                         source: IngestSource::Mqtt {
-                            client: g.ident(),
+                            client: g.name(),
                             topic: g.ident().as_str().to_string(),
                             instances: 1,
                             mode: MqttIngestMode::NoAckSequential {
@@ -820,12 +840,12 @@ mod tests {
                     })
                 } else if g.bool() {
                     Model::Ingestor(CreateIngestor {
-                        name: g.ident(),
-                        output_routes: flushed_ingestor_outputs(g.ident()),
-                        decode_using_codec: g.ident(),
+                        name: g.name(),
+                        output_routes: flushed_ingestor_outputs(g.name()),
+                        decode_using_codec: g.name(),
                         timestamp_source: None,
                         source: IngestSource::Prometheus {
-                            client: g.ident(),
+                            client: g.name(),
                             query: r#"label_replace(vector(42.5), "source", "local", "", "")"#
                                 .to_string(),
                             every: "15s".to_string(),
@@ -838,22 +858,22 @@ mod tests {
                     let (sink, publishing_mode) = match g.next_u8() % 3 {
                         0 => (
                             EmitSink::Kafka {
-                                client: g.ident(),
-                                topic: g.ident(),
+                                client: g.name(),
+                                topic: g.name(),
                             },
                             emitter_publishing_mode(),
                         ),
                         1 => (
                             EmitSink::Pulsar {
-                                client: g.ident(),
-                                topic: g.ident(),
+                                client: g.name(),
+                                topic: g.name(),
                             },
                             emitter_publishing_mode(),
                         ),
                         _ => (
                             EmitSink::Mqtt {
-                                client: g.ident(),
-                                topic: g.ident(),
+                                client: g.name(),
+                                topic: g.name(),
                             },
                             EmitterPublishingMode::MqttQos0 {
                                 retry_policy: emitter_retry_policy(),
@@ -862,9 +882,9 @@ mod tests {
                     };
 
                     Model::Emitter(CreateEmitter {
-                        name: g.ident(),
-                        from: ProcessorInputs::single(g.ident()),
-                        encode_using_codec: Some(g.ident()),
+                        name: g.name(),
+                        from: ProcessorInputs::single(g.name()),
+                        encode_using_codec: Some(g.name()),
                         sink: Box::new(sink),
                         publishing_mode,
                         flush_each: "100ms".to_string(),
@@ -881,14 +901,14 @@ mod tests {
                 }
             }
             14 => Model::Endpoint(CreateEndpoint {
-                name: g.ident(),
-                on_vhost: g.ident(),
+                name: g.name(),
+                on_vhost: g.name(),
                 path: "/ws".to_string(),
                 endpoint_type: EndpointType::Websockets,
                 signaling_protocol: None,
             }),
             15 => Model::ClientNats(CreateClientNats {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -896,7 +916,7 @@ mod tests {
                 }],
             }),
             16 => Model::ClientZeroMq(CreateClientZeroMq {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -910,7 +930,7 @@ mod tests {
                 ],
             }),
             17 => Model::ClientSqs(CreateClientSqs {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -924,10 +944,10 @@ mod tests {
                 ],
             }),
             18 => Model::Emitter(CreateEmitter {
-                name: g.ident(),
-                from: ProcessorInputs::single(g.ident()),
-                encode_using_codec: Some(g.ident()),
-                sink: Box::new(EmitSink::ZeroMq { client: g.ident() }),
+                name: g.name(),
+                from: ProcessorInputs::single(g.name()),
+                encode_using_codec: Some(g.name()),
+                sink: Box::new(EmitSink::ZeroMq { client: g.name() }),
                 publishing_mode: emitter_publishing_mode(),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
@@ -941,12 +961,12 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             19 => Model::Ingestor(CreateIngestor {
-                name: g.ident(),
-                output_routes: flushed_ingestor_outputs(g.ident()),
-                decode_using_codec: g.ident(),
+                name: g.name(),
+                output_routes: flushed_ingestor_outputs(g.name()),
+                decode_using_codec: g.name(),
                 timestamp_source: None,
                 source: IngestSource::ZeroMq {
-                    client: g.ident(),
+                    client: g.name(),
                     mode: ZeroMqIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::Suspend,
                 },
@@ -954,12 +974,12 @@ mod tests {
                 filter_where: None,
             }),
             20 => Model::Emitter(CreateEmitter {
-                name: g.ident(),
-                from: ProcessorInputs::single(g.ident()),
-                encode_using_codec: Some(g.ident()),
+                name: g.name(),
+                from: ProcessorInputs::single(g.name()),
+                encode_using_codec: Some(g.name()),
                 sink: Box::new(EmitSink::Nats {
-                    client: g.ident(),
-                    subject: g.ident(),
+                    client: g.name(),
+                    subject: g.name(),
                 }),
                 publishing_mode: emitter_publishing_mode(),
                 flush_each: "100ms".to_string(),
@@ -974,14 +994,14 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             21 => Model::Ingestor(CreateIngestor {
-                name: g.ident(),
-                output_routes: flushed_ingestor_outputs(g.ident()),
-                decode_using_codec: g.ident(),
+                name: g.name(),
+                output_routes: flushed_ingestor_outputs(g.name()),
+                decode_using_codec: g.name(),
                 timestamp_source: None,
                 source: IngestSource::Nats {
-                    client: g.ident(),
-                    subject: g.ident(),
-                    queue_group: g.ident(),
+                    client: g.name(),
+                    subject: g.name(),
+                    queue_group: g.name(),
                     instances: g.bounded_u64(1, 10),
                     mode: NatsIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::Drop,
@@ -990,18 +1010,18 @@ mod tests {
                 filter_where: None,
             }),
             22 => {
-                let from_relay = ModelIdentifier::try_from("source").expect("valid identifier");
+                let from_relay = RelayName::try_from("source").expect("valid relay name");
                 let error_condition = r#"input.level = "error""#;
                 let warn_condition = r#"input.level = "warn""#;
                 Model::Reingestor(nervix_models::CreateReingestor {
-                    name: g.ident(),
+                    name: g.name(),
                     from: ProcessorInputs::single(from_relay),
                     output_routes: ProcessorOutputs::new(vec![
-                        flushed_output(g.ident(), Some(format!("WHERE {error_condition}")))
+                        flushed_output(g.name(), Some(format!("WHERE {error_condition}")))
                             .with_branch(OutputBranch::Unbranched),
-                        flushed_output(g.ident(), Some(format!("WHERE {warn_condition}")))
+                        flushed_output(g.name(), Some(format!("WHERE {warn_condition}")))
                             .with_branch(OutputBranch::Unbranched),
-                        flushed_output(g.ident(), None).with_branch(OutputBranch::Unbranched),
+                        flushed_output(g.name(), None).with_branch(OutputBranch::Unbranched),
                     ]),
                     mode: if g.bool() {
                         AckMode::Attached
@@ -1013,7 +1033,7 @@ mod tests {
                 })
             }
             23 => Model::ClientS3(CreateClientS3 {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -1027,7 +1047,7 @@ mod tests {
                 ],
             }),
             24 => Model::ClientGcs(CreateClientGcs {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -1041,7 +1061,7 @@ mod tests {
                 ],
             }),
             26 => Model::ClientAzureBlob(CreateClientAzureBlob {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -1055,7 +1075,7 @@ mod tests {
                 ],
             }),
             27 => Model::ClientIcebergRest(CreateClientIcebergRest {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -1069,7 +1089,7 @@ mod tests {
                 ],
             }),
             28 => Model::SignalingProtocol(CreateSignalingProtocol {
-                name: g.ident(),
+                name: g.name(),
                 format: if g.bool() {
                     g.choose(&[
                         SignalingWireFormat::Json,
@@ -1081,7 +1101,7 @@ mod tests {
                     ])
                 } else {
                     SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                        resource: g.ident(),
+                        resource: g.name(),
                         resource_version: if g.bool() {
                             Some(g.bounded_u64(1, 8))
                         } else {
@@ -1132,7 +1152,7 @@ mod tests {
                 },
             }),
             29 => Model::ClientSyslog(CreateClientSyslog {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     ClientConfigEntry {
@@ -1146,13 +1166,13 @@ mod tests {
                 ],
             }),
             _ => Model::Ingestor(CreateIngestor {
-                name: g.ident(),
-                output_routes: flushed_ingestor_outputs(g.ident()),
-                decode_using_codec: g.ident(),
+                name: g.name(),
+                output_routes: flushed_ingestor_outputs(g.name()),
+                decode_using_codec: g.name(),
                 timestamp_source: None,
                 source: if g.bool() {
                     IngestSource::Endpoint {
-                        endpoint: g.ident(),
+                        endpoint: g.name(),
                         mode: EndpointIngestMode::NoAckSequential,
                         quiesce: IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
@@ -1160,8 +1180,8 @@ mod tests {
                     }
                 } else {
                     IngestSource::Sqs {
-                        client: g.ident(),
-                        queue: g.ident(),
+                        client: g.name(),
+                        queue: g.name(),
                         instances: 1,
                         mode: SqsIngestMode::AckSequential {
                             timeout: format!("{}s", g.bounded_u64(1, 300)),
@@ -1593,7 +1613,9 @@ mod tests {
             parsed,
             Statement::Drop(DropModel {
                 kind: ModelKind::Schema,
-                name: ModelIdentifier::try_from("event_schema").expect("valid identifier"),
+                name: ModelName::from(
+                    &SchemaName::try_from("event_schema").expect("valid schema name")
+                ),
             })
         );
     }
@@ -1605,7 +1627,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::AlterRelay(AlterRelay {
-                relay: ModelIdentifier::try_from("notifications").expect("valid identifier"),
+                relay: RelayName::try_from("notifications").expect("valid relay name"),
                 operations: vec![AlterRelayOperation::SetCapacity { capacity: 32 }],
             })
         );
@@ -1628,7 +1650,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DropNode(DropNode {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
             })
         );
     }
@@ -1639,7 +1661,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::CordonNode(CordonNode {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
             })
         );
     }
@@ -1650,7 +1672,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::UncordonNode(UncordonNode {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
             })
         );
     }
@@ -1661,7 +1683,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DrainNode(DrainNode {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
             })
         );
     }
@@ -1673,7 +1695,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeResource(nervix_models::DescribeResource {
-                identifier: ModelIdentifier::parse("fraud_model").expect("valid identifier"),
+                identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
                 version: Some(7),
             })
         );
@@ -1686,7 +1708,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeResource(nervix_models::DescribeResource {
-                identifier: ModelIdentifier::parse("fraud_model").expect("valid identifier"),
+                identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
                 version: None,
             })
         );
@@ -1723,7 +1745,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeIngestor(nervix_models::DescribeIngestor {
-                ingestor: ModelIdentifier::parse("kafka_notifications").expect("valid identifier"),
+                ingestor: IngestorName::parse("kafka_notifications").expect("valid name"),
             })
         );
     }
@@ -1735,8 +1757,8 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeEndpoint(nervix_models::DescribeEndpoint {
-                name: ModelIdentifier::parse("http_notifications_endpoint")
-                    .expect("valid identifier"),
+                name: EndpointName::parse("http_notifications_endpoint")
+                    .expect("valid endpoint name"),
             })
         );
     }
@@ -1748,9 +1770,9 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeRelay(DescribeRelay {
-                relay: ModelIdentifier::parse("notifications").expect("valid identifier"),
+                relay: RelayName::parse("notifications").expect("valid name"),
                 bindings: vec![SubscriptionBinding {
-                    field: ModelIdentifier::parse("user_id").expect("valid identifier"),
+                    field: FieldName::parse("user_id").expect("valid name"),
                     value: SubscriptionLiteral::Number("42".to_string()),
                 }],
             })
@@ -1764,7 +1786,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeDeduplicator(nervix_models::DescribeDeduplicator {
-                name: ModelIdentifier::parse("dedup_txns").expect("valid identifier"),
+                name: DeduplicatorName::parse("dedup_txns").expect("valid name"),
             })
         );
     }
@@ -1776,7 +1798,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeJunction(nervix_models::DescribeJunction {
-                name: ModelIdentifier::parse("route_notifications").expect("valid identifier"),
+                name: JunctionName::parse("route_notifications").expect("valid name"),
             })
         );
     }
@@ -1788,7 +1810,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeReingestor(nervix_models::DescribeReingestor {
-                name: ModelIdentifier::parse("repartition").expect("valid identifier"),
+                name: ReingestorName::parse("repartition").expect("valid name"),
             })
         );
     }
@@ -1800,7 +1822,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeCorrelator(nervix_models::DescribeCorrelator {
-                name: ModelIdentifier::parse("correlate_profiles").expect("valid identifier"),
+                name: CorrelatorName::parse("correlate_profiles").expect("valid name"),
             })
         );
     }
@@ -1812,7 +1834,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeReorderer(nervix_models::DescribeReorderer {
-                name: ModelIdentifier::parse("order_notifications").expect("valid identifier"),
+                name: ReordererName::parse("order_notifications").expect("valid name"),
             })
         );
     }
@@ -1823,7 +1845,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeEmitter(nervix_models::DescribeEmitter {
-                name: ModelIdentifier::parse("kafka_out").expect("valid identifier"),
+                name: EmitterName::parse("kafka_out").expect("valid name"),
             })
         );
     }
@@ -1835,7 +1857,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeWindowProcessor(nervix_models::DescribeWindowProcessor {
-                name: ModelIdentifier::parse("latency_window").expect("valid identifier"),
+                name: WindowProcessorName::parse("latency_window").expect("valid name"),
             })
         );
     }
@@ -1847,7 +1869,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeWasmProcessor(nervix_models::DescribeWasmProcessor {
-                name: ModelIdentifier::parse("filter_even").expect("valid identifier"),
+                name: WasmProcessorName::parse("filter_even").expect("valid name"),
             })
         );
     }
@@ -1866,7 +1888,7 @@ mod tests {
             parsed,
             Statement::CreateResource(nervix_models::CreateStatement::new(
                 nervix_models::CreateResource {
-                    identifier: ModelIdentifier::parse("fraud_model").expect("valid identifier"),
+                    identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
                 },
                 false,
             ))

@@ -1,3 +1,4 @@
+use nervix_models::{DomainName, IngestorName};
 use tokio_tungstenite::{Connector, connect_async, connect_async_tls_with_config};
 
 use super::super::*;
@@ -7,12 +8,12 @@ pub(in crate::runtime) struct WebsocketsIngestor;
 #[derive(Clone, Copy)]
 struct WebsocketDispatchContext<'a> {
     runtime: &'a Runtime,
-    domain: &'a Domain,
-    ingestor: &'a Identifier,
+    domain: &'a DomainName,
+    ingestor: &'a IngestorName,
     timestamp_source: Option<&'a IngestTimestampSource>,
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     codec: &'a Arc<CompiledCodec>,
     events: &'a broadcast::Sender<RuntimeEvent>,
     quiesce: &'a Arc<IngestorQuiesceControl>,
@@ -21,7 +22,7 @@ struct WebsocketDispatchContext<'a> {
 impl WebsocketsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientWebsockets,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

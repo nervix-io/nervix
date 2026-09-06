@@ -10,6 +10,7 @@ use ::mongodb::{
         UpdateOneModel as MongoDbUpdateOneModel, WriteModel as MongoDbWriteModel,
     },
 };
+use nervix_models::CollectionName;
 
 use super::*;
 
@@ -313,7 +314,7 @@ impl MongoDbEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        collection: &Identifier,
+        collection: &CollectionName,
         values: &[MongoDbValueMapping],
         conflict_action: &MongoDbConflictAction,
         batch: &RelayRecordBatch,

@@ -17,6 +17,7 @@ use nervix_client_core::{
     ConnectOptions, Diagnostic, SubscriptionDeliveryBehavior, SubscriptionRequest,
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionState,
 };
+use nervix_models::ClusterNodeName;
 use nervix_nspl::client_statement::{
     parse_client_statements, parse_upload_resource_query, upload_resource_path_fragment,
 };
@@ -89,22 +90,22 @@ enum Command {
     /// Remove a node from the cluster membership
     RemoveNode {
         /// Node id to remove
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Prevent the scheduler from placing new tasks on a node
     CordonNode {
         /// Node id to cordon
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Allow the scheduler to place new tasks on a node
     UncordonNode {
         /// Node id to uncordon
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Move scheduled graph nodes away from a node and keep it cordoned
     DrainNode {
         /// Node id to drain
-        node_id: String,
+        node_id: ClusterNodeName,
     },
 }
 
@@ -908,7 +909,10 @@ mod tests {
     fn remove_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "remove-node", "node-2"]);
         match args.subcommand {
-            Some(Command::RemoveNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::RemoveNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -917,7 +921,10 @@ mod tests {
     fn cordon_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "cordon-node", "node-2"]);
         match args.subcommand {
-            Some(Command::CordonNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::CordonNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -926,7 +933,10 @@ mod tests {
     fn uncordon_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "uncordon-node", "node-2"]);
         match args.subcommand {
-            Some(Command::UncordonNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::UncordonNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -935,7 +945,10 @@ mod tests {
     fn drain_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "drain-node", "node-2"]);
         match args.subcommand {
-            Some(Command::DrainNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::DrainNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }

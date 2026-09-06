@@ -1,3 +1,5 @@
+use nervix_models::DomainName;
+
 use super::super::*;
 
 pub(in crate::runtime) struct EndpointIngestor;
@@ -5,7 +7,7 @@ pub(in crate::runtime) struct EndpointIngestor;
 impl EndpointIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         endpoint: CreateEndpoint,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

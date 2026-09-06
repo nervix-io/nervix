@@ -7,7 +7,7 @@
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    Identifier, Model, PlacementPolicy, PlacementRuntimeNode, RelocationMember,
+    Model, PlacementName, PlacementPolicy, PlacementRuntimeNode, RelocationMember,
     RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
 };
 use strum::AsRefStr;
@@ -55,7 +55,7 @@ pub struct RelocationPreference {
     pub policy: PlacementPolicy,
     pub left: PlacementRuntimeNode,
     pub right: PlacementRuntimeNode,
-    pub winning_rules: Vec<Identifier>,
+    pub winning_rules: Vec<PlacementName>,
     pub from_domain_default: bool,
 }
 
@@ -105,7 +105,7 @@ impl ActiveGraph {
     /// currently active graph.
     pub fn relocation_unit(
         &self,
-        domain: &nervix_models::Domain,
+        domain: &nervix_models::DomainName,
         default_policy: PlacementPolicy,
         selection: &RelocationSelection,
         default_strategy: RelocationPreferenceStrategy,
@@ -227,7 +227,7 @@ impl ActiveGraph {
     /// Resolves one kind-qualified member against the active graph.
     fn resolve_relocation_member(
         &self,
-        domain: &nervix_models::Domain,
+        domain: &nervix_models::DomainName,
         member: &RelocationMember,
     ) -> Result<RegistryKey, RelocationPlanError> {
         let key = RegistryKey::new(member.kind, member.name.clone());
@@ -251,7 +251,7 @@ impl ActiveGraph {
     /// Covers each `FROM`/`TO` pair with the path-gated coverage placement rules use.
     fn relocation_corridor_selection(
         &self,
-        domain: &nervix_models::Domain,
+        domain: &nervix_models::DomainName,
         from: &[RelocationMember],
         to: &[RelocationMember],
     ) -> Result<(Vec<RegistryKey>, Vec<RelocationCoverage>), RelocationPlanError> {

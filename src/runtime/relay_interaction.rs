@@ -24,7 +24,7 @@ use std::{future::pending, task::Poll};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt as _;
-use nervix_models::Identifier;
+use nervix_models::RelayName;
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, watch},
@@ -56,10 +56,10 @@ pub(super) enum RelayInteractionError {
     #[error("relay interaction requires at least one input")]
     NoInputs,
     #[error("relay interaction input relay '{relay}' is declared more than once")]
-    DuplicateInput { relay: Identifier },
+    DuplicateInput { relay: RelayName },
     #[error("failed to concatenate collected input from relay '{relay}': {reason}")]
     Concatenate {
-        relay: Identifier,
+        relay: RelayName,
         reason: String,
         acks: AckSet,
     },
@@ -107,7 +107,7 @@ pub(super) enum RelayInteractionStop {
 #[derive(Debug)]
 pub(super) enum RelayInteractionEvent<C> {
     Batch {
-        relay: Identifier,
+        relay: RelayName,
         batch: RelayRecordBatch,
     },
     Wake,
@@ -128,14 +128,14 @@ impl<C> RelayInteractionWork<C> {
 }
 
 pub(super) struct RelayInteractionInput {
-    relay: Identifier,
+    relay: RelayName,
     receiver: RelayRuntimeFanIn,
     collect_policy: Option<RuntimeInputCollectPolicy>,
 }
 
 impl RelayInteractionInput {
     pub(super) fn new(
-        relay: Identifier,
+        relay: RelayName,
         receiver: RelayRuntimeFanIn,
         collect_policy: Option<RuntimeInputCollectPolicy>,
     ) -> Self {
@@ -289,7 +289,7 @@ impl Drop for RelayInputCollection {
 }
 
 struct RelayInteractionSource {
-    relay: Identifier,
+    relay: RelayName,
     receiver: RelayRuntimeFanIn,
     collection: RelayInputCollection,
     closed: bool,
@@ -442,7 +442,7 @@ impl RelayInteractionInputs {
         &mut self,
         source: usize,
         batch: RelayRecordBatch,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         let relay = self.sources[source].relay.clone();
         self.sources[source]
             .collection
@@ -465,13 +465,11 @@ impl RelayInteractionInputs {
     fn take_due(
         &mut self,
         now: Instant,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         self.take_collection(|collection| collection.take_due(now))
     }
 
-    fn take_any(
-        &mut self,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    fn take_any(&mut self) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         self.take_collection(RelayInputCollection::take_any)
     }
 
@@ -480,7 +478,7 @@ impl RelayInteractionInputs {
         mut take: impl FnMut(
             &mut RelayInputCollection,
         ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError>,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         let source_count = self.sources.len();
         for offset in 0..source_count {
             let index = (self.collection_cursor + offset) % source_count;
@@ -867,7 +865,9 @@ async fn wait_until(deadline: Option<Instant>) {
 mod tests {
     use std::{num::NonZeroUsize, sync::OnceLock};
 
-    use nervix_models::{CreateSchema, Identifier, ParseAsType, Timestamp};
+    use nervix_models::{
+        CreateSchema, FieldName, ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
+    };
 
     use super::*;
     use crate::{
@@ -884,9 +884,11 @@ mod tests {
         SCHEMA
             .get_or_init(|| {
                 triomphe::Arc::new(compile_schema(&CreateSchema {
-                    name: Identifier::parse("relay_interaction_test").expect("valid schema"),
+                    name: SchemaName::from(
+                        &ModelName::parse("relay_interaction_test").expect("valid schema"),
+                    ),
                     fields: vec![nervix_models::SchemaField {
-                        name: Identifier::parse("value").expect("valid field"),
+                        name: FieldName::parse("value").expect("valid field"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
@@ -913,9 +915,11 @@ mod tests {
 
     fn alternate_batch(acks: AckSet) -> RelayRecordBatch {
         let alternate_schema = triomphe::Arc::new(compile_schema(&CreateSchema {
-            name: Identifier::parse("relay_interaction_alternate").expect("valid alternate schema"),
+            name: SchemaName::from(
+                &ModelName::parse("relay_interaction_alternate").expect("valid alternate schema"),
+            ),
             fields: vec![nervix_models::SchemaField {
-                name: Identifier::parse("value").expect("valid field"),
+                name: FieldName::parse("value").expect("valid field"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
@@ -934,7 +938,7 @@ mod tests {
     fn branch(value: &str) -> Option<BranchKey> {
         Some(
             BranchKey::from_fields([(
-                Identifier::parse("tenant").expect("valid branch field"),
+                FieldName::parse("tenant").expect("valid branch field"),
                 RuntimeValue::String(value.to_string()),
             )])
             .expect("branch key must build"),
@@ -954,7 +958,7 @@ mod tests {
         capacity: usize,
         policy: Option<RuntimeInputCollectPolicy>,
     ) -> (RelayInteractionInput, RelayBroadcast<RelayRecordBatch>) {
-        let relay = Identifier::parse(name).expect("valid relay");
+        let relay = RelayName::parse(name).expect("valid relay");
         let broadcast = RelayBroadcast::with_capacity(
             NonZeroUsize::new(capacity).expect("nonzero test capacity"),
         );

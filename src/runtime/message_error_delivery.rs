@@ -1,14 +1,15 @@
 use dashmap::mapref::entry::Entry as DashMapEntry;
+use nervix_models::{DomainName, ModelName};
 
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MessageErrorRouteKey {
-    pub(super) domain: Domain,
+    pub(super) domain: DomainName,
     pub(super) node_kind: String,
-    pub(super) node: Identifier,
-    pub(super) source_route: Option<Identifier>,
-    pub(super) error_relay: Identifier,
+    pub(super) node: ModelName,
+    pub(super) source_route: Option<RelayName>,
+    pub(super) error_relay: RelayName,
 }
 
 #[derive(Clone)]
@@ -64,8 +65,8 @@ struct MessageErrorRouteTask {
 
 pub(super) fn matching_message_error_output<'a>(
     outputs: &'a nervix_models::ProcessorOutputs,
-    source_route: Option<&Identifier>,
-    error_relay: &Identifier,
+    source_route: Option<&RelayName>,
+    error_relay: &RelayName,
     assignments: &[Assignment],
 ) -> Option<&'a ProcessorOutput> {
     if let Some(route) = source_route
@@ -368,7 +369,7 @@ impl Runtime {
             })
     }
 
-    pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &Domain) {
+    pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &DomainName) {
         let keys = self
             .message_error_routes
             .iter()
@@ -387,13 +388,17 @@ impl Runtime {
 mod tests {
     use super::*;
 
-    fn identifier(value: &str) -> Identifier {
-        Identifier::parse(value).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn test_delivery() -> (MessageErrorDelivery, AckCompletion) {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
-            name: identifier("message_error"),
+            name: named("message_error"),
             fields: Vec::new(),
         }));
         let batch = RelayRecordBatch::single(schema, None, test_runtime_row([]), AckSet::empty())
@@ -415,11 +420,11 @@ mod tests {
         let task = MessageErrorRouteTask {
             runtime: Runtime::default(),
             route: MessageErrorRouteKey {
-                domain: Domain::try_from("test").expect("valid domain"),
+                domain: DomainName::try_from("test").expect("valid domain"),
                 node_kind: "emitter".to_string(),
-                node: identifier("notifications"),
+                node: named("notifications"),
                 source_route: None,
-                error_relay: identifier("emitter_errors"),
+                error_relay: named("emitter_errors"),
             },
             target: MessageErrorRouteTarget {
                 registry: RelayRegistry::new(),

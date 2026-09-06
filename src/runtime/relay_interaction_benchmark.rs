@@ -6,7 +6,7 @@
 use std::{num::NonZeroUsize, sync::OnceLock};
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{CreateSchema, Identifier, ParseAsType, Timestamp};
+use nervix_models::{CreateSchema, FieldName, ParseAsType, RelayName, SchemaName, Timestamp};
 use tokio::{
     sync::{mpsc, watch},
     time::Instant,
@@ -93,7 +93,7 @@ impl RelayInteractionBenchmark {
         let mut inputs = Vec::with_capacity(source_count);
         let mut sources = Vec::with_capacity(source_count);
         for source in 0..source_count {
-            let relay = Identifier::parse(&format!("benchmark_source_{source}")).assured(
+            let relay = RelayName::parse(&format!("benchmark_source_{source}")).assured(
                 "the name is built here from fixed text that satisfies the identifier grammar",
             );
             let broadcast = RelayBroadcast::with_capacity(capacity);
@@ -203,11 +203,11 @@ fn benchmark_schema() -> triomphe::Arc<CompiledSchema> {
     SCHEMA
         .get_or_init(|| {
             triomphe::Arc::new(compile_schema(&CreateSchema {
-                name: Identifier::parse("relay_interaction_benchmark").assured(
+                name: SchemaName::parse("relay_interaction_benchmark").assured(
                     "the name is built here from fixed text that satisfies the identifier grammar",
                 ),
                 fields: vec![nervix_models::SchemaField {
-                    name: Identifier::parse("value").assured(
+                    name: FieldName::parse("value").assured(
                         "the name is built here from fixed text that satisfies the identifier \
                          grammar",
                     ),

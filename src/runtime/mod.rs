@@ -37,28 +37,30 @@ use nervix_interconnect::{
     TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AckMode, Assignment, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule,
-    CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
-    CreateUdf, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink,
-    EmitterAckWindow, EmitterPublishingMode, EndpointType, ErrorPolicies, FieldPath,
-    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
+    AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
+    ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CorrelationTimeoutAction,
+    CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
+    CreateClientOtel, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint,
+    CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
+    CreateSignalingProtocol, CreateUdf, DomainConfig, DomainName, DomainPace, DomainSchedule,
+    DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode,
+    EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath, GeneralErrorPolicy,
+    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
     InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
-    Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
-    MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    OtelValueMapping, OutputBranch, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
-    PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceVersionStatus, RetryPolicy,
-    RouteConstruction, ScheduledNode, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, Timestamp, WireSchemaDefinition,
+    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, ModelName,
+    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, MySqlValueMapping, OtelAggregationTemporality, OtelMetric, OtelMetricKind,
+    OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
+    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
+    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
+    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -309,7 +311,7 @@ pub enum RuntimeError {
     )]
     RuntimeRevisionReadiness {
         revision: u64,
-        pending_nodes: Vec<String>,
+        pending_nodes: Vec<ClusterNodeName>,
     },
     #[error("failed to decode remote relay '{relay}' in domain '{domain}': {reason}")]
     DecodeRemoteRelay {
@@ -326,19 +328,19 @@ pub enum RuntimeEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RuntimeKey {
-    domain: Domain,
-    identifier: Identifier,
+    domain: DomainName,
+    identifier: ModelName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RuntimeStateSchemaKey {
-    domain: Domain,
+    domain: DomainName,
     kind: ModelKind,
-    identifier: Identifier,
+    identifier: ModelName,
 }
 
 impl RuntimeStateSchemaKey {
-    fn new(domain: Domain, kind: ModelKind, identifier: Identifier) -> Self {
+    fn new(domain: DomainName, kind: ModelKind, identifier: ModelName) -> Self {
         Self {
             domain,
             kind,
@@ -348,8 +350,11 @@ impl RuntimeStateSchemaKey {
 }
 
 impl RuntimeKey {
-    fn new(domain: Domain, identifier: Identifier) -> Self {
-        Self { domain, identifier }
+    fn new(domain: DomainName, identifier: impl Into<ModelName>) -> Self {
+        Self {
+            domain,
+            identifier: identifier.into(),
+        }
     }
 }
 
@@ -871,7 +876,7 @@ pub struct IngestorQuiesceCounters {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct BranchKey {
-    fields: BTreeMap<Identifier, RuntimeValue>,
+    fields: BTreeMap<FieldName, RuntimeValue>,
     json: String,
 }
 
@@ -883,7 +888,7 @@ impl BranchKey {
     }
 
     pub(crate) fn from_fields(
-        fields: impl IntoIterator<Item = (Identifier, RuntimeValue)>,
+        fields: impl IntoIterator<Item = (FieldName, RuntimeValue)>,
     ) -> Result<Self, String> {
         let fields = fields.into_iter().collect::<BTreeMap<_, _>>();
         if fields.is_empty() {
@@ -899,7 +904,7 @@ impl BranchKey {
 
     fn from_remote_record<'a>(
         record: &nervix_models::RemoteRuntimeRecord,
-        field_names: impl IntoIterator<Item = &'a Identifier>,
+        field_names: impl IntoIterator<Item = &'a FieldName>,
     ) -> Result<Option<Self>, String> {
         let mut fields = BTreeMap::new();
         for field_name in field_names {
@@ -926,7 +931,7 @@ impl BranchKey {
         };
         let mut values = BTreeMap::new();
         for field in fields {
-            let name = Identifier::try_from(field.name.clone()).map_err(|error| {
+            let name = FieldName::try_from(field.name.clone()).map_err(|error| {
                 format!(
                     "remote branch key field '{}' is invalid: {error}",
                     field.name
@@ -989,20 +994,20 @@ struct DomainExecution {
     start_version: u64,
     shutdown: watch::Sender<bool>,
     graph: SharedActiveGraph,
-    relay_registries: HashMap<Identifier, RelayRegistry>,
-    relay_schemas: HashMap<Identifier, Arc<CompiledSchema>>,
-    relay_services: HashMap<Identifier, Arc<RelayBoundaryServices>>,
-    lookups: HashMap<Identifier, Arc<LookupRuntime>>,
+    relay_registries: HashMap<RelayName, RelayRegistry>,
+    relay_schemas: HashMap<RelayName, Arc<CompiledSchema>>,
+    relay_services: HashMap<RelayName, Arc<RelayBoundaryServices>>,
+    lookups: HashMap<LookupName, Arc<LookupRuntime>>,
     udfs: UdfExecutor,
-    relay_branchings: HashMap<Identifier, Vec<Identifier>>,
-    relay_branching_schemas: HashMap<Identifier, Option<StdArc<arrow_schema::Schema>>>,
-    materialized_stream_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
-    materialized_stream_owner_nodes: HashMap<Identifier, Option<String>>,
-    branched_ingestors: HashMap<Identifier, Vec<BranchedIngestorSpec>>,
-    branched_entrypoints: HashMap<Identifier, Vec<Arc<IngestorRouteRuntime>>>,
-    codecs: HashMap<Identifier, Arc<CompiledCodec>>,
-    signaling_protocols: HashMap<Identifier, Arc<CompiledSignalingProtocol>>,
-    endpoint_routes: HashMap<Identifier, EndpointRoute>,
+    relay_branchings: HashMap<RelayName, Vec<FieldName>>,
+    relay_branching_schemas: HashMap<RelayName, Option<StdArc<arrow_schema::Schema>>>,
+    materialized_stream_specs: HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
+    branched_ingestors: HashMap<ModelName, Vec<BranchedIngestorSpec>>,
+    branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
+    codecs: HashMap<CodecName, Arc<CompiledCodec>>,
+    signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
+    endpoint_routes: HashMap<EndpointName, EndpointRoute>,
     node_tasks: HashMap<RegistryEntity, ScheduledNodeTask>,
     emitter_tasks: HashMap<RegistryEntity, ScheduledEmitterTask>,
     generator_tasks: HashMap<RegistryEntity, JoinHandle<()>>,
@@ -1011,10 +1016,10 @@ struct DomainExecution {
     /// reassignment can replace one node's replication runtime without disturbing its siblings.
     placement_tasks: HashMap<RegistryEntity, Vec<JoinHandle<()>>>,
     /// The task maintaining each locally owned materialized relay, keyed by that relay.
-    relay_state_tasks: HashMap<Identifier, RelayStateTask>,
+    relay_state_tasks: HashMap<RelayName, RelayStateTask>,
     /// The single buffer-and-fan-out task for every relay owned by this cluster node.
-    relay_owner_tasks: HashMap<Identifier, RelayOwnerTask>,
-    clients: HashMap<Identifier, Arc<Model>>,
+    relay_owner_tasks: HashMap<RelayName, RelayOwnerTask>,
+    clients: HashMap<ClientName, Arc<Model>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -1027,7 +1032,7 @@ pub enum EmitterPublishingDrainState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmitterPublishingDrainStatus {
-    pub emitter: Identifier,
+    pub emitter: EmitterName,
     pub state: EmitterPublishingDrainState,
     pub pending_messages: usize,
     pub retry_backoff: Option<Duration>,
@@ -1075,7 +1080,7 @@ pub(crate) struct EntityGateLease<'a> {
 
 struct EntityAlterHold {
     gates: EntityGateHold,
-    quiesced_ingestors: Vec<(Identifier, IngestorQuiesceCause)>,
+    quiesced_ingestors: Vec<(IngestorName, IngestorQuiesceCause)>,
 }
 
 #[derive(Debug, Default)]
@@ -1178,7 +1183,7 @@ impl BranchQuiesceGauges {
         }
     }
 
-    fn observe(&mut self, branch: &BranchRuntime, processor: &Identifier) {
+    fn observe(&mut self, branch: &BranchRuntime, processor: &ModelName) {
         let (collected_inputs, pending_materialized, output_buffers) = branch
             .processors
             .get(processor)
@@ -1380,8 +1385,8 @@ impl RelayRegistry {
 struct ConcreteRelayRuntime {
     key: Option<BranchKey>,
     runtime: Runtime,
-    domain: Domain,
-    relay: Identifier,
+    domain: DomainName,
+    relay: RelayName,
     registry: RelayRegistry,
     services: Arc<RelayBoundaryServices>,
 }
@@ -1389,8 +1394,8 @@ struct ConcreteRelayRuntime {
 struct ConcreteRelayRuntimeBuild {
     key: Option<BranchKey>,
     runtime: Runtime,
-    domain: Domain,
-    relay: Identifier,
+    domain: DomainName,
+    relay: RelayName,
     registry: RelayRegistry,
     services: Arc<RelayBoundaryServices>,
 }
@@ -1402,7 +1407,7 @@ struct RelayBoundaryServices {
     detached_runtime_consumer_count: AtomicUsize,
     remote_runtime_consumers: ArcSwap<Vec<RemoteRuntimeConsumer>>,
     remote_dispatcher: Option<Arc<RemoteDispatcher>>,
-    owner_node: RwLock<Option<String>>,
+    owner_node: RwLock<Option<ClusterNodeName>>,
     ingress_slot: Mutex<()>,
     outbound_slots: DashMap<String, Arc<Mutex<()>>, RandomState>,
 }
@@ -1489,8 +1494,8 @@ enum RelayBoundaryFanout {
 
 #[derive(Debug, Clone)]
 struct RemoteRuntimeConsumer {
-    node_id: String,
-    relay: Identifier,
+    node_id: ClusterNodeName,
+    relay: RelayName,
     mode: AckMode,
 }
 
@@ -1564,13 +1569,13 @@ struct EndpointRoute {
 struct EndpointIngestBinding {
     runtime_key: RuntimeKey,
     quiesce: Arc<IngestorQuiesceControl>,
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     timestamp_source: Option<IngestTimestampSource>,
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1590,12 +1595,12 @@ struct IngestorDependencies {
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    branched_templates: HashMap<Identifier, (SharedActiveGraph, IngestorRouteTemplate)>,
+    branched_templates: HashMap<RelayName, (SharedActiveGraph, IngestorRouteTemplate)>,
 }
 
 struct IngestGroupContext {
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     timestamp_source: Option<IngestTimestampSource>,
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
@@ -1607,8 +1612,8 @@ struct IngestGroupContext {
 /// The collector owns the actual group boundary: request-scoped sources flush at the
 /// end of the request, while streaming sources flush at the row or idle-time bound.
 struct IngestGroupDispatch<'a> {
-    domain: &'a Domain,
-    ingestor: &'a Identifier,
+    domain: &'a DomainName,
+    ingestor: &'a IngestorName,
     timestamp_source: Option<&'a IngestTimestampSource>,
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
@@ -1625,8 +1630,8 @@ struct IngestGroupDispatch<'a> {
 }
 
 struct IngestGroupContribution<'a> {
-    domain: &'a Domain,
-    ingestor: &'a Identifier,
+    domain: &'a DomainName,
+    ingestor: &'a IngestorName,
     timestamp_source: Option<&'a IngestTimestampSource>,
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
@@ -1637,12 +1642,12 @@ struct IngestGroupContribution<'a> {
 }
 
 struct RawIngestDispatch<'a> {
-    domain: &'a Domain,
-    ingestor: &'a Identifier,
+    domain: &'a DomainName,
+    ingestor: &'a IngestorName,
     timestamp_source: Option<&'a IngestTimestampSource>,
     output_routes: &'a RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     codec: Arc<CompiledCodec>,
     payload: &'a BufferedIngestPayload,
     collector: &'a mut IngestRouteCollector,
@@ -1824,8 +1829,8 @@ impl IngestGroupRows {
 
 /// An ingestor `FILTER WHERE` message error, with the row it came from.
 struct IngestorFilterWhereError<'a> {
-    domain: &'a Domain,
-    ingestor: &'a Identifier,
+    domain: &'a DomainName,
+    ingestor: &'a IngestorName,
     output_routes: &'a RelayProcessorOutputsNode,
     record: &'a RuntimeRow,
     ingest_metadata: Option<IngestFilterMapMetadata>,
@@ -1845,7 +1850,7 @@ struct IngestRouteCollector {
     row_bound: usize,
     context: Option<IngestGroupContext>,
     pending: PendingIngestGroup,
-    routed: Vec<(Identifier, RelayMessage)>,
+    routed: Vec<(RelayName, RelayMessage)>,
     flush_at: Option<Instant>,
 }
 
@@ -1921,7 +1926,7 @@ impl IngestRouteCollector {
         Ok(Some((context, pending.into_rows()?)))
     }
 
-    fn push(&mut self, relay: Identifier, message: RelayMessage) {
+    fn push(&mut self, relay: RelayName, message: RelayMessage) {
         self.routed.push((relay, message));
     }
 
@@ -1939,9 +1944,9 @@ impl IngestRouteCollector {
 
     /// Groups by (relay, branch key) preserving arrival order within each group.
     /// `RelayRecordBatch::from_messages` requires a uniform key per batch.
-    fn drain_groups(&mut self) -> Vec<(Identifier, Vec<RelayMessage>)> {
-        let mut groups: Vec<(Identifier, Option<BranchKey>, Vec<RelayMessage>)> = Vec::new();
-        let mut group_indices: HashMap<(Identifier, Option<BranchKey>), usize> = HashMap::default();
+    fn drain_groups(&mut self) -> Vec<(RelayName, Vec<RelayMessage>)> {
+        let mut groups: Vec<(RelayName, Option<BranchKey>, Vec<RelayMessage>)> = Vec::new();
+        let mut group_indices: HashMap<(RelayName, Option<BranchKey>), usize> = HashMap::default();
         for (relay, message) in self.routed.drain(..) {
             let group_key = (relay.clone(), message.key.clone());
             if let Some(index) = group_indices.get(&group_key).copied() {
@@ -1961,7 +1966,7 @@ impl IngestRouteCollector {
 #[derive(Clone, Default)]
 struct IngestorRouteRuntimes {
     runtimes: Vec<Arc<IngestorRouteRuntime>>,
-    senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
 }
 
 type BranchedEntrypointInput = RelayRecordBatch;
@@ -2117,10 +2122,10 @@ fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
 }
 
 struct MessageErrorContext<'a> {
-    domain: &'a Domain,
+    domain: &'a DomainName,
     node_kind: &'a str,
-    node: &'a Identifier,
-    source_route: Option<&'a Identifier>,
+    node: &'a ModelName,
+    source_route: Option<&'a RelayName>,
     message: &'a RelayMessage,
     error: &'a StructuredMessageError,
     partial_output: Option<&'a RuntimeRecordBatch>,
@@ -2129,10 +2134,10 @@ struct MessageErrorContext<'a> {
 }
 
 struct MessageErrorHandling<'a> {
-    domain: &'a Domain,
+    domain: &'a DomainName,
     node_kind: &'a str,
-    node: &'a Identifier,
-    source_route: Option<&'a Identifier>,
+    node: &'a ModelName,
+    source_route: Option<&'a RelayName>,
     policy: &'a MessageErrorPolicy,
     message: RelayMessage,
     error: StructuredMessageError,
@@ -2142,18 +2147,18 @@ struct MessageErrorHandling<'a> {
 }
 
 struct MessageErrorFailure {
-    source_route: Option<Identifier>,
+    source_route: Option<RelayName>,
     reason: String,
     operation: MessageErrorOperation,
 }
 
 impl MessageErrorFailure {
-    fn publish(source_route: Option<&Identifier>, reason: String) -> Self {
+    fn publish(source_route: Option<&RelayName>, reason: String) -> Self {
         Self::new(source_route, reason, MessageErrorOperation::Publish)
     }
 
     fn new(
-        source_route: Option<&Identifier>,
+        source_route: Option<&RelayName>,
         reason: String,
         operation: MessageErrorOperation,
     ) -> Self {
@@ -2171,7 +2176,7 @@ struct MessageErrorCompileSchemas {
     left: Option<Arc<CompiledSchema>>,
     right: Option<Arc<CompiledSchema>>,
     partial_output: Option<Arc<CompiledSchema>>,
-    current_branching: Vec<Identifier>,
+    current_branching: Vec<FieldName>,
     allow_header_reads: bool,
 }
 
@@ -2685,7 +2690,8 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
     }
 }
 
-type RelayBoundaryFanoutMap = Arc<DashMap<(Domain, Identifier), RelayBoundaryFanout, RandomState>>;
+type RelayBoundaryFanoutMap =
+    Arc<DashMap<(DomainName, RelayName), RelayBoundaryFanout, RandomState>>;
 type RelayRuntimeConsumerReceiver = RelaySubscriptionReceiver<RelayRecordBatch>;
 
 struct RelayRuntimeFanIn {
@@ -3134,20 +3140,20 @@ impl IngestorReadiness {
 struct BranchRuntime {
     key: Option<BranchKey>,
     runtime: Runtime,
-    domain: Domain,
+    domain: DomainName,
     source_kind: ModelKind,
-    source: Identifier,
-    root_relay: Identifier,
+    source: RelayName,
+    root_relay: RelayName,
     error_policies: ErrorPolicies,
-    relays: HashMap<Identifier, ConcreteRelayRuntime>,
-    materialized_states: HashMap<Identifier, Arc<ReplicatedMaterializedRelayState>>,
+    relays: HashMap<RelayName, ConcreteRelayRuntime>,
+    materialized_states: HashMap<RelayName, Arc<ReplicatedMaterializedRelayState>>,
     relay_state_epoch: Option<u64>,
-    processors: HashMap<Identifier, RelayProcessorNode>,
+    processors: HashMap<ModelName, RelayProcessorNode>,
 }
 
 #[derive(Debug)]
 struct PendingMaterializedBatch {
-    input_relay: Identifier,
+    input_relay: RelayName,
     batch: Option<RelayRecordBatch>,
     required_wait: Option<AckRequiredWaitGuard>,
 }
@@ -3159,7 +3165,7 @@ struct MaterializedBatchWaitContext<'a> {
 }
 
 impl PendingMaterializedBatch {
-    fn new(input_relay: Identifier, batch: RelayRecordBatch) -> Self {
+    fn new(input_relay: RelayName, batch: RelayRecordBatch) -> Self {
         let required_wait = AckRequiredWaitGuard::new(batch.acks.iter());
         Self {
             input_relay,
@@ -3168,7 +3174,7 @@ impl PendingMaterializedBatch {
         }
     }
 
-    fn into_parts(mut self) -> (Identifier, RelayRecordBatch) {
+    fn into_parts(mut self) -> (RelayName, RelayRecordBatch) {
         drop(self.required_wait.take());
         let batch = self
             .batch
@@ -3210,8 +3216,8 @@ fn internal_processor_error_policies(general: GeneralErrorPolicy) -> ErrorPolici
 }
 
 struct BranchExecutionRuntime {
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     sender: mpsc::Sender<BranchedEntrypointInput>,
     shutdown: watch::Sender<bool>,
     task: parking_lot::Mutex<Option<JoinHandle<()>>>,
@@ -3232,8 +3238,8 @@ struct PendingIngestorRouteBatch {
 
 struct IngestorRouteTask {
     runtime_handle: Runtime,
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     template: IngestorRouteTemplate,
     branch_sender: mpsc::Sender<BranchedEntrypointInput>,
     pending: HashMap<Option<BranchKey>, PendingIngestorRouteBatch>,
@@ -3241,8 +3247,8 @@ struct IngestorRouteTask {
 
 struct BranchExecutionDispatchContext<'a> {
     runtime_handle: &'a Runtime,
-    domain: &'a Domain,
-    ingestor: &'a Identifier,
+    domain: &'a DomainName,
+    ingestor: &'a IngestorName,
     graph: &'a SharedActiveGraph,
     template: &'a BranchInstanceTemplate,
     now: Timestamp,
@@ -3467,27 +3473,27 @@ struct ExpiringRelayState {
 
 #[derive(Debug, Clone, Copy)]
 struct ExecutionBuildDeps<'a> {
-    domain: &'a Domain,
-    relay_schemas: &'a HashMap<Identifier, Arc<CompiledSchema>>,
-    relay_branchings: &'a HashMap<Identifier, Vec<Identifier>>,
-    materialized_relay_specs: &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
-    lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
+    domain: &'a DomainName,
+    relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
+    relay_branchings: &'a HashMap<RelayName, Vec<FieldName>>,
+    materialized_relay_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
 }
 
 #[derive(Debug, Clone)]
 struct EmitterTaskDeps {
     input_schema: Arc<CompiledSchema>,
-    input_branching: Vec<Identifier>,
-    materialized_relay_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
-    lookups: HashMap<Identifier, Arc<LookupRuntime>>,
+    input_branching: Vec<FieldName>,
+    materialized_relay_specs: HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    lookups: HashMap<LookupName, Arc<LookupRuntime>>,
 }
 
 #[derive(Debug, Clone)]
 struct EmitterTaskBuildDeps<'a> {
-    domain: &'a Domain,
+    domain: &'a DomainName,
     shutdown_tx: &'a watch::Sender<bool>,
-    codecs: &'a HashMap<Identifier, Arc<CompiledCodec>>,
-    clients: &'a HashMap<Identifier, Arc<Model>>,
+    codecs: &'a HashMap<CodecName, Arc<CompiledCodec>>,
+    clients: &'a HashMap<ClientName, Arc<Model>>,
     deps: EmitterTaskDeps,
 }
 
@@ -3511,14 +3517,16 @@ struct RelayRetention {
 
 impl RelayRetention {
     fn from_schedule(
-        domain: &Domain,
+        domain: &DomainName,
         schedule: &DomainSchedule,
-        relay: &Identifier,
+        relay: &RelayName,
     ) -> Result<Self, RuntimeError> {
         let Some(Model::Relay(model)) = schedule
             .nodes
             .iter()
-            .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
+            .find(|node| {
+                node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
+            })
             .map(|node| node.config.as_ref())
         else {
             return Err(RuntimeError::BuildDomainExecution {
@@ -3583,7 +3591,7 @@ impl RelayRetention {
 /// One materialized relay's runtime task: the relay it serves, the replicated state it maintains,
 /// the branch retention limits it enforces, and the fan-in it consumes.
 struct RelayStateTaskSpec {
-    relay: Identifier,
+    relay: RelayName,
     state: Arc<ReplicatedMaterializedRelayState>,
     retention: RelayRetention,
     receiver: RelayRuntimeFanIn,
@@ -3591,9 +3599,9 @@ struct RelayStateTaskSpec {
 
 struct GeneratorTaskSpec {
     generator: CreateGenerator,
-    source_relay: Identifier,
+    source_relay: RelayName,
     source_schema: Arc<CompiledSchema>,
-    source_branching: Vec<Identifier>,
+    source_branching: Vec<FieldName>,
     context_projection: GeneratorContextProjection,
     routes: Vec<GeneratorTaskRouteSpec>,
 }
@@ -3602,7 +3610,7 @@ impl GeneratorTaskSpec {
     fn new(
         generator: CreateGenerator,
         source_schema: Arc<CompiledSchema>,
-        source_branching: Vec<Identifier>,
+        source_branching: Vec<FieldName>,
         source_branch_schema: Option<StdArc<arrow_schema::Schema>>,
         routes: Vec<GeneratorTaskRouteSpec>,
     ) -> Self {
@@ -3630,7 +3638,7 @@ struct GeneratorContextProjection {
 
 impl GeneratorContextProjection {
     fn new(
-        source_relay: &Identifier,
+        source_relay: &RelayName,
         source_schema: &arrow_schema::Schema,
         branch_schema: Option<&arrow_schema::Schema>,
     ) -> Self {
@@ -3872,7 +3880,7 @@ pub(crate) struct MaterializedFieldInterest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaterializedRelayInterest {
-    relay: Identifier,
+    relay: RelayName,
     schema: StdArc<arrow_schema::Schema>,
     fields: Vec<MaterializedFieldInterest>,
     key_mode: MaterializedLookupKeyMode,
@@ -3887,7 +3895,7 @@ pub(crate) struct MaterializedProgramInterest {
 pub(crate) struct RuntimeMaterializedRelaySpec {
     pub(crate) schema: StdArc<arrow_schema::Schema>,
     pub(crate) sensitivity: VmSchemaSensitivity,
-    pub(crate) branching: Vec<Identifier>,
+    pub(crate) branching: Vec<FieldName>,
     fields: Arc<Vec<MaterializedFieldInterest>>,
 }
 
@@ -3895,7 +3903,7 @@ impl RuntimeMaterializedRelaySpec {
     pub(crate) fn new(
         schema: StdArc<arrow_schema::Schema>,
         sensitivity: VmSchemaSensitivity,
-        branching: Vec<Identifier>,
+        branching: Vec<FieldName>,
     ) -> Self {
         let fields = Arc::new(
             schema
@@ -3985,10 +3993,9 @@ pub(crate) struct CompiledEmitterFilterMapProgram {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RuntimeVmCompileContext<'a> {
-    pub(crate) available_materialized_streams:
-        &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
-    pub(crate) available_lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
-    pub(crate) current_branching: &'a [Identifier],
+    pub(crate) available_materialized_streams: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    pub(crate) available_lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
+    pub(crate) current_branching: &'a [FieldName],
     pub(crate) current_branch_schema: Option<&'a StdArc<arrow_schema::Schema>>,
     pub(crate) current_branch_sensitivity: Option<&'a VmSchemaSensitivity>,
     pub(crate) udfs: Option<&'a UdfExecutor>,
@@ -3996,8 +4003,8 @@ pub(crate) struct RuntimeVmCompileContext<'a> {
 
 #[derive(Debug, Clone, Copy)]
 struct RuntimeCompileTarget<'a> {
-    domain: &'a Domain,
-    identifier: &'a Identifier,
+    domain: &'a DomainName,
+    identifier: &'a ModelName,
 }
 
 #[derive(Debug, Clone)]
@@ -4075,8 +4082,8 @@ pub(crate) struct StateSyncAck {
 struct ActiveDomainAlter;
 
 pub(crate) struct DomainAlterGuard {
-    domain: Domain,
-    active_domain_alters: Arc<DashMap<Domain, ActiveDomainAlter, RandomState>>,
+    domain: DomainName,
+    active_domain_alters: Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
 }
 
 impl Drop for DomainAlterGuard {
@@ -4096,25 +4103,25 @@ pub struct Runtime {
     emitter_transient_errors: Arc<DashMap<RuntimeKey, String, RandomState>>,
     emitter_retry_statuses: Arc<DashMap<RuntimeKey, EmitterRetryStatus, RandomState>>,
     emitter_confirmation_waits: Arc<DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>>,
-    executions: Arc<DashMap<Domain, DomainExecution, RandomState>>,
+    executions: Arc<DashMap<DomainName, DomainExecution, RandomState>>,
     message_error_routes:
         Arc<DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>>,
-    compiled_domain_udfs: Arc<DashMap<Domain, CompiledDomainUdfs, RandomState>>,
+    compiled_domain_udfs: Arc<DashMap<DomainName, CompiledDomainUdfs, RandomState>>,
     schedule_apply_lock: Arc<Mutex<()>>,
     applied_cluster_revision: Arc<AtomicU64>,
-    domain_instantiation_errors: Arc<DashMap<Domain, String, RandomState>>,
-    domains: Arc<DashMap<Domain, RuntimeDomainState, RandomState>>,
+    domain_instantiation_errors: Arc<DashMap<DomainName, String, RandomState>>,
+    domains: Arc<DashMap<DomainName, RuntimeDomainState, RandomState>>,
     domain_status_changed: watch::Sender<u64>,
-    in_flight_by_domain: Arc<DashMap<Domain, Arc<AckRootTracker>, RandomState>>,
+    in_flight_by_domain: Arc<DashMap<DomainName, Arc<AckRootTracker>, RandomState>>,
     in_flight_by_ingestor: Arc<DashMap<RuntimeKey, Arc<AckRootTracker>, RandomState>>,
-    generator_activity_by_domain: Arc<DashMap<Domain, Arc<AtomicUsize>, RandomState>>,
+    generator_activity_by_domain: Arc<DashMap<DomainName, Arc<AtomicUsize>, RandomState>>,
     emitter_buffers: Arc<DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>>,
-    force_flush_by_domain: Arc<DashMap<Domain, Arc<DomainForceFlush>, RandomState>>,
+    force_flush_by_domain: Arc<DashMap<DomainName, Arc<DomainForceFlush>, RandomState>>,
     node_quiesce_counters: Arc<DashMap<RuntimeKey, Arc<NodeQuiesceCounters>, RandomState>>,
-    entity_gate_holds: Arc<DashMap<(Domain, u64), EntityAlterHold, RandomState>>,
-    active_domain_alters: Arc<DashMap<Domain, ActiveDomainAlter, RandomState>>,
+    entity_gate_holds: Arc<DashMap<(DomainName, u64), EntityAlterHold, RandomState>>,
+    active_domain_alters: Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     state_schema_fingerprints: Arc<DashMap<RuntimeStateSchemaKey, [u8; 32], RandomState>>,
-    domain_graphs: Arc<DashMap<Domain, SharedActiveGraph, RandomState>>,
+    domain_graphs: Arc<DashMap<DomainName, SharedActiveGraph, RandomState>>,
     endpoint_bindings: Arc<DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>>,
     relay_boundary_fanouts: RelayBoundaryFanoutMap,
     events: broadcast::Sender<RuntimeEvent>,
@@ -4134,7 +4141,7 @@ pub struct Runtime {
     resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
     resource_versions: Arc<RwLock<ResourceVersionStatus>>,
     remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,
-    local_node_id: Arc<RwLock<Option<String>>>,
+    local_node_id: Arc<RwLock<Option<ClusterNodeName>>>,
     next_remote_ack_id: Arc<AtomicU64>,
     pending_remote_acks: Arc<DashMap<u64, AckSet, RandomState>>,
     pending_relay_admissions:
@@ -4143,14 +4150,14 @@ pub struct Runtime {
     pending_state_syncs: Arc<DashMap<u64, PendingStateSyncSender, RandomState>>,
     expiring_stream_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>>,
-    latest_resource_versions: Arc<DashMap<(Domain, Identifier), u64, RandomState>>,
+    latest_resource_versions: Arc<DashMap<(DomainName, ResourceName), u64, RandomState>>,
     replicated_deduplicator_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>>,
     replicated_kafka_offset_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedKafkaOffsetState>, RandomState>>,
     replicated_materialized_stream_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedMaterializedRelayState>, RandomState>>,
-    relay_state_epochs: Arc<DashMap<Domain, Arc<AtomicU64>, RandomState>>,
+    relay_state_epochs: Arc<DashMap<DomainName, Arc<AtomicU64>, RandomState>>,
     materialized_state_changed: Arc<Notify>,
     replicated_window_processor_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedWindowProcessorState>, RandomState>>,
@@ -4173,7 +4180,7 @@ pub struct Runtime {
 struct RemoteDispatcher {
     cluster: Arc<cluster::ClusterHandle>,
     interconnect: Arc<Transport>,
-    local_node_id: Arc<RwLock<Option<String>>>,
+    local_node_id: Arc<RwLock<Option<ClusterNodeName>>>,
     next_remote_ack_id: Arc<AtomicU64>,
     pending_remote_acks: Arc<DashMap<u64, AckSet, RandomState>>,
     pending_relay_admissions:
@@ -4189,7 +4196,7 @@ impl std::fmt::Debug for RemoteDispatcher {
 #[derive(Clone)]
 struct RuntimeWasmDomainClock {
     runtime: Runtime,
-    domain: Domain,
+    domain: DomainName,
 }
 
 impl WasmDomainClock for RuntimeWasmDomainClock {
@@ -4226,14 +4233,14 @@ impl RelayBoundaryServices {
         self.fanout.subscription_receiver()
     }
 
-    fn replace_owner_node(&self, owner_node: Option<String>) {
+    fn replace_owner_node(&self, owner_node: Option<ClusterNodeName>) {
         *self.owner_node.write() = owner_node;
     }
 
-    fn is_owned_by(&self, node_id: Option<&str>) -> bool {
+    fn is_owned_by(&self, node_id: Option<&ClusterNodeName>) -> bool {
         self.owner_node
             .read()
-            .as_deref()
+            .as_ref()
             .is_none_or(|owner| Some(owner) == node_id)
     }
 
@@ -4245,7 +4252,7 @@ impl RelayBoundaryServices {
         self.fanout.deactivate_owner_buffer();
     }
 
-    fn outbound_slot(&self, node_id: &str) -> Arc<Mutex<()>> {
+    fn outbound_slot(&self, node_id: &ClusterNodeName) -> Arc<Mutex<()>> {
         self.outbound_slots
             .entry(node_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -4255,9 +4262,9 @@ impl RelayBoundaryServices {
     async fn enqueue_owner_batch(
         &self,
         metrics: &RuntimeMetrics,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         let dispatch_gate = self.fanout.dispatch_gate();
@@ -4292,8 +4299,8 @@ impl RelayBoundaryServices {
 
     async fn dispatch_to_owner(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         let dispatch_gate = self.fanout.dispatch_gate();
@@ -4377,9 +4384,9 @@ impl RelayBoundaryServices {
     fn observe_owner_buffer_length(
         &self,
         metrics: &RuntimeMetrics,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
         branch_key: Option<&BranchKey>,
     ) {
         let Some((len, capacity)) = self.fanout.owner_buffer_len() else {
@@ -4405,8 +4412,8 @@ impl RelayBoundaryServices {
 
     async fn fanout_remote_subscriptions(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
         batch: &RelayRecordBatch,
     ) {
         let Some(dispatcher) = &self.remote_dispatcher else {
@@ -4437,7 +4444,7 @@ impl RelayBoundaryServices {
 
     async fn dispatch_remote_runtime_consumers(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         let remote_runtime_consumers = self.remote_runtime_consumers.load_full();
@@ -4472,7 +4479,7 @@ impl RelayBoundaryServices {
                     }
                     warn!(
                         error = %error,
-                        target_node = consumer.node_id,
+                        target_node = %consumer.node_id,
                         "failed to serialize detached remote relay batch"
                     );
                     continue;
@@ -4534,7 +4541,7 @@ impl RelayBoundaryServices {
                 (AckMode::Detached, Err(error)) => {
                     warn!(
                         error = %error,
-                        target_node = consumer.node_id,
+                        target_node = %consumer.node_id,
                         "detached remote delivery failed"
                     );
                 }
@@ -4575,9 +4582,9 @@ impl RelayBoundaryServices {
     async fn fanout_owner_batch(
         &self,
         metrics: &RuntimeMetrics,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
@@ -4637,7 +4644,7 @@ impl RemoteDispatcher {
     const DISPATCH_RETRY_INTERVAL: Duration = Duration::from_millis(25);
     const DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
 
-    fn local_node_id(&self) -> Option<String> {
+    fn local_node_id(&self) -> Option<ClusterNodeName> {
         self.local_node_id.read().clone()
     }
 
@@ -4672,7 +4679,7 @@ impl RemoteDispatcher {
 
     async fn dispatch_admitted_relay_payload(
         &self,
-        node_id: &str,
+        node_id: &ClusterNodeName,
         mut payload: RelayPayload,
     ) -> Result<(), String> {
         let local_node_id = self
@@ -4699,7 +4706,7 @@ impl RemoteDispatcher {
     }
 
     async fn await_relay_admission(
-        node_id: &str,
+        node_id: &ClusterNodeName,
         mut admission: mpsc::UnboundedReceiver<RemoteAckOutcome>,
         inactivity_timeout: Duration,
     ) -> Result<(), String> {
@@ -4724,10 +4731,10 @@ impl RemoteDispatcher {
     async fn dispatch_subscription_fanout(
         &self,
         services: &RelayBoundaryServices,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
         batch: &RelayRecordBatch,
-        excluded_nodes: &BTreeSet<String>,
+        excluded_nodes: &BTreeSet<ClusterNodeName>,
     ) {
         let Some(local_node_id) = self.local_node_id() else {
             return;
@@ -4776,7 +4783,7 @@ impl RemoteDispatcher {
                 .await
             {
                 warn!(
-                    target_node = node_id,
+                    target_node = %node_id,
                     domain = domain.as_str(),
                     relay = relay.as_str(),
                     error = %error,
@@ -4786,7 +4793,7 @@ impl RemoteDispatcher {
         }
     }
 
-    async fn dispatch(&self, node_id: &str, envelope: Envelope) -> Result<(), String> {
+    async fn dispatch(&self, node_id: &ClusterNodeName, envelope: Envelope) -> Result<(), String> {
         let deadline = Instant::now() + Self::DISPATCH_TIMEOUT;
         loop {
             tokio::task::consume_budget().await;
@@ -4797,7 +4804,7 @@ impl RemoteDispatcher {
                     .await
                     .live_nodes
                     .into_iter()
-                    .find(|node| node.node_id == node_id)
+                    .find(|node| node.node_id == node_id.clone())
                     .ok_or_else(|| {
                         format!("remote node '{node_id}' is not present in gossip membership")
                     })?;
@@ -4835,13 +4842,13 @@ impl RemoteDispatcher {
 
 fn push_remote_runtime_consumer(
     consumers: &mut Vec<RemoteRuntimeConsumer>,
-    node_id: &str,
-    relay: &Identifier,
+    node_id: &ClusterNodeName,
+    relay: &RelayName,
     mode: AckMode,
 ) {
     if let Some(existing) = consumers
         .iter_mut()
-        .find(|consumer| consumer.node_id == node_id && consumer.relay == *relay)
+        .find(|consumer| consumer.node_id == node_id.clone() && consumer.relay == *relay)
     {
         if mode == AckMode::Attached {
             existing.mode = AckMode::Attached;
@@ -4850,7 +4857,7 @@ fn push_remote_runtime_consumer(
     }
 
     consumers.push(RemoteRuntimeConsumer {
-        node_id: node_id.to_string(),
+        node_id: node_id.clone(),
         relay: relay.clone(),
         mode,
     });
@@ -5142,7 +5149,7 @@ impl RelayProcessorOperationNode {
 }
 
 impl RelayProcessorNode {
-    fn source_filter_scope(&self, incoming_relay: &Identifier) -> RuntimeFilterScope {
+    fn source_filter_scope(&self, incoming_relay: &RelayName) -> RuntimeFilterScope {
         match &self.operation {
             RelayProcessorOperationNode::Correlator {
                 left_relays,
@@ -5181,7 +5188,12 @@ impl RelayProcessorNode {
             .await
     }
 
-    fn refresh(&mut self, runtime: &Runtime, domain: &Domain, graph: Option<StdArc<ActiveGraph>>) {
+    fn refresh(
+        &mut self,
+        runtime: &Runtime,
+        domain: &DomainName,
+        graph: Option<StdArc<ActiveGraph>>,
+    ) {
         let changed = match (&self.last_graph, &graph) {
             (Some(previous), Some(current)) => !StdArc::ptr_eq(previous, current),
             (None, None) => false,
@@ -5222,7 +5234,7 @@ impl RelayProcessorNode {
     fn apply_refreshed_graph(
         &mut self,
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         graph: Option<&StdArc<ActiveGraph>>,
     ) -> Option<String> {
         let Some(graph) = graph else {
@@ -5304,7 +5316,7 @@ impl RelayProcessorNode {
         &mut self,
         graph: &SharedActiveGraph,
         branch: &mut BranchRuntime,
-        incoming_relay: &Identifier,
+        incoming_relay: &RelayName,
         batch: RelayRecordBatch,
         materialized_state: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
@@ -5332,7 +5344,7 @@ impl RelayProcessorNode {
     fn concat_collected_input(
         &self,
         branch: &BranchRuntime,
-        incoming_relay: &Identifier,
+        incoming_relay: &RelayName,
         batches: Vec<RelayRecordBatch>,
     ) -> Option<RelayRecordBatch> {
         let acks = batches
@@ -5364,7 +5376,7 @@ impl RelayProcessorNode {
         &'a mut self,
         graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
-        incoming_relay: &'a Identifier,
+        incoming_relay: &'a RelayName,
         batch: RelayRecordBatch,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
@@ -5456,7 +5468,7 @@ impl RelayProcessorNode {
         &mut self,
         graph: &SharedActiveGraph,
         branch: &mut BranchRuntime,
-        incoming_relay: &Identifier,
+        incoming_relay: &RelayName,
         batch: RelayRecordBatch,
         kind: ProcessorInputFilterKind,
         materialized_state: &HashMap<String, RuntimeValue>,
@@ -5622,7 +5634,7 @@ impl RelayProcessorNode {
         &'a mut self,
         graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
-        incoming_relay: &'a Identifier,
+        incoming_relay: &'a RelayName,
         batch: RelayRecordBatch,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
@@ -7399,15 +7411,15 @@ impl RelayProcessorNode {
 /// The exact relay schemas one WASM guest call encodes against.
 struct WasmGuestCallSchemas {
     input: Arc<CompiledSchema>,
-    outputs: Vec<(Identifier, Arc<CompiledSchema>)>,
+    outputs: Vec<(RelayName, Arc<CompiledSchema>)>,
 }
 
 /// Resolves the input and output relay schemas a WASM guest call needs. Returns `None` after
 /// NACKing everything the branch is holding when the graph can no longer describe them.
 fn wasm_guest_call_schemas(
     branch: &BranchRuntime,
-    processor: &Identifier,
-    input_relays: &[Identifier],
+    processor: &ModelName,
+    input_relays: &[RelayName],
     output_routes: &RelayProcessorOutputsNode,
     ack_map: &mut WasmAckMap,
 ) -> Option<WasmGuestCallSchemas> {
@@ -7499,7 +7511,7 @@ impl RelayProcessorTemplate {
     fn instantiate(
         &self,
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         key: &Option<BranchKey>,
     ) -> Result<RelayProcessorNode, String> {
         Ok(RelayProcessorNode {
@@ -7695,7 +7707,7 @@ impl BranchInstanceTemplate {
     async fn prepare_wasm_processors(
         &mut self,
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
     ) -> Result<(), String> {
         for processor in self.processors.values_mut() {
             tokio::task::consume_budget().await;
@@ -7726,7 +7738,7 @@ impl BranchInstanceTemplate {
     fn instantiate(
         &self,
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         key: Option<BranchKey>,
     ) -> Result<Mutex<BranchRuntime>, String> {
         let relays = self
@@ -7815,7 +7827,7 @@ impl BranchRuntime {
         }
     }
 
-    fn reconcile_materialized_state_membership(&mut self, relay: &Identifier) {
+    fn reconcile_materialized_state_membership(&mut self, relay: &RelayName) {
         let current_epoch = self
             .runtime
             .relay_state_epoch(&self.domain)
@@ -7884,7 +7896,7 @@ impl BranchRuntime {
         self.relay_state_epoch = Some(current_epoch);
     }
 
-    async fn materialize_stream_batch(&mut self, relay: &Identifier, batch: &RelayRecordBatch) {
+    async fn materialize_stream_batch(&mut self, relay: &RelayName, batch: &RelayRecordBatch) {
         if self.runtime.relay_is_cluster_scheduled(&self.domain, relay) {
             return;
         }
@@ -7916,13 +7928,13 @@ impl BranchRuntime {
         }
     }
 
-    fn processor_has_pending_materialized(&self, processor_id: &Identifier) -> bool {
+    fn processor_has_pending_materialized(&self, processor_id: &ModelName) -> bool {
         self.processors
             .get(processor_id)
             .is_some_and(|processor| !processor.pending_materialized.is_empty())
     }
 
-    fn snapshot_processor_live_state(&mut self, processor_id: &Identifier) -> Result<(), String> {
+    fn snapshot_processor_live_state(&mut self, processor_id: &ModelName) -> Result<(), String> {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return Ok(());
         };
@@ -7934,7 +7946,7 @@ impl BranchRuntime {
     async fn retry_processor_pending_materialized(
         &mut self,
         graph: &SharedActiveGraph,
-        processor_id: &Identifier,
+        processor_id: &ModelName,
     ) {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return;
@@ -7953,7 +7965,7 @@ impl BranchRuntime {
     async fn retry_materialized_waiters(
         &mut self,
         graph: &SharedActiveGraph,
-        updated_relay: &Identifier,
+        updated_relay: &RelayName,
     ) {
         let processor_ids = self
             .processors
@@ -7990,9 +8002,9 @@ impl BranchRuntime {
             .observe_global_node_sent(NodeBatchObservation {
                 domain: &self.domain,
                 kind: self.source_kind,
-                node: &self.source,
+                node: &ModelName::from(&self.source),
                 relay: &root_relay,
-                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                physical_node_id: self.runtime.local_node_id.read().as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
@@ -8002,9 +8014,9 @@ impl BranchRuntime {
             NodeBatchObservation {
                 domain: &self.domain,
                 kind: self.source_kind,
-                node: &self.source,
+                node: &ModelName::from(&self.source),
                 relay: &root_relay,
-                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                physical_node_id: self.runtime.local_node_id.read().as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
@@ -8050,7 +8062,7 @@ impl BranchRuntime {
     fn dispatch_stream<'a>(
         &'a mut self,
         graph: &'a SharedActiveGraph,
-        relay: &'a Identifier,
+        relay: &'a RelayName,
         batch: &'a RelayRecordBatch,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RelayDispatchResult> + Send + 'a>> {
         Box::pin(async move {
@@ -8068,8 +8080,8 @@ impl BranchRuntime {
     async fn execute_processor_input(
         &mut self,
         graph: &SharedActiveGraph,
-        processor_id: &Identifier,
-        incoming_relay: &Identifier,
+        processor_id: &ModelName,
+        incoming_relay: &RelayName,
         batch: RelayRecordBatch,
     ) {
         let Some(mut processor) = self.processors.remove(processor_id) else {
@@ -8087,7 +8099,7 @@ impl BranchRuntime {
                 kind: processor.kind,
                 node: &processor.processor,
                 relay: incoming_relay,
-                physical_node_id: physical_node_id.as_deref(),
+                physical_node_id: physical_node_id.as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: delivery_observation.domain_timestamp,
@@ -8099,7 +8111,7 @@ impl BranchRuntime {
                 kind: processor.kind,
                 node: &processor.processor,
                 relay: incoming_relay,
-                physical_node_id: physical_node_id.as_deref(),
+                physical_node_id: physical_node_id.as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: delivery_observation.domain_timestamp,
@@ -8118,7 +8130,7 @@ impl BranchRuntime {
                     kind: processor.kind,
                     node: &processor.processor,
                     relay: incoming_relay,
-                    physical_node_id: physical_node_id.as_deref(),
+                    physical_node_id: physical_node_id.as_ref(),
                     seconds,
                     domain_timestamp: delivery_observation.domain_timestamp,
                 });
@@ -8129,7 +8141,7 @@ impl BranchRuntime {
                     kind: processor.kind,
                     node: &processor.processor,
                     relay: incoming_relay,
-                    physical_node_id: physical_node_id.as_deref(),
+                    physical_node_id: physical_node_id.as_ref(),
                     seconds,
                     domain_timestamp: delivery_observation.domain_timestamp,
                 },
@@ -8144,7 +8156,7 @@ impl BranchRuntime {
     async fn flush_processor_collected_inputs(
         &mut self,
         graph: &SharedActiveGraph,
-        processor_id: &Identifier,
+        processor_id: &ModelName,
     ) {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return;
@@ -8158,7 +8170,7 @@ impl BranchRuntime {
         graph: &SharedActiveGraph,
         output: &RelayProcessorOutputNode,
         source_kind: ModelKind,
-        source: &Identifier,
+        source: &ModelName,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.runtime
@@ -8166,9 +8178,9 @@ impl BranchRuntime {
             .observe_global_node_sent(NodeBatchObservation {
                 domain: &self.domain,
                 kind: source_kind,
-                node: source,
+                node: &ModelName::from(source),
                 relay: &output.relay,
-                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                physical_node_id: self.runtime.local_node_id.read().as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
@@ -8178,9 +8190,9 @@ impl BranchRuntime {
             NodeBatchObservation {
                 domain: &self.domain,
                 kind: source_kind,
-                node: source,
+                node: &ModelName::from(source),
                 relay: &output.relay,
-                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                physical_node_id: self.runtime.local_node_id.read().as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
@@ -8317,8 +8329,8 @@ impl IngestorRouteTask {
                         NodeWithoutRelayObservation {
                             domain: &self.domain,
                             kind: self.template.branch.source_kind,
-                            node: &self.template.branch.source,
-                            physical_node_id: self.runtime_handle.local_node_id.read().as_deref(),
+                            node: &ModelName::from(&self.template.branch.source),
+                            physical_node_id: self.runtime_handle.local_node_id.read().as_ref(),
                             messages: 1,
                             bytes: row_bytes,
                             domain_timestamp: Some(metadata.ingested_at_high_watermark()),
@@ -8487,8 +8499,8 @@ impl IngestorRouteTask {
 impl IngestorRouteRuntime {
     fn new(
         runtime_handle: Runtime,
-        domain: Domain,
-        ingestor: Identifier,
+        domain: DomainName,
+        ingestor: IngestorName,
         graph: SharedActiveGraph,
         template: IngestorRouteTemplate,
         expiration_scan_interval: Duration,
@@ -8539,24 +8551,24 @@ impl IngestorRouteRuntime {
 }
 
 impl Runtime {
-    fn register_branch_lifecycle_metrics(&self, domain: &Domain, branch: Option<&Identifier>) {
+    fn register_branch_lifecycle_metrics(&self, domain: &DomainName, branch: Option<&BranchName>) {
         if let Some(branch) = branch {
             self.metrics
-                .register_branch(domain, branch, self.local_node_id.read().as_deref());
+                .register_branch(domain, branch, self.local_node_id.read().as_ref());
         }
     }
 
     fn observe_branch_instance_created(
         &self,
-        domain: &Domain,
-        branch: Option<&Identifier>,
+        domain: &DomainName,
+        branch: Option<&BranchName>,
         key: &Option<BranchKey>,
     ) {
         if let Some(branch) = branch {
             self.metrics.observe_branch_instance_created(
                 domain,
                 branch,
-                self.local_node_id.read().as_deref(),
+                self.local_node_id.read().as_ref(),
                 branch_key_display(key),
             );
         }
@@ -8564,8 +8576,8 @@ impl Runtime {
 
     fn observe_branch_instance_removed(
         &self,
-        domain: &Domain,
-        branch: Option<&Identifier>,
+        domain: &DomainName,
+        branch: Option<&BranchName>,
         key: &Option<BranchKey>,
         reason: Option<BranchEvictionReason>,
     ) {
@@ -8577,7 +8589,7 @@ impl Runtime {
             self.metrics.observe_branch_instance_removed(
                 domain,
                 branch,
-                physical_node_id.as_deref(),
+                physical_node_id.as_ref(),
                 branch_key_display(key),
                 reason,
             );
@@ -8585,7 +8597,7 @@ impl Runtime {
             self.metrics.observe_branch_instance_detached(
                 domain,
                 branch,
-                physical_node_id.as_deref(),
+                physical_node_id.as_ref(),
                 branch_key_display(key),
             );
         }
@@ -8711,8 +8723,8 @@ impl BranchExecutionRuntime {
 
     fn new(
         runtime_handle: Runtime,
-        domain: Domain,
-        ingestor: Identifier,
+        domain: DomainName,
+        ingestor: IngestorName,
         graph: SharedActiveGraph,
         template: BranchInstanceTemplate,
         expiration_scan_interval: Duration,
@@ -8976,9 +8988,9 @@ impl BranchExecutionRuntime {
 
 async fn expire_branch_instance_instances(
     runtime: &Runtime,
-    domain: &Domain,
-    ingestor: &Identifier,
-    branch: Option<&Identifier>,
+    domain: &DomainName,
+    ingestor: &IngestorName,
+    branch: Option<&BranchName>,
     now: Timestamp,
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
@@ -9003,9 +9015,9 @@ async fn expire_branch_instance_instances(
 
 async fn evict_branch_instance_instances_to_capacity(
     runtime: &Runtime,
-    domain: &Domain,
-    ingestor: &Identifier,
-    branch: Option<&Identifier>,
+    domain: &DomainName,
+    ingestor: &IngestorName,
+    branch: Option<&BranchName>,
     max_instances: usize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
@@ -9030,9 +9042,9 @@ async fn evict_branch_instance_instances_to_capacity(
 
 async fn shutdown_all_branch_instance_instances(
     runtime: &Runtime,
-    domain: &Domain,
-    ingestor: &Identifier,
-    branch: Option<&Identifier>,
+    domain: &DomainName,
+    ingestor: &IngestorName,
+    branch: Option<&BranchName>,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
     for (key, state) in instances.drain() {
@@ -9049,7 +9061,7 @@ async fn shutdown_all_branch_instance_instances(
 
 fn branch_lru_placement(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     template: &BranchInstanceTemplate,
 ) -> RuntimeStatePlacement {
     runtime.state_placement(
@@ -9063,7 +9075,7 @@ fn branch_lru_placement(
 
 fn restore_branch_instance_lru_snapshot(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Result<u64, String> {
@@ -9088,7 +9100,7 @@ fn restore_branch_instance_lru_snapshot(
 
 fn persist_branch_instance_lru_snapshot<V>(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     template: &BranchInstanceTemplate,
     instances: &BranchInstanceRegistry<Option<BranchKey>, V>,
     last_persisted_lsm: &mut u64,
@@ -9142,7 +9154,7 @@ fn record_next_branch_instance_branch_deadline(
 
 fn wall_duration_until_domain_deadline(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     now: Timestamp,
     deadline: Timestamp,
 ) -> Duration {
@@ -9178,7 +9190,7 @@ struct ProcessorBranchTask {
 }
 
 struct ProcessorBranchInput {
-    relay: Identifier,
+    relay: RelayName,
     batch: RelayRecordBatch,
     work: NodeQuiesceWorkGuard,
 }
@@ -9421,14 +9433,14 @@ impl ScheduledNodeTask {
 #[derive(Clone)]
 pub(in crate::runtime) struct ProcessorRuntimeContext {
     runtime_handle: Runtime,
-    domain: Domain,
+    domain: DomainName,
     graph: SharedActiveGraph,
 }
 
 impl ProcessorRuntimeContext {
     pub(in crate::runtime) fn new(
         runtime_handle: Runtime,
-        domain: Domain,
+        domain: DomainName,
         graph: SharedActiveGraph,
     ) -> Self {
         Self {
@@ -9443,7 +9455,7 @@ pub(in crate::runtime) fn spawn_processor_node_runtime(
     context: ProcessorRuntimeContext,
     shutdown_tx: &watch::Sender<bool>,
     template: BranchInstanceTemplate,
-    inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
+    inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     expiration_scan_interval: Duration,
 ) -> ScheduledNodeTask {
     spawn_processor_node_runtime_with_handoffs(
@@ -9460,7 +9472,7 @@ pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
     context: ProcessorRuntimeContext,
     shutdown_tx: &watch::Sender<bool>,
     template: BranchInstanceTemplate,
-    inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
+    inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     handoffs: Vec<ProcessorBranchHandoff>,
     expiration_scan_interval: Duration,
 ) -> ScheduledNodeTask {
@@ -9481,7 +9493,7 @@ pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
 async fn run_processor_node_runtime(
     context: ProcessorRuntimeContext,
     template: BranchInstanceTemplate,
-    inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
+    inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     shutdown_rx: watch::Receiver<bool>,
     command_rx: mpsc::Receiver<ProcessorNodeCommand>,
     restored_handoffs: Vec<ProcessorBranchHandoff>,
@@ -9722,7 +9734,7 @@ async fn run_processor_node_runtime(
 
 struct ProcessorNodeDispatchContext<'a> {
     runtime_handle: &'a Runtime,
-    domain: &'a Domain,
+    domain: &'a DomainName,
     graph: &'a SharedActiveGraph,
     template: &'a BranchInstanceTemplate,
     now: Timestamp,
@@ -9731,7 +9743,7 @@ struct ProcessorNodeDispatchContext<'a> {
 async fn dispatch_processor_node_input(
     context: ProcessorNodeDispatchContext<'_>,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
-    relay: Identifier,
+    relay: RelayName,
     batch: RelayRecordBatch,
     dequeued_work: NodeQuiesceWorkGuard,
 ) {
@@ -9834,7 +9846,10 @@ fn spawn_processor_branch_task(
     let mut branch = template
         .instantiate(&context.runtime_handle, &context.domain, key)?
         .into_inner();
-    if let Some(processor) = branch.processors.get_mut(&template.source) {
+    if let Some(processor) = branch
+        .processors
+        .get_mut(&ModelName::from(&template.source))
+    {
         processor.pending_materialized = pending_materialized;
     }
     let (input_tx, input_rx) = mpsc::channel(1);
@@ -9843,7 +9858,7 @@ fn spawn_processor_branch_task(
     let (snapshot_shutdown_tx, _) = watch::channel(false);
     let (snapshot_task, snapshot_requests) = branch
         .processors
-        .get(&processor)
+        .get(&ModelName::from(&processor))
         .map(|processor| {
             processor.spawn_snapshot_task(&context.runtime_handle, &snapshot_shutdown_tx)
         })
@@ -9858,7 +9873,7 @@ fn spawn_processor_branch_task(
         .node_quiesce_counters(&context.domain, &processor);
     let task = tokio::spawn(run_processor_branch_task(
         context,
-        processor,
+        ModelName::from(&processor),
         branch,
         input_rx,
         stop_rx,
@@ -9874,7 +9889,7 @@ fn spawn_processor_branch_task(
 
 async fn stop_processor_snapshot_task(
     branch: &mut BranchRuntime,
-    processor: &Identifier,
+    processor: &ModelName,
     snapshot: &mut ProcessorSnapshotTask,
 ) {
     if let Some(requests) = snapshot.requests.as_mut() {
@@ -9902,7 +9917,7 @@ async fn stop_processor_snapshot_task(
 
 async fn run_processor_branch_task(
     context: ProcessorRuntimeContext,
-    processor: Identifier,
+    processor: ModelName,
     mut branch: BranchRuntime,
     mut input: mpsc::Receiver<ProcessorBranchInput>,
     mut stop_rx: mpsc::Receiver<ProcessorBranchStopMode>,
@@ -10050,12 +10065,13 @@ async fn run_processor_branch_task(
 }
 
 async fn stop_processor_branch_task(
-    domain: &Domain,
-    processor: &Identifier,
+    domain: &DomainName,
+    processor: impl Into<ModelName>,
     key: &Option<BranchKey>,
     entry: Arc<ProcessorBranchTask>,
     mode: ProcessorBranchStopMode,
 ) {
+    let processor = processor.into();
     let _ = entry.stop.send(mode).await;
     let Some(mut task) = entry.task.lock().take() else {
         return;
@@ -10097,18 +10113,19 @@ async fn stop_processor_branch_task(
 
 async fn handoff_all_processor_branch_instances(
     runtime: &Runtime,
-    domain: &Domain,
-    processor: &Identifier,
-    branch: Option<&Identifier>,
+    domain: &DomainName,
+    processor: impl Into<ModelName>,
+    branch: Option<&BranchName>,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) -> Vec<ProcessorBranchHandoff> {
+    let processor = processor.into();
     let mut handoffs = Vec::new();
     for (key, entry) in instances.drain() {
         runtime.observe_branch_instance_removed(domain, branch, &key, None);
         let (response, receiver) = oneshot::channel();
         stop_processor_branch_task(
             domain,
-            processor,
+            processor.clone(),
             &key,
             entry,
             ProcessorBranchStopMode::Handoff(response),
@@ -10123,13 +10140,14 @@ async fn handoff_all_processor_branch_instances(
 
 async fn expire_processor_branch_instances(
     runtime: &Runtime,
-    domain: &Domain,
-    processor: &Identifier,
-    branch: Option<&Identifier>,
+    domain: &DomainName,
+    processor: impl Into<ModelName>,
+    branch: Option<&BranchName>,
     now: Timestamp,
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
+    let processor = processor.into();
     for (key, entry) in instances.expire(now, expiration_after) {
         runtime.observe_branch_instance_removed(
             domain,
@@ -10139,7 +10157,7 @@ async fn expire_processor_branch_instances(
         );
         stop_processor_branch_task(
             domain,
-            processor,
+            processor.clone(),
             &key,
             entry,
             ProcessorBranchStopMode::Evict,
@@ -10156,12 +10174,13 @@ async fn expire_processor_branch_instances(
 
 async fn evict_processor_branch_instances_to_capacity(
     runtime: &Runtime,
-    domain: &Domain,
-    processor: &Identifier,
-    branch: Option<&Identifier>,
+    domain: &DomainName,
+    processor: impl Into<ModelName>,
+    branch: Option<&BranchName>,
     max_instances: usize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
+    let processor = processor.into();
     for (key, entry) in instances.evict_lru_to_capacity(max_instances) {
         runtime.observe_branch_instance_removed(
             domain,
@@ -10171,7 +10190,7 @@ async fn evict_processor_branch_instances_to_capacity(
         );
         stop_processor_branch_task(
             domain,
-            processor,
+            processor.clone(),
             &key,
             entry,
             ProcessorBranchStopMode::Evict,
@@ -10189,16 +10208,17 @@ async fn evict_processor_branch_instances_to_capacity(
 
 async fn shutdown_all_processor_branch_instances(
     runtime: &Runtime,
-    domain: &Domain,
-    processor: &Identifier,
-    branch: Option<&Identifier>,
+    domain: &DomainName,
+    processor: impl Into<ModelName>,
+    branch: Option<&BranchName>,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
+    let processor = processor.into();
     for (key, entry) in instances.drain() {
         runtime.observe_branch_instance_removed(domain, branch, &key, None);
         stop_processor_branch_task(
             domain,
-            processor,
+            processor.clone(),
             &key,
             entry,
             ProcessorBranchStopMode::Detach,
@@ -10215,7 +10235,7 @@ async fn shutdown_all_processor_branch_instances(
 
 fn restore_processor_branch_lru_snapshot(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     graph: &SharedActiveGraph,
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
@@ -10246,7 +10266,7 @@ fn restore_processor_branch_lru_snapshot(
 
 #[derive(Debug, Clone)]
 struct LookupHashMapCall {
-    lookup: Identifier,
+    lookup: LookupName,
     lookup_runtime: Arc<LookupRuntime>,
     lookup_field: String,
     generated_field: String,
@@ -10260,14 +10280,14 @@ struct LookupHashMapCall {
 /// way over the same batch.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct LookupHashMapCallKey {
-    lookup: Identifier,
+    lookup: LookupName,
     lookup_field: String,
     key_expr: Expr,
 }
 
 #[derive(Debug, Clone)]
 struct PendingLookupHashMapCall {
-    lookup: Identifier,
+    lookup: LookupName,
     lookup_runtime: Arc<LookupRuntime>,
     lookup_field: String,
     lookup_field_type: ArrowDataType,
@@ -10384,7 +10404,7 @@ fn expr_contains_lookup_hash_map(expr: &SpannedExpr) -> bool {
 
 fn rewrite_lookup_hash_map_expr(
     expr: &SpannedExpr,
-    available_lookups: &HashMap<Identifier, Arc<LookupRuntime>>,
+    available_lookups: &HashMap<LookupName, Arc<LookupRuntime>>,
     pending_calls: &mut Vec<PendingLookupHashMapCall>,
 ) -> Result<SpannedExpr, String> {
     let rewritten = match &expr.inner {
@@ -10479,7 +10499,7 @@ fn rewrite_lookup_hash_map_expr(
                     ));
                 }
                 let lookup_name = lookup_hash_map_literal_arg(args, 0, expr.span)?;
-                let lookup = Identifier::parse(lookup_name).map_err(|error| {
+                let lookup = LookupName::parse(lookup_name).map_err(|error| {
                     format!("LOOKUP_HASH_MAP hash map name '{lookup_name}' is invalid: {error}")
                 })?;
                 let lookup_field = lookup_hash_map_literal_arg(args, 2, expr.span)?.to_string();
@@ -10553,7 +10573,7 @@ fn rewrite_lookup_hash_map_expr(
 
 fn rewrite_lookup_hash_map_program(
     parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
-    available_lookups: &HashMap<Identifier, Arc<LookupRuntime>>,
+    available_lookups: &HashMap<LookupName, Arc<LookupRuntime>>,
 ) -> Result<
     (
         nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
@@ -10709,10 +10729,10 @@ fn compile_lookup_hash_map_calls(
 fn referenced_materialized_stream_bindings(
     parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
     writable_namespaces: &HashSet<String>,
-    available_materialized_streams: &HashMap<Identifier, RuntimeMaterializedRelaySpec>,
-    current_branching: &[Identifier],
+    available_materialized_streams: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    current_branching: &[FieldName],
 ) -> Result<(Vec<VmCompileBinding>, MaterializedProgramInterest), String> {
-    let mut fields_by_relay = HashMap::<Identifier, HashSet<String>>::default();
+    let mut fields_by_relay = HashMap::<RelayName, HashSet<String>>::default();
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
         if writable_namespaces.contains(&relay)
             || relay == INGEST_METADATA_NAMESPACE
@@ -10723,7 +10743,7 @@ fn referenced_materialized_stream_bindings(
         let Some(relay_name) = relay.strip_prefix("relay_state.") else {
             continue;
         };
-        let Ok(relay) = Identifier::parse(relay_name) else {
+        let Ok(relay) = RelayName::parse(relay_name) else {
             continue;
         };
         let Some(spec) = available_materialized_streams.get(&relay) else {
@@ -10962,8 +10982,8 @@ fn all_optional_arrow_schema(schema: &CompiledSchema) -> StdArc<arrow_schema::Sc
 }
 
 fn compile_message_error_set_program(
-    domain: &Domain,
-    node: &Identifier,
+    domain: &DomainName,
+    node: &ModelName,
     assignments: &[Assignment],
     output_schema: Arc<CompiledSchema>,
     schemas: MessageErrorCompileSchemas,
@@ -11099,8 +11119,8 @@ fn compile_expression_filter_program(
 }
 
 fn compile_finalized_output_filter_program(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     filter: Option<&nervix_models::Expression>,
     output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
@@ -11273,8 +11293,8 @@ fn compile_scoped_filter_program(
 
 fn compile_processor_output_filter_map_program(
     target: RuntimeCompileTarget<'_>,
-    input_relays: &[Identifier],
-    output_relay: &Identifier,
+    input_relays: &[RelayName],
+    output_relay: &RelayName,
     construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
     inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
@@ -11561,8 +11581,8 @@ fn compile_output_branch_program(
 }
 
 fn compile_wasm_output_filter_map_program(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     construction: &RouteConstruction,
     output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
@@ -11677,7 +11697,7 @@ fn compile_wasm_output_filter_map_program(
 }
 
 pub(crate) fn compile_emitter_filter_map_program(
-    domain: &Domain,
+    domain: &DomainName,
     emitter: &CreateEmitter,
     input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
@@ -11767,7 +11787,7 @@ pub(crate) fn compile_emitter_filter_map_program(
     let body = compile_emitter_filter_map_part(
         RuntimeCompileTarget {
             domain,
-            identifier: &emitter.name,
+            identifier: &ModelName::from(&emitter.name),
         },
         parsed,
         RuntimeVmSchemaPair {
@@ -11784,7 +11804,7 @@ pub(crate) fn compile_emitter_filter_map_program(
 }
 
 pub(crate) fn compile_sqs_fifo_group_program(
-    domain: &Domain,
+    domain: &DomainName,
     emitter: &CreateEmitter,
     input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
@@ -11797,7 +11817,7 @@ pub(crate) fn compile_sqs_fifo_group_program(
     else {
         return Ok(None);
     };
-    let field = Identifier::parse("fifo_group")
+    let field = FieldName::parse("fifo_group")
         .assured("this is a constant literal that satisfies the identifier grammar");
     let output_schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
         field.as_str(),
@@ -11830,7 +11850,7 @@ pub(crate) fn compile_sqs_fifo_group_program(
     compile_emitter_filter_map_part(
         RuntimeCompileTarget {
             domain,
-            identifier: &emitter.name,
+            identifier: &ModelName::from(&emitter.name),
         },
         parsed,
         RuntimeVmSchemaPair {
@@ -11955,15 +11975,19 @@ fn compile_emitter_filter_map_part(
 }
 
 pub(crate) fn compile_session_filter_map_program(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: impl Into<ModelName>,
     where_clause: Option<&nervix_models::Expression>,
     input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+    let identifier = identifier.into();
     compile_expression_filter_program(
-        RuntimeCompileTarget { domain, identifier },
+        RuntimeCompileTarget {
+            domain,
+            identifier: &identifier,
+        },
         where_clause,
         RuntimeVmSchema {
             schema: input_schema,
@@ -11977,9 +12001,9 @@ pub(crate) fn compile_session_filter_map_program(
 
 pub(super) fn compile_key_projection_program(
     processor_kind: &str,
-    processor: &Identifier,
+    processor: &ModelName,
     clause: &str,
-    input_relays: &[Identifier],
+    input_relays: &[RelayName],
     expressions: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -11998,7 +12022,7 @@ pub(super) fn compile_key_projection_program(
         .map(|(index, expression)| {
             Ok(nervix_models::Assignment {
                 target: nervix_models::AssignmentTarget::bare(
-                    Identifier::parse(&format!("key_{index}")).map_err(|error| {
+                    FieldName::parse(&format!("key_{index}")).map_err(|error| {
                         format!(
                             "{processor_kind} '{}' has invalid key target: {error}",
                             processor
@@ -12086,7 +12110,7 @@ async fn evaluate_constant_expression_vm(
     const OUTPUT_FIELD: &str = "value";
     let assignment = nervix_models::Assignment {
         target: nervix_models::AssignmentTarget::bare(
-            Identifier::parse(OUTPUT_FIELD).map_err(|error| error.to_string())?,
+            FieldName::parse(OUTPUT_FIELD).map_err(|error| error.to_string())?,
         ),
         value: expression.clone(),
     };
@@ -12170,8 +12194,8 @@ async fn evaluate_constant_expression_vm(
 }
 
 fn compile_reorderer_program(
-    processor: &Identifier,
-    input_relays: &[Identifier],
+    processor: &ModelName,
+    input_relays: &[RelayName],
     order_by: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -12199,11 +12223,11 @@ fn compile_reorderer_program(
 }
 
 fn compile_correlator_where_program(
-    processor: &Identifier,
+    processor: &ModelName,
     correlate_where: &nervix_models::Expression,
-    left_relays: &[Identifier],
+    left_relays: &[RelayName],
     left_schema: StdArc<arrow_schema::Schema>,
-    right_relays: &[Identifier],
+    right_relays: &[RelayName],
     right_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledCorrelatorWhereProgram, String> {
@@ -12254,12 +12278,12 @@ fn compile_correlator_where_program(
 }
 
 struct CorrelatorOutputCompileContext<'a> {
-    processor: &'a Identifier,
+    processor: &'a ModelName,
     left_schema: StdArc<arrow_schema::Schema>,
     left_sensitivity: VmSchemaSensitivity,
     right_schema: StdArc<arrow_schema::Schema>,
     right_sensitivity: VmSchemaSensitivity,
-    output_relay: &'a Identifier,
+    output_relay: &'a RelayName,
     output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     construction: &'a RouteConstruction,
@@ -12454,10 +12478,10 @@ struct ReordererFlushContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
     node_kind: &'a str,
-    processor: &'a Identifier,
+    processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
-    input_relays: &'a [Identifier],
+    input_relays: &'a [RelayName],
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
 
@@ -12736,7 +12760,7 @@ fn store_correlator_unmatched_incoming(
 }
 
 async fn correlate_incoming_message(
-    processor: &Identifier,
+    processor: &ModelName,
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     match_policy: CorrelatorMatchPolicy,
@@ -12791,7 +12815,7 @@ async fn correlate_incoming_message(
 }
 
 async fn evaluate_correlator_where_matches(
-    processor: &Identifier,
+    processor: &ModelName,
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     incoming: &CorrelatorPendingMessage,
@@ -12989,7 +13013,7 @@ fn correlator_output_metadata(
 type CorrelatorOutputOutcome = Result<Option<RelayMessage>, Box<PlannedMessageError>>;
 
 fn correlator_output_batch_errors(
-    processor: &Identifier,
+    processor: &ModelName,
     matched: &CorrelatorMatchedBatch,
     acks: Vec<AckSet>,
     code: MessageErrorCode,
@@ -13019,7 +13043,7 @@ fn correlator_output_batch_errors(
 }
 
 async fn evaluate_correlator_output_batch(
-    processor: &Identifier,
+    processor: &ModelName,
     program: &CompiledCorrelatorOutputProgram,
     matched: &CorrelatorMatchedBatch,
     acks: Vec<AckSet>,
@@ -13295,7 +13319,7 @@ struct CorrelatorOutputContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
     node_kind: &'a str,
-    processor: &'a Identifier,
+    processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
 }
@@ -13399,7 +13423,13 @@ async fn enqueue_correlator_output(
         }
     };
     if branch
-        .dispatch_output(graph, output, ModelKind::Correlator, processor, &forwarded)
+        .dispatch_output(
+            graph,
+            output,
+            ModelKind::Correlator,
+            &ModelName::from(&RelayName::from(processor)),
+            &forwarded,
+        )
         .await
         .is_ok()
     {
@@ -13426,7 +13456,7 @@ async fn handle_correlator_timeout_action(
     graph: &SharedActiveGraph,
     branch: &mut BranchRuntime,
     node_kind: &str,
-    processor: &Identifier,
+    processor: &ModelName,
     error_policies: &ErrorPolicies,
     action: &CorrelationTimeoutAction,
     message: RelayMessage,
@@ -13487,7 +13517,13 @@ async fn handle_correlator_timeout_action(
                 }
             };
             if branch
-                .dispatch_output(graph, &output, ModelKind::Correlator, processor, &batch)
+                .dispatch_output(
+                    graph,
+                    &output,
+                    ModelKind::Correlator,
+                    &ModelName::from(&RelayName::from(processor)),
+                    &batch,
+                )
                 .await
                 .is_ok()
             {
@@ -13512,13 +13548,14 @@ async fn handle_correlator_timeout_action(
 }
 
 fn compile_ingestor_filter_map_program(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: impl Into<ModelName>,
     source: &IngestSource,
     construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+    let identifier = identifier.into();
     let parsed = lower_transforming_route(construction, &schemas.input, &schemas.output).map_err(
         |reason| RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
@@ -13641,7 +13678,7 @@ struct GeneratorSetProgramSchemas {
 }
 
 fn compile_generator_set_program(
-    domain: &Domain,
+    domain: &DomainName,
     generator: &CreateGenerator,
     output: &ProcessorOutput,
     schemas: GeneratorSetProgramSchemas,
@@ -13714,7 +13751,7 @@ fn compile_generator_set_program(
 }
 
 pub(crate) async fn execute_filter_map_on_record(
-    owner: &Identifier,
+    subscription: &SubscriptionName,
     filter_map: &CompiledProgramWithMaterializedInterest,
     record: RuntimeRow,
     branch_key: Option<&BranchKey>,
@@ -13727,7 +13764,7 @@ pub(crate) async fn execute_filter_map_on_record(
     let carrier = record.one_row_batch();
     let outcome = evaluate_filter_map_on_batch(
         "subscription",
-        owner,
+        subscription,
         filter_map,
         FilterMapOutcomeInputs {
             carrier: &carrier,
@@ -13768,11 +13805,12 @@ struct FilterMapOutcomeInputs<'a> {
 
 async fn evaluate_filter_map_on_batch(
     processor_kind: &str,
-    processor: &Identifier,
+    processor: impl Into<ModelName>,
     filter_map: &CompiledProgramWithMaterializedInterest,
     inputs: FilterMapOutcomeInputs<'_>,
     execution_now: Timestamp,
 ) -> Result<Vec<SingleRecordFilterMapOutcome>, String> {
+    let processor = processor.into();
     let FilterMapOutcomeInputs {
         carrier,
         record_metadata,
@@ -13977,7 +14015,7 @@ enum ProcessorOutputFilterSource<'a> {
 }
 
 impl ProcessorOutputFilterSource<'_> {
-    fn relays(&self, input_relays: &[Identifier]) -> Vec<Identifier> {
+    fn relays(&self, input_relays: &[RelayName]) -> Vec<RelayName> {
         match self {
             Self::InputRelays | Self::OutputRelay | Self::Inferencer(_) => input_relays.to_vec(),
         }
@@ -13997,9 +14035,9 @@ struct ProcessorOutputDispatchContext<'a> {
     branch: &'a mut BranchRuntime,
     node_kind: &'a str,
     source_kind: ModelKind,
-    processor: &'a Identifier,
+    processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
-    input_relays: &'a [Identifier],
+    input_relays: &'a [RelayName],
     filter_source: ProcessorOutputFilterSource<'a>,
     materialized_state: ProcessorMaterializedState<'a>,
 }
@@ -14027,9 +14065,9 @@ impl ProcessorMaterializedState<'_> {
     async fn resolve(
         &self,
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         node_kind: &str,
-        node: &Identifier,
+        node: &ModelName,
         branch_key: &Option<BranchKey>,
     ) -> Result<HashMap<String, RuntimeValue>, String> {
         match self {
@@ -14124,7 +14162,7 @@ struct PendingProcessorOutputMessageError {
 
 fn processor_output_input_sensitivity(
     branch: &BranchRuntime,
-    relays: &[Identifier],
+    relays: &[RelayName],
 ) -> VmSchemaSensitivity {
     let Some(relay) = relays.first() else {
         return VmSchemaSensitivity::default();
@@ -14818,13 +14856,14 @@ async fn flush_due_processor_outputs(
 
 async fn plan_filter_map_messages(
     processor_kind: &str,
-    processor: &Identifier,
+    processor: impl Into<ModelName>,
     program_label: &str,
     program: &CompiledProgramWithMaterializedInterest,
     mut batch: RelayRecordBatch,
     execution_now: Timestamp,
     side_inputs: &HashMap<String, RuntimeValue>,
 ) -> Result<FilterMapPlan, PlannedGeneralError> {
+    let processor = processor.into();
     let lookup_columns = match compute_lookup_hash_map_columns(
         program,
         &FilterMapBatchInputs {
@@ -15086,7 +15125,7 @@ struct EmitterFilterMapPlan {
 }
 
 async fn plan_emitter_filter_map_batch(
-    emitter: &Identifier,
+    emitter: &EmitterName,
     program: &CompiledEmitterFilterMapProgram,
     mut input: RelayRecordBatch,
     execution_now: Timestamp,
@@ -15300,7 +15339,7 @@ async fn plan_emitter_filter_map_batch(
 }
 
 pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
-    emitter: &Identifier,
+    emitter: &EmitterName,
     program: &CompiledProgramWithMaterializedInterest,
     batch: &RelayRecordBatch,
     execution_now: Timestamp,
@@ -15377,13 +15416,14 @@ impl VmUninitializedInput {
 
 async fn execute_prepared_filter_map(
     processor_kind: &str,
-    processor: &Identifier,
+    processor: impl Into<ModelName>,
     program: &CompiledProgramWithMaterializedInterest,
     vm_batch: VmTypedBatch,
     execution_now: Timestamp,
     acks: Vec<AckSet>,
     injector: Option<Arc<Box<dyn VmFunctionInjector>>>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralError> {
+    let processor = processor.into();
     let result = match execute_program_with_selection_in_context(
         &program.compiled,
         &vm_batch,
@@ -15425,13 +15465,14 @@ struct FilterMapBatchInputs<'a> {
 
 async fn execute_filter_map_program_on_batch(
     processor_kind: &str,
-    processor: &Identifier,
+    processor: impl Into<ModelName>,
     program: &CompiledProgramWithMaterializedInterest,
     inputs: FilterMapBatchInputs<'_>,
     execution_now: Timestamp,
     acks: Vec<AckSet>,
     mut shared: Option<&mut SharedBatchColumns>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralError> {
+    let processor = processor.into();
     let lookup_columns = match compute_lookup_hash_map_columns(
         program,
         &inputs,
@@ -15512,7 +15553,7 @@ async fn execute_filter_map_program_on_batch(
 }
 
 async fn evaluate_output_branch_program(
-    owner: &Identifier,
+    node: impl Into<ModelName>,
     program: &CompiledBranchProgram,
     input: &RuntimeRecordBatch,
     output: &RuntimeRecordBatch,
@@ -15520,11 +15561,12 @@ async fn evaluate_output_branch_program(
     side_inputs: &HashMap<String, RuntimeValue>,
     execution_now: Timestamp,
 ) -> Result<Vec<Result<Option<BranchKey>, String>>, String> {
+    let node = node.into();
     let row_count = output.batch().num_rows();
     if input.batch().num_rows() != row_count || keys.len() != row_count {
         return Err(format!(
             "branch construction for '{}' received {} input rows, {} output rows, and {} keys",
-            owner.as_str(),
+            node.as_str(),
             input.batch().num_rows(),
             row_count,
             keys.len()
@@ -15581,7 +15623,7 @@ async fn evaluate_output_branch_program(
     .map_err(|error| {
         format!(
             "branch construction VM for '{}' failed: {}",
-            owner.as_str(),
+            node.as_str(),
             error
         )
     })?;
@@ -15592,7 +15634,7 @@ async fn evaluate_output_branch_program(
         if input_row >= outcomes.len() {
             return Err(format!(
                 "branch construction VM for '{}' selected unknown row {}",
-                owner.as_str(),
+                node.as_str(),
                 input_row
             ));
         }
@@ -15616,7 +15658,7 @@ async fn evaluate_output_branch_program(
                 field.name(),
             )?
             .ok_or_else(|| format!("branch field '{}' is null", field.name()))?;
-            let name = Identifier::parse(field.name()).map_err(|error| {
+            let name = FieldName::parse(field.name()).map_err(|error| {
                 format!(
                     "compiled branch field '{}' is invalid: {}",
                     field.name(),
@@ -15666,7 +15708,7 @@ fn message_timestamp(message: &RelayMessage) -> Timestamp {
 
 fn current_window_emit_high_watermark(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
 ) -> Result<Timestamp, String> {
     runtime
         .current_stream_expiration_time(domain)?
@@ -15947,7 +15989,7 @@ async fn flush_ready_window_processor(
 }
 
 fn snapshot_window_processor_live_state(
-    processor: &Identifier,
+    processor: &ModelName,
     replicated_state: &ReplicatedWindowProcessorState,
     state: &WindowProcessorState,
 ) -> Result<(), String> {
@@ -17830,8 +17872,8 @@ fn vm_typed_batch_selected_rows_to_runtime_batch(
 
 fn relay_schema_for_runtime(
     runtime: &Runtime,
-    domain: &Domain,
-    relay: &Identifier,
+    domain: &DomainName,
+    relay: &RelayName,
 ) -> Result<Arc<CompiledSchema>, String> {
     let Some(execution) = runtime.executions.get(domain) else {
         return Err(format!("domain '{}' is not instantiated", domain.as_str()));
@@ -17847,8 +17889,8 @@ fn relay_schema_for_runtime(
 
 fn relay_branch_schema_for_runtime(
     runtime: &Runtime,
-    domain: &Domain,
-    relay: &Identifier,
+    domain: &DomainName,
+    relay: &RelayName,
 ) -> Option<StdArc<arrow_schema::Schema>> {
     runtime
         .executions
@@ -17859,9 +17901,9 @@ fn relay_branch_schema_for_runtime(
 
 fn materialized_stream_specs_for_graph(
     runtime: &Runtime,
-    domain: &Domain,
+    domain: &DomainName,
     _graph: &SharedActiveGraph,
-) -> HashMap<Identifier, RuntimeMaterializedRelaySpec> {
+) -> HashMap<RelayName, RuntimeMaterializedRelaySpec> {
     let Some(execution) = runtime.executions.get(domain) else {
         return HashMap::default();
     };
@@ -18542,26 +18584,27 @@ async fn flush_branch_wasm_processor(
 
 struct WasmInstanceContext<'a> {
     branch: &'a BranchRuntime,
-    processor: &'a Identifier,
-    resource: &'a Identifier,
+    processor: &'a ModelName,
+    resource: &'a ResourceName,
     resource_version: Option<u64>,
     file: &'a str,
     limits: nervix_models::WasmProcessorLimits,
-    guest_input_relay: &'a Identifier,
+    guest_input_relay: &'a RelayName,
     input_schema: &'a Arc<CompiledSchema>,
-    output_schemas: &'a [(Identifier, Arc<CompiledSchema>)],
+    output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     replicated_state: &'a ReplicatedWasmProcessorState,
 }
 
 impl Runtime {
     async fn compile_wasm_processor_module(
         &self,
-        domain: &Domain,
-        processor: &Identifier,
-        resource: &Identifier,
+        domain: &DomainName,
+        processor: impl Into<ModelName>,
+        resource: &ResourceName,
         resource_version: Option<u64>,
         file: &str,
     ) -> Result<WasmCompiledBranchProcessor, String> {
+        let processor = processor.into();
         let id = self.resolve_resource_id(domain, resource, resource_version, resource.as_str())?;
         let version = id.version;
         let Some(resource_store) = self.resource_store.read().clone() else {
@@ -18747,12 +18790,12 @@ struct WasmOutputContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
     node_kind: &'a str,
-    processor: &'a Identifier,
+    processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
-    input_relays: &'a [Identifier],
+    input_relays: &'a [RelayName],
     input_schema: &'a Arc<CompiledSchema>,
-    output_schemas: &'a [(Identifier, Arc<CompiledSchema>)],
+    output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     key: &'a Option<BranchKey>,
     dispatch_error: &'static str,
 }
@@ -18906,7 +18949,7 @@ enum WasmOutputError {
 struct WasmOutputValidator<'a> {
     ack_map: &'a WasmAckMap,
     input_schema: &'a Arc<CompiledSchema>,
-    output_schemas: &'a [(Identifier, Arc<CompiledSchema>)],
+    output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     output_routes: &'a RelayProcessorOutputsNode,
 }
 
@@ -19067,7 +19110,7 @@ impl WasmOutputValidator<'_> {
             acks,
         } = output;
         let output_identifier =
-            Identifier::parse(&output_relay).map_err(|_| WasmOutputError::UnknownOutputRelay {
+            RelayName::parse(&output_relay).map_err(|_| WasmOutputError::UnknownOutputRelay {
                 output_relay: output_relay.clone(),
             })?;
         let Some(schema) = wasm_output_schema(self.output_schemas, &output_identifier) else {
@@ -19494,9 +19537,9 @@ struct WasmRouteDispatchContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
     node_kind: &'a str,
-    processor: &'a Identifier,
+    processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
-    input_relays: &'a [Identifier],
+    input_relays: &'a [RelayName],
     dispatch_error: &'static str,
 }
 
@@ -20029,8 +20072,8 @@ async fn dispatch_wasm_output_route(
 }
 
 fn wasm_output_schema<'a>(
-    output_schemas: &'a [(Identifier, Arc<CompiledSchema>)],
-    output_relay: &Identifier,
+    output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
+    output_relay: &RelayName,
 ) -> Option<&'a Arc<CompiledSchema>> {
     output_schemas
         .iter()
@@ -20052,9 +20095,9 @@ fn wasm_output_token_use_counts(outputs: &[WasmMaterializedOutput]) -> HashMap<u
 struct WasmSidecarTerminalContext<'a> {
     branch: &'a BranchRuntime,
     node_kind: &'a str,
-    processor: &'a Identifier,
+    processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
-    message_error_relay: &'a Identifier,
+    message_error_relay: &'a RelayName,
     message_error_policy: &'a MessageErrorPolicy,
 }
 
@@ -20141,7 +20184,7 @@ async fn apply_wasm_sidecar_terminal_decisions(
 
 async fn persist_wasm_guest_state(
     runtime: &Runtime,
-    processor: &Identifier,
+    processor: &ModelName,
     replicated_state: &ReplicatedWasmProcessorState,
     instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
 ) -> Result<(), String> {
@@ -20327,9 +20370,9 @@ fn wall_duration_until_timestamp(current: Timestamp, target: Timestamp) -> Durat
 
 struct GeneratorFlushContext<'a> {
     runtime: &'a Runtime,
-    domain: &'a Domain,
-    generator: &'a Identifier,
-    output_relay: &'a Identifier,
+    domain: &'a DomainName,
+    generator: &'a GeneratorName,
+    output_relay: &'a RelayName,
     output_schema: &'a Arc<CompiledSchema>,
     output_registry: &'a RelayRegistry,
     output_services: &'a Arc<RelayBoundaryServices>,
@@ -20446,14 +20489,14 @@ async fn decode_ingested_payload_owned(
 
 pub(crate) fn scheduled_relay_owner_nodes(
     schedule: &DomainSchedule,
-    relay: &Identifier,
-) -> Vec<String> {
+    relay: &RelayName,
+) -> Vec<ClusterNodeName> {
     schedule
         .nodes
         .iter()
-        .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
+        .find(|node| node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay))
         .and_then(ScheduledNode::execution_node)
-        .map(|owner| vec![owner.to_string()])
+        .map(|owner| vec![owner.clone()])
         .unwrap_or_default()
 }
 
@@ -20502,9 +20545,9 @@ fn operation_for_filter_label(label: &str) -> MessageErrorOperation {
 }
 
 fn preserved_message_error_branch(
-    target_branching: &[Identifier],
+    target_branching: &[FieldName],
     incoming: &Option<BranchKey>,
-    relay: &Identifier,
+    relay: &RelayName,
     reference: uuid::Uuid,
 ) -> Result<Option<BranchKey>, String> {
     match (target_branching.is_empty(), incoming.as_ref()) {

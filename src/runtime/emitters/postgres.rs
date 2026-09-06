@@ -1,3 +1,4 @@
+use nervix_models::TableName;
 use postgres_types::ToSql;
 use tokio_postgres::{Client as PostgresClient, NoTls};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -175,7 +176,7 @@ impl PostgresEmitter {
 
     async fn column_types(
         client: &PostgresClient,
-        table: &Identifier,
+        table: &TableName,
         columns: &[String],
     ) -> Result<Vec<String>, PostgresWriteError> {
         let table_name = table.as_str().to_string();
@@ -212,7 +213,7 @@ impl PostgresEmitter {
 
     async fn publish_rows_with_types(
         client: &PostgresClient,
-        table: &Identifier,
+        table: &TableName,
         mappings: &[PostgresValueMapping],
         conflict_action: &PostgresConflictAction,
         column_types: &[String],
@@ -333,7 +334,7 @@ impl PostgresEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        table: &Identifier,
+        table: &TableName,
         values: &[PostgresValueMapping],
         conflict_action: &PostgresConflictAction,
         batch: &RelayRecordBatch,

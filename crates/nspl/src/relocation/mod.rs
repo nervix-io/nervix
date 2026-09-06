@@ -8,10 +8,10 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, correlator_ref, deduplicator_ref,
-        emitter_ref, generator_ref, inferencer_ref, ingestor_ref, into_parse_error, junction_ref,
-        kw, kw_phrase2, lex_input, lookup_ref, node_id, reingestor_ref, relay_ref, reorderer_ref,
-        suggest_from, tok, wasm_processor_ref, window_processor_ref,
+        ParseError, ParseFromSourceError, boxed_choice, cluster_node_name, correlator_ref,
+        deduplicator_ref, emitter_ref, generator_ref, inferencer_ref, ingestor_ref,
+        into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref, reingestor_ref,
+        relay_ref, reorderer_ref, suggest_from, tok, wasm_processor_ref, window_processor_ref,
     },
 };
 
@@ -22,43 +22,43 @@ fn relocation_member<'src>()
     boxed_choice!(
         kw(Identifier::Ingestor)
             .ignore_then(ingestor_ref())
-            .map(|name| RelocationMember::new(ModelKind::Ingestor, name)),
+            .map(|name| RelocationMember::new(ModelKind::Ingestor, name.into())),
         kw(Identifier::Reingestor)
             .ignore_then(reingestor_ref())
-            .map(|name| RelocationMember::new(ModelKind::Reingestor, name)),
+            .map(|name| RelocationMember::new(ModelKind::Reingestor, name.into())),
         kw(Identifier::Generator)
             .ignore_then(generator_ref())
-            .map(|name| RelocationMember::new(ModelKind::Generator, name)),
+            .map(|name| RelocationMember::new(ModelKind::Generator, name.into())),
         kw(Identifier::Junction)
             .ignore_then(junction_ref())
-            .map(|name| RelocationMember::new(ModelKind::Junction, name)),
+            .map(|name| RelocationMember::new(ModelKind::Junction, name.into())),
         kw(Identifier::Deduplicator)
             .ignore_then(deduplicator_ref())
-            .map(|name| RelocationMember::new(ModelKind::Deduplicator, name)),
+            .map(|name| RelocationMember::new(ModelKind::Deduplicator, name.into())),
         kw(Identifier::Correlator)
             .ignore_then(correlator_ref())
-            .map(|name| RelocationMember::new(ModelKind::Correlator, name)),
+            .map(|name| RelocationMember::new(ModelKind::Correlator, name.into())),
         kw(Identifier::Reorderer)
             .ignore_then(reorderer_ref())
-            .map(|name| RelocationMember::new(ModelKind::Reorderer, name)),
+            .map(|name| RelocationMember::new(ModelKind::Reorderer, name.into())),
         kw_phrase2(Identifier::Window, Identifier::Processor)
             .ignore_then(window_processor_ref())
-            .map(|name| RelocationMember::new(ModelKind::WindowProcessor, name)),
+            .map(|name| RelocationMember::new(ModelKind::WindowProcessor, name.into())),
         kw(Identifier::Inferencer)
             .ignore_then(inferencer_ref())
-            .map(|name| RelocationMember::new(ModelKind::Inferencer, name)),
+            .map(|name| RelocationMember::new(ModelKind::Inferencer, name.into())),
         kw_phrase2(Identifier::Wasm, Identifier::Processor)
             .ignore_then(wasm_processor_ref())
-            .map(|name| RelocationMember::new(ModelKind::WasmProcessor, name)),
+            .map(|name| RelocationMember::new(ModelKind::WasmProcessor, name.into())),
         kw(Identifier::Emitter)
             .ignore_then(emitter_ref())
-            .map(|name| RelocationMember::new(ModelKind::Emitter, name)),
+            .map(|name| RelocationMember::new(ModelKind::Emitter, name.into())),
         kw_phrase2(Identifier::Hash, Identifier::Map)
             .ignore_then(lookup_ref())
-            .map(|name| RelocationMember::new(ModelKind::Lookup, name)),
+            .map(|name| RelocationMember::new(ModelKind::Lookup, name.into())),
         kw(Identifier::Relay)
             .ignore_then(relay_ref())
-            .map(|name| RelocationMember::new(ModelKind::Relay, name)),
+            .map(|name| RelocationMember::new(ModelKind::Relay, name.into())),
     )
 }
 
@@ -125,7 +125,7 @@ fn relocation_clauses<'src>()
 -> impl Parser<'src, &'src [Token], Relocation, extra::Err<ParseError<'src>>> + Clone {
     relocation_selection()
         .then_ignore(kw_phrase2(Identifier::Onto, Identifier::Node))
-        .then(node_id())
+        .then(cluster_node_name())
         .then(preference_strategy())
         .then(
             preference_override()
@@ -208,7 +208,7 @@ pub fn suggest_describe_relocation(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::Statement;
+    use nervix_models::{ClusterNodeName, Statement};
 
     use super::*;
     use crate::statement::{parse_statement, suggest_statement};
@@ -216,8 +216,7 @@ mod tests {
     fn member(kind: ModelKind, name: &str) -> RelocationMember {
         RelocationMember::new(
             kind,
-            nervix_models::Identifier::try_from(name)
-                .expect("test name must be a valid identifier"),
+            nervix_models::ModelName::try_from(name).expect("test name must be a valid identifier"),
         )
     }
 
@@ -252,7 +251,10 @@ mod tests {
                 member(ModelKind::Relay, "normalized"),
             ]
         );
-        assert_eq!(relocation.destination, "node-2");
+        assert_eq!(
+            relocation.destination,
+            ClusterNodeName::parse("node-2").expect("valid name")
+        );
         assert_eq!(relocation.strategy, RelocationPreferenceStrategy::Follow);
         assert!(relocation.overrides.is_empty());
     }
@@ -277,7 +279,10 @@ mod tests {
             ]
         );
         assert_eq!(to, &vec![member(ModelKind::Junction, "risk_scorer")]);
-        assert_eq!(relocation.destination, "nervix-1.internal");
+        assert_eq!(
+            relocation.destination,
+            ClusterNodeName::parse("nervix-1.internal").expect("valid name")
+        );
         assert_eq!(relocation.strategy, RelocationPreferenceStrategy::Follow);
         assert_eq!(
             relocation.overrides,
@@ -311,7 +316,10 @@ mod tests {
              nervix-1.internal IGNORE PREFERENCES;",
         )
         .expect("describe relocation must parse");
-        assert_eq!(describe.destination, "nervix-1.internal");
+        assert_eq!(
+            describe.destination,
+            ClusterNodeName::parse("nervix-1.internal").expect("valid name")
+        );
         assert_eq!(describe.strategy, RelocationPreferenceStrategy::Ignore);
     }
 

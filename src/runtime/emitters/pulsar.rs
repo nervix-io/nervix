@@ -4,6 +4,7 @@ use ::pulsar::{
     producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
 };
 use futures_util::FutureExt;
+use nervix_models::TopicName;
 
 use super::*;
 
@@ -23,7 +24,7 @@ impl PulsarEmitter {
     pub(super) async fn new(
         client: &CreateClientPulsar,
         resolved: Option<&ResolvedClientConfig>,
-        topic: &Identifier,
+        topic: &TopicName,
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
         let producer = Self::producer_from_config(

@@ -1,3 +1,4 @@
+use nervix_models::DomainName;
 use redis::{Client as RedisClient, ClientTlsConfig, TlsCertificates as RedisTlsCertificates};
 
 use super::super::*;
@@ -7,7 +8,7 @@ pub(in crate::runtime) struct RedisPubSubIngestor;
 impl RedisPubSubIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientRedis,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

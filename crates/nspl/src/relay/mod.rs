@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(
             parsed.branching,
             RelayBranching::branched_by(
-                nervix_models::Identifier::parse("by_tenant").expect("valid identifier"),
+                nervix_models::BranchName::parse("by_tenant").expect("valid branch name"),
             )
         );
     }
@@ -271,12 +271,13 @@ mod tests {
             vec![
                 AlterRelayOperation::SetCapacity { capacity: 8 },
                 AlterRelayOperation::SetSchema {
-                    schema: nervix_models::Identifier::try_from("event_v2")
+                    schema: nervix_models::SchemaName::try_from("event_v2")
                         .expect("valid identifier"),
                 },
                 AlterRelayOperation::SetBranching {
                     branching: RelayBranching::branched_by(
-                        nervix_models::Identifier::try_from("by_tenant").expect("valid identifier"),
+                        nervix_models::BranchName::try_from("by_tenant")
+                            .expect("valid branch name"),
                     ),
                 },
                 AlterRelayOperation::SetBranching {

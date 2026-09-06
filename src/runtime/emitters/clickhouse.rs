@@ -3,6 +3,7 @@ use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor as HyperTokioExecutor,
 };
+use nervix_models::TableName;
 
 use super::*;
 
@@ -211,7 +212,7 @@ impl ClickHouseEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        table: &Identifier,
+        table: &TableName,
         values: &[ClickHouseValueMapping],
         batch: &RelayRecordBatch,
         pending_chunks: &[Vec<usize>],

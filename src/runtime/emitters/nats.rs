@@ -11,6 +11,7 @@ use async_nats::{
     message::OutboundMessage,
 };
 use futures_util::{FutureExt, SinkExt};
+use nervix_models::SubjectName;
 
 use super::*;
 
@@ -34,7 +35,7 @@ impl NatsEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientNats,
         resolved: Option<&ResolvedClientConfig>,
-        subject: &Identifier,
+        subject: &SubjectName,
         mode: NatsPublishingMode,
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<Self> {

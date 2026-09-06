@@ -5,7 +5,7 @@ use std::sync::{
 
 use ahash::RandomState;
 use dashmap::DashMap;
-use nervix_models::{RemoteRuntimeField, RemoteRuntimeRecord};
+use nervix_models::{ClusterNodeName, RemoteRuntimeField, RemoteRuntimeRecord};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
@@ -40,7 +40,7 @@ impl ReplicatedMaterializedRelayState {
     pub(super) fn new(
         placement: RuntimeStatePlacement,
         schema: StdArc<arrow_schema::Schema>,
-        primary_node: Option<String>,
+        primary_node: Option<ClusterNodeName>,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
         let entries = DashMap::default();
@@ -69,7 +69,7 @@ impl ReplicatedMaterializedRelayState {
         })
     }
 
-    pub(super) fn primary_node(&self) -> Option<String> {
+    pub(super) fn primary_node(&self) -> Option<ClusterNodeName> {
         self.roles.read().primary_node.clone()
     }
 
@@ -224,20 +224,20 @@ fn snapshot_key_sort(key: &Option<Vec<RemoteRuntimeField>>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{Domain, Identifier, ModelKind};
+    use nervix_models::{DomainName, ModelKind, ModelName, RelayName};
 
     use super::*;
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};
 
     #[test]
     fn unbranched_materialized_state_snapshot_restores_entries() {
-        let domain = Domain::parse("default").expect("valid domain");
-        let relay = Identifier::parse("notifications").expect("valid relay");
+        let domain = DomainName::parse("default").expect("valid domain");
+        let relay = RelayName::parse("notifications").expect("valid relay");
         let placement = RuntimeStatePlacement {
             domain,
             state: super::super::RuntimeStateKind::MaterializedRelay,
             kind: ModelKind::Relay,
-            identifier: relay,
+            identifier: ModelName::from(&relay),
             schema_fingerprint: [0; 32],
             branch_key: None,
         };
@@ -292,10 +292,10 @@ mod tests {
         ]);
         let state = ReplicatedMaterializedRelayState::new(
             RuntimeStatePlacement {
-                domain: Domain::parse("default").expect("valid domain"),
+                domain: DomainName::parse("default").expect("valid domain"),
                 state: super::super::RuntimeStateKind::MaterializedRelay,
                 kind: ModelKind::Relay,
-                identifier: Identifier::parse("profiles").expect("valid relay"),
+                identifier: ModelName::parse("profiles").expect("valid relay"),
                 schema_fingerprint: [0; 32],
                 branch_key: None,
             },

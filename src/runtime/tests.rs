@@ -21,18 +21,19 @@ use nervix_models::{
     CreateClientMqtt, CreateClientPrometheus, CreateClientWebsockets, CreateClientZeroMq,
     CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer,
     CreateIngestor, CreateJsonWireSchema, CreateJunction, CreateLookup, CreateReingestor,
-    CreateRelay, CreateSchema, CreateWasmProcessor, CreateWindowProcessor, Domain, DomainConfig,
-    DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink,
-    EmitterPublishingMode, ErrorPolicies, Expression, FieldPath, FieldReference, FieldScope,
-    GeneralErrorPolicy, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
+    CreateRelay, CreateSchema, CreateWasmProcessor, CreateWindowProcessor, DomainConfig,
+    DomainName, DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink,
+    EmitterPublishingMode, ErrorPolicies, Expression, FieldName, FieldPath, FieldReference,
+    FieldScope, GeneralErrorPolicy, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
     InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, JsonType, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy,
-    ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, ResourceId, ResourceVersion,
-    ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField, SqsFifoGroup,
-    StructuredMessageError, Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
+    IngestTimestampSource, IngestorName, JsonType, MessageErrorCode, MessageErrorOperation,
+    MessageErrorPolicy, ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, OutputBranch,
+    ParseAsType, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    RelayBranching, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    ResourceId, ResourceVersion, ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField,
+    SqsFifoGroup, StructuredMessageError, Timestamp, WindowBound, WireSchemaField,
+    ZeroMqIngestMode,
 };
 use nervix_nspl::window_processor::aggregate::lower_window_assignments;
 use nervix_wasm::{
@@ -49,6 +50,10 @@ fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
         dimensions: vec![InferencerTensorDimension::Fixed(size)],
     }
 }
+use nervix_models::{
+    BranchName, ClientName, ClusterNodeName, CodecName, DeduplicatorName, EmitterName,
+    ReingestorName, SchemaName, WireSchemaName,
+};
 use tempfile::tempdir;
 use tokio::{
     sync::{Mutex, mpsc, watch},
@@ -72,8 +77,12 @@ use crate::{
     },
 };
 
-fn identifier(raw: &str) -> Identifier {
-    Identifier::parse(raw).expect("valid identifier")
+fn named<N>(raw: &str) -> N
+where
+    N: for<'a> TryFrom<&'a str>,
+    for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+{
+    N::try_from(raw).expect("valid name")
 }
 
 fn row_value(row: &RuntimeRow, field: &str) -> Option<RuntimeValue> {
@@ -148,7 +157,7 @@ async fn execute_filter_map_for_test(
     now: Timestamp,
 ) -> Result<Option<RuntimeRow>, String> {
     super::execute_filter_map_on_record(
-        &identifier("test_filter_map"),
+        &named("test_filter_map"),
         program,
         record,
         branch_key,
@@ -163,9 +172,9 @@ async fn execute_filter_map_for_test(
 fn domain_drain_status_reports_structured_emitter_publishing_state() {
     let runtime = super::Runtime::new();
     let domain = domain("default");
-    let confirming = identifier("confirming");
-    let retrying = identifier("retrying");
-    let iceberg = identifier("iceberg");
+    let confirming = named::<EmitterName>("confirming");
+    let retrying = named::<EmitterName>("retrying");
+    let iceberg = named::<EmitterName>("iceberg");
 
     for (emitter, pending_messages) in [
         (&confirming, 3_usize),
@@ -236,7 +245,7 @@ fn domain_drain_status_reports_structured_emitter_publishing_state() {
     .into_iter()
     .map(|identifier| crate::registry::RegistryEntity {
         kind: ModelKind::Emitter,
-        identifier,
+        identifier: ModelName::from(&identifier),
     })
     .collect::<Vec<_>>();
     let entity_status = runtime
@@ -262,7 +271,7 @@ fn domain_drain_status_reports_structured_emitter_publishing_state() {
             .domain_drain_status(&domain)
             .emitter_publishing
             .iter()
-            .all(|status| status.emitter != identifier("confirming")),
+            .all(|status| status.emitter != named("confirming")),
         "a completed confirmation must disappear from drain status"
     );
 }
@@ -353,7 +362,7 @@ async fn scheduled_emitter_stop_clears_signal_when_the_response_is_dropped() {
 
 fn window_outputs(relay: &str, set: &str) -> ProcessorOutputs {
     ProcessorOutputs::new(vec![ProcessorOutput {
-        relay: identifier(relay),
+        relay: named(relay),
         construction: construction(set),
         flush_policy: None,
         message_error_policy: MessageErrorPolicy::Log,
@@ -379,12 +388,12 @@ fn compile_window_aggregate_for_test(
     input_type: ParseAsType,
     output_schema: &super::CompiledSchema,
 ) -> super::CompiledWindowAggregateProgram {
-    let input_relay = identifier("events");
-    let output_relay = identifier("summary");
+    let input_relay = named::<RelayName>("events");
+    let output_relay = named::<RelayName>("summary");
     let input_schema = compile_schema(&CreateSchema {
-        name: input_relay.clone(),
+        name: SchemaName::from(&ModelName::from(&input_relay)),
         fields: vec![SchemaField {
-            name: identifier("latency"),
+            name: named("latency"),
             ty: input_type,
             optional: false,
             sensitive: false,
@@ -417,18 +426,18 @@ fn window_inputs(
         .collect()
 }
 
-fn branch_key(fields: impl IntoIterator<Item = (Identifier, RuntimeValue)>) -> Option<BranchKey> {
+fn branch_key(fields: impl IntoIterator<Item = (FieldName, RuntimeValue)>) -> Option<BranchKey> {
     BranchKey::from_fields(fields)
         .expect("test branch key must be non-empty")
         .into()
 }
 
-fn concrete_branch_key(fields: impl IntoIterator<Item = (Identifier, RuntimeValue)>) -> BranchKey {
+fn concrete_branch_key(fields: impl IntoIterator<Item = (FieldName, RuntimeValue)>) -> BranchKey {
     branch_key(fields).expect("test branch key must be concrete")
 }
 
 fn string_branch_key(field: &str, value: &str) -> Option<BranchKey> {
-    branch_key([(identifier(field), RuntimeValue::String(value.to_string()))])
+    branch_key([(named(field), RuntimeValue::String(value.to_string()))])
 }
 
 #[test]
@@ -437,15 +446,15 @@ fn branch_key_rejects_empty_fields() {
 }
 
 fn u32_branch_key(field: &str, value: u32) -> Option<BranchKey> {
-    branch_key([(identifier(field), RuntimeValue::U32(value))])
+    branch_key([(named(field), RuntimeValue::U32(value))])
 }
 
 fn key_label(key: &Option<BranchKey>) -> &str {
     key.as_ref().expect("test branch key must exist").as_str()
 }
 
-fn domain(raw: &str) -> Domain {
-    Domain::parse(raw).expect("valid domain")
+fn domain(raw: &str) -> DomainName {
+    DomainName::parse(raw).expect("valid domain")
 }
 
 const TWO_ITEM_TEST_CHANNEL_CAPACITY: usize = 2;
@@ -459,7 +468,7 @@ fn branched_by(relay: &str, fields: &[&str]) -> OutputBranch {
         OutputBranch::Unbranched
     } else {
         OutputBranch::BranchedBy {
-            branch: identifier(&format!("by_{relay}")),
+            branch: named(&format!("by_{relay}")),
             assignments: branch_mappings(fields),
         }
     }
@@ -469,7 +478,7 @@ fn processor_branched_by(relay: &str, fields: &[&str]) -> BranchSelection {
     if fields.is_empty() {
         BranchSelection::unbranched()
     } else {
-        BranchSelection::branched_by(identifier(&format!("by_{relay}")))
+        BranchSelection::branched_by(named(&format!("by_{relay}")))
     }
 }
 
@@ -479,12 +488,9 @@ fn branch_mappings(fields: &[&str]) -> Vec<Assignment> {
         .map(|field| Assignment {
             target: AssignmentTarget {
                 scope: AssignmentTargetScope::Bare,
-                field: identifier(field),
+                field: named(field),
             },
-            value: Expression::Field(FieldReference::scoped(
-                FieldScope::Message,
-                identifier(field),
-            )),
+            value: Expression::Field(FieldReference::scoped(FieldScope::Message, named(field))),
         })
         .collect()
 }
@@ -493,14 +499,14 @@ fn branch_model_tuple(
     schema: &str,
     relay: &str,
     _fields: &[&str],
-) -> (ModelKind, Identifier, nervix_models::Model) {
-    let branch = identifier(&format!("by_{relay}"));
+) -> (ModelKind, ModelName, nervix_models::Model) {
+    let branch = named::<BranchName>(&format!("by_{relay}"));
     (
         ModelKind::Branch,
-        branch.clone(),
+        ModelName::from(&branch.clone()),
         nervix_models::Model::Branch(CreateBranch {
             name: branch,
-            schema: identifier(schema),
+            schema: named(schema),
             ttl: "5m".to_string(),
             eviction: None,
         }),
@@ -521,8 +527,8 @@ fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices> {
 
 fn test_ingestor_quiesce_control(
     runtime: &super::Runtime,
-    domain: &Domain,
-    ingestor: &Identifier,
+    domain: &DomainName,
+    ingestor: &IngestorName,
     mode: IngestQuiesceMode,
 ) -> Arc<super::IngestorQuiesceControl> {
     let metric_labels = runtime
@@ -539,7 +545,7 @@ fn test_ingestor_quiesce_control(
 fn ownership_handoff_stops_new_intake_and_dispatches_already_admitted_payloads() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let ingestor = identifier("source");
+    let ingestor = named("source");
     let control =
         test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Drop);
     control.engage(super::IngestorQuiesceCause::OwnershipHandoff);
@@ -568,7 +574,7 @@ fn ownership_handoff_stops_new_intake_and_dispatches_already_admitted_payloads()
 fn quiesce_buffer_enforces_drop_oldest_per_instance() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let ingestor = identifier("source");
+    let ingestor = named("source");
     let control = test_ingestor_quiesce_control(
         &runtime,
         &domain,
@@ -620,7 +626,7 @@ fn quiesce_buffer_enforces_drop_oldest_per_instance() {
 fn endpoint_quiesce_buffer_rejects_overflow_without_discarding_acknowledged_payloads() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let ingestor = identifier("source");
+    let ingestor = named("source");
     let control = test_ingestor_quiesce_control(
         &runtime,
         &domain,
@@ -671,7 +677,7 @@ fn endpoint_quiesce_buffer_rejects_overflow_without_discarding_acknowledged_payl
 fn source_replacement_waits_when_the_active_hold_mode_is_not_supported() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let ingestor = identifier("source");
+    let ingestor = named("source");
     let control = test_ingestor_quiesce_control(
         &runtime,
         &domain,
@@ -682,7 +688,7 @@ fn source_replacement_waits_when_the_active_hold_mode_is_not_supported() {
     );
     control.engage(super::IngestorQuiesceCause::EntityHold);
     control.update_declared_source(&IngestSource::ZeroMq {
-        client: identifier("zeromq"),
+        client: named("zeromq"),
         mode: ZeroMqIngestMode::NoAckSequential,
         quiesce: IngestQuiesceMode::Suspend,
     });
@@ -697,7 +703,7 @@ fn source_replacement_waits_when_the_active_hold_mode_is_not_supported() {
 fn memory_pressure_turns_buffer_into_zero_capacity_without_losing_existing_payloads() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let ingestor = identifier("source");
+    let ingestor = named("source");
     let control = test_ingestor_quiesce_control(
         &runtime,
         &domain,
@@ -750,7 +756,7 @@ fn memory_pressure_turns_buffer_into_zero_capacity_without_losing_existing_paylo
 async fn memory_pressure_quiesces_registered_ingestors_without_stopping_them() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let ingestor = identifier("source");
+    let ingestor = named::<IngestorName>("source");
     let key = super::RuntimeKey::new(domain.clone(), ingestor.clone());
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let stopped = Arc::new(AtomicBool::new(false));
@@ -901,7 +907,7 @@ async fn remote_relay_admission_alive_resets_dispatch_timeout() {
 
     assert_eq!(
         super::RemoteDispatcher::await_relay_admission(
-            "relay-owner",
+            &ClusterNodeName::parse("relay-owner").expect("valid name"),
             admission_rx,
             Duration::from_millis(200),
         )
@@ -940,7 +946,7 @@ async fn forwarding_to_a_remote_relay_owner_extends_the_ack_chain() {
 #[tokio::test]
 async fn relay_gate_holds_nonowner_dispatch_before_the_remote_slot() {
     let services = test_relay_boundary_services();
-    services.replace_owner_node(Some("node-2".to_string()));
+    services.replace_owner_node(Some(ClusterNodeName::parse("node-2").expect("valid name")));
     let gate = services.fanout.dispatch_gate();
     let lease = super::RelayDispatchGateLease::engage(
         gate,
@@ -950,11 +956,7 @@ async fn relay_gate_holds_nonowner_dispatch_before_the_remote_slot() {
     let task_services = services.clone();
     let dispatch = tokio::spawn(async move {
         task_services
-            .dispatch_to_owner(
-                &domain("default"),
-                &identifier("orders"),
-                &quiesce_test_batch(),
-            )
+            .dispatch_to_owner(&domain("default"), &named("orders"), &quiesce_test_batch())
             .await
     });
 
@@ -976,7 +978,7 @@ async fn relay_gate_holds_nonowner_dispatch_before_the_remote_slot() {
 async fn relay_gate_allows_admitted_owner_batches_to_reach_consumers() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("orders");
+    let relay = named("orders");
     let services = test_relay_boundary_services();
     let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
     let gate = services.fanout.dispatch_gate();
@@ -1011,28 +1013,28 @@ async fn relay_gate_allows_admitted_owner_batches_to_reach_consumers() {
 #[tokio::test]
 async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array() {
     let output_schema = compile_schema(&CreateSchema {
-        name: identifier("summary"),
+        name: named("summary"),
         fields: vec![
             nervix_models::SchemaField {
-                name: identifier("count"),
+                name: named("count"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("adjusted_count"),
+                name: named("adjusted_count"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("p50"),
+                name: named("p50"),
                 ty: ParseAsType::F64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("latencies"),
+                name: named("latencies"),
                 ty: ParseAsType::Array {
                     element: Box::new(ParseAsType::F64),
                     len: 2,
@@ -1135,22 +1137,22 @@ async fn window_aggregate_inputs_evaluate_one_batch_in_one_vm_execution() {
 #[tokio::test]
 async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
     let output_schema = compile_schema(&CreateSchema {
-        name: identifier("summary"),
+        name: named("summary"),
         fields: vec![
             nervix_models::SchemaField {
-                name: identifier("p50"),
+                name: named("p50"),
                 ty: ParseAsType::F64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("p90"),
+                name: named("p90"),
                 ty: ParseAsType::F64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("p50_other_range"),
+                name: named("p50_other_range"),
                 ty: ParseAsType::F64,
                 optional: false,
                 sensitive: false,
@@ -1242,9 +1244,9 @@ fn window_advance_removes_step_messages() {
 #[tokio::test]
 async fn linear_histogram_zero_delay_removes_step_values_immediately() {
     let output_schema = compile_schema(&CreateSchema {
-        name: identifier("summary"),
+        name: named("summary"),
         fields: vec![nervix_models::SchemaField {
-            name: identifier("p0"),
+            name: named("p0"),
             ty: ParseAsType::F64,
             optional: false,
             sensitive: false,
@@ -1294,9 +1296,9 @@ async fn linear_histogram_zero_delay_removes_step_values_immediately() {
 #[tokio::test]
 async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
     let output_schema = compile_schema(&CreateSchema {
-        name: identifier("summary"),
+        name: named("summary"),
         fields: vec![nervix_models::SchemaField {
-            name: identifier("p0"),
+            name: named("p0"),
             ty: ParseAsType::F64,
             optional: false,
             sensitive: false,
@@ -1385,9 +1387,9 @@ async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
 #[tokio::test]
 async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() {
     let output_schema = compile_schema(&CreateSchema {
-        name: identifier("summary"),
+        name: named("summary"),
         fields: vec![nervix_models::SchemaField {
-            name: identifier("p0"),
+            name: named("p0"),
             ty: ParseAsType::F64,
             optional: false,
             sensitive: false,
@@ -1453,34 +1455,34 @@ async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() 
 #[tokio::test]
 async fn window_aggregate_state_updates_first_last_min_max_and_sum() {
     let output_schema = compile_schema(&CreateSchema {
-        name: identifier("summary"),
+        name: named("summary"),
         fields: vec![
             nervix_models::SchemaField {
-                name: identifier("first_latency"),
+                name: named("first_latency"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("last_latency"),
+                name: named("last_latency"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("min_latency"),
+                name: named("min_latency"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("max_latency"),
+                name: named("max_latency"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("total_latency"),
+                name: named("total_latency"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
@@ -1627,22 +1629,22 @@ fn window_output_metadata_uses_window_low_and_emit_high_watermark() {
 #[tokio::test]
 async fn window_processor_state_snapshot_roundtrips_entries_and_accumulators() {
     let output_schema = compile_schema(&CreateSchema {
-        name: identifier("summary"),
+        name: named("summary"),
         fields: vec![
             nervix_models::SchemaField {
-                name: identifier("count"),
+                name: named("count"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("first_latency"),
+                name: named("first_latency"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("p50"),
+                name: named("p50"),
                 ty: ParseAsType::F64,
                 optional: false,
                 sensitive: false,
@@ -1721,11 +1723,11 @@ fn paced_domain_state(raw: &str) -> DomainState {
 
 fn test_schema(fields: &[(&str, ParseAsType)]) -> Arc<super::CompiledSchema> {
     Arc::new(compile_schema(&CreateSchema {
-        name: identifier("test_schema"),
+        name: named("test_schema"),
         fields: fields
             .iter()
             .map(|(name, ty)| nervix_models::SchemaField {
-                name: identifier(name),
+                name: named(name),
                 ty: ty.clone(),
                 optional: false,
                 sensitive: false,
@@ -1736,11 +1738,11 @@ fn test_schema(fields: &[(&str, ParseAsType)]) -> Arc<super::CompiledSchema> {
 
 fn test_optional_schema(fields: &[(&str, ParseAsType, bool)]) -> Arc<super::CompiledSchema> {
     Arc::new(compile_schema(&CreateSchema {
-        name: identifier("test_schema"),
+        name: named("test_schema"),
         fields: fields
             .iter()
             .map(|(name, ty, optional)| nervix_models::SchemaField {
-                name: identifier(name),
+                name: named(name),
                 ty: ty.clone(),
                 optional: *optional,
                 sensitive: false,
@@ -1807,7 +1809,7 @@ fn validate_wasm_test_output_groups(
 ) -> Result<Vec<super::WasmMaterializedOutput>, super::WasmOutputError> {
     let output_schemas = schemas
         .into_iter()
-        .map(|(relay, schema)| (identifier(relay), schema))
+        .map(|(relay, schema)| (named::<RelayName>(relay), schema))
         .collect::<Vec<_>>();
     let output_routes = super::RelayProcessorOutputsNode {
         routes: output_schemas
@@ -2931,7 +2933,7 @@ async fn wasm_callback_validation_is_all_or_nothing_for_terminal_decisions() {
 
 fn scheduled_model(
     kind: ModelKind,
-    identifier: Identifier,
+    identifier: ModelName,
     model: nervix_models::Model,
 ) -> ScheduledNode {
     ScheduledNode {
@@ -2942,8 +2944,8 @@ fn scheduled_model(
         effective_branching_schema: None,
         schema_fingerprint: [0; 32],
         kafka_partition_schedule: None,
-        primary_node: Some("node-1".to_string()),
-        assigned_nodes: vec!["node-1".to_string()],
+        primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+        assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
     }
 }
 
@@ -2951,8 +2953,8 @@ fn scheduled_model(
 async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("events");
-    let schema = identifier("event");
+    let relay = named::<RelayName>("events");
+    let schema = named::<SchemaName>("event");
     runtime.sync_domains(&BTreeMap::from([(
         domain.clone(),
         DomainState {
@@ -2974,12 +2976,12 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
             domain: domain.clone(),
             nodes: vec![
                 ScheduledNode {
-                    identifier: schema.clone(),
+                    identifier: ModelName::from(&schema.clone()),
                     kind: ModelKind::Schema,
                     config: Box::new(nervix_models::Model::Schema(CreateSchema {
                         name: schema.clone(),
                         fields: vec![SchemaField {
-                            name: identifier("value"),
+                            name: named("value"),
                             ty: ParseAsType::I64,
                             optional: false,
                             sensitive: false,
@@ -2994,7 +2996,7 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
                 },
                 scheduled_model(
                     ModelKind::Relay,
-                    relay.clone(),
+                    ModelName::from(&relay.clone()),
                     nervix_models::Model::Relay(CreateRelay {
                         name: relay.clone(),
                         schema,
@@ -3009,7 +3011,10 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
     };
 
     runtime
-        .apply_cluster_schedule("node-1", &schedule)
+        .apply_cluster_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &schedule,
+        )
         .await
         .expect("relay schedule should build");
 
@@ -3026,8 +3031,8 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
 async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("events");
-    let ingestor = identifier("events_source");
+    let relay = named::<RelayName>("events");
+    let ingestor = named::<IngestorName>("events_source");
     let operation_id = 41;
 
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
@@ -3059,7 +3064,7 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
 
     let affected = crate::registry::RegistryEntity {
         kind: ModelKind::Ingestor,
-        identifier: ingestor.clone(),
+        identifier: ModelName::from(&ingestor.clone()),
     };
     runtime
         .engage_entity_gate_operation(
@@ -3114,7 +3119,7 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
 async fn entity_gate_operation_releases_when_its_lease_deadline_expires() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("events");
+    let relay = named::<RelayName>("events");
     let operation_id = 42;
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
     let gate = fanout.dispatch_gate();
@@ -3153,8 +3158,8 @@ async fn entity_gate_operation_releases_when_its_lease_deadline_expires() {
 async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let schema = identifier("notification");
-    let relay = identifier("notifications");
+    let schema = named::<SchemaName>("notification");
+    let relay = named::<RelayName>("notifications");
     let running = DomainState {
         id: domain.clone(),
         config: DomainConfig {
@@ -3175,11 +3180,11 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
             nodes: vec![
                 scheduled_model(
                     ModelKind::Schema,
-                    schema.clone(),
+                    ModelName::from(&schema.clone()),
                     nervix_models::Model::Schema(CreateSchema {
                         name: schema.clone(),
                         fields: vec![SchemaField {
-                            name: identifier("user_id"),
+                            name: named("user_id"),
                             ty: ParseAsType::I64,
                             optional: false,
                             sensitive: false,
@@ -3188,7 +3193,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
                 ),
                 scheduled_model(
                     ModelKind::Relay,
-                    relay.clone(),
+                    ModelName::from(&relay),
                     nervix_models::Model::Relay(CreateRelay {
                         name: relay.clone(),
                         schema,
@@ -3202,7 +3207,10 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
         }],
     };
     runtime
-        .apply_cluster_schedule("node-1", &schedule)
+        .apply_cluster_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &schedule,
+        )
         .await
         .expect("running schedule should build");
     let graph_before_pause = runtime
@@ -3216,7 +3224,10 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
     paused.status = DomainStatus::Paused;
     runtime.sync_domains(&BTreeMap::from([(domain.clone(), paused)]));
     runtime
-        .apply_cluster_schedule("node-1", &schedule)
+        .apply_cluster_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &schedule,
+        )
         .await
         .expect("paused schedule should remain active");
 
@@ -3233,8 +3244,8 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
 async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let schema = identifier("notification");
-    let relay = identifier("notifications");
+    let schema = named::<SchemaName>("notification");
+    let relay = named::<RelayName>("notifications");
     let domains = BTreeMap::from([(
         domain.clone(),
         DomainState {
@@ -3253,11 +3264,11 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
     )]);
     let schema_node = scheduled_model(
         ModelKind::Schema,
-        schema.clone(),
+        ModelName::from(&schema.clone()),
         nervix_models::Model::Schema(CreateSchema {
             name: schema.clone(),
             fields: vec![SchemaField {
-                name: identifier("user_id"),
+                name: named("user_id"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
@@ -3278,7 +3289,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
                 schema_node,
                 scheduled_model(
                     ModelKind::Relay,
-                    relay.clone(),
+                    ModelName::from(&relay),
                     nervix_models::Model::Relay(CreateRelay {
                         name: relay.clone(),
                         schema,
@@ -3293,11 +3304,21 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
     };
 
     runtime
-        .apply_cluster_state("node-1", 2, &domains, &current_schedule)
+        .apply_cluster_state(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            2,
+            &domains,
+            &current_schedule,
+        )
         .await
         .expect("current cluster state should build");
     runtime
-        .apply_cluster_state("node-1", 1, &domains, &stale_schedule)
+        .apply_cluster_state(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            1,
+            &domains,
+            &stale_schedule,
+        )
         .await
         .expect("stale cluster state should be ignored");
 
@@ -3330,26 +3351,26 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
         },
     )]));
 
-    let schema = identifier("notification");
-    let wire_schema = identifier("notification_wire");
-    let codec = identifier("notification_json");
-    let relay = identifier("notifications");
-    let client = identifier("mqtt_main");
-    let ingestor = identifier("mqtt_notifications");
+    let schema = named::<SchemaName>("notification");
+    let wire_schema = named::<WireSchemaName>("notification_wire");
+    let codec = named::<CodecName>("notification_json");
+    let relay = named::<RelayName>("notifications");
+    let client = named::<ClientName>("mqtt_main");
+    let ingestor = named::<IngestorName>("mqtt_notifications");
     let result = runtime
         .apply_cluster_schedule(
-            "node-1",
+            &ClusterNodeName::parse("node-1").expect("valid name"),
             &ClusterSchedule {
                 domains: vec![DomainSchedule {
                     domain: domain.clone(),
                     nodes: vec![
                         scheduled_model(
                             ModelKind::Schema,
-                            schema.clone(),
+                            ModelName::from(&schema.clone()),
                             nervix_models::Model::Schema(CreateSchema {
                                 name: schema.clone(),
                                 fields: vec![SchemaField {
-                                    name: identifier("user_id"),
+                                    name: named("user_id"),
                                     ty: ParseAsType::I64,
                                     optional: false,
                                     sensitive: false,
@@ -3358,12 +3379,12 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::WireJsonSchema,
-                            wire_schema.clone(),
+                            ModelName::from(&wire_schema),
                             nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
                                 name: wire_schema.clone(),
                                 strictness: Default::default(),
                                 fields: vec![WireSchemaField {
-                                    name: identifier("user_id"),
+                                    name: named("user_id"),
                                     ty: JsonType::Integer,
                                     optional: false,
                                 }],
@@ -3371,7 +3392,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::Codec,
-                            codec.clone(),
+                            ModelName::from(&codec),
                             nervix_models::Model::Codec(CreateCodec {
                                 name: codec.clone(),
                                 wire_format: CodecWireFormat::Json,
@@ -3382,7 +3403,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::Relay,
-                            relay.clone(),
+                            ModelName::from(&relay),
                             nervix_models::Model::Relay(CreateRelay {
                                 name: relay.clone(),
                                 schema: schema.clone(),
@@ -3393,7 +3414,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::Client,
-                            client.clone(),
+                            ModelName::from(&client),
                             nervix_models::Model::ClientMqtt(CreateClientMqtt {
                                 name: client.clone(),
                                 mount: None,
@@ -3411,7 +3432,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::Ingestor,
-                            ingestor.clone(),
+                            ModelName::from(&ingestor),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
                                 output_routes: with_inherit_all(ProcessorOutputs::single(
@@ -3478,26 +3499,26 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
         },
     )]));
 
-    let schema = identifier("notification");
-    let wire_schema = identifier("notification_wire");
-    let codec = identifier("notification_json");
-    let relay = identifier("notifications");
-    let client = identifier("mqtt_main");
-    let ingestor = identifier("mqtt_notifications");
+    let schema = named::<SchemaName>("notification");
+    let wire_schema = named::<WireSchemaName>("notification_wire");
+    let codec = named::<CodecName>("notification_json");
+    let relay = named::<RelayName>("notifications");
+    let client = named::<ClientName>("mqtt_main");
+    let ingestor = named::<IngestorName>("mqtt_notifications");
     let result = runtime
         .apply_cluster_schedule(
-            "node-1",
+            &ClusterNodeName::parse("node-1").expect("valid name"),
             &ClusterSchedule {
                 domains: vec![DomainSchedule {
                     domain: domain.clone(),
                     nodes: vec![
                         scheduled_model(
                             ModelKind::Schema,
-                            schema.clone(),
+                            ModelName::from(&schema.clone()),
                             nervix_models::Model::Schema(CreateSchema {
                                 name: schema.clone(),
                                 fields: vec![SchemaField {
-                                    name: identifier("user_id"),
+                                    name: named("user_id"),
                                     ty: ParseAsType::I64,
                                     optional: false,
                                     sensitive: false,
@@ -3506,12 +3527,12 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::WireJsonSchema,
-                            wire_schema.clone(),
+                            ModelName::from(&wire_schema),
                             nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
                                 name: wire_schema.clone(),
                                 strictness: Default::default(),
                                 fields: vec![WireSchemaField {
-                                    name: identifier("user_id"),
+                                    name: named("user_id"),
                                     ty: JsonType::Integer,
                                     optional: false,
                                 }],
@@ -3519,7 +3540,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::Codec,
-                            codec.clone(),
+                            ModelName::from(&codec),
                             nervix_models::Model::Codec(CreateCodec {
                                 name: codec.clone(),
                                 wire_format: CodecWireFormat::Json,
@@ -3530,7 +3551,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::Relay,
-                            relay.clone(),
+                            ModelName::from(&relay),
                             nervix_models::Model::Relay(CreateRelay {
                                 name: relay.clone(),
                                 schema: schema.clone(),
@@ -3541,7 +3562,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::Client,
-                            client.clone(),
+                            ModelName::from(&client),
                             nervix_models::Model::ClientMqtt(CreateClientMqtt {
                                 name: client.clone(),
                                 mount: None,
@@ -3553,7 +3574,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::Ingestor,
-                            ingestor.clone(),
+                            ModelName::from(&ingestor),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
                                 output_routes: with_inherit_all(ProcessorOutputs::single(
@@ -3615,13 +3636,13 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
 async fn branch_preserving_processors_build_standalone_schedule_nodes() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let order_schema = identifier("order_event");
+    let order_schema = named::<SchemaName>("order_event");
     let order_relay = |name: &str| {
         scheduled_model(
             ModelKind::Relay,
-            identifier(name),
+            named(name),
             nervix_models::Model::Relay(CreateRelay {
-                name: identifier(name),
+                name: named(name),
                 schema: order_schema.clone(),
                 buffer: 2,
                 branching: RelayBranching::unbranched(),
@@ -3634,11 +3655,11 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
         nodes: vec![
             scheduled_model(
                 ModelKind::Schema,
-                order_schema.clone(),
+                ModelName::from(&order_schema.clone()),
                 nervix_models::Model::Schema(CreateSchema {
                     name: order_schema.clone(),
                     fields: vec![SchemaField {
-                        name: identifier("order_id"),
+                        name: named("order_id"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
@@ -3652,11 +3673,11 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
             order_relay("joined_orders"),
             scheduled_model(
                 ModelKind::Deduplicator,
-                identifier("dedup_orders"),
+                named("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_orders"),
-                    from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                    name: named("dedup_orders"),
+                    from: ProcessorInputs::single(named("orders")),
+                    output_routes: (ProcessorOutputs::single(named("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: BranchSelection::unbranched(),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -3668,14 +3689,14 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
             ),
             scheduled_model(
                 ModelKind::Junction,
-                identifier("join_orders"),
+                named("join_orders"),
                 nervix_models::Model::Junction(CreateJunction {
-                    name: identifier("join_orders"),
+                    name: named("join_orders"),
                     from: ProcessorInputs::new(
-                        vec![identifier("left_orders"), identifier("right_orders")],
+                        vec![named("left_orders"), named("right_orders")],
                         Vec::new(),
                     ),
-                    output_routes: (ProcessorOutputs::single(identifier("joined_orders")))
+                    output_routes: (ProcessorOutputs::single(named("joined_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: BranchSelection::unbranched(),
                     mode: AckMode::Attached,
@@ -3688,11 +3709,21 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
     };
 
     runtime
-        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule), true)
+        .rebuild_domain_from_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &domain,
+            Some(schedule),
+            true,
+        )
         .await
         .expect("standalone branch-preserving processors must build");
     runtime
-        .rebuild_domain_from_schedule("node-1", &domain, None, true)
+        .rebuild_domain_from_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &domain,
+            None,
+            true,
+        )
         .await
         .expect("domain teardown must stop processor runtimes");
 }
@@ -3700,14 +3731,11 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
 #[test]
 fn emitter_entity_pause_gates_every_input_relay() {
     let emitter = CreateEmitter {
-        name: identifier("combined_sink"),
-        from: ProcessorInputs::new(
-            vec![identifier("source_b"), identifier("source_a")],
-            Vec::new(),
-        ),
-        encode_using_codec: Some(identifier("event_codec")),
+        name: named("combined_sink"),
+        from: ProcessorInputs::new(vec![named("source_b"), named("source_a")], Vec::new()),
+        encode_using_codec: Some(named("event_codec")),
         sink: Box::new(EmitSink::ZeroMq {
-            client: identifier("sink"),
+            client: named("sink"),
         }),
         flush_each: "IMMEDIATE".to_string(),
         max_batch_size: None,
@@ -3725,10 +3753,10 @@ fn emitter_entity_pause_gates_every_input_relay() {
     let input_relay = |name: &str| {
         scheduled_model(
             ModelKind::Relay,
-            identifier(name),
+            named(name),
             nervix_models::Model::Relay(CreateRelay {
-                name: identifier(name),
-                schema: identifier("event"),
+                name: named(name),
+                schema: named("event"),
                 buffer: 2,
                 branching: RelayBranching::unbranched(),
                 materialized_state: None,
@@ -3742,7 +3770,7 @@ fn emitter_entity_pause_gates_every_input_relay() {
             input_relay("source_b"),
             scheduled_model(
                 ModelKind::Emitter,
-                emitter.name.clone(),
+                ModelName::from(&emitter.name.clone()),
                 nervix_models::Model::Emitter(emitter.clone()),
             ),
         ],
@@ -3753,27 +3781,32 @@ fn emitter_entity_pause_gates_every_input_relay() {
         .iter_mut()
         .find(|node| node.kind == ModelKind::Emitter)
         .expect("test schedule must contain its emitter");
-    emitter_node.primary_node = Some("node-2".to_string());
-    emitter_node.assigned_nodes = vec!["node-2".to_string()];
+    emitter_node.primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
+    emitter_node.assigned_nodes = vec![ClusterNodeName::parse("node-2").expect("valid name")];
     let entity = crate::registry::RegistryEntity {
         kind: ModelKind::Emitter,
-        identifier: emitter.name,
+        identifier: ModelName::from(&emitter.name),
     };
 
     assert_eq!(
         super::Runtime::entity_pause_relays_for_schedule(&schedule, &[entity]),
-        vec![identifier("source_a"), identifier("source_b")]
+        vec![named("source_a"), named("source_b")]
     );
-    let remote_consumers =
-        super::Runtime::remote_runtime_consumers_for_schedule(&schedule, "node-1");
+    let remote_consumers = super::Runtime::remote_runtime_consumers_for_schedule(
+        &schedule,
+        &ClusterNodeName::parse("node-1").expect("valid name"),
+    );
     assert_eq!(remote_consumers.len(), 2);
-    for relay in [identifier("source_a"), identifier("source_b")] {
+    for relay in [named("source_a"), named("source_b")] {
         let consumers = remote_consumers
             .get(&relay)
             .expect("every emitter input needs a remote consumer");
         assert_eq!(consumers.len(), 1);
         assert_eq!(consumers[0].relay, relay);
-        assert_eq!(consumers[0].node_id, "node-2");
+        assert_eq!(
+            consumers[0].node_id,
+            ClusterNodeName::parse("node-2").expect("valid name")
+        );
     }
 }
 
@@ -3782,11 +3815,11 @@ fn ownership_handoff_keeps_internal_moved_group_relays_open() {
     let junction = |name: &str, input: &str, output: &str| {
         scheduled_model(
             ModelKind::Junction,
-            identifier(name),
+            named(name),
             nervix_models::Model::Junction(CreateJunction {
-                name: identifier(name),
-                from: ProcessorInputs::single(identifier(input)),
-                output_routes: (ProcessorOutputs::single(identifier(output)))
+                name: named(name),
+                from: ProcessorInputs::single(named(input)),
+                output_routes: (ProcessorOutputs::single(named(output)))
                     .with_flush_policy("IMMEDIATE".to_string(), None),
                 branched_by: BranchSelection::unbranched(),
                 mode: AckMode::Attached,
@@ -3806,36 +3839,36 @@ fn ownership_handoff_keeps_internal_moved_group_relays_open() {
     let affected =
         ["corridor_source", "corridor_sink"].map(|name| crate::registry::RegistryEntity {
             kind: ModelKind::Junction,
-            identifier: identifier(name),
+            identifier: named(name),
         });
 
     assert_eq!(
         super::Runtime::entity_pause_relays_for_schedule(&schedule, &affected),
-        vec![identifier("corridor_stage"), identifier("inbound")]
+        vec![named("corridor_stage"), named("inbound")]
     );
     assert_eq!(
         super::Runtime::ownership_handoff_relays_for_schedule(&schedule, &affected),
-        vec![identifier("inbound")]
+        vec![named("inbound")]
     );
 }
 
 #[tokio::test]
 async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     let runtime = super::Runtime::default();
-    *runtime.local_node_id.write() = Some("node-1".to_string());
+    *runtime.local_node_id.write() = Some(ClusterNodeName::parse("node-1").expect("valid name"));
     let domain = domain("default");
-    let event_schema = identifier("event");
-    let processor = identifier("deduplicate_events");
+    let event_schema = named::<SchemaName>("event");
+    let processor = named::<DeduplicatorName>("deduplicate_events");
     let schedule = DomainSchedule {
         domain: domain.clone(),
         nodes: vec![
             scheduled_model(
                 ModelKind::Schema,
-                event_schema.clone(),
+                ModelName::from(&event_schema.clone()),
                 nervix_models::Model::Schema(CreateSchema {
                     name: event_schema.clone(),
                     fields: vec![SchemaField {
-                        name: identifier("event_id"),
+                        name: named("event_id"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
@@ -3844,9 +3877,9 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
             ),
             scheduled_model(
                 ModelKind::Relay,
-                identifier("events"),
+                named("events"),
                 nervix_models::Model::Relay(CreateRelay {
-                    name: identifier("events"),
+                    name: named("events"),
                     schema: event_schema.clone(),
                     buffer: 2,
                     branching: RelayBranching::unbranched(),
@@ -3855,9 +3888,9 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
             ),
             scheduled_model(
                 ModelKind::Relay,
-                identifier("unique_events"),
+                named("unique_events"),
                 nervix_models::Model::Relay(CreateRelay {
-                    name: identifier("unique_events"),
+                    name: named("unique_events"),
                     schema: event_schema,
                     buffer: 2,
                     branching: RelayBranching::unbranched(),
@@ -3866,11 +3899,11 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
             ),
             scheduled_model(
                 ModelKind::Deduplicator,
-                processor.clone(),
+                ModelName::from(&processor),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: processor.clone(),
-                    from: ProcessorInputs::single(identifier("events")),
-                    output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                    from: ProcessorInputs::single(named("events")),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(named(
                         "unique_events",
                     )))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
@@ -3887,16 +3920,21 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     };
 
     runtime
-        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule.clone()), true)
+        .rebuild_domain_from_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &domain,
+            Some(schedule.clone()),
+            true,
+        )
         .await
         .expect("scheduled deduplicator must build");
     let entity = crate::registry::RegistryEntity {
         kind: ModelKind::Deduplicator,
-        identifier: processor.clone(),
+        identifier: ModelName::from(&processor),
     };
     assert_eq!(
         runtime.entity_pause_relays(&domain, std::slice::from_ref(&entity)),
-        vec![identifier("events")],
+        vec![named("events")],
         "every scheduled processor swap must gate its input relays"
     );
 
@@ -3927,7 +3965,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
             .node_tasks
             .contains_key(&crate::registry::RegistryEntity {
                 kind: ModelKind::Deduplicator,
-                identifier: processor,
+                identifier: ModelName::from(&processor),
             })
     );
 }
@@ -3935,20 +3973,20 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
 #[tokio::test]
 async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     let runtime = super::Runtime::default();
-    *runtime.local_node_id.write() = Some("node-1".to_string());
+    *runtime.local_node_id.write() = Some(ClusterNodeName::parse("node-1").expect("valid name"));
     let domain = domain("default");
-    let event_schema = identifier("event");
-    let processor = identifier("deduplicate_events");
+    let event_schema = named::<SchemaName>("event");
+    let processor = named::<DeduplicatorName>("deduplicate_events");
     let schedule = DomainSchedule {
         domain: domain.clone(),
         nodes: vec![
             scheduled_model(
                 ModelKind::Schema,
-                event_schema.clone(),
+                ModelName::from(&event_schema.clone()),
                 nervix_models::Model::Schema(CreateSchema {
                     name: event_schema.clone(),
                     fields: vec![SchemaField {
-                        name: identifier("event_id"),
+                        name: named("event_id"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
@@ -3957,9 +3995,9 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
             ),
             scheduled_model(
                 ModelKind::Relay,
-                identifier("events"),
+                named("events"),
                 nervix_models::Model::Relay(CreateRelay {
-                    name: identifier("events"),
+                    name: named("events"),
                     schema: event_schema.clone(),
                     buffer: 2,
                     branching: RelayBranching::unbranched(),
@@ -3968,9 +4006,9 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
             ),
             scheduled_model(
                 ModelKind::Relay,
-                identifier("unique_events"),
+                named("unique_events"),
                 nervix_models::Model::Relay(CreateRelay {
-                    name: identifier("unique_events"),
+                    name: named("unique_events"),
                     schema: event_schema,
                     buffer: 2,
                     branching: RelayBranching::unbranched(),
@@ -3979,11 +4017,11 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
             ),
             scheduled_model(
                 ModelKind::Deduplicator,
-                processor.clone(),
+                ModelName::from(&processor),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: processor.clone(),
-                    from: ProcessorInputs::single(identifier("events")),
-                    output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                    from: ProcessorInputs::single(named("events")),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(named(
                         "unique_events",
                     )))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
@@ -4000,7 +4038,12 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     };
 
     runtime
-        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule.clone()), true)
+        .rebuild_domain_from_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &domain,
+            Some(schedule.clone()),
+            true,
+        )
         .await
         .expect("scheduled deduplicator must build");
 
@@ -4017,7 +4060,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     config.mode = AckMode::Detached;
     let entity = crate::registry::RegistryEntity {
         kind: ModelKind::Deduplicator,
-        identifier: processor.clone(),
+        identifier: ModelName::from(&processor),
     };
 
     runtime
@@ -4030,7 +4073,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
         .get(&super::RuntimeStateSchemaKey::new(
             domain,
             ModelKind::Deduplicator,
-            processor,
+            ModelName::from(&processor),
         ))
         .map(|entry| *entry.value());
     assert_eq!(
@@ -4045,9 +4088,9 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
 fn processor_template_refresh_is_not_junction_specific() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let input = identifier("events");
-    let output = identifier("unique_events");
-    let processor = identifier("deduplicate_events");
+    let input = named::<RelayName>("events");
+    let output = named::<RelayName>("unique_events");
+    let processor = named::<ModelName>("deduplicate_events");
     let collect_policy = super::RuntimeInputCollectPolicy {
         interval: Duration::from_secs(1),
         max_batch_size: Some(1024),
@@ -4130,9 +4173,9 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
     let domain = domain("default");
     let graph: super::SharedActiveGraph = StdArc::new(ArcSwapOption::from(None));
     let schema = Arc::new(compile_schema(&CreateSchema {
-        name: identifier("notification"),
+        name: named("notification"),
         fields: vec![SchemaField {
-            name: identifier("user_id"),
+            name: named("user_id"),
             ty: ParseAsType::I64,
             optional: false,
             sensitive: false,
@@ -4140,14 +4183,14 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
     }));
     let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Deduplicator,
-        source: identifier("dedup_users"),
-        root_relay: identifier("orders"),
+        source: named("dedup_users"),
+        root_relay: named("orders"),
         branch: None,
         branch_ttl: None,
         branch_max_instances: None,
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
-            identifier("projected_orders"),
+            named("projected_orders"),
             super::RelayProcessorRelayTemplate {
                 registry: super::RelayRegistry::new(),
                 services: test_relay_boundary_services(),
@@ -4157,11 +4200,11 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         .collect(),
         materialized_streams: HashSet::default(),
         processors: [(
-            identifier("dedup_users"),
+            named("dedup_users"),
             super::RelayProcessorTemplate {
                 kind: ModelKind::Deduplicator,
-                processor: identifier("dedup_users"),
-                input_relays: vec![identifier("orders")],
+                processor: named("dedup_users"),
+                input_relays: vec![named("orders")],
                 input_collect_policies: HashMap::default(),
                 error_policies: ErrorPolicies::handled_by_log(),
                 from_where: HashMap::default(),
@@ -4170,7 +4213,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
                 operation: super::RelayProcessorOperationTemplate::Deduplicator {
                     output_routes: super::RelayProcessorOutputsTemplate {
                         routes: vec![super::RelayProcessorOutputTemplate {
-                            output_relay: identifier("projected_orders"),
+                            output_relay: named("projected_orders"),
                             construction: nervix_models::RouteConstruction {
                                 inherit: Some(nervix_models::Inheritance::All),
                                 ..nervix_models::RouteConstruction::default()
@@ -4193,7 +4236,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
     let now = super::current_timestamp();
     let dequeued_work = || {
         super::NodeQuiesceWorkGuard::begin(
-            runtime.node_quiesce_counters(&domain, &identifier("dedup_users")),
+            runtime.node_quiesce_counters(&domain, named::<ModelName>("dedup_users")),
         )
     };
     let branch_batch = |user_id: i64, tenant: &str| {
@@ -4217,7 +4260,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
             now,
         },
         &mut instances,
-        identifier("orders"),
+        named("orders"),
         branch_batch(42, "acme"),
         dequeued_work(),
     )
@@ -4235,7 +4278,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
             now,
         },
         &mut instances,
-        identifier("orders"),
+        named("orders"),
         branch_batch(43, "acme"),
         dequeued_work(),
     )
@@ -4256,7 +4299,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
             now,
         },
         &mut instances,
-        identifier("orders"),
+        named("orders"),
         branch_batch(7, "beta"),
         dequeued_work(),
     )
@@ -4266,7 +4309,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
     super::shutdown_all_processor_branch_instances(
         &runtime,
         &domain,
-        &identifier("dedup_users"),
+        &named::<ModelName>("dedup_users"),
         None,
         &mut instances,
     )
@@ -4275,11 +4318,11 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
 }
 
 fn junction_branch_template(processor: &str, input_relay: &str) -> super::BranchInstanceTemplate {
-    let processor = identifier(processor);
-    let input_relay = identifier(input_relay);
+    let processor = named::<ModelName>(processor);
+    let input_relay = named::<RelayName>(input_relay);
     super::BranchInstanceTemplate {
         source_kind: ModelKind::Junction,
-        source: processor.clone(),
+        source: RelayName::from(&processor.clone()),
         root_relay: input_relay.clone(),
         branch: None,
         branch_ttl: None,
@@ -4322,8 +4365,8 @@ fn quiesce_test_batch() -> super::RelayRecordBatch {
 fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let processor = identifier("wait_for_customer");
-    let input_relay = identifier("orders");
+    let processor = named::<ModelName>("wait_for_customer");
+    let input_relay = named::<RelayName>("orders");
     let template = junction_branch_template(processor.as_str(), input_relay.as_str());
     let mut branch = template
         .instantiate(&runtime, &domain, None)
@@ -4411,7 +4454,7 @@ async fn dropping_pending_materialized_batch_nacks_its_ack_root() {
     let tracker = Arc::new(AckRootTracker::default());
     let (acks, completion) = AckSet::tracked_root(tracker.clone());
     let pending = super::PendingMaterializedBatch::new(
-        identifier("orders"),
+        named("orders"),
         super::RelayRecordBatch::single(
             test_schema(&[("value", ParseAsType::I64)]),
             None,
@@ -4440,7 +4483,7 @@ async fn dropping_pending_materialized_batch_nacks_its_ack_root() {
 fn required_wait_ack_does_not_block_ownership_handoff_drain_status() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let ingestor = identifier("orders_source");
+    let ingestor = named::<IngestorName>("orders_source");
     let tracker = Arc::new(AckRootTracker::default());
     runtime.in_flight_by_ingestor.insert(
         super::RuntimeKey::new(domain.clone(), ingestor.clone()),
@@ -4450,7 +4493,7 @@ fn required_wait_ack_does_not_block_ownership_handoff_drain_status() {
     let _required_wait = acks.required_wait_guard();
     let affected = [crate::registry::RegistryEntity {
         kind: ModelKind::Ingestor,
-        identifier: ingestor,
+        identifier: ModelName::from(&ingestor),
     }];
 
     let alteration =
@@ -4468,7 +4511,7 @@ fn required_wait_ack_does_not_block_ownership_handoff_drain_status() {
 async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("orders");
+    let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
     let _owner_receiver = services.activate_owner_buffer();
     runtime
@@ -4500,7 +4543,7 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
 async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("orders");
+    let relay = named("orders");
     let services = test_relay_boundary_services();
     let mut owner_receiver = services.activate_owner_buffer();
     let (acks, completion) = AckSet::root();
@@ -4543,8 +4586,8 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
 async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let processor = identifier("route_orders");
-    let input_relay = identifier("orders");
+    let processor = named::<ModelName>("route_orders");
+    let input_relay = named::<RelayName>("orders");
     let template = junction_branch_template(processor.as_str(), input_relay.as_str());
     let counters = runtime.node_quiesce_counters(&domain, &processor);
     let (input_tx, mut input_rx) = mpsc::channel(1);
@@ -4604,9 +4647,9 @@ async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
 async fn processor_handoff_drains_ready_batches_from_every_input() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let processor = identifier("route_orders");
-    let orders = identifier("orders");
-    let returns = identifier("returns");
+    let processor = named::<ModelName>("route_orders");
+    let orders = named::<RelayName>("orders");
+    let returns = named::<RelayName>("returns");
     let mut template = junction_branch_template(processor.as_str(), orders.as_str());
     template
         .processors
@@ -4765,7 +4808,7 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
         domain: domain("default"),
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
@@ -4831,7 +4874,7 @@ async fn deduplicator_snapshot_task_persists_dirty_state_on_interval() {
         domain: domain("default"),
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
@@ -4874,7 +4917,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
         domain: domain("default"),
         state: RuntimeStateKind::MaterializedRelay,
         kind: ModelKind::Relay,
-        identifier: identifier("latest_orders"),
+        identifier: named("latest_orders"),
         schema_fingerprint: [0; 32],
         branch_key: None,
     };
@@ -4935,7 +4978,7 @@ async fn window_processor_snapshot_task_persists_dirty_state_on_interval() {
         domain: domain("default"),
         state: RuntimeStateKind::WindowProcessor,
         kind: ModelKind::WindowProcessor,
-        identifier: identifier("latency_window"),
+        identifier: named("latency_window"),
         schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
@@ -4990,7 +5033,7 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
         domain: domain("default"),
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
         branch_key: None,
     };
@@ -5042,7 +5085,7 @@ fn runtime_state_store_purges_only_the_requested_domain() {
         domain: domain("stopped"),
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
         branch_key: None,
     };
@@ -5088,12 +5131,12 @@ fn runtime_state_store_purges_only_the_requested_entity() {
         domain: domain("default"),
         state: RuntimeStateKind::MaterializedRelay,
         kind: ModelKind::Relay,
-        identifier: identifier("events"),
+        identifier: named("events"),
         schema_fingerprint: [1; 32],
         branch_key: None,
     };
     let retained = RuntimeStatePlacement {
-        identifier: identifier("audit"),
+        identifier: named("audit"),
         ..removed.clone()
     };
     store
@@ -5139,7 +5182,7 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         domain: domain("default"),
         state: RuntimeStateKind::KafkaOffset,
         kind: ModelKind::Ingestor,
-        identifier: identifier("kafka_notifications"),
+        identifier: named("kafka_notifications"),
         schema_fingerprint: [0; 32],
         branch_key: None,
     };
@@ -5194,15 +5237,15 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
         domain: domain("default"),
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Ingestor,
-        identifier: identifier("redis_notifications"),
+        identifier: named("redis_notifications"),
         schema_fingerprint: [0; 32],
         branch_key: None,
     };
-    let relay = identifier("notifications");
+    let relay = named("notifications");
     let state = super::ReplicatedBranchAggregatedState::new(
         placement.clone(),
-        Some("node-1".to_string()),
-        "node-1".to_string(),
+        Some(ClusterNodeName::parse("node-1").expect("valid name")),
+        ClusterNodeName::parse("node-1").expect("valid name"),
         Vec::new(),
         0,
         &metrics,
@@ -5214,7 +5257,7 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
         kind: placement.kind,
         node: &placement.identifier,
         relay: &relay,
-        physical_node_id: Some("node-1"),
+        physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
         messages: 2,
         bytes: 64,
         domain_timestamp: None,
@@ -5228,8 +5271,8 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
     let restored_metrics = RuntimeMetrics::default();
     let _restored = super::ReplicatedBranchAggregatedState::new(
         placement.clone(),
-        Some("node-1".to_string()),
-        "node-1".to_string(),
+        Some(ClusterNodeName::parse("node-1").expect("valid name")),
+        ClusterNodeName::parse("node-1").expect("valid name"),
         Vec::new(),
         0,
         &restored_metrics,
@@ -5255,12 +5298,12 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
 fn describe_restores_branch_aggregated_metrics_from_store_without_materialized_state() {
     let dir = tempdir().expect("temp dir should open");
     let domain = domain("default");
-    let ingestor = identifier("redis_notifications");
+    let ingestor = named::<IngestorName>("redis_notifications");
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Ingestor,
-        identifier: ingestor.clone(),
+        identifier: ModelName::from(&ingestor.clone()),
         schema_fingerprint: [0; 32],
         branch_key: None,
     };
@@ -5273,9 +5316,9 @@ fn describe_restores_branch_aggregated_metrics_from_store_without_materialized_s
         metrics.observe_global_node_sent(crate::metrics::NodeBatchObservation {
             domain: &domain,
             kind: ModelKind::Ingestor,
-            node: &ingestor,
-            relay: &identifier("notifications"),
-            physical_node_id: Some("node-3"),
+            node: &ModelName::from(&ingestor),
+            relay: &named("notifications"),
+            physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
             messages: 19,
             bytes: 1900,
             domain_timestamp: None,
@@ -5284,8 +5327,8 @@ fn describe_restores_branch_aggregated_metrics_from_store_without_materialized_s
             metrics: metrics.snapshot_global_target(
                 &domain,
                 ModelKind::Ingestor,
-                &ingestor,
-                "node-3",
+                &ModelName::from(&ingestor),
+                &ClusterNodeName::parse("node-3").expect("valid name"),
             ),
         };
         let payload = super::encode_branch_aggregated_snapshot(&snapshot)
@@ -5301,9 +5344,12 @@ fn describe_restores_branch_aggregated_metrics_from_store_without_materialized_s
     let runtime =
         super::Runtime::with_persistence(Some(db), Duration::from_millis(100), Default::default())
             .expect("runtime should open persisted state");
-    runtime
-        .metrics
-        .register_global_node(&domain, ModelKind::Ingestor, &ingestor, Some("node-3"));
+    runtime.metrics.register_global_node(
+        &domain,
+        ModelKind::Ingestor,
+        &ModelName::from(&ingestor),
+        Some(&ClusterNodeName::parse("node-3").expect("valid name")),
+    );
 
     let rendered = runtime.describe_metrics_for(&domain, "INGESTOR", &ingestor);
     assert!(
@@ -5318,12 +5364,12 @@ fn describe_restores_branch_aggregated_metrics_from_store_without_materialized_s
 fn describe_restores_branch_aggregated_metrics_when_state_lsm_is_current_but_metrics_missing() {
     let dir = tempdir().expect("temp dir should open");
     let domain = domain("default");
-    let ingestor = identifier("redis_notifications");
+    let ingestor = named::<IngestorName>("redis_notifications");
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Ingestor,
-        identifier: ingestor.clone(),
+        identifier: ModelName::from(&ingestor.clone()),
         schema_fingerprint: [0; 32],
         branch_key: None,
     };
@@ -5335,9 +5381,9 @@ fn describe_restores_branch_aggregated_metrics_when_state_lsm_is_current_but_met
     persisted_metrics.observe_global_node_sent(crate::metrics::NodeBatchObservation {
         domain: &domain,
         kind: ModelKind::Ingestor,
-        node: &ingestor,
-        relay: &identifier("notifications"),
-        physical_node_id: Some("node-3"),
+        node: &ModelName::from(&ingestor),
+        relay: &named("notifications"),
+        physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
         messages: 19,
         bytes: 1900,
         domain_timestamp: None,
@@ -5346,8 +5392,8 @@ fn describe_restores_branch_aggregated_metrics_when_state_lsm_is_current_but_met
         metrics: persisted_metrics.snapshot_global_target(
             &domain,
             ModelKind::Ingestor,
-            &ingestor,
-            "node-3",
+            &ModelName::from(&ingestor),
+            &ClusterNodeName::parse("node-3").expect("valid name"),
         ),
     };
     let payload = super::encode_branch_aggregated_snapshot(&snapshot)
@@ -5362,8 +5408,8 @@ fn describe_restores_branch_aggregated_metrics_when_state_lsm_is_current_but_met
     let stale_state = Arc::new(
         super::ReplicatedBranchAggregatedState::new(
             placement.clone(),
-            Some("node-3".to_string()),
-            "node-3".to_string(),
+            Some(ClusterNodeName::parse("node-3").expect("valid name")),
+            ClusterNodeName::parse("node-3").expect("valid name"),
             Vec::new(),
             0,
             &RuntimeMetrics::default(),
@@ -5377,9 +5423,12 @@ fn describe_restores_branch_aggregated_metrics_when_state_lsm_is_current_but_met
     runtime
         .replicated_branch_aggregated_states
         .insert(placement, stale_state);
-    runtime
-        .metrics
-        .register_global_node(&domain, ModelKind::Ingestor, &ingestor, Some("node-3"));
+    runtime.metrics.register_global_node(
+        &domain,
+        ModelKind::Ingestor,
+        &ModelName::from(&ingestor),
+        Some(&ClusterNodeName::parse("node-3").expect("valid name")),
+    );
 
     let rendered = runtime.describe_metrics_for(&domain, "INGESTOR", &ingestor);
     assert!(
@@ -5394,12 +5443,12 @@ fn describe_restores_branch_aggregated_metrics_when_state_lsm_is_current_but_met
 fn describe_does_not_reapply_equal_lsm_snapshot_over_active_metrics() {
     let dir = tempdir().expect("temp dir should open");
     let domain = domain("default");
-    let ingestor = identifier("redis_notifications");
+    let ingestor = named::<IngestorName>("redis_notifications");
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Ingestor,
-        identifier: ingestor.clone(),
+        identifier: ModelName::from(&ingestor.clone()),
         schema_fingerprint: [0; 32],
         branch_key: None,
     };
@@ -5411,9 +5460,9 @@ fn describe_does_not_reapply_equal_lsm_snapshot_over_active_metrics() {
     persisted_metrics.observe_global_node_sent(crate::metrics::NodeBatchObservation {
         domain: &domain,
         kind: ModelKind::Ingestor,
-        node: &ingestor,
-        relay: &identifier("notifications"),
-        physical_node_id: Some("node-3"),
+        node: &ModelName::from(&ingestor),
+        relay: &named("notifications"),
+        physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
         messages: 19,
         bytes: 1900,
         domain_timestamp: None,
@@ -5422,8 +5471,8 @@ fn describe_does_not_reapply_equal_lsm_snapshot_over_active_metrics() {
         metrics: persisted_metrics.snapshot_global_target(
             &domain,
             ModelKind::Ingestor,
-            &ingestor,
-            "node-3",
+            &ModelName::from(&ingestor),
+            &ClusterNodeName::parse("node-3").expect("valid name"),
         ),
     };
     let payload = super::encode_branch_aggregated_snapshot(&snapshot)
@@ -5438,8 +5487,8 @@ fn describe_does_not_reapply_equal_lsm_snapshot_over_active_metrics() {
     let state = Arc::new(
         super::ReplicatedBranchAggregatedState::new(
             placement.clone(),
-            Some("node-3".to_string()),
-            "node-3".to_string(),
+            Some(ClusterNodeName::parse("node-3").expect("valid name")),
+            ClusterNodeName::parse("node-3").expect("valid name"),
             Vec::new(),
             0,
             &RuntimeMetrics::default(),
@@ -5457,9 +5506,9 @@ fn describe_does_not_reapply_equal_lsm_snapshot_over_active_metrics() {
         .observe_global_node_sent(crate::metrics::NodeBatchObservation {
             domain: &domain,
             kind: ModelKind::Ingestor,
-            node: &ingestor,
-            relay: &identifier("notifications"),
-            physical_node_id: Some("node-3"),
+            node: &ModelName::from(&ingestor),
+            relay: &named("notifications"),
+            physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
             messages: 1,
             bytes: 100,
             domain_timestamp: None,
@@ -5481,7 +5530,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         domain: domain("default"),
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
@@ -5515,7 +5564,7 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
         domain: domain("default"),
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
@@ -5536,7 +5585,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         domain: domain("default"),
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
         branch_key: string_branch_key("tenant", "beta"),
     };
@@ -5544,7 +5593,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         domain: domain("default"),
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
@@ -5554,7 +5603,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         domain: domain("default"),
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
         branch_key: None,
     };
@@ -5566,7 +5615,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         domain: domain("default"),
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
-        identifier: identifier("dedup_orders"),
+        identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
         branch_key: None,
     };
@@ -5580,22 +5629,22 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
 fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let identifier = identifier("dedup_orders");
+    let identifier = named::<ModelName>("dedup_orders");
     let schedule = |fingerprint| DomainSchedule {
         domain: domain.clone(),
         nodes: vec![ScheduledNode {
             identifier: identifier.clone(),
             kind: ModelKind::Deduplicator,
             config: Box::new(nervix_models::Model::Schema(CreateSchema {
-                name: identifier.clone(),
+                name: SchemaName::from(&identifier.clone()),
                 fields: Vec::new(),
             })),
             effective_branching: None,
             effective_branching_schema: None,
             schema_fingerprint: fingerprint,
             kafka_partition_schedule: None,
-            primary_node: Some("node-1".to_string()),
-            assigned_nodes: vec!["node-1".to_string()],
+            primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+            assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
         }],
         placement_groups: Vec::new(),
     };
@@ -5648,8 +5697,8 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
 #[tokio::test]
 async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("customer_id", ParseAsType::String)]);
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
@@ -5714,8 +5763,8 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
 #[tokio::test]
 async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
@@ -5765,8 +5814,8 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
 #[tokio::test]
 async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receivers() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
@@ -5826,8 +5875,8 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
 #[tokio::test]
 async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = super::RelayRegistry::new();
     let branch_collapse = Arc::new(super::BranchCollapseNode::with_capacity(nonzero_capacity(
@@ -5860,7 +5909,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         registry,
         services,
         key: Some(concrete_branch_key([(
-            identifier("user_id"),
+            named("user_id"),
             RuntimeValue::U32(52),
         )])),
     });
@@ -5911,7 +5960,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
 async fn unbranched_relay_uses_direct_fanout_without_branch_collapse() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("notifications");
+    let relay = named("notifications");
 
     let fanout = runtime
         .relay_boundary_fanout_with_capacity(
@@ -5929,23 +5978,23 @@ async fn unbranched_relay_uses_direct_fanout_without_branch_collapse() {
 async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let schema = identifier("notification");
-    let relay = identifier("notifications");
+    let schema = named::<SchemaName>("notification");
+    let relay = named::<RelayName>("notifications");
 
     runtime
         .rebuild_domain_from_schedule(
-            "node-1",
+            &ClusterNodeName::parse("node-1").expect("valid name"),
             &domain,
             Some(DomainSchedule {
                 domain: domain.clone(),
                 nodes: vec![
                     scheduled_model(
                         ModelKind::Schema,
-                        schema.clone(),
+                        ModelName::from(&schema.clone()),
                         nervix_models::Model::Schema(CreateSchema {
                             name: schema.clone(),
                             fields: vec![nervix_models::SchemaField {
-                                name: identifier("user_id"),
+                                name: named("user_id"),
                                 ty: ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
@@ -5954,7 +6003,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
                     ),
                     scheduled_model(
                         ModelKind::Relay,
-                        relay.clone(),
+                        ModelName::from(&relay),
                         nervix_models::Model::Relay(CreateRelay {
                             name: relay.clone(),
                             schema,
@@ -5986,7 +6035,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
 fn flush_immediate_schedules_100_microsecond_system_timeout() {
     let now = Timestamp::from_unix_nanos(1_000_000);
     let mut output = super::RelayProcessorOutputNode {
-        relay: identifier("notifications"),
+        relay: named("notifications"),
         construction: nervix_models::RouteConstruction::default(),
         branch: None,
         flush_policy: Some(super::RuntimeFlushPolicy::Immediate),
@@ -6199,8 +6248,8 @@ fn relay_fanout_shares_arrow_columns_and_exposes_row_views() {
 #[tokio::test]
 async fn owner_ingress_touches_expiring_stream_state() {
     let runtime = super::Runtime::default();
-    let domain = Domain::parse("default").expect("valid domain");
-    let relay_id = Identifier::parse("notifications").expect("valid identifier");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let relay_id = RelayName::parse("notifications").expect("valid identifier");
     let expiring_state = runtime.expiring_stream_state(&domain, &relay_id);
     let registry = expiring_state.registry.clone();
     let services = test_relay_boundary_services();
@@ -6279,7 +6328,7 @@ async fn owner_ingress_touches_expiring_stream_state() {
             acks: vec![None],
             admission: Some(RemoteAckRegistration {
                 ack_id: 1,
-                reply_node_id: "producer-node".to_string(),
+                reply_node_id: ClusterNodeName::parse("producer-node").expect("valid name"),
             }),
         })
         .await
@@ -6308,7 +6357,7 @@ async fn owner_ingress_touches_expiring_stream_state() {
 async fn relay_owner_enforces_branch_capacity_across_batches() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("orders");
+    let relay = named("orders");
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
@@ -6374,7 +6423,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     )
     .expect("runtime should build");
     let domain = domain("default");
-    let relay = identifier("orders");
+    let relay = named("orders");
     let key = string_branch_key("tenant", "acme");
     let registry = super::RelayRegistry::new();
     let services = test_relay_boundary_services();
@@ -6429,7 +6478,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
 async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("notifications");
+    let relay = named("notifications");
     let branch = string_branch_key("tenant", "acme");
     let expiring_state = runtime.expiring_stream_state(&domain, &relay);
     expiring_state.touch(&branch, Timestamp::from_unix_nanos(1));
@@ -6482,7 +6531,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
 async fn relay_state_shutdown_drains_every_ready_batch() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("materialized_orders");
+    let relay = named::<RelayName>("materialized_orders");
     let schema = test_schema(&[("value", ParseAsType::I64)]);
     let state = runtime
         .replicated_materialized_stream_state(
@@ -6490,7 +6539,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
                 domain: domain.clone(),
                 state: RuntimeStateKind::MaterializedRelay,
                 kind: ModelKind::Relay,
-                identifier: relay.clone(),
+                identifier: ModelName::from(&relay.clone()),
                 schema_fingerprint: [0; 32],
                 branch_key: None,
             },
@@ -6551,7 +6600,7 @@ fn lookup_queries_surface_recorded_domain_instantiation_errors() {
     );
 
     let error = runtime
-        .query_local_lookup(&domain("default"), &identifier("zip_codes"), "99926")
+        .query_local_lookup(&domain("default"), &named("zip_codes"), "99926")
         .expect_err("lookup should surface stored instantiation errors");
 
     assert!(error.contains("failed to build domain execution for 'default'"));
@@ -6562,7 +6611,7 @@ fn lookup_queries_surface_recorded_domain_instantiation_errors() {
 async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing() {
     let runtime = super::Runtime::new();
     let domain = domain("default");
-    let ingestor = identifier("mqtt_notifications");
+    let ingestor = named("mqtt_notifications");
     runtime.domain_instantiation_errors.insert(
         domain.clone(),
         "failed to build domain execution for 'default': ingestor start failed".to_string(),
@@ -6635,8 +6684,8 @@ fn runtime_uses_configured_timestamp_field_when_present() {
     let timestamp = runtime
         .resolve_ingested_record_timestamp(
             &domain("paced"),
-            &identifier("ing"),
-            Some(&IngestTimestampSource::At(identifier("occurred_at"))),
+            &named("ing"),
+            Some(&IngestTimestampSource::At(named("occurred_at"))),
             &record,
         )
         .expect("timestamp should resolve");
@@ -6660,7 +6709,7 @@ fn runtime_uses_ingested_watermark_for_timestamp_now() {
     let timestamp = runtime
         .resolve_ingested_record_timestamp(
             &domain("paced"),
-            &identifier("ing"),
+            &named("ing"),
             Some(&IngestTimestampSource::Now),
             &record,
         )
@@ -6679,7 +6728,7 @@ fn paced_domain_requires_explicit_timestamp_source() {
     let error = runtime
         .resolve_ingested_record_timestamp(
             &domain("paced"),
-            &identifier("ing"),
+            &named("ing"),
             None,
             &test_runtime_row([]).with_ingested_at_watermarks(Timestamp::from_unix_nanos(1)),
         )
@@ -6708,7 +6757,7 @@ fn paced_domains_accept_records_inside_tick_window() {
         runtime
             .ensure_domain_allows_ingestion(
                 &domain("paced"),
-                &identifier("ing"),
+                &named("ing"),
                 Timestamp::from_unix_nanos(10_200_000_000),
             )
             .is_ok()
@@ -6717,7 +6766,7 @@ fn paced_domains_accept_records_inside_tick_window() {
         runtime
             .ensure_domain_allows_ingestion(
                 &domain("paced"),
-                &identifier("ing"),
+                &named("ing"),
                 Timestamp::from_unix_nanos(10_400_000_000),
             )
             .is_err()
@@ -6741,7 +6790,7 @@ fn paced_domains_accept_records_while_clock_is_running_before_ticks_arrive() {
         runtime
             .ensure_domain_allows_ingestion(
                 &domain("paced"),
-                &identifier("ing"),
+                &named("ing"),
                 Timestamp::from_unix_nanos(10_200_000_000),
             )
             .is_ok()
@@ -6750,7 +6799,7 @@ fn paced_domains_accept_records_while_clock_is_running_before_ticks_arrive() {
         runtime
             .ensure_domain_allows_ingestion(
                 &domain("paced"),
-                &identifier("ing"),
+                &named("ing"),
                 Timestamp::from_unix_nanos(11_200_000_000),
             )
             .is_ok()
@@ -6795,7 +6844,7 @@ fn sync_domains_clears_ticks_when_paced_domain_stops() {
         runtime
             .ensure_domain_allows_ingestion(
                 &domain("paced"),
-                &identifier("ing"),
+                &named("ing"),
                 Timestamp::from_unix_nanos(10_000_000),
             )
             .is_err()
@@ -6836,7 +6885,7 @@ fn sync_domains_preserves_clock_state_but_rejects_ingestion_while_paused() {
     let error = runtime
         .ensure_domain_allows_ingestion(
             &domain("paced"),
-            &identifier("ing"),
+            &named("ing"),
             Timestamp::from_unix_nanos(10_000_000_000),
         )
         .expect_err("paused domain must reject ingestion");
@@ -6869,7 +6918,7 @@ fn stopped_unpaced_domain_rejects_ingestion() {
         runtime
             .ensure_domain_allows_ingestion(
                 &domain("default"),
-                &identifier("ing"),
+                &named("ing"),
                 Timestamp::from_unix_nanos(10_000_000),
             )
             .is_err()
@@ -6880,7 +6929,7 @@ fn stopped_unpaced_domain_rejects_ingestion() {
 async fn direct_fanout_owner_buffer_uses_configured_capacity() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("orders");
+    let relay = named("orders");
     let schema = test_schema(&[]);
     let fanout = runtime
         .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(1))
@@ -6946,7 +6995,7 @@ async fn direct_fanout_owner_buffer_uses_configured_capacity() {
 async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("orders");
+    let relay = named("orders");
     let schema = test_schema(&[]);
     let fanout = runtime
         .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(1))
@@ -7033,7 +7082,7 @@ async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
         ("operation_index", ParseAsType::U32, true),
     ]);
     let materialized_specs = HashMap::from_iter([(
-        identifier("profiles"),
+        named("profiles"),
         super::RuntimeMaterializedRelaySpec::new(
             state_schema.arrow_schema(),
             super::VmSchemaSensitivity::default(),
@@ -7048,7 +7097,7 @@ async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
     .assignments;
     let program = super::compile_message_error_set_program(
         &domain("default"),
-        &identifier("calculate"),
+        &named("calculate"),
         &assignments,
         output_schema,
         super::MessageErrorCompileSchemas {
@@ -7104,17 +7153,12 @@ async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
 #[test]
 fn message_error_routes_preserve_branch_identity_without_reconstruction() {
     let incoming = string_branch_key("tenant", "acme");
-    let relay = identifier("processing_errors");
+    let relay = named("processing_errors");
     let reference = uuid::Uuid::now_v7();
 
     assert_eq!(
-        super::preserved_message_error_branch(
-            &[identifier("tenant")],
-            &incoming,
-            &relay,
-            reference,
-        )
-        .expect("matching branched error route should preserve its key"),
+        super::preserved_message_error_branch(&[named("tenant")], &incoming, &relay, reference,)
+            .expect("matching branched error route should preserve its key"),
         incoming
     );
     assert!(
@@ -7123,7 +7167,7 @@ fn message_error_routes_preserve_branch_identity_without_reconstruction() {
             .contains("cannot receive branched message error")
     );
     assert!(
-        super::preserved_message_error_branch(&[identifier("tenant")], &None, &relay, reference,)
+        super::preserved_message_error_branch(&[named("tenant")], &None, &relay, reference,)
             .expect_err("branched error relay must reject unbranched execution")
             .contains("cannot receive unbranched message error")
     );
@@ -7256,13 +7300,13 @@ fn ingest_group_builds_one_metadata_column_set_for_all_of_its_messages() {
 async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
     let left_schema = test_schema(&[("id", ParseAsType::U32), ("marker", ParseAsType::I64)]);
     let right_schema = test_schema(&[("id", ParseAsType::U32)]);
-    let processor = identifier("join_profiles");
+    let processor = named("join_profiles");
     let program = super::compile_correlator_where_program(
         &processor,
         &expression("left.id = right.id"),
-        &[identifier("left_profiles")],
+        &[named("left_profiles")],
         left_schema.arrow_schema(),
-        &[identifier("right_profiles")],
+        &[named("right_profiles")],
         right_schema.arrow_schema(),
         None,
     )
@@ -7366,9 +7410,9 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
     ]);
     let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
     let state_schema = test_schema(&[("status", ParseAsType::String)]);
-    let branch = identifier("by_tenant");
+    let branch = named::<FieldName>("by_tenant");
     let materialized_specs = HashMap::from_iter([(
-        identifier("profiles"),
+        named("profiles"),
         super::RuntimeMaterializedRelaySpec::new(
             state_schema.arrow_schema(),
             super::VmSchemaSensitivity::default(),
@@ -7376,12 +7420,12 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
         ),
     )]);
     let program = super::CorrelatorOutputCompileContext {
-        processor: &identifier("join_profiles"),
+        processor: &named("join_profiles"),
         left_schema: left_schema.arrow_schema(),
         left_sensitivity: super::VmSchemaSensitivity::default(),
         right_schema: right_schema.arrow_schema(),
         right_sensitivity: super::VmSchemaSensitivity::default(),
-        output_relay: &identifier("joined_profiles"),
+        output_relay: &named("joined_profiles"),
         output_schema: output_schema.arrow_schema(),
         output_sensitivity: super::VmSchemaSensitivity::default(),
         construction: &construction(
@@ -7455,7 +7499,7 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
     super::CORRELATOR_OUTPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
 
     let outcomes = super::evaluate_correlator_output_batch(
-        &identifier("join_profiles"),
+        &named("join_profiles"),
         &program,
         &matched,
         vec![AckSet::empty(), AckSet::empty()],
@@ -7622,7 +7666,7 @@ fn url_scheme_detection_uses_url_parser() {
 #[test]
 fn mqtt_client_builder_uses_configured_or_default_client_id() {
     let client = CreateClientMqtt {
-        name: identifier("mqtt_main"),
+        name: named("mqtt_main"),
         mount: None,
         config: vec![nervix_models::ClientConfigEntry {
             key: "addr".to_string(),
@@ -7634,7 +7678,7 @@ fn mqtt_client_builder_uses_configured_or_default_client_id() {
         .expect("must build client from default id");
 
     let client_with_id = CreateClientMqtt {
-        name: identifier("mqtt_main"),
+        name: named("mqtt_main"),
         mount: None,
         config: vec![
             nervix_models::ClientConfigEntry {
@@ -7698,7 +7742,7 @@ fn prometheus_query_url_uses_url_parser_for_path_and_query() {
 #[test]
 fn runtime_duration_parsers_validate_and_report_context() {
     let domain = domain("default");
-    let ingestor = identifier("orders_ingestor");
+    let ingestor = named("orders_ingestor");
 
     assert_eq!(
         super::Runtime::parse_ack_timeout(&domain, &ingestor, "2s").expect("valid timeout"),
@@ -7759,13 +7803,13 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
     let ca_path = source_root.path().join("ca.pem");
     std::fs::write(&ca_path, "test-ca").expect("ca file should be written");
 
-    let mount_domain = Domain::parse("tenant").expect("valid domain");
+    let mount_domain = DomainName::parse("tenant").expect("valid domain");
     let store = ResourceStore::open(store_root.path()).expect("resource store should open");
     store
         .install_from_directory(
-            ResourceId::new(mount_domain.clone(), identifier("dev_tls"), 1),
+            ResourceId::new(mount_domain.clone(), named("dev_tls"), 1),
             source_root.path(),
-            "node-1",
+            ClusterNodeName::parse("node-1").expect("valid name"),
             Timestamp::from_unix_nanos(0),
         )
         .await
@@ -7777,17 +7821,17 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
         ResourceVersionStatus {
             next_version_by_resource: SortedVec::from_unsorted(vec![(
                 mount_domain.clone(),
-                identifier("dev_tls"),
+                named("dev_tls"),
                 2,
             )]),
             versions: SortedVec::from_unsorted(vec![ResourceVersion {
-                id: ResourceId::new(mount_domain.clone(), identifier("dev_tls"), 1),
+                id: ResourceId::new(mount_domain.clone(), named("dev_tls"), 1),
                 root_checksum: "root".to_string(),
                 manifest_checksum: "manifest".to_string(),
                 file_count: 1,
                 total_bytes: 7,
                 created_at: Timestamp::from_unix_nanos(0),
-                created_by_node: "node-1".to_string(),
+                created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
             }]),
             replicas: SortedVec::new(),
         },
@@ -7796,7 +7840,7 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
     let resolved = runtime
         .resolve_client_config(
             &mount_domain,
-            Some(&identifier("dev_tls")),
+            Some(&named("dev_tls")),
             &[ClientConfigEntry {
                 key: "tls_ca_file".to_string(),
                 value: "{{ dev_tls }}/ca.pem".to_string(),
@@ -7813,11 +7857,11 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
         "test-ca"
     );
 
-    let other_domain = Domain::parse("other").expect("valid domain");
+    let other_domain = DomainName::parse("other").expect("valid domain");
     let error = runtime
         .resolve_client_config(
             &other_domain,
-            Some(&identifier("dev_tls")),
+            Some(&named("dev_tls")),
             &[ClientConfigEntry {
                 key: "tls_ca_file".to_string(),
                 value: "{{ dev_tls }}/ca.pem".to_string(),
@@ -7835,7 +7879,7 @@ fn client_resource_mounts_reject_unknown_placeholders() {
     let runtime = super::Runtime::new();
     let error = runtime
         .resolve_client_config(
-            &Domain::parse("tenant").expect("valid domain"),
+            &DomainName::parse("tenant").expect("valid domain"),
             None,
             &[ClientConfigEntry {
                 key: "tls_ca_file".to_string(),
@@ -7851,7 +7895,7 @@ fn client_config_instance_placeholder_renders_for_concrete_instance() {
     let runtime = super::Runtime::new();
     let resolved = runtime
         .resolve_client_config_with_instance(
-            &Domain::parse("tenant").expect("valid domain"),
+            &DomainName::parse("tenant").expect("valid domain"),
             None,
             &[ClientConfigEntry {
                 key: "client_id".to_string(),
@@ -7867,7 +7911,7 @@ fn client_config_instance_placeholder_renders_for_concrete_instance() {
 #[test]
 fn client_config_extractors_handle_defaults_and_missing_keys() {
     let zeromq = CreateClientZeroMq {
-        name: identifier("zmq"),
+        name: named("zmq"),
         mount: None,
         config: vec![
             ClientConfigEntry {
@@ -7889,7 +7933,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
     ));
 
     let http = CreateClientHttp {
-        name: identifier("http"),
+        name: named("http"),
         mount: None,
         config: vec![ClientConfigEntry {
             key: "endpoint".to_string(),
@@ -7906,7 +7950,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
     );
 
     let http_post = CreateClientHttp {
-        name: identifier("http"),
+        name: named("http"),
         mount: None,
         config: vec![
             ClientConfigEntry {
@@ -7925,7 +7969,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
     );
     assert!(
         super::ingestors::http::HttpIngestor::method_from_client(&CreateClientHttp {
-            name: identifier("http"),
+            name: named("http"),
             mount: None,
             config: vec![ClientConfigEntry {
                 key: "method".to_string(),
@@ -7936,7 +7980,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
     );
 
     let websocket = CreateClientWebsockets {
-        name: identifier("ws"),
+        name: named("ws"),
         mount: None,
         signaling_protocol: None,
         config: vec![ClientConfigEntry {
@@ -7951,7 +7995,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
     );
 
     let prometheus = CreateClientPrometheus {
-        name: identifier("prom"),
+        name: named("prom"),
         mount: None,
         config: vec![ClientConfigEntry {
             key: "addr".to_string(),
@@ -7965,7 +8009,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
     );
 
     let zeromq_default = CreateClientZeroMq {
-        name: identifier("zmq"),
+        name: named("zmq"),
         mount: None,
         config: vec![ClientConfigEntry {
             key: "addr".to_string(),
@@ -7978,7 +8022,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
 
     assert!(
         super::ingestors::zeromq::ZeroMqIngestor::addr_from_client(&CreateClientZeroMq {
-            name: identifier("zmq"),
+            name: named("zmq"),
             mount: None,
             config: vec![],
         })
@@ -7987,7 +8031,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
     );
     assert!(
         super::ingestors::http::HttpIngestor::endpoint_from_client(&CreateClientHttp {
-            name: identifier("http"),
+            name: named("http"),
             mount: None,
             config: vec![],
         })
@@ -7997,7 +8041,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
     assert!(
         super::ingestors::websockets::WebsocketsIngestor::endpoint_from_client(
             &CreateClientWebsockets {
-                name: identifier("ws"),
+                name: named("ws"),
                 mount: None,
                 signaling_protocol: None,
                 config: vec![],
@@ -8009,7 +8053,7 @@ fn client_config_extractors_handle_defaults_and_missing_keys() {
     assert!(
         super::ingestors::prometheus::PrometheusIngestor::addr_from_client(
             &CreateClientPrometheus {
-                name: identifier("prom"),
+                name: named("prom"),
                 mount: None,
                 config: vec![],
             }
@@ -8130,7 +8174,7 @@ fn http_and_prometheus_clients_validate_timeout_configuration() {
 
     let err = super::ingestors::prometheus::PrometheusIngestor::client_from_client(
         &CreateClientPrometheus {
-            name: identifier("prom"),
+            name: named("prom"),
             mount: None,
             config: vec![ClientConfigEntry {
                 key: "timeout_ms".to_string(),
@@ -8146,7 +8190,7 @@ fn http_and_prometheus_clients_validate_timeout_configuration() {
 fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
     let err = super::ingestors::mqtt::MqttIngestor::client_from_client(
         &CreateClientMqtt {
-            name: identifier("mqtt_main"),
+            name: named("mqtt_main"),
             mount: None,
             config: vec![],
         },
@@ -8174,16 +8218,16 @@ fn branched_node_specs_capture_downstream_processing_tree() {
             branch_model_tuple("tenant", "projected_orders", &["tenant"]),
             (
                 ModelKind::Ingestor,
-                identifier("orders_ingestor"),
+                named("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
-                    name: identifier("orders_ingestor"),
-                    output_routes: (ProcessorOutputs::single(identifier("orders")))
+                    name: named("orders_ingestor"),
+                    output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
                         .with_branch(branched_by("orders", &["tenant"])),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_client"),
+                        client: named("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -8193,12 +8237,12 @@ fn branched_node_specs_capture_downstream_processing_tree() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_orders"),
+                named("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_orders"),
-                    from: ProcessorInputs::single(identifier("orders"))
+                    name: named("dedup_orders"),
+                    from: ProcessorInputs::single(named("orders"))
                         .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
-                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                    output_routes: (ProcessorOutputs::single(named("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("orders", &["tenant"]),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -8210,11 +8254,11 @@ fn branched_node_specs_capture_downstream_processing_tree() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_projected_orders"),
+                named("dedup_projected_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_projected_orders"),
-                    from: ProcessorInputs::single(identifier("projected_orders")),
-                    output_routes: (ProcessorOutputs::single(identifier("aggregated_orders")))
+                    name: named("dedup_projected_orders"),
+                    from: ProcessorInputs::single(named("projected_orders")),
+                    output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("projected_orders", &["tenant"]),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -8226,13 +8270,13 @@ fn branched_node_specs_capture_downstream_processing_tree() {
             ),
             (
                 ModelKind::Emitter,
-                identifier("orders_emitter"),
+                named("orders_emitter"),
                 nervix_models::Model::Emitter(CreateEmitter {
-                    name: identifier("orders_emitter"),
-                    from: ProcessorInputs::single(identifier("aggregated_orders")),
-                    encode_using_codec: Some(identifier("orders_codec")),
+                    name: named("orders_emitter"),
+                    from: ProcessorInputs::single(named("aggregated_orders")),
+                    encode_using_codec: Some(named("orders_codec")),
                     sink: Box::new(EmitSink::ZeroMq {
-                        client: identifier("zmq_client"),
+                        client: named("zmq_client"),
                     }),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
@@ -8254,21 +8298,21 @@ fn branched_node_specs_capture_downstream_processing_tree() {
 
     assert_eq!(specs.entrypoints.len(), 1);
     let spec = &specs.entrypoints[0];
-    assert_eq!(spec.identifier, identifier("orders_ingestor"));
-    assert_eq!(spec.root_relay, identifier("orders"));
-    assert_eq!(spec.branch.as_ref(), Some(&identifier("by_orders")));
+    assert_eq!(spec.identifier, named("orders_ingestor"));
+    assert_eq!(spec.root_relay, named("orders"));
+    assert_eq!(spec.branch.as_ref(), Some(&named("by_orders")));
     assert_eq!(specs.processors.len(), 2);
     let dedup_orders = &specs.processors[0];
-    assert_eq!(dedup_orders.spec.processor, identifier("dedup_orders"));
-    assert_eq!(dedup_orders.spec.input_relays, vec![identifier("orders")]);
+    assert_eq!(dedup_orders.spec.processor, named("dedup_orders"));
+    assert_eq!(dedup_orders.spec.input_relays, vec![named("orders")]);
     let collect_policy = dedup_orders
         .spec
         .input_collect_policies
-        .get(&identifier("orders"))
+        .get(&RelayName::from(&named::<ModelName>("orders")))
         .expect("input collection policy must be planned for its source relay");
     assert_eq!(collect_policy.collect_for, "25ms");
     assert_eq!(collect_policy.max_batch_size.as_deref(), Some("2MiB"));
-    assert_eq!(dedup_orders.branch.as_ref(), Some(&identifier("by_orders")));
+    assert_eq!(dedup_orders.branch.as_ref(), Some(&named("by_orders")));
     assert_eq!(dedup_orders.branch_ttl.as_deref(), Some("5m"));
     assert_eq!(dedup_orders.branch_max_instances, None);
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
@@ -8280,15 +8324,15 @@ fn branched_node_specs_capture_downstream_processing_tree() {
         .routes
         .first()
         .expect("deduplicator should have output route");
-    assert_eq!(output.relay, identifier("projected_orders"));
+    assert_eq!(output.relay, named("projected_orders"));
     let dedup_projected = &specs.processors[1];
     assert_eq!(
         dedup_projected.spec.processor,
-        identifier("dedup_projected_orders")
+        named("dedup_projected_orders")
     );
     assert_eq!(
         dedup_projected.spec.input_relays,
-        vec![identifier("projected_orders")]
+        vec![named("projected_orders")]
     );
     assert_eq!(dedup_projected.branch_ttl.as_deref(), Some("5m"));
 }
@@ -8301,16 +8345,16 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
             branch_model_tuple("host", "metric_summary", &["host"]),
             (
                 ModelKind::Ingestor,
-                identifier("metrics_ingestor"),
+                named("metrics_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
-                    name: identifier("metrics_ingestor"),
-                    output_routes: (ProcessorOutputs::single(identifier("metrics")))
+                    name: named("metrics_ingestor"),
+                    output_routes: (ProcessorOutputs::single(named("metrics")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
                         .with_branch(branched_by("metrics", &["host"])),
-                    decode_using_codec: identifier("metrics_codec"),
+                    decode_using_codec: named("metrics_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_client"),
+                        client: named("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -8320,10 +8364,10 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
             ),
             (
                 ModelKind::WindowProcessor,
-                identifier("metric_window"),
+                named("metric_window"),
                 nervix_models::Model::WindowProcessor(CreateWindowProcessor {
-                    name: identifier("metric_window"),
-                    from: ProcessorInputs::single(identifier("metrics")),
+                    name: named("metric_window"),
+                    from: ProcessorInputs::single(named("metrics")),
                     output_routes: window_outputs(
                         "metric_summary",
                         "SET count = COUNT(input.latency)",
@@ -8344,11 +8388,11 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_summary"),
+                named("dedup_summary"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_summary"),
-                    from: ProcessorInputs::single(identifier("metric_summary")),
-                    output_routes: (ProcessorOutputs::single(identifier("projected_summary")))
+                    name: named("dedup_summary"),
+                    from: ProcessorInputs::single(named("metric_summary")),
+                    output_routes: (ProcessorOutputs::single(named("projected_summary")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("metric_summary", &["host"]),
                     deduplicate_on: vec![expression("input.count")],
@@ -8364,12 +8408,12 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
 
     assert_eq!(specs.entrypoints.len(), 1);
     let spec = &specs.entrypoints[0];
-    assert_eq!(spec.root_relay, identifier("metrics"));
+    assert_eq!(spec.root_relay, named("metrics"));
     assert_eq!(specs.processors.len(), 2);
     let window = specs
         .processors
         .iter()
-        .find(|node| node.spec.processor == identifier("metric_window"))
+        .find(|node| node.spec.processor == named("metric_window"))
         .expect("window processor spec must exist");
     let BranchedProcessorOperationSpec::WindowProcessor {
         output_routes,
@@ -8383,7 +8427,7 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
         .routes
         .first()
         .expect("window processor should have output route");
-    assert_eq!(output.relay, identifier("metric_summary"));
+    assert_eq!(output.relay, named("metric_summary"));
     assert_eq!(width.messages, Some(100));
     assert_eq!(step.messages, Some(10));
     assert_eq!(output.construction.assignments.len(), 1);
@@ -8391,8 +8435,8 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
         specs
             .processors
             .iter()
-            .any(|node| node.spec.processor == identifier("dedup_summary")
-                && node.spec.input_relays == vec![identifier("metric_summary")])
+            .any(|node| node.spec.processor == named("dedup_summary")
+                && node.spec.input_relays == vec![named("metric_summary")])
     );
 }
 
@@ -8404,16 +8448,16 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
             branch_model_tuple("tenant", "scores", &["tenant"]),
             (
                 ModelKind::Ingestor,
-                identifier("features_ingestor"),
+                named("features_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
-                    name: identifier("features_ingestor"),
-                    output_routes: (ProcessorOutputs::single(identifier("features")))
+                    name: named("features_ingestor"),
+                    output_routes: (ProcessorOutputs::single(named("features")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
                         .with_branch(branched_by("features", &["tenant"])),
-                    decode_using_codec: identifier("features_codec"),
+                    decode_using_codec: named("features_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_client"),
+                        client: named("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -8423,14 +8467,14 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
             ),
             (
                 ModelKind::Inferencer,
-                identifier("score_model"),
+                named("score_model"),
                 nervix_models::Model::Inferencer(CreateInferencer {
-                    name: identifier("score_model"),
-                    from: ProcessorInputs::single(identifier("features")),
-                    output_routes: (ProcessorOutputs::single(identifier("scores")))
+                    name: named("score_model"),
+                    from: ProcessorInputs::single(named("features")),
+                    output_routes: (ProcessorOutputs::single(named("scores")))
                         .with_flush_policy("IMMEDIATE".to_string(), None),
                     branched_by: processor_branched_by("features", &["tenant"]),
-                    resource: identifier("fraud_model"),
+                    resource: named("fraud_model"),
                     resource_version: Some(3),
                     file: "models/fraud.onnx".to_string(),
                     inputs: vec![InferencerTensorMapping {
@@ -8449,11 +8493,11 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_scores"),
+                named("dedup_scores"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_scores"),
-                    from: ProcessorInputs::single(identifier("scores")),
-                    output_routes: (ProcessorOutputs::single(identifier("projected_scores")))
+                    name: named("dedup_scores"),
+                    from: ProcessorInputs::single(named("scores")),
+                    output_routes: (ProcessorOutputs::single(named("projected_scores")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("scores", &["tenant"]),
                     deduplicate_on: vec![expression("input.score")],
@@ -8469,12 +8513,12 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
 
     assert_eq!(specs.entrypoints.len(), 1);
     let spec = &specs.entrypoints[0];
-    assert_eq!(spec.root_relay, identifier("features"));
+    assert_eq!(spec.root_relay, named("features"));
     assert_eq!(specs.processors.len(), 2);
     let inferencer = specs
         .processors
         .iter()
-        .find(|node| node.spec.processor == identifier("score_model"))
+        .find(|node| node.spec.processor == named("score_model"))
         .expect("inferencer spec must exist");
     let BranchedProcessorOperationSpec::Inferencer {
         output_routes,
@@ -8492,8 +8536,8 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
         .routes
         .first()
         .expect("inferencer should have output route");
-    assert_eq!(output.relay, identifier("scores"));
-    assert_eq!(resource, &identifier("fraud_model"));
+    assert_eq!(output.relay, named("scores"));
+    assert_eq!(resource, &named("fraud_model"));
     assert_eq!(*resource_version, Some(3));
     assert_eq!(file, "models/fraud.onnx");
     assert_eq!(inputs.len(), 1);
@@ -8507,8 +8551,8 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
         specs
             .processors
             .iter()
-            .any(|node| node.spec.processor == identifier("dedup_scores")
-                && node.spec.input_relays == vec![identifier("scores")])
+            .any(|node| node.spec.processor == named("dedup_scores")
+                && node.spec.input_relays == vec![named("scores")])
     );
 }
 
@@ -8519,11 +8563,11 @@ fn branched_node_specs_capture_reingestor_entrypoint_tree() {
             branch_model_tuple("tenant", "tenant_orders", &["tenant"]),
             (
                 ModelKind::Reingestor,
-                identifier("tenant_partition"),
+                named("tenant_partition"),
                 nervix_models::Model::Reingestor(CreateReingestor {
-                    name: identifier("tenant_partition"),
-                    from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                    name: named("tenant_partition"),
+                    from: ProcessorInputs::single(named("orders")),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(named(
                         "tenant_orders",
                     )))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
@@ -8535,11 +8579,11 @@ fn branched_node_specs_capture_reingestor_entrypoint_tree() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_orders"),
+                named("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_orders"),
-                    from: ProcessorInputs::single(identifier("tenant_orders")),
-                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                    name: named("dedup_orders"),
+                    from: ProcessorInputs::single(named("tenant_orders")),
+                    output_routes: (ProcessorOutputs::single(named("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant_orders", &["tenant"]),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -8556,21 +8600,18 @@ fn branched_node_specs_capture_reingestor_entrypoint_tree() {
     assert_eq!(specs.entrypoints.len(), 1);
     let spec = &specs.entrypoints[0];
     assert_eq!(spec.kind, ModelKind::Reingestor);
-    assert_eq!(spec.identifier, identifier("tenant_partition"));
-    assert_eq!(spec.root_relay, identifier("tenant_orders"));
-    assert_eq!(spec.branch.as_ref(), Some(&identifier("by_tenant_orders")));
+    assert_eq!(spec.identifier, named("tenant_partition"));
+    assert_eq!(spec.root_relay, named("tenant_orders"));
+    assert_eq!(spec.branch.as_ref(), Some(&named("by_tenant_orders")));
     assert_eq!(specs.processors.len(), 1);
-    assert_eq!(
-        specs.processors[0].spec.processor,
-        identifier("dedup_orders")
-    );
+    assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(
         specs.processors[0].spec.input_relays,
-        vec![identifier("tenant_orders")]
+        vec![named("tenant_orders")]
     );
     assert_eq!(
         specs.processors[0].branch.as_ref(),
-        Some(&identifier("by_tenant_orders"))
+        Some(&named("by_tenant_orders"))
     );
     assert_eq!(specs.processors[0].branch_ttl.as_deref(), Some("5m"));
 }
@@ -8584,16 +8625,16 @@ fn branched_node_specs_capture_processor_output_route_tree() {
             branch_model_tuple("tenant", "default_orders", &["tenant"]),
             (
                 ModelKind::Ingestor,
-                identifier("orders_ingestor"),
+                named("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
-                    name: identifier("orders_ingestor"),
-                    output_routes: (ProcessorOutputs::single(identifier("orders")))
+                    name: named("orders_ingestor"),
+                    output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
                         .with_branch(branched_by("orders", &["tenant"])),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_client"),
+                        client: named("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -8603,13 +8644,13 @@ fn branched_node_specs_capture_processor_output_route_tree() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("orders_splitter"),
+                named("orders_splitter"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("orders_splitter"),
-                    from: ProcessorInputs::single(identifier("orders")),
+                    name: named("orders_splitter"),
+                    from: ProcessorInputs::single(named("orders")),
                     output_routes: (ProcessorOutputs::new(vec![
                         ProcessorOutput {
-                            relay: identifier("urgent_orders"),
+                            relay: named("urgent_orders"),
                             construction: nervix_nspl::parse_route_construction(
                                 "WHERE output.urgent",
                             )
@@ -8619,7 +8660,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                             branch: None,
                         },
                         ProcessorOutput {
-                            relay: identifier("default_orders"),
+                            relay: named("default_orders"),
                             construction: nervix_models::RouteConstruction::default(),
                             flush_policy: None,
                             message_error_policy: MessageErrorPolicy::Log,
@@ -8637,11 +8678,11 @@ fn branched_node_specs_capture_processor_output_route_tree() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_urgent"),
+                named("dedup_urgent"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_urgent"),
-                    from: ProcessorInputs::single(identifier("urgent_orders")),
-                    output_routes: (ProcessorOutputs::single(identifier("urgent_projected")))
+                    name: named("dedup_urgent"),
+                    from: ProcessorInputs::single(named("urgent_orders")),
+                    output_routes: (ProcessorOutputs::single(named("urgent_projected")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("urgent_orders", &["tenant"]),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -8653,11 +8694,11 @@ fn branched_node_specs_capture_processor_output_route_tree() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_default"),
+                named("dedup_default"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_default"),
-                    from: ProcessorInputs::single(identifier("default_orders")),
-                    output_routes: (ProcessorOutputs::single(identifier("default_projected")))
+                    name: named("dedup_default"),
+                    from: ProcessorInputs::single(named("default_orders")),
+                    output_routes: (ProcessorOutputs::single(named("default_projected")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("default_orders", &["tenant"]),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -8676,7 +8717,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
     let splitter = specs
         .processors
         .iter()
-        .find(|node| node.spec.processor == identifier("orders_splitter"))
+        .find(|node| node.spec.processor == named("orders_splitter"))
         .expect("splitter spec must exist");
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
         &splitter.spec.operation
@@ -8689,21 +8730,21 @@ fn branched_node_specs_capture_processor_output_route_tree() {
         output_routes.routes[0].construction.where_clause,
         Some(expression("output.urgent"))
     );
-    assert_eq!(output_routes.routes[0].relay, identifier("urgent_orders"));
-    assert_eq!(output_routes.routes[1].relay, identifier("default_orders"));
+    assert_eq!(output_routes.routes[0].relay, named("urgent_orders"));
+    assert_eq!(output_routes.routes[1].relay, named("default_orders"));
     assert!(
         specs
             .processors
             .iter()
-            .any(|node| node.spec.processor == identifier("dedup_urgent")
-                && node.spec.input_relays == vec![identifier("urgent_orders")])
+            .any(|node| node.spec.processor == named("dedup_urgent")
+                && node.spec.input_relays == vec![named("urgent_orders")])
     );
     assert!(
         specs
             .processors
             .iter()
-            .any(|node| node.spec.processor == identifier("dedup_default")
-                && node.spec.input_relays == vec![identifier("default_orders")])
+            .any(|node| node.spec.processor == named("dedup_default")
+                && node.spec.input_relays == vec![named("default_orders")])
     );
 }
 
@@ -8716,16 +8757,16 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
             branch_model_tuple("tenant", "joined_stream", &["tenant"]),
             (
                 ModelKind::Ingestor,
-                identifier("left_ingestor"),
+                named("left_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
-                    name: identifier("left_ingestor"),
-                    output_routes: (ProcessorOutputs::single(identifier("left_stream")))
+                    name: named("left_ingestor"),
+                    output_routes: (ProcessorOutputs::single(named("left_stream")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
                         .with_branch(branched_by("left_stream", &["tenant"])),
-                    decode_using_codec: identifier("notification_codec"),
+                    decode_using_codec: named("notification_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_client"),
+                        client: named("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -8736,16 +8777,16 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
             ),
             (
                 ModelKind::Ingestor,
-                identifier("right_ingestor"),
+                named("right_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
-                    name: identifier("right_ingestor"),
-                    output_routes: (ProcessorOutputs::single(identifier("right_stream")))
+                    name: named("right_ingestor"),
+                    output_routes: (ProcessorOutputs::single(named("right_stream")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
                         .with_branch(branched_by("right_stream", &["tenant"])),
-                    decode_using_codec: identifier("notification_codec"),
+                    decode_using_codec: named("notification_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_client"),
+                        client: named("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -8756,14 +8797,14 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
             ),
             (
                 ModelKind::Junction,
-                identifier("join_streams"),
+                named("join_streams"),
                 nervix_models::Model::Junction(CreateJunction {
-                    name: identifier("join_streams"),
+                    name: named("join_streams"),
                     from: ProcessorInputs::new(
-                        vec![identifier("left_stream"), identifier("right_stream")],
+                        vec![named("left_stream"), named("right_stream")],
                         Vec::new(),
                     ),
-                    output_routes: (ProcessorOutputs::single(identifier("joined_stream")))
+                    output_routes: (ProcessorOutputs::single(named("joined_stream")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("left_stream", &["tenant"]),
                     mode: AckMode::Attached,
@@ -8773,11 +8814,11 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_joined"),
+                named("dedup_joined"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_joined"),
-                    from: ProcessorInputs::single(identifier("joined_stream")),
-                    output_routes: (ProcessorOutputs::single(identifier("projected_joined")))
+                    name: named("dedup_joined"),
+                    from: ProcessorInputs::single(named("joined_stream")),
+                    output_routes: (ProcessorOutputs::single(named("projected_joined")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("joined_stream", &["tenant"]),
                     deduplicate_on: vec![expression("input.tenant")],
@@ -8796,18 +8837,18 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
         specs
             .processors
             .iter()
-            .filter(|node| node.spec.processor == identifier("join_streams"))
+            .filter(|node| node.spec.processor == named("join_streams"))
             .count(),
         1
     );
     let junction = specs
         .processors
         .iter()
-        .find(|node| node.spec.processor == identifier("join_streams"))
+        .find(|node| node.spec.processor == named("join_streams"))
         .expect("junction spec must exist");
     assert_eq!(
         junction.spec.input_relays,
-        vec![identifier("left_stream"), identifier("right_stream")]
+        vec![named("left_stream"), named("right_stream")]
     );
     let BranchedProcessorOperationSpec::Junction { output_routes, .. } = &junction.spec.operation
     else {
@@ -8817,12 +8858,12 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
         .routes
         .first()
         .expect("junction should have output route");
-    assert_eq!(output.relay, identifier("joined_stream"));
+    assert_eq!(output.relay, named("joined_stream"));
     assert!(
         specs
             .processors
             .iter()
-            .any(|node| node.spec.processor == identifier("dedup_joined"))
+            .any(|node| node.spec.processor == named("dedup_joined"))
     );
 }
 
@@ -8834,16 +8875,16 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
             branch_model_tuple("tenant", "projected_orders", &["tenant"]),
             (
                 ModelKind::Ingestor,
-                identifier("orders_ingestor"),
+                named("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
-                    name: identifier("orders_ingestor"),
-                    output_routes: (ProcessorOutputs::single(identifier("orders")))
+                    name: named("orders_ingestor"),
+                    output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
                         .with_branch(branched_by("orders", &["tenant"])),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_client"),
+                        client: named("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -8854,17 +8895,17 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("orders_filter"),
+                named("orders_filter"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("orders_filter"),
+                    name: named("orders_filter"),
                     from: ProcessorInputs::new(
-                        vec![identifier("orders")],
+                        vec![named("orders")],
                         vec![ProcessorInputWhere {
-                            relay: identifier("orders"),
+                            relay: named("orders"),
                             where_clause: expression("input.active"),
                         }],
                     ),
-                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                    output_routes: (ProcessorOutputs::single(named("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("orders", &["tenant"]),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -8876,11 +8917,11 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_projected"),
+                named("dedup_projected"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_projected"),
-                    from: ProcessorInputs::single(identifier("projected_orders")),
-                    output_routes: (ProcessorOutputs::single(identifier("aggregated_orders")))
+                    name: named("dedup_projected"),
+                    from: ProcessorInputs::single(named("projected_orders")),
+                    output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("projected_orders", &["tenant"]),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -8898,10 +8939,13 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
     let orders_filter = specs
         .processors
         .iter()
-        .find(|node| node.spec.processor == identifier("orders_filter"))
+        .find(|node| node.spec.processor == named("orders_filter"))
         .expect("orders filter spec must exist");
     assert_eq!(
-        orders_filter.spec.from_where.get(&identifier("orders")),
+        orders_filter
+            .spec
+            .from_where
+            .get(&RelayName::from(&named::<ModelName>("orders"))),
         Some(&expression("input.active"))
     );
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
@@ -8914,16 +8958,13 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
         Some(expression("input.active"))
     );
     assert_eq!(output_routes.routes.len(), 1);
-    assert_eq!(
-        output_routes.routes[0].relay,
-        identifier("projected_orders")
-    );
+    assert_eq!(output_routes.routes[0].relay, named("projected_orders"));
     assert!(
         specs
             .processors
             .iter()
-            .any(|node| node.spec.processor == identifier("dedup_projected")
-                && node.spec.input_relays == vec![identifier("projected_orders")])
+            .any(|node| node.spec.processor == named("dedup_projected")
+                && node.spec.input_relays == vec![named("projected_orders")])
     );
 }
 
@@ -8933,16 +8974,16 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
         [
             (
                 ModelKind::Ingestor,
-                identifier("orders_ingestor"),
+                named("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
-                    name: identifier("orders_ingestor"),
-                    output_routes: (ProcessorOutputs::single(identifier("orders")))
+                    name: named("orders_ingestor"),
+                    output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
                         .with_branch(OutputBranch::Unbranched),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_client"),
+                        client: named("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -8953,11 +8994,11 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_orders"),
+                named("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_orders"),
-                    from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                    name: named("dedup_orders"),
+                    from: ProcessorInputs::single(named("orders")),
+                    output_routes: (ProcessorOutputs::single(named("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("orders", &[]),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -8972,18 +9013,12 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
     );
 
     assert_eq!(specs.entrypoints.len(), 1);
-    assert_eq!(
-        specs.entrypoints[0].identifier,
-        identifier("orders_ingestor")
-    );
-    assert_eq!(specs.entrypoints[0].root_relay, identifier("orders"));
+    assert_eq!(specs.entrypoints[0].identifier, named("orders_ingestor"));
+    assert_eq!(specs.entrypoints[0].root_relay, named("orders"));
     assert_eq!(specs.entrypoints[0].branch, None);
     assert_eq!(specs.entrypoints[0].branch_ttl, None);
     assert_eq!(specs.processors.len(), 1);
-    assert_eq!(
-        specs.processors[0].spec.processor,
-        identifier("dedup_orders")
-    );
+    assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(specs.processors[0].branch_ttl, None);
     assert_eq!(specs.processors[0].branch, None);
     assert_eq!(specs.processors[0].branch_max_instances, None);
@@ -8995,10 +9030,10 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
         [
             (
                 ModelKind::Relay,
-                identifier("orders"),
+                named("orders"),
                 nervix_models::Model::Relay(CreateRelay {
-                    name: identifier("orders"),
-                    schema: identifier("order_event"),
+                    name: named("orders"),
+                    schema: named("order_event"),
                     buffer: 1,
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
@@ -9006,11 +9041,11 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
             ),
             (
                 ModelKind::Deduplicator,
-                identifier("dedup_orders"),
+                named("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
-                    name: identifier("dedup_orders"),
-                    from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                    name: named("dedup_orders"),
+                    from: ProcessorInputs::single(named("orders")),
+                    output_routes: (ProcessorOutputs::single(named("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: BranchSelection::unbranched(),
                     deduplicate_on: vec![expression("input.order_id")],
@@ -9026,14 +9061,8 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
 
     assert!(specs.entrypoints.is_empty());
     assert_eq!(specs.processors.len(), 1);
-    assert_eq!(
-        specs.processors[0].spec.processor,
-        identifier("dedup_orders")
-    );
-    assert_eq!(
-        specs.processors[0].spec.input_relays,
-        vec![identifier("orders")]
-    );
+    assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
+    assert_eq!(specs.processors[0].spec.input_relays, vec![named("orders")]);
     assert_eq!(specs.processors[0].branch_ttl, None);
 }
 
@@ -9043,10 +9072,10 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
         [
             (
                 ModelKind::Relay,
-                identifier("orders"),
+                named("orders"),
                 nervix_models::Model::Relay(CreateRelay {
-                    name: identifier("orders"),
-                    schema: identifier("order_event"),
+                    name: named("orders"),
+                    schema: named("order_event"),
                     buffer: 1,
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
@@ -9054,13 +9083,13 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
             ),
             (
                 ModelKind::WasmProcessor,
-                identifier("filter_orders"),
+                named("filter_orders"),
                 nervix_models::Model::WasmProcessor(CreateWasmProcessor {
-                    name: identifier("filter_orders"),
-                    from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: ProcessorOutputs::single(identifier("filtered_orders")),
+                    name: named("filter_orders"),
+                    from: ProcessorInputs::single(named("orders")),
+                    output_routes: ProcessorOutputs::single(named("filtered_orders")),
                     branched_by: BranchSelection::unbranched(),
-                    resource: identifier("filter_resource"),
+                    resource: named("filter_resource"),
                     resource_version: None,
                     file: "filter.wasm".to_string(),
                     limits: nervix_models::WasmProcessorLimits {
@@ -9095,11 +9124,11 @@ fn branched_node_specs_include_reingestor_with_declared_branching() {
             branch_model_tuple("tenant", "tenant_notifications", &["tenant"]),
             (
                 ModelKind::Reingestor,
-                identifier("tenant_partition"),
+                named("tenant_partition"),
                 nervix_models::Model::Reingestor(CreateReingestor {
-                    name: identifier("tenant_partition"),
-                    from: ProcessorInputs::single(identifier("notifications")),
-                    output_routes: (ProcessorOutputs::single(identifier("tenant_notifications")))
+                    name: named("tenant_partition"),
+                    from: ProcessorInputs::single(named("notifications")),
+                    output_routes: (ProcessorOutputs::single(named("tenant_notifications")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
                         .with_branch(branched_by("tenant_notifications", &["tenant"])),
                     mode: AckMode::Attached,
@@ -9112,13 +9141,10 @@ fn branched_node_specs_include_reingestor_with_declared_branching() {
     );
 
     assert_eq!(specs.entrypoints.len(), 1);
-    assert_eq!(
-        specs.entrypoints[0].identifier,
-        identifier("tenant_partition")
-    );
+    assert_eq!(specs.entrypoints[0].identifier, named("tenant_partition"));
     assert_eq!(
         specs.entrypoints[0].root_relay,
-        identifier("tenant_notifications")
+        named("tenant_notifications")
     );
 }
 
@@ -9126,7 +9152,7 @@ fn branched_node_specs_include_reingestor_with_declared_branching() {
 async fn branched_root_without_children_acks_success() {
     let runtime = super::Runtime::default();
     let root_domain = domain("default");
-    let root_relay = identifier("tenant_orders");
+    let root_relay = named("tenant_orders");
     let root_registry = super::RelayRegistry::new();
     let root_services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
@@ -9138,13 +9164,13 @@ async fn branched_root_without_children_acks_success() {
     );
     let mut root = super::BranchRuntime {
         key: Some(concrete_branch_key([(
-            identifier("tenant"),
+            named("tenant"),
             RuntimeValue::String("acme".to_string()),
         )])),
         runtime: runtime.clone(),
         domain: root_domain.clone(),
         source_kind: ModelKind::Ingestor,
-        source: identifier("metric_ingestor"),
+        source: named("metric_ingestor"),
         root_relay: root_relay.clone(),
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
@@ -9156,7 +9182,7 @@ async fn branched_root_without_children_acks_success() {
                 registry: root_registry,
                 services: root_services,
                 key: Some(concrete_branch_key([(
-                    identifier("tenant"),
+                    named("tenant"),
                     RuntimeValue::String("acme".to_string()),
                 )])),
             }),
@@ -9202,7 +9228,7 @@ async fn branched_root_without_children_acks_success() {
 async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filters() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let root_relay = identifier("tenant_orders");
+    let root_relay = named("tenant_orders");
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(
         TWO_ITEM_TEST_CHANNEL_CAPACITY,
     ));
@@ -9226,7 +9252,7 @@ async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filte
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
     let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Reingestor,
-        source: identifier("tenant_partition"),
+        source: named("tenant_partition"),
         root_relay: root_relay.clone(),
         branch: None,
         branch_ttl: None,
@@ -9288,7 +9314,7 @@ async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filte
     let route_runtime = super::IngestorRouteRuntime::new(
         runtime,
         domain,
-        identifier("tenant_partition"),
+        named("tenant_partition"),
         StdArc::new(ArcSwapOption::from(None)),
         super::IngestorRouteTemplate {
             branch: template,
@@ -9365,7 +9391,7 @@ async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filte
 async fn reingestor_branched_entrypoint_reuses_existing_branches() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let root_relay = identifier("tenant_orders");
+    let root_relay = named("tenant_orders");
     let services = Arc::new(super::RelayBoundaryServices::new(
         super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1)),
         0,
@@ -9384,7 +9410,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
     let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Reingestor,
-        source: identifier("tenant_partition"),
+        source: named("tenant_partition"),
         root_relay: root_relay.clone(),
         branch: None,
         branch_ttl: None,
@@ -9409,7 +9435,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
     let route_task = super::IngestorRouteTask {
         runtime_handle: runtime.clone(),
         domain: domain.clone(),
-        ingestor: identifier("tenant_partition"),
+        ingestor: named("tenant_partition"),
         template: super::IngestorRouteTemplate {
             branch: template.clone(),
             ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Detached),
@@ -9441,7 +9467,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
             super::BranchExecutionDispatchContext {
                 runtime_handle: &runtime,
                 domain: &domain,
-                ingestor: &identifier("tenant_partition"),
+                ingestor: &named("tenant_partition"),
                 graph: &graph,
                 template: &template,
                 now: Timestamp::from_unix_nanos(1_000_000_000 + i64::from(round)),
@@ -9463,7 +9489,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
 async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let relay = identifier("tenant_orders");
+    let relay = named("tenant_orders");
     let output_registry = super::RelayRegistry::new();
     let output_services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
@@ -9494,13 +9520,13 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             graph: StdArc::new(ArcSwapOption::empty()),
             relay_registries: HashMap::default(),
             relay_schemas: [
-                (identifier("orders"), schema.clone()),
-                (identifier("tenant_orders"), schema.clone()),
+                (named("orders"), schema.clone()),
+                (named("tenant_orders"), schema.clone()),
             ]
             .into_iter()
             .collect(),
             relay_services: HashMap::default(),
-            relay_branchings: [(relay.clone(), vec![identifier("tenant")])]
+            relay_branchings: [(relay.clone(), vec![named("tenant")])]
                 .into_iter()
                 .collect(),
             relay_branching_schemas: [(relay.clone(), Some(branch_schema))].into_iter().collect(),
@@ -9527,12 +9553,12 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     let branched_runtime = super::IngestorRouteRuntime::new(
         runtime.clone(),
         domain.clone(),
-        identifier("tenant_partition"),
+        named("tenant_partition"),
         StdArc::new(ArcSwapOption::from(None)),
         super::IngestorRouteTemplate {
             branch: super::BranchInstanceTemplate {
                 source_kind: ModelKind::Reingestor,
-                source: identifier("tenant_partition"),
+                source: named("tenant_partition"),
                 root_relay: relay.clone(),
                 branch: None,
                 branch_ttl: Some(Duration::from_secs(30)),
@@ -9571,18 +9597,16 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             &shutdown_tx,
             &branched_entrypoint_senders,
             CreateReingestor {
-                name: identifier("tenant_partition"),
-                from: ProcessorInputs::single(identifier("orders")),
-                output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
-                    "tenant_orders",
-                )))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
-                .with_branch(branched_by("tenant_orders", &["tenant"])),
+                name: named("tenant_partition"),
+                from: ProcessorInputs::single(named("orders")),
+                output_routes: with_inherit_all(ProcessorOutputs::single(named("tenant_orders")))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                    .with_branch(branched_by("tenant_orders", &["tenant"])),
                 mode: AckMode::Attached,
                 filter_where: None,
                 materialized_state: Vec::new(),
             },
-            identifier("orders"),
+            named("orders"),
             fan_in,
         )
         .expect("reingestor task should spawn");
@@ -9698,9 +9722,9 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
 async fn reingestor_force_and_shutdown_flush_buffered_routes() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let input_relay = identifier("orders");
-    let output_relay = identifier("tenant_orders");
-    let reingestor = identifier("tenant_partition");
+    let input_relay = named::<RelayName>("orders");
+    let output_relay = named::<RelayName>("tenant_orders");
+    let reingestor = named::<ReingestorName>("tenant_partition");
     let schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("user_id", ParseAsType::U32),
@@ -9898,7 +9922,7 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
 async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let root_relay = identifier("notifications");
+    let root_relay = named("notifications");
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1));
     let mut fan_in =
         super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
@@ -9921,11 +9945,11 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     let branched_runtime = super::BranchExecutionRuntime::new(
         runtime,
         domain,
-        identifier("notifications_ingestor"),
+        named("notifications_ingestor"),
         StdArc::new(ArcSwapOption::from(None)),
         super::BranchInstanceTemplate {
             source_kind: ModelKind::Ingestor,
-            source: identifier("notifications_ingestor"),
+            source: named("notifications_ingestor"),
             root_relay: root_relay.clone(),
             branch: None,
             branch_ttl: None,
@@ -9991,7 +10015,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         tokio::task::consume_budget().await;
         let runtime = super::Runtime::default();
         let domain = domain("default");
-        let root_relay = identifier("notifications");
+        let root_relay = named("notifications");
         let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
         let mut fan_in = super::RelayRuntimeFanIn::new(
             fanout.runtime_consumer_receiver_for_mode(AckMode::Attached),
@@ -10035,12 +10059,12 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         let route_runtime = super::IngestorRouteRuntime::new(
             runtime,
             domain,
-            identifier(source),
+            named(source),
             StdArc::new(ArcSwapOption::from(None)),
             super::IngestorRouteTemplate {
                 branch: super::BranchInstanceTemplate {
                     source_kind,
-                    source: identifier(source),
+                    source: named(source),
                     root_relay: root_relay.clone(),
                     branch: None,
                     branch_ttl: None,
@@ -10195,47 +10219,47 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         .expect("lookup fixture should build as Arrow");
     let lookup = Arc::new(super::LookupRuntime {
         model: CreateLookup {
-            name: identifier("titles_by_normalized"),
-            key_field: identifier("normalized_title"),
-            resource: identifier("titles_data"),
+            name: named("titles_by_normalized"),
+            key_field: named("normalized_title"),
+            resource: named("titles_data"),
             path: "lookup.jsonl".to_string(),
-            decode_using_codec: identifier("title_lookup_codec"),
+            decode_using_codec: named("title_lookup_codec"),
         },
         resource_version: 1,
         schema: lookup_schema,
         batch: Arc::new(lookup_batch),
         entries: Arc::new(HashMap::from_iter([("mr".to_string(), 0)])),
     });
-    let lookups = HashMap::from_iter([(identifier("titles_by_normalized"), lookup)]);
+    let lookups = HashMap::from_iter([(named("titles_by_normalized"), lookup)]);
     let output_schema = Arc::new(compile_schema(&CreateSchema {
-        name: identifier("lookup_output"),
+        name: named("lookup_output"),
         fields: vec![
             nervix_models::SchemaField {
-                name: identifier("id"),
+                name: named("id"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("active"),
+                name: named("active"),
                 ty: ParseAsType::Bool,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("title_key"),
+                name: named("title_key"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("city"),
+                name: named("city"),
                 ty: ParseAsType::String,
                 optional: true,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("region"),
+                name: named("region"),
                 ty: ParseAsType::String,
                 optional: true,
                 sensitive: false,
@@ -10245,10 +10269,10 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
     let program = super::compile_processor_output_filter_map_program(
         super::RuntimeCompileTarget {
             domain: &domain("default"),
-            identifier: &identifier("project_titles"),
+            identifier: &named("project_titles"),
         },
-        &[identifier("incoming_logs")],
-        &identifier("projected_titles"),
+        &[named("incoming_logs")],
+        &named("projected_titles"),
         &construction(
             "INHERIT ALL EXCEPT title SET title_key = lower(input.title), city = \
              LOOKUP_HASH_MAP(\"titles_by_normalized\", lower(input.title), \"city_name\"), region \
@@ -10308,7 +10332,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
 
     let plan = super::plan_filter_map_messages(
         "deduplicator",
-        &identifier("project_titles"),
+        &named::<ModelName>("project_titles"),
         "FILTER-MAP",
         &program,
         batch,
@@ -10345,10 +10369,10 @@ async fn filter_map_can_read_branch_namespace() {
     let program = super::compile_processor_output_filter_map_program(
         super::RuntimeCompileTarget {
             domain: &domain("default"),
-            identifier: &identifier("project_notifications"),
+            identifier: &named("project_notifications"),
         },
-        &[identifier("notifications")],
-        &identifier("projected_notifications"),
+        &[named("notifications")],
+        &named("projected_notifications"),
         &construction(
             "INHERIT ALL SET branch_tenant = branch.tenant, amount = amount + 1 WHERE \
              branch.tenant = output.tenant",
@@ -10363,7 +10387,7 @@ async fn filter_map_can_read_branch_namespace() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_branching: &[identifier("tenant")],
+            current_branching: &[named("tenant")],
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
             udfs: None,
@@ -10395,7 +10419,7 @@ async fn filter_map_can_read_branch_namespace() {
 
     let plan = super::plan_filter_map_messages(
         "deduplicator",
-        &identifier("project_notifications"),
+        &named::<ModelName>("project_notifications"),
         "FILTER-MAP",
         &program,
         batch,
@@ -10447,10 +10471,10 @@ async fn projection_can_read_branch_namespace() {
     let program = super::compile_processor_output_filter_map_program(
         super::RuntimeCompileTarget {
             domain: &domain("default"),
-            identifier: &identifier("project_notifications"),
+            identifier: &named("project_notifications"),
         },
-        &[identifier("notifications")],
-        &identifier("projected_notifications"),
+        &[named("notifications")],
+        &named("projected_notifications"),
         &construction(
             "INHERIT tenant, amount SET branch_tenant = branch.tenant, amount = amount + 1 WHERE \
              branch.tenant = output.tenant",
@@ -10465,7 +10489,7 @@ async fn projection_can_read_branch_namespace() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_branching: &[identifier("tenant")],
+            current_branching: &[named("tenant")],
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
             udfs: None,
@@ -10494,7 +10518,7 @@ async fn projection_can_read_branch_namespace() {
 
     let plan = super::plan_filter_map_messages(
         "processor",
-        &identifier("project_notifications"),
+        &named::<ModelName>("project_notifications"),
         "FILTER-MAP",
         &program,
         batch,
@@ -10546,10 +10570,10 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
     let program = super::compile_processor_output_filter_map_program(
         super::RuntimeCompileTarget {
             domain: &domain("default"),
-            identifier: &identifier("copy_vectors"),
+            identifier: &named("copy_vectors"),
         },
-        &[identifier("vectors")],
-        &identifier("copied_vectors"),
+        &[named("vectors")],
+        &named("copied_vectors"),
         &construction("INHERIT ALL"),
         super::RuntimeVmSchemaPair {
             input: schema.arrow_schema(),
@@ -10585,7 +10609,7 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
 
     let plan = super::plan_filter_map_messages(
         "junction",
-        &identifier("copy_vectors"),
+        &named::<ModelName>("copy_vectors"),
         "FILTER-MAP",
         &program,
         batch,
@@ -10613,10 +10637,10 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
     let program = super::compile_processor_output_filter_map_program(
         super::RuntimeCompileTarget {
             domain: &domain("default"),
-            identifier: &identifier("calculate_amount"),
+            identifier: &named("calculate_amount"),
         },
-        &[identifier("amounts")],
-        &identifier("calculated_amounts"),
+        &[named("amounts")],
+        &named("calculated_amounts"),
         &construction("SET amount = input.amount, amount = amount / input.denominator"),
         super::RuntimeVmSchemaPair {
             input: input_schema.arrow_schema(),
@@ -10661,7 +10685,7 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
 
     let plan = super::plan_filter_map_messages(
         "junction",
-        &identifier("calculate_amount"),
+        &named::<ModelName>("calculate_amount"),
         "FILTER-MAP",
         &program,
         batch,
@@ -10715,10 +10739,10 @@ fn filter_map_rejects_branch_namespace_without_branch_schema() {
     let error = super::compile_processor_output_filter_map_program(
         super::RuntimeCompileTarget {
             domain: &domain("default"),
-            identifier: &identifier("project_notifications"),
+            identifier: &named("project_notifications"),
         },
-        &[identifier("notifications")],
-        &identifier("projected_notifications"),
+        &[named("notifications")],
+        &named("projected_notifications"),
         &construction("INHERIT ALL WHERE branch.tenant = output.tenant"),
         super::RuntimeVmSchemaPair {
             input: schema.arrow_schema(),
@@ -10752,10 +10776,10 @@ fn filter_map_rejects_missing_branch_key() {
     let error = super::compile_processor_output_filter_map_program(
         super::RuntimeCompileTarget {
             domain: &domain("default"),
-            identifier: &identifier("project_notifications"),
+            identifier: &named("project_notifications"),
         },
-        &[identifier("notifications")],
-        &identifier("projected_notifications"),
+        &[named("notifications")],
+        &named("projected_notifications"),
         &construction("INHERIT ALL WHERE branch.tenant = output.tenant"),
         super::RuntimeVmSchemaPair {
             input: schema.arrow_schema(),
@@ -10767,7 +10791,7 @@ fn filter_map_rejects_missing_branch_key() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_branching: &[identifier("region")],
+            current_branching: &[named("region")],
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
             udfs: None,
@@ -10794,12 +10818,12 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
         ("normalized", ParseAsType::String),
     ]);
     let emitter = CreateEmitter {
-        name: identifier("kafka_notifications"),
-        from: ProcessorInputs::single(identifier("notifications")),
-        encode_using_codec: Some(identifier("notification_codec")),
+        name: named("kafka_notifications"),
+        from: ProcessorInputs::single(named("notifications")),
+        encode_using_codec: Some(named("notification_codec")),
         sink: Box::new(EmitSink::Kafka {
-            client: identifier("kafka_main"),
-            topic: identifier("notifications_out"),
+            client: named("kafka_main"),
+            topic: named("notifications_out"),
         }),
         flush_each: "100ms".to_string(),
         max_batch_size: Some("1MiB".to_string()),
@@ -10839,7 +10863,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     .expect("program must exist");
     let mut unsupported_emitter = emitter.clone();
     *unsupported_emitter.sink = EmitSink::ZeroMq {
-        client: identifier("zeromq_main"),
+        client: named("zeromq_main"),
     };
     let error = super::compile_emitter_filter_map_program(
         &domain("default"),
@@ -10922,11 +10946,11 @@ async fn sqs_fifo_group_expression_evaluates_per_source_row_in_order() {
         ("region", ParseAsType::String),
     ]);
     let emitter = CreateEmitter {
-        name: identifier("sqs_notifications"),
-        from: ProcessorInputs::single(identifier("notifications")),
-        encode_using_codec: Some(identifier("notification_codec")),
+        name: named("sqs_notifications"),
+        from: ProcessorInputs::single(named("notifications")),
+        encode_using_codec: Some(named("notification_codec")),
         sink: Box::new(EmitSink::Sqs {
-            client: identifier("sqs_main"),
+            client: named("sqs_main"),
             queue: "notifications.fifo".to_string(),
             fifo_group: Some(SqsFifoGroup::Expression(expression(
                 "concat(input.tenant, '-', input.region)",
@@ -11010,7 +11034,7 @@ async fn filter_map_on_runtime_row_evaluates_only_selected_arrow_row() {
     let where_clause = expression("input.value = (3 AS U32)");
     let program = super::compile_session_filter_map_program(
         &domain("default"),
-        &identifier("selected_row_subscription"),
+        named::<ModelName>("selected_row_subscription"),
         Some(&where_clause),
         schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
@@ -11083,88 +11107,88 @@ async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
         ("raw", ParseAsType::String),
     ]);
     let output_schema = Arc::new(compile_schema(&CreateSchema {
-        name: identifier("logic_output"),
+        name: named("logic_output"),
         fields: vec![
             nervix_models::SchemaField {
-                name: identifier("tenant"),
+                name: named("tenant"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("u8_next"),
+                name: named("u8_next"),
                 ty: ParseAsType::U8,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("i8_abs"),
+                name: named("i8_abs"),
                 ty: ParseAsType::I8,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("u16_keep"),
+                name: named("u16_keep"),
                 ty: ParseAsType::U16,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("i16_prev"),
+                name: named("i16_prev"),
                 ty: ParseAsType::I16,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("u32_same"),
+                name: named("u32_same"),
                 ty: ParseAsType::U32,
                 optional: true,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("i32_neg"),
+                name: named("i32_neg"),
                 ty: ParseAsType::I32,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("u64_next"),
+                name: named("u64_next"),
                 ty: ParseAsType::U64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("i64_keep"),
+                name: named("i64_keep"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("f32_next"),
+                name: named("f32_next"),
                 ty: ParseAsType::F32,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("f64_keep"),
+                name: named("f64_keep"),
                 ty: ParseAsType::F64,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("bool_copy"),
+                name: named("bool_copy"),
                 ty: ParseAsType::Bool,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("occurred_text"),
+                name: named("occurred_text"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("occurred_copy"),
+                name: named("occurred_copy"),
                 ty: ParseAsType::Datetime,
                 optional: false,
                 sensitive: false,
@@ -11173,9 +11197,9 @@ async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
     }));
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
-        &identifier("logic_ingestor"),
+        named::<ModelName>("logic_ingestor"),
         &IngestSource::Endpoint {
-            endpoint: identifier("logic_endpoint"),
+            endpoint: named("logic_endpoint"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
@@ -11290,8 +11314,8 @@ async fn reorderer_key_program_evaluates_direct_u32_field() {
         ("payload", ParseAsType::String),
     ]);
     let program = super::compile_reorderer_program(
-        &identifier("order_notifications"),
-        &[identifier("incoming_notifications")],
+        &named("order_notifications"),
+        &[named("incoming_notifications")],
         &[expression("input.sequence")],
         input_schema.arrow_schema(),
         None,
@@ -11357,8 +11381,8 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
         ("payload", ParseAsType::String),
     ]);
     let program = super::compile_reorderer_program(
-        &identifier("order_notifications"),
-        &[identifier("incoming_notifications")],
+        &named("order_notifications"),
+        &[named("incoming_notifications")],
         &[expression("input.sequence")],
         input_schema.arrow_schema(),
         None,
@@ -11407,16 +11431,16 @@ fn processor_key_expressions_reject_relay_qualified_fields() {
 #[tokio::test]
 async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
     let input_schema = Arc::new(compile_schema(&CreateSchema {
-        name: identifier("optional_logic"),
+        name: named("optional_logic"),
         fields: vec![
             nervix_models::SchemaField {
-                name: identifier("tenant"),
+                name: named("tenant"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("raw"),
+                name: named("raw"),
                 ty: ParseAsType::String,
                 optional: true,
                 sensitive: false,
@@ -11424,16 +11448,16 @@ async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
         ],
     }));
     let output_schema = Arc::new(compile_schema(&CreateSchema {
-        name: identifier("optional_logic_output"),
+        name: named("optional_logic_output"),
         fields: vec![
             nervix_models::SchemaField {
-                name: identifier("tenant"),
+                name: named("tenant"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
             },
             nervix_models::SchemaField {
-                name: identifier("normalized"),
+                name: named("normalized"),
                 ty: ParseAsType::String,
                 optional: true,
                 sensitive: false,
@@ -11442,9 +11466,9 @@ async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
     }));
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
-        &identifier("logic_ingestor"),
+        named::<ModelName>("logic_ingestor"),
         &IngestSource::Endpoint {
-            endpoint: identifier("logic_endpoint"),
+            endpoint: named("logic_endpoint"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
@@ -11501,10 +11525,10 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     ]);
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
-        &identifier("logic_ingestor"),
+        named::<ModelName>("logic_ingestor"),
         &IngestSource::Kafka {
-            client: identifier("logic_kafka"),
-            topic: identifier("logic_notifications"),
+            client: named("logic_kafka"),
+            topic: named("logic_notifications"),
             offset_mode: nervix_models::KafkaOffsetMode::Domain,
             instances: 1,
             mode: nervix_models::KafkaIngestMode::AckSequential {
@@ -11524,28 +11548,28 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
             input: input_schema.arrow_schema(),
             input_sensitivity: super::VmSchemaSensitivity::default(),
             output: Arc::new(compile_schema(&CreateSchema {
-                name: identifier("metadata_output"),
+                name: named("metadata_output"),
                 fields: vec![
                     nervix_models::SchemaField {
-                        name: identifier("tenant"),
+                        name: named("tenant"),
                         ty: ParseAsType::String,
                         optional: false,
                         sensitive: false,
                     },
                     nervix_models::SchemaField {
-                        name: identifier("topic"),
+                        name: named("topic"),
                         ty: ParseAsType::String,
                         optional: true,
                         sensitive: false,
                     },
                     nervix_models::SchemaField {
-                        name: identifier("partition"),
+                        name: named("partition"),
                         ty: ParseAsType::I32,
                         optional: true,
                         sensitive: false,
                     },
                     nervix_models::SchemaField {
-                        name: identifier("offset"),
+                        name: named("offset"),
                         ty: ParseAsType::I64,
                         optional: true,
                         sensitive: false,
@@ -11659,22 +11683,22 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         ("raw", ParseAsType::String),
     ]);
     let output_schema = Arc::new(compile_schema(&CreateSchema {
-        name: identifier("header_output"),
+        name: named("header_output"),
         fields: vec![
             SchemaField {
-                name: identifier("tenant"),
+                name: named("tenant"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
             },
             SchemaField {
-                name: identifier("first"),
+                name: named("first"),
                 ty: ParseAsType::String,
                 optional: true,
                 sensitive: false,
             },
             SchemaField {
-                name: identifier("total"),
+                name: named("total"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
@@ -11682,8 +11706,8 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         ],
     }));
     let source = IngestSource::Kafka {
-        client: identifier("logic_kafka"),
-        topic: identifier("logic_notifications"),
+        client: named("logic_kafka"),
+        topic: named("logic_notifications"),
         offset_mode: nervix_models::KafkaOffsetMode::Domain,
         instances: 1,
         mode: nervix_models::KafkaIngestMode::AckSequential {
@@ -11697,7 +11721,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     };
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
-        &identifier("header_ingestor"),
+        named::<ModelName>("header_ingestor"),
         &source,
         &construction(
             "INHERIT tenant SET first = read_header(lower(input.header_name)), total = \
@@ -11795,7 +11819,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     let grouped_keys = vec![None, None];
     let grouped_outcomes = super::evaluate_filter_map_on_batch(
         ModelKind::Ingestor.as_str(),
-        &identifier("header_ingestor"),
+        &named::<ModelName>("header_ingestor"),
         &program,
         super::FilterMapOutcomeInputs {
             carrier: &grouped_carrier,
@@ -11840,7 +11864,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     let top_filter = super::compile_expression_filter_program(
         super::RuntimeCompileTarget {
             domain: &domain("default"),
-            identifier: &identifier("header_ingestor"),
+            identifier: &named("header_ingestor"),
         },
         Some(&expression(
             "read_header(lower(input.header_name)) = \"primary\" AND \
@@ -11883,7 +11907,7 @@ async fn finalized_output_filter_reads_constructed_output_values() {
         test_schema(&[("tenant", ParseAsType::String), ("total", ParseAsType::I64)]);
     let program = super::compile_finalized_output_filter_program(
         &domain("default"),
-        &identifier("aggregate_route"),
+        &named("aggregate_route"),
         Some(&expression("output.total >= 100 AND tenant = \"acme\"")),
         output_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
@@ -11978,7 +12002,7 @@ async fn generator_set_program_projects_columnar_state_and_branch_context() {
     ]);
     let branch_schema = test_schema(&[("tenant", ParseAsType::String)]);
     let output = ProcessorOutput {
-        relay: identifier("generated_notifications"),
+        relay: named("generated_notifications"),
         construction: construction(
             "SET tenant = branch.tenant, amount = relay_state.notifications.amount + 1, samples = \
              relay_state.notifications.samples, labels = relay_state.notifications.labels",
@@ -11991,8 +12015,8 @@ async fn generator_set_program_projects_columnar_state_and_branch_context() {
         branch: None,
     };
     let generator = CreateGenerator {
-        name: identifier("synth_notifications"),
-        materialized_relay: identifier("notifications"),
+        name: named("synth_notifications"),
+        materialized_relay: named("notifications"),
         branched_by: processor_branched_by("generated_notifications", &["tenant"]),
         each: "100ms".to_string(),
         output_routes: ProcessorOutputs::new(vec![output.clone()]),
@@ -12033,7 +12057,7 @@ async fn generator_set_program_projects_columnar_state_and_branch_context() {
         .expect("generator source batch must build");
     let branch_key = string_branch_key("tenant", "acme");
     let context_projection = super::GeneratorContextProjection::new(
-        &identifier("notifications"),
+        &named("notifications"),
         source_schema.arrow_schema().as_ref(),
         Some(branch_schema.arrow_schema().as_ref()),
     );
@@ -12098,7 +12122,7 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
         .into_iter()
         .map(|relay| {
             (
-                identifier(relay),
+                named(relay),
                 super::RuntimeMaterializedRelaySpec::new(
                     state_schema.arrow_schema(),
                     super::VmSchemaSensitivity::default(),
@@ -12107,7 +12131,7 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             )
         })
         .collect();
-    let relay_registries = [(identifier("input"), super::RelayRegistry::new())]
+    let relay_registries = [(named("input"), super::RelayRegistry::new())]
         .into_iter()
         .collect();
     runtime.executions.insert(
@@ -12149,9 +12173,9 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
     );
 
     let default = nervix_models::MaterializedStateDependency {
-        relay: identifier("profiles"),
+        relay: named("profiles"),
         policy: nervix_models::MaterializedStatePolicy::Default(vec![Assignment {
-            target: AssignmentTarget::bare(identifier("status")),
+            target: AssignmentTarget::bare(named("status")),
             value: Expression::Literal(nervix_models::Literal::String("unknown".to_string())),
         }]),
     };
@@ -12169,11 +12193,11 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
     assert!(!values.contains_key("relay_state.profiles.note"));
 
     let wait = nervix_models::MaterializedStateDependency {
-        relay: identifier("profiles"),
+        relay: named("profiles"),
         policy: nervix_models::MaterializedStatePolicy::RequiredWait,
     };
     let skip = nervix_models::MaterializedStateDependency {
-        relay: identifier("rules"),
+        relay: named("rules"),
         policy: nervix_models::MaterializedStatePolicy::RequiredSkip,
     };
     assert!(matches!(
@@ -12208,9 +12232,9 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
     )
     .expect("required-wait branch batch must build");
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let input_relay = identifier("input");
+    let input_relay = named("input");
     let dependencies = [nervix_models::MaterializedStateDependency {
-        relay: identifier("profiles"),
+        relay: named("profiles"),
         policy: nervix_models::MaterializedStatePolicy::RequiredWait,
     }];
     let resolution = runtime.resolve_materialized_dependencies_for_batch(
@@ -12261,9 +12285,9 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
         runtime
             .resolve_materialized_dependencies_for_batch(
                 &domain,
-                &identifier("input"),
+                &named("input"),
                 &[nervix_models::MaterializedStateDependency {
-                    relay: identifier("profiles"),
+                    relay: named("profiles"),
                     policy: nervix_models::MaterializedStatePolicy::RequiredWait,
                 }],
                 retained,

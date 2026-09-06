@@ -8,8 +8,9 @@
 use std::collections::BTreeSet;
 
 use nervix_models::{
-    Domain, DomainSchedule, DomainStatus, Identifier, Model, PlacementPolicy, PlacementRuntimeNode,
-    QuiesceLevel, Relocation, RelocationPreferenceStrategy, ScheduledNode,
+    ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, PlacementPolicy,
+    PlacementRuntimeNode, QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy,
+    ScheduledNode,
 };
 
 use super::{
@@ -28,17 +29,17 @@ struct RelocationPlanMember {
     group: usize,
     strategy: RelocationPreferenceStrategy,
     reason: RelocationMemberReason,
-    owner: String,
+    owner: ClusterNodeName,
     moves: bool,
-    replicas: Vec<String>,
+    replicas: Vec<ClusterNodeName>,
     promoted_replica: bool,
 }
 
 /// The plan `DESCRIBE RELOCATION` shows and `RELOCATE` executes.
 struct RelocationPlan {
-    destination: String,
+    destination: ClusterNodeName,
     level: QuiesceLevel,
-    gated_relays: Vec<Identifier>,
+    gated_relays: Vec<RelayName>,
     coverage: Vec<RelocationCoverage>,
     members: Vec<RelocationPlanMember>,
     unsatisfied: Vec<String>,
@@ -63,7 +64,7 @@ impl RelocationPlan {
                 } else {
                     self.gated_relays
                         .iter()
-                        .map(Identifier::as_str)
+                        .map(|name| name.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
                 }
@@ -116,7 +117,7 @@ impl RelocationPlan {
 impl SessionServiceImpl {
     pub(super) async fn describe_relocation(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         relocation: Relocation,
     ) -> CommandResult {
         match self.plan_relocation(domain, &relocation).await {
@@ -125,7 +126,11 @@ impl SessionServiceImpl {
         }
     }
 
-    pub(super) async fn relocate(&self, domain: &Domain, relocation: Relocation) -> CommandResult {
+    pub(super) async fn relocate(
+        &self,
+        domain: &DomainName,
+        relocation: Relocation,
+    ) -> CommandResult {
         let Some(_alter_guard) = self.runtime.try_begin_domain_alter(domain) else {
             return command_error(
                 DomainAlterError::ConcurrentAlter {
@@ -220,7 +225,7 @@ impl SessionServiceImpl {
     /// state. `RELOCATE` recomputes it under the domain alteration lock before executing.
     async fn plan_relocation(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         relocation: &Relocation,
     ) -> Result<RelocationPlan, String> {
         let Some(domain_state) = self.consensus.current_domain(domain).await else {
@@ -274,7 +279,7 @@ impl SessionServiceImpl {
         for member in &unit.members {
             owners.push(
                 relocation_member_owner(domain, current, &member.runtime_node, &live_nodes)?
-                    .to_string(),
+                    .clone(),
             );
         }
 
@@ -285,7 +290,7 @@ impl SessionServiceImpl {
             .members
             .iter()
             .zip(&owners)
-            .filter(|(_, owner)| owner.as_str() != relocation.destination)
+            .filter(|(_, owner)| **owner != relocation.destination)
             .map(|(member, _)| member.runtime_node.clone())
             .collect::<Vec<_>>();
 
@@ -331,7 +336,7 @@ impl SessionServiceImpl {
             .iter()
             .zip(&owners)
             .map(|(member, owner)| {
-                let moves = owner.as_str() != relocation.destination;
+                let moves = *owner != relocation.destination;
                 let assignment = planned
                     .as_ref()
                     .filter(|_| moves)
@@ -345,12 +350,7 @@ impl SessionServiceImpl {
                     owner: owner.clone(),
                     moves,
                     replicas: assignment
-                        .map(|node| {
-                            node.replica_nodes()
-                                .into_iter()
-                                .map(str::to_string)
-                                .collect()
-                        })
+                        .map(|node| node.replica_nodes().into_iter().cloned().collect())
                         .unwrap_or_default(),
                     promoted_replica: moves
                         && scheduled_node(current, &member.runtime_node)
@@ -382,8 +382,8 @@ impl SessionServiceImpl {
     /// The destination must be a cluster node the scheduler could choose for a new assignment.
     async fn validate_relocation_destination(
         &self,
-        destination: &str,
-        live_nodes: &BTreeSet<String>,
+        destination: &ClusterNodeName,
+        live_nodes: &BTreeSet<ClusterNodeName>,
     ) -> Result<(), String> {
         let membership = self.consensus.membership_nodes().await;
         if !membership.contains_key(destination) {
@@ -411,9 +411,9 @@ impl SessionServiceImpl {
     /// owner and existing replicas leave open.
     fn desired_domain_schedule(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         graph: &ActiveGraph,
-        schedulable_nodes: &BTreeSet<String>,
+        schedulable_nodes: &BTreeSet<ClusterNodeName>,
         placement: PlacementPolicy,
     ) -> DomainSchedule {
         let cluster_nodes = schedulable_nodes.iter().cloned().collect::<Vec<_>>();
@@ -439,11 +439,11 @@ impl SessionServiceImpl {
 fn planned_relocation_schedule(
     current: &DomainSchedule,
     desired: &DomainSchedule,
-    destination: &str,
+    destination: &ClusterNodeName,
     moved: &[PlacementRuntimeNode],
     replica_count: usize,
-    schedulable_nodes: &BTreeSet<String>,
-    live_nodes: &BTreeSet<String>,
+    schedulable_nodes: &BTreeSet<ClusterNodeName>,
+    live_nodes: &BTreeSet<ClusterNodeName>,
 ) -> DomainSchedule {
     let mut planned = current.clone();
     for member in moved {
@@ -454,7 +454,7 @@ fn planned_relocation_schedule(
         else {
             continue;
         };
-        let former_owner = node.execution_node().map(str::to_string);
+        let former_owner = node.execution_node().cloned();
         let replica_slots = if relay_without_materialized_state(node) {
             0
         } else {
@@ -470,7 +470,7 @@ fn planned_relocation_schedule(
             node.replica_nodes()
                 .into_iter()
                 .filter(|replica| live_nodes.contains(*replica))
-                .map(str::to_string),
+                .cloned(),
         );
         if let Some(desired_node) = desired.nodes.iter().find(|candidate| {
             candidate.kind == member.kind && candidate.identifier == member.identifier
@@ -484,7 +484,7 @@ fn planned_relocation_schedule(
             );
         }
 
-        let mut assigned_nodes = vec![destination.to_string()];
+        let mut assigned_nodes = vec![destination.clone()];
         for candidate in candidates {
             if assigned_nodes.len() > replica_slots {
                 break;
@@ -494,7 +494,7 @@ fn planned_relocation_schedule(
             }
         }
         assigned_nodes.truncate(replica_slots.saturating_add(1));
-        node.primary_node = Some(destination.to_string());
+        node.primary_node = Some(destination.clone());
         node.assigned_nodes = assigned_nodes;
     }
 
@@ -504,7 +504,7 @@ fn planned_relocation_schedule(
             .iter()
             .any(|group_member| moved.contains(group_member))
         {
-            group.primary_node = Some(destination.to_string());
+            group.primary_node = Some(destination.clone());
         }
     }
     planned
@@ -562,11 +562,11 @@ fn unsatisfied_preference_lines(
 /// A member whose owner is unavailable cannot be relocated: there is nothing to drain from a dead
 /// owner, and failover is already reassigning it.
 fn relocation_member_owner<'a>(
-    domain: &Domain,
+    domain: &DomainName,
     schedule: &'a DomainSchedule,
     member: &PlacementRuntimeNode,
-    live_nodes: &BTreeSet<String>,
-) -> Result<&'a str, String> {
+    live_nodes: &BTreeSet<ClusterNodeName>,
+) -> Result<&'a ClusterNodeName, String> {
     let Some(node) = scheduled_node(schedule, member) else {
         return Err(format!(
             "{} '{}' is not scheduled in domain '{}'",
@@ -608,29 +608,33 @@ fn relay_without_materialized_state(node: &ScheduledNode) -> bool {
     matches!(node.config.as_ref(), Model::Relay(relay) if relay.materialized_state.is_none())
 }
 
-fn format_node_list(nodes: &[String]) -> String {
+fn format_node_list(nodes: &[ClusterNodeName]) -> String {
     if nodes.is_empty() {
         "-".to_string()
     } else {
-        nodes.join(",")
+        nodes
+            .iter()
+            .map(|node| node.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{CreateJunction, Identifier, ModelKind};
+    use nervix_models::{CreateJunction, JunctionName, ModelKind, ModelName};
 
     use super::*;
 
     fn junction_node(name: &str, primary: &str, replicas: &[&str]) -> ScheduledNode {
-        let identifier = Identifier::try_from(name).expect("test name must be an identifier");
-        let mut assigned_nodes = vec![primary.to_string()];
-        assigned_nodes.extend(replicas.iter().map(|node| (*node).to_string()));
+        let identifier = ModelName::try_from(name).expect("test name must be an identifier");
+        let mut assigned_nodes = vec![node_name(primary)];
+        assigned_nodes.extend(replicas.iter().map(|node| node_name(node)));
         ScheduledNode {
             identifier: identifier.clone(),
             kind: ModelKind::Junction,
             config: Box::new(Model::Junction(CreateJunction {
-                name: identifier,
+                name: JunctionName::from(&identifier),
                 from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
                 output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
                 branched_by: nervix_models::BranchSelection::unbranched(),
@@ -642,14 +646,14 @@ mod tests {
             effective_branching_schema: None,
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
-            primary_node: Some(primary.to_string()),
+            primary_node: Some(ClusterNodeName::parse(primary).expect("valid node name")),
             assigned_nodes,
         }
     }
 
     fn schedule(nodes: Vec<ScheduledNode>) -> DomainSchedule {
         DomainSchedule {
-            domain: Domain::parse("relocation_test").expect("valid domain"),
+            domain: DomainName::parse("relocation_test").expect("valid domain"),
             nodes,
             placement_groups: Vec::new(),
         }
@@ -658,12 +662,19 @@ mod tests {
     fn member(name: &str) -> PlacementRuntimeNode {
         PlacementRuntimeNode::new(
             ModelKind::Junction,
-            Identifier::try_from(name).expect("test name must be an identifier"),
+            ModelName::try_from(name).expect("test name must be a model name"),
         )
     }
 
-    fn live(nodes: &[&str]) -> BTreeSet<String> {
-        nodes.iter().map(|node| (*node).to_string()).collect()
+    fn node_name(raw: &str) -> ClusterNodeName {
+        ClusterNodeName::parse(raw).expect("valid node name")
+    }
+
+    fn live(nodes: &[&str]) -> BTreeSet<ClusterNodeName> {
+        nodes
+            .iter()
+            .map(|node| ClusterNodeName::parse(node).expect("valid node name"))
+            .collect()
     }
 
     #[test]
@@ -673,7 +684,7 @@ mod tests {
         assert_eq!(
             relocation_member_owner(&domain, &schedule, &member("route"), &live(&["node-1"]))
                 .expect("a live owner must resolve"),
-            "node-1"
+            &node_name("node-1")
         );
     }
 
@@ -712,7 +723,7 @@ mod tests {
         let planned = planned_relocation_schedule(
             &current,
             &desired,
-            "node-2",
+            &ClusterNodeName::parse("node-2").expect("valid name"),
             &[member("route")],
             1,
             &live(&["node-1", "node-2", "node-3"]),
@@ -720,8 +731,11 @@ mod tests {
         );
         let node =
             scheduled_node(&planned, &member("route")).expect("member must remain scheduled");
-        assert_eq!(node.primary_node.as_deref(), Some("node-2"));
-        assert_eq!(node.assigned_nodes, vec!["node-2", "node-1"]);
+        assert_eq!(node.primary_node.as_ref(), Some(&node_name("node-2")));
+        assert_eq!(
+            node.assigned_nodes,
+            vec![node_name("node-2"), node_name("node-1")]
+        );
     }
 
     #[test]
@@ -731,7 +745,7 @@ mod tests {
         let planned = planned_relocation_schedule(
             &current,
             &desired,
-            "node-2",
+            &ClusterNodeName::parse("node-2").expect("valid name"),
             &[member("route")],
             0,
             &live(&["node-1", "node-2"]),
@@ -739,6 +753,6 @@ mod tests {
         );
         let node =
             scheduled_node(&planned, &member("route")).expect("member must remain scheduled");
-        assert_eq!(node.assigned_nodes, vec!["node-2"]);
+        assert_eq!(node.assigned_nodes, vec![node_name("node-2")]);
     }
 }

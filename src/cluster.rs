@@ -13,6 +13,7 @@ use chitchat::{
     transport::{Socket, Transport, UdpSocket},
 };
 use nervix_consensus::{GossipNode, GossipState};
+use nervix_models::ClusterNodeName;
 use parking_lot::{Mutex, RwLock};
 use tokio::{net::lookup_host, sync::broadcast, task::JoinHandle};
 use tokio_stream::StreamExt;
@@ -39,7 +40,7 @@ pub struct ClusterHandle {
     chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
     chitchat_server: Mutex<Option<ChitchatHandle>>,
     events: broadcast::Sender<String>,
-    interconnect_state: RwLock<BTreeMap<String, InterconnectPeerState>>,
+    interconnect_state: RwLock<BTreeMap<ClusterNodeName, InterconnectPeerState>>,
     node_unavailability_timeout: Duration,
     membership_task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -147,7 +148,7 @@ impl FromStr for HostPort {
 #[derive(Debug, Clone)]
 pub struct ClusterSettings {
     pub cluster_id: String,
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
     pub cluster_listen_addr: SocketAddr,
     pub cluster_advertise_addr: HostPort,
     pub grpc_listen_addr: SocketAddr,
@@ -223,7 +224,7 @@ pub async fn start_cluster_with_transport(
         None => Vec::new(),
     };
     let chitchat_id = ChitchatId {
-        node_id: node_id.clone(),
+        node_id: node_id.to_string(),
         generation_id,
         gossip_advertise_addr,
     };
@@ -242,7 +243,7 @@ pub async fn start_cluster_with_transport(
 
     let initial_key_values = vec![
         (KEY_CLUSTER_ID.to_string(), settings.cluster_id.clone()),
-        (KEY_NODE_ID.to_string(), node_id),
+        (KEY_NODE_ID.to_string(), node_id.to_string()),
         (
             KEY_CLUSTER_LISTEN_ADDR.to_string(),
             settings.cluster_listen_addr.to_string(),
@@ -414,7 +415,7 @@ impl ClusterHandle {
 
         let mut dead_node_ids = chitchat
             .dead_nodes()
-            .map(|node_id| node_id.node_id.clone())
+            .filter_map(|node_id| ClusterNodeName::parse(&node_id.node_id).ok())
             .filter(|node_id| !live_node_ids.contains(node_id))
             .collect::<BTreeSet<_>>();
         dead_node_ids.extend(self.unavailable_interconnect_nodes());
@@ -426,7 +427,7 @@ impl ClusterHandle {
         }
     }
 
-    pub async fn live_node_ids(&self) -> Vec<String> {
+    pub async fn live_node_ids(&self) -> Vec<ClusterNodeName> {
         self.gossip_state()
             .await
             .live_nodes
@@ -443,7 +444,10 @@ impl ClusterHandle {
             .set(KEY_RUNTIME_REVISION_READY, revision.to_string());
     }
 
-    pub async fn nodes_ready_for_runtime_revision(&self, revision: u64) -> BTreeSet<String> {
+    pub async fn nodes_ready_for_runtime_revision(
+        &self,
+        revision: u64,
+    ) -> BTreeSet<ClusterNodeName> {
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
@@ -452,7 +456,7 @@ impl ClusterHandle {
         if let Some(state) = chitchat.node_state(&self_id)
             && runtime_revision_is_ready(state, revision)
         {
-            ready.insert(self_id.node_id.clone());
+            ready.extend(ClusterNodeName::parse(&self_id.node_id).ok());
         }
         for node_id in chitchat.live_nodes() {
             if *node_id == self_id {
@@ -461,7 +465,7 @@ impl ClusterHandle {
             if let Some(state) = chitchat.node_state(node_id)
                 && runtime_revision_is_ready(state, revision)
             {
-                ready.insert(node_id.node_id.clone());
+                ready.extend(ClusterNodeName::parse(&node_id.node_id).ok());
             }
         }
         ready
@@ -488,7 +492,7 @@ impl ClusterHandle {
         &self,
         domain: &str,
         relay: &str,
-    ) -> BTreeSet<String> {
+    ) -> BTreeSet<ClusterNodeName> {
         let key = subscription_interest_key(domain, relay);
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
@@ -498,7 +502,7 @@ impl ClusterHandle {
         if let Some(state) = chitchat.node_state(&self_id)
             && state.get(&key).is_some()
         {
-            interested.insert(self_id.node_id.clone());
+            interested.extend(ClusterNodeName::parse(&self_id.node_id).ok());
         }
 
         for node_id in chitchat.live_nodes() {
@@ -508,17 +512,17 @@ impl ClusterHandle {
             if let Some(state) = chitchat.node_state(node_id)
                 && state.get(&key).is_some()
             {
-                interested.insert(node_id.node_id.clone());
+                interested.extend(ClusterNodeName::parse(&node_id.node_id).ok());
             }
         }
 
         interested
     }
 
-    pub fn record_interconnect_connected(&self, node_id: &str, target_addr: String) {
+    pub fn record_interconnect_connected(&self, node_id: &ClusterNodeName, target_addr: String) {
         let mut peers = self.interconnect_state.write();
         let entry = peers
-            .entry(node_id.to_string())
+            .entry(node_id.clone())
             .or_insert_with(|| InterconnectPeerState {
                 target_addr: Some(target_addr.clone()),
                 connected: false,
@@ -531,22 +535,26 @@ impl ClusterHandle {
         entry.unavailable_since = None;
 
         if !was_connected {
-            info!(node_id, target_addr, "interconnect connection established");
+            info!(%node_id, target_addr, "interconnect connection established");
             let _ = self.events.send(format!(
                 "interconnect connection established: {node_id}@{target_addr}"
             ));
         } else if was_unavailable {
-            info!(node_id, target_addr, "interconnect connection restored");
+            info!(%node_id, target_addr, "interconnect connection restored");
             let _ = self.events.send(format!(
                 "interconnect connection restored: {node_id}@{target_addr}"
             ));
         }
     }
 
-    pub fn record_interconnect_failure(&self, node_id: &str, target_addr: Option<String>) {
+    pub fn record_interconnect_failure(
+        &self,
+        node_id: &ClusterNodeName,
+        target_addr: Option<String>,
+    ) {
         let mut peers = self.interconnect_state.write();
         let entry = peers
-            .entry(node_id.to_string())
+            .entry(node_id.clone())
             .or_insert_with(|| InterconnectPeerState {
                 target_addr: target_addr.clone(),
                 connected: false,
@@ -563,14 +571,14 @@ impl ClusterHandle {
         }
         if was_connected || !was_unavailable {
             error!(
-                node_id,
+                %node_id,
                 target_addr = entry.target_addr.as_deref().unwrap_or("<unknown>"),
                 "interconnect connection establishment failed"
             );
         }
     }
 
-    pub fn retain_interconnect_live_set(&self, live_node_ids: &BTreeSet<String>) {
+    pub fn retain_interconnect_live_set(&self, live_node_ids: &BTreeSet<ClusterNodeName>) {
         self.interconnect_state
             .write()
             .retain(|node_id, _| live_node_ids.contains(node_id));
@@ -606,7 +614,7 @@ impl ClusterHandle {
             .collect()
     }
 
-    fn unavailable_interconnect_nodes(&self) -> BTreeSet<String> {
+    fn unavailable_interconnect_nodes(&self) -> BTreeSet<ClusterNodeName> {
         let peers = self.interconnect_state.read();
         let now = Instant::now();
         let mut unavailable = BTreeSet::new();
@@ -621,7 +629,7 @@ impl ClusterHandle {
         unavailable
     }
 
-    pub fn is_interconnect_unavailable(&self, node_id: &str) -> bool {
+    pub fn is_interconnect_unavailable(&self, node_id: &ClusterNodeName) -> bool {
         self.unavailable_interconnect_nodes().contains(node_id)
     }
 }
@@ -745,7 +753,7 @@ fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode>
         .unwrap_or("")
         .to_string();
     Some(GossipNode {
-        node_id: node_id.node_id.clone(),
+        node_id: ClusterNodeName::parse(&node_id.node_id).ok()?,
         cluster_api_advertise_addr,
         grpc_advertise_addr,
         web_console_advertise_addr,

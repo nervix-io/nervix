@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CreateEmitter,
+    AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CodecName, CreateEmitter,
     CreateStatement, EmitSink, EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend,
     IcebergValueMapping, MongoDbConflictAction, MySqlConflictAction, OtelAggregationTemporality,
     OtelMetric, OtelMetricKind, OtelScope, OtelSignal, PostgresConflictAction, SqsFifoGroup,
@@ -13,12 +13,13 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, ack_timeout, alter_op_separator, boxed_choice,
-        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, duration_lit,
-        emitter_ack_window, emitter_name, emitter_ref, flush_each, from_relay_clauses,
-        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
-        lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
-        render_vm_program_tokens, retry_policy, route_construction, string_lit, suggest_from,
-        table_ref, tok, topic_ref, where_expression, where_only_route_construction, word_raw,
+        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, collection_ref,
+        duration_lit, emitter_ack_window, emitter_name, emitter_ref, flush_each,
+        from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
+        kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
+        queue_ref, relay_ref, render_vm_program_tokens, retry_policy, route_construction,
+        string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref, where_expression,
+        where_only_route_construction, word_raw,
     },
 };
 
@@ -190,7 +191,7 @@ fn nats_emit_sink_parser<'src>()
     kw(Identifier::Nats)
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Subject))
-        .then(topic_ref())
+        .then(subject_ref())
         .map(|(client, subject)| EmitSink::Nats { client, subject })
 }
 
@@ -771,7 +772,7 @@ fn mongodb_emit_sink_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw_phrase2(Identifier::Insert, Identifier::To))
         .then_ignore(kw(Identifier::Collection))
-        .then(table_ref())
+        .then(collection_ref())
         .then_ignore(kw(Identifier::Values))
         .then(clickhouse_values())
         .then(mongodb_conflict_action())
@@ -885,8 +886,7 @@ fn iceberg_commit_each<'src>()
 /// at `TO` which sinks are still reachable, and offers sinks that can never complete. This also
 /// matches ingestors, which already read `FROM <source> DECODE USING <codec>`.
 fn encode_using_clause<'src>()
--> impl Parser<'src, &'src [Token], nervix_models::Identifier, extra::Err<ParseError<'src>>> + Clone
-{
+-> impl Parser<'src, &'src [Token], CodecName, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase2(Identifier::Encode, Identifier::Using)
         .ignore_then(codec_ref())
         .boxed()
@@ -933,7 +933,7 @@ fn codec_free_sink<'src>(
 type ParsedSink = (
     EmitSink,
     EmitterPublishingMode,
-    Option<nervix_models::Identifier>,
+    Option<CodecName>,
     Option<nervix_models::RouteConstruction>,
 );
 
@@ -1949,10 +1949,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Kafka {
-                client: nervix_models::Identifier::try_from("broker1")
+                client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
-                topic: nervix_models::Identifier::try_from("topic")
-                    .expect("valid topic identifier"),
+                topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
             }
         );
         assert_eq!(parsed.mode, AckMode::Attached);
@@ -2097,9 +2096,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::ClickHouse {
-                client: nervix_models::Identifier::try_from("clickhouse_client")
+                client: nervix_models::ClientName::try_from("clickhouse_client")
                     .expect("valid client identifier"),
-                table: nervix_models::Identifier::try_from("my_table")
+                table: nervix_models::TableName::try_from("my_table")
                     .expect("valid table identifier"),
                 values: vec![
                     ClickHouseValueMapping {
@@ -2166,9 +2165,9 @@ mod tests {
             parsed.sink.as_ref(),
             &EmitSink::Iceberg {
                 backend: IcebergStorageBackend::S3,
-                client: nervix_models::Identifier::try_from("s3_client")
+                client: nervix_models::ClientName::try_from("s3_client")
                     .expect("valid client identifier"),
-                table: nervix_models::Identifier::try_from("notifications")
+                table: nervix_models::TableName::try_from("notifications")
                     .expect("valid table identifier"),
                 values: vec![
                     ClickHouseValueMapping {
@@ -2182,7 +2181,7 @@ mod tests {
                 ],
                 location: "s3://nervix-iceberg/tables/notifications".to_string(),
                 catalog: IcebergCatalog::Rest {
-                    client: nervix_models::Identifier::try_from("iceberg_catalog")
+                    client: nervix_models::ClientName::try_from("iceberg_catalog")
                         .expect("valid catalog client identifier"),
                 },
                 flush_each: "10s".to_string(),
@@ -2216,9 +2215,9 @@ mod tests {
             parsed.sink.as_ref(),
             &EmitSink::Iceberg {
                 backend: IcebergStorageBackend::Gcs,
-                client: nervix_models::Identifier::try_from("gcs_client")
+                client: nervix_models::ClientName::try_from("gcs_client")
                     .expect("valid client identifier"),
-                table: nervix_models::Identifier::try_from("notifications")
+                table: nervix_models::TableName::try_from("notifications")
                     .expect("valid table identifier"),
                 values: vec![
                     ClickHouseValueMapping {
@@ -2232,7 +2231,7 @@ mod tests {
                 ],
                 location: "gs://nervix-iceberg/tables/notifications".to_string(),
                 catalog: IcebergCatalog::Rest {
-                    client: nervix_models::Identifier::try_from("iceberg_catalog")
+                    client: nervix_models::ClientName::try_from("iceberg_catalog")
                         .expect("valid catalog client identifier"),
                 },
                 flush_each: "IMMEDIATE".to_string(),
@@ -2266,9 +2265,9 @@ mod tests {
             parsed.sink.as_ref(),
             &EmitSink::Iceberg {
                 backend: IcebergStorageBackend::AzureBlob,
-                client: nervix_models::Identifier::try_from("azure_client")
+                client: nervix_models::ClientName::try_from("azure_client")
                     .expect("valid client identifier"),
-                table: nervix_models::Identifier::try_from("notifications")
+                table: nervix_models::TableName::try_from("notifications")
                     .expect("valid table identifier"),
                 values: vec![
                     ClickHouseValueMapping {
@@ -2284,7 +2283,7 @@ mod tests {
                            notifications"
                     .to_string(),
                 catalog: IcebergCatalog::Rest {
-                    client: nervix_models::Identifier::try_from("iceberg_catalog")
+                    client: nervix_models::ClientName::try_from("iceberg_catalog")
                         .expect("valid catalog client identifier"),
                 },
                 flush_each: "IMMEDIATE".to_string(),
@@ -2522,9 +2521,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Postgres {
-                client: nervix_models::Identifier::try_from("postgres_client")
+                client: nervix_models::ClientName::try_from("postgres_client")
                     .expect("valid client identifier"),
-                table: nervix_models::Identifier::try_from("my_table")
+                table: nervix_models::TableName::try_from("my_table")
                     .expect("valid table identifier"),
                 values: vec![
                     ClickHouseValueMapping {
@@ -2741,9 +2740,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::MySql {
-                client: nervix_models::Identifier::try_from("mysql_client")
+                client: nervix_models::ClientName::try_from("mysql_client")
                     .expect("valid client identifier"),
-                table: nervix_models::Identifier::try_from("my_table")
+                table: nervix_models::TableName::try_from("my_table")
                     .expect("valid table identifier"),
                 values: vec![
                     ClickHouseValueMapping {
@@ -2917,9 +2916,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::MongoDb {
-                client: nervix_models::Identifier::try_from("mongodb_client")
+                client: nervix_models::ClientName::try_from("mongodb_client")
                     .expect("valid client identifier"),
-                collection: nervix_models::Identifier::try_from("my_collection")
+                collection: nervix_models::CollectionName::try_from("my_collection")
                     .expect("valid collection identifier"),
                 values: vec![
                     ClickHouseValueMapping {
@@ -3165,10 +3164,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Pulsar {
-                client: nervix_models::Identifier::try_from("pulsar1")
+                client: nervix_models::ClientName::try_from("pulsar1")
                     .expect("valid client identifier"),
-                topic: nervix_models::Identifier::try_from("topic")
-                    .expect("valid topic identifier"),
+                topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
             }
         );
     }
@@ -3308,10 +3306,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Mqtt {
-                client: nervix_models::Identifier::try_from("broker1")
+                client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
-                topic: nervix_models::Identifier::try_from("topic")
-                    .expect("valid topic identifier"),
+                topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
             }
         );
     }
@@ -3331,9 +3328,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Nats {
-                client: nervix_models::Identifier::try_from("nats_main")
+                client: nervix_models::ClientName::try_from("nats_main")
                     .expect("valid client identifier"),
-                subject: nervix_models::Identifier::try_from("notifications")
+                subject: nervix_models::SubjectName::try_from("notifications")
                     .expect("valid subject identifier"),
             }
         );
@@ -3354,9 +3351,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::RabbitMq {
-                client: nervix_models::Identifier::try_from("broker1")
+                client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
-                queue: nervix_models::Identifier::try_from("queue1")
+                queue: nervix_models::QueueName::try_from("queue1")
                     .expect("valid queue identifier"),
             }
         );
@@ -3377,9 +3374,9 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Redis {
-                client: nervix_models::Identifier::try_from("broker1")
+                client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
-                channel: nervix_models::Identifier::try_from("out")
+                channel: nervix_models::ChannelName::try_from("out")
                     .expect("valid channel identifier"),
             }
         );
@@ -3424,7 +3421,7 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::ZeroMq {
-                client: nervix_models::Identifier::try_from("zmq_out")
+                client: nervix_models::ClientName::try_from("zmq_out")
                     .expect("valid client identifier"),
             }
         );
@@ -3444,7 +3441,7 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Syslog {
-                client: nervix_models::Identifier::try_from("syslog_out")
+                client: nervix_models::ClientName::try_from("syslog_out")
                     .expect("valid client identifier"),
             }
         );
@@ -3500,7 +3497,7 @@ mod tests {
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Sqs {
-                client: nervix_models::Identifier::try_from("sqs_main")
+                client: nervix_models::ClientName::try_from("sqs_main")
                     .expect("valid client identifier"),
                 queue: "queue1".to_string(),
                 fifo_group: None,

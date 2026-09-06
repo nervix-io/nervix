@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(
             parsed.format,
             SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                resource: nervix_models::Identifier::parse("proto_bundle")
+                resource: nervix_models::ResourceName::parse("proto_bundle")
                     .expect("valid identifier"),
                 resource_version: Some(2),
                 config: vec![

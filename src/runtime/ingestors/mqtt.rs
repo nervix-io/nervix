@@ -20,14 +20,14 @@ pub(in crate::runtime) struct MqttIngestorAddr {
 #[derive(Clone)]
 struct MqttTaskContext {
     runtime: Runtime,
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     error_policies: ErrorPolicies,
     timestamp_source: Option<IngestTimestampSource>,
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     events: broadcast::Sender<RuntimeEvent>,
     quiesce: Arc<IngestorQuiesceControl>,
 }
@@ -60,7 +60,7 @@ enum MqttSubscriptionState {
 impl MqttIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientMqtt,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
@@ -1119,7 +1119,7 @@ impl MqttIngestor {
         }
     }
 
-    fn subscribe_filter(topic: &str, domain: &Domain, ingestor: &Identifier) -> String {
+    fn subscribe_filter(topic: &str, domain: &DomainName, ingestor: &IngestorName) -> String {
         format!("$share/{}~{}/{topic}", domain.as_str(), ingestor.as_str())
     }
 

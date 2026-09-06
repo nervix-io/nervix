@@ -16,7 +16,7 @@ use nervix_dataflow_graph::{
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
     DataflowStatistics,
 };
-use nervix_models::Statement;
+use nervix_models::{ClusterNodeName, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
@@ -176,7 +176,7 @@ struct ResourceVersionView {
     manifest_checksum: Option<String>,
     file_count: Option<String>,
     total_bytes: Option<String>,
-    created_by_node: Option<String>,
+    created_by_node: Option<ClusterNodeName>,
     created_at: Option<String>,
     files: Vec<ResourceFileView>,
 }
@@ -1547,7 +1547,7 @@ fn parse_resource_version_detail(line: &str) -> Option<ResourceVersionView> {
             "manifest_checksum" => manifest_checksum = Some(value.to_string()),
             "file_count" => file_count = Some(value.to_string()),
             "total_bytes" => total_bytes = Some(value.to_string()),
-            "created_by_node" => created_by_node = Some(value.to_string()),
+            "created_by_node" => created_by_node = ClusterNodeName::parse(value).ok(),
             "created_at" => created_at = Some(value.to_string()),
             _ => {}
         }

@@ -6,6 +6,7 @@ use aws_sdk_sqs::{
     Client as SqsClient,
     types::{Message as SqsMessage, MessageAttributeValue},
 };
+use nervix_models::DomainName;
 
 use super::super::*;
 
@@ -31,7 +32,7 @@ impl IngestMessageHeaders for SqsMessageAttributes<'_> {
 impl SqsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientSqs,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

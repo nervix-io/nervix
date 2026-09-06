@@ -6,6 +6,7 @@ use lapin::{
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
+use nervix_models::DomainName;
 
 use super::super::*;
 
@@ -34,7 +35,7 @@ impl IngestMessageHeaders for RabbitMqDeliveryHeaders<'_> {
 impl RabbitMqIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientRabbitMq,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

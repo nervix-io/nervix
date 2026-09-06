@@ -115,7 +115,7 @@ mod tests {
         assert_eq!(
             parsed.tls,
             Some(VhostTlsResource {
-                resource: nervix_models::Identifier::parse("my_cert").expect("valid resource"),
+                resource: nervix_models::ResourceName::parse("my_cert").expect("valid resource"),
                 version: None,
             })
         );
@@ -129,7 +129,7 @@ mod tests {
         assert_eq!(
             parsed.tls,
             Some(VhostTlsResource {
-                resource: nervix_models::Identifier::parse("my_cert").expect("valid resource"),
+                resource: nervix_models::ResourceName::parse("my_cert").expect("valid resource"),
                 version: Some(7),
             })
         );

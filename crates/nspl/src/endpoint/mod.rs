@@ -152,7 +152,7 @@ mod tests {
             parsed
                 .signaling_protocol
                 .as_ref()
-                .map(nervix_models::Identifier::as_str),
+                .map(nervix_models::SignalingProtocolName::as_str),
             Some("binance_style")
         );
     }

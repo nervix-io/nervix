@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(
             parsed.wire_format,
             CodecWireFormat::Protobuf(CodecProtobufConfig {
-                resource: nervix_models::Identifier::parse("proto_bundle")
+                resource: nervix_models::ResourceName::parse("proto_bundle")
                     .expect("valid identifier"),
                 resource_version: Some(2),
                 config: vec![
@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(
             parsed.encoding_rules,
             vec![CodecEncodingRule {
-                field: nervix_models::Identifier::parse("created_at").expect("valid identifier"),
+                field: nervix_models::FieldName::parse("created_at").expect("valid field name"),
                 encoding: CodecEncoding::Rfc3339,
             }]
         );

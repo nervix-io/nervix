@@ -1,3 +1,4 @@
+use nervix_models::DomainName;
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use url::Url;
@@ -28,7 +29,7 @@ pub(in crate::runtime) struct PrometheusVectorResult {
 impl PrometheusIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientPrometheus,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

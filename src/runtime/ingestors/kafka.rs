@@ -1,5 +1,6 @@
 use std::future;
 
+use nervix_models::DomainName;
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -35,7 +36,7 @@ impl IngestMessageHeaders for KafkaMessageHeaders<'_> {
 impl KafkaIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientKafka,
         ingestor: CreateIngestor,
         kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,

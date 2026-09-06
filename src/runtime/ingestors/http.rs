@@ -1,3 +1,4 @@
+use nervix_models::DomainName;
 use reqwest::Client as HttpClient;
 
 use super::super::*;
@@ -20,7 +21,7 @@ impl IngestMessageHeaders for HttpResponseHeaders<'_> {
 impl HttpIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientHttp,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {

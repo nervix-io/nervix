@@ -1,3 +1,4 @@
+use nervix_models::DomainName;
 use zeromq::{PullSocket, Socket, SocketRecv};
 
 use super::super::*;
@@ -7,7 +8,7 @@ pub(in crate::runtime) struct ZeroMqIngestor;
 impl ZeroMqIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientZeroMq,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
