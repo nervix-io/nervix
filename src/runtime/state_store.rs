@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use ahash::HashMap;
+use error_stack::Report;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use meticulous::OptionExt as _;
 pub(crate) use nervix_interconnect::RuntimeStateKind;
@@ -9,6 +10,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
 
 use super::BranchKey;
+use crate::registry::RegistryEntity;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
@@ -311,8 +313,8 @@ impl RuntimeStateStore {
     pub fn purge_stale_schema_fingerprints(
         &self,
         domain: &DomainName,
-        current: &HashMap<(ModelKind, ModelName), [u8; 32]>,
-    ) -> Result<(), RuntimePersistenceError> {
+        current: &HashMap<RegistryEntity, [u8; 32]>,
+    ) -> Result<(), Report<RuntimePersistenceError>> {
         let mut domain_prefix = domain.as_str().as_bytes().to_vec();
         domain_prefix.push(0);
         let mut stale_latest_keys = Vec::new();
@@ -321,14 +323,20 @@ impl RuntimeStateStore {
                 .key()
                 .map(|key| key.as_ref().to_vec())
                 .map_err(|_| RuntimePersistenceError::ReadValue)?;
-            let (state, kind, identifier, fingerprint) = stored_placement_schema(&key)?;
-            let mut expected = current.get(&(kind, identifier)).copied();
+            let stored = stored_placement_schema(&key)?;
+            let mut expected = current
+                .get(&RegistryEntity {
+                    kind: stored.kind,
+                    identifier: stored.identifier,
+                })
+                .copied();
             if expected.is_some()
-                && let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset = state
+                && let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset =
+                    stored.state
             {
                 expected = Some([0; 32]);
             }
-            if expected != Some(fingerprint) {
+            if expected != Some(stored.schema_fingerprint) {
                 stale_latest_keys.push(key);
             }
         }
@@ -361,13 +369,22 @@ impl RuntimeStateStore {
         }
         batch
             .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)
+            .map_err(|_| Report::new(RuntimePersistenceError::WriteValue))
     }
+}
+
+/// The placement a stored runtime-state key encodes: which kind of state it is, which model owns
+/// it, and the schema fingerprint the state was written under.
+struct StoredPlacementSchema {
+    state: RuntimeStateKind,
+    kind: ModelKind,
+    identifier: ModelName,
+    schema_fingerprint: [u8; 32],
 }
 
 fn stored_placement_schema(
     key: &[u8],
-) -> Result<(RuntimeStateKind, ModelKind, ModelName, [u8; 32]), RuntimePersistenceError> {
+) -> Result<StoredPlacementSchema, Report<RuntimePersistenceError>> {
     let domain_end = key.iter().position(|byte| *byte == 0).ok_or_else(|| {
         RuntimePersistenceError::DecodeState(
             "runtime state key has no domain separator".to_string(),
@@ -384,9 +401,9 @@ fn stored_placement_schema(
         Some(6) => RuntimeStateKind::WindowProcessor,
         Some(7) => RuntimeStateKind::BranchLru,
         Some(_) | None => {
-            return Err(RuntimePersistenceError::DecodeState(
+            return Err(Report::new(RuntimePersistenceError::DecodeState(
                 "runtime state key has an invalid state kind".to_string(),
-            ));
+            )));
         }
     };
     let kind_start = state_offset.saturating_add(2);
@@ -439,5 +456,10 @@ fn stored_placement_schema(
         })?;
     let mut schema_fingerprint = [0; 32];
     schema_fingerprint.copy_from_slice(fingerprint);
-    Ok((state, kind, identifier, schema_fingerprint))
+    Ok(StoredPlacementSchema {
+        state,
+        kind,
+        identifier,
+        schema_fingerprint,
+    })
 }

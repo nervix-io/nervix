@@ -5,8 +5,9 @@ use nervix_models::{CreateEndpoint, CreateStatement, EndpointType};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, endpoint_name, if_not_exists_clause, into_parse_error,
-        kw, lex_input, signaling_protocol_clause, string_lit, suggest_from, tok, vhost_ref,
+        LexedInput, ParseError, ParseFromSourceError, endpoint_name, if_not_exists_clause,
+        into_parse_error, kw, lex_input, signaling_protocol_clause, string_lit, suggest_from, tok,
+        vhost_ref,
     },
 };
 
@@ -96,7 +97,11 @@ pub fn parse_create_endpoint_tokens(
 pub fn parse_create_endpoint(
     input: &str,
 ) -> Result<CreateStatement<CreateEndpoint>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_endpoint_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

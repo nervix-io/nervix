@@ -8,9 +8,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, alter_op_separator, branch_ref, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, relay_name, relay_ref, schema_ref,
-        suggest_from, tok, word_raw,
+        LexedInput, ParseError, ParseFromSourceError, alter_op_separator, branch_ref,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, relay_name, relay_ref,
+        schema_ref, suggest_from, tok, word_raw,
     },
 };
 
@@ -144,7 +144,11 @@ pub fn parse_create_stream_tokens(
 pub fn parse_create_stream(
     input: &str,
 ) -> Result<CreateStatement<CreateRelay>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_stream_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -161,7 +165,11 @@ pub fn parse_alter_relay_tokens(tokens: &[Token]) -> Result<AlterRelay, Vec<Pars
 }
 
 pub fn parse_alter_relay(input: &str) -> Result<AlterRelay, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_relay_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

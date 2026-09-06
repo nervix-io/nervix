@@ -5,8 +5,8 @@ use nervix_models::DescribeLookup;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, into_parse_error, kw, kw_phrase2, lex_input, lookup_ref,
-        suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, kw_phrase2, lex_input,
+        lookup_ref, suggest_from, tok,
     },
 };
 
@@ -33,7 +33,11 @@ pub fn parse_describe_lookup_tokens(
 }
 
 pub fn parse_describe_lookup(input: &str) -> Result<DescribeLookup, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_describe_lookup_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

@@ -107,7 +107,7 @@ impl SyslogEmitter {
         let mut staged_deliveries = Vec::new();
         for record in records {
             tokio::task::consume_budget().await;
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             if current_batch.is_some_and(|batch| batch != record.batch_index) {
                 for position in staged_deliveries.drain(..) {
                     outcome.deliver(position);

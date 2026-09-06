@@ -9,11 +9,11 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, filter_where_clause,
-        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, inferencer_name,
-        into_parse_error, kw, kw_phrase2, lex_input, materialized_state_dependencies,
-        render_vm_program_tokens, resource_ref, string_lit, suggest_from, tok, u64_value,
-        vm_program_error_message,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection,
+        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
+        inferencer_name, into_parse_error, kw, kw_phrase2, lex_input,
+        materialized_state_dependencies, render_vm_program_tokens, resource_ref, string_lit,
+        suggest_from, tok, u64_value, vm_program_error_message,
     },
 };
 
@@ -250,7 +250,11 @@ pub fn parse_create_inferencer_tokens(
 pub fn parse_create_inferencer(
     input: &str,
 ) -> Result<CreateStatement<CreateInferencer>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_inferencer_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

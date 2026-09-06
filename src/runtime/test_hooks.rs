@@ -51,7 +51,7 @@ pub struct TransactionBindingDropInjector {
 
 #[derive(Debug, Default)]
 pub(crate) struct TransactionCommitPauseInjector {
-    pauses: DashMap<(ClusterNodeName, usize), Arc<TransactionCommitPause>, RandomState>,
+    pauses: DashMap<TransactionCommitPauseKey, Arc<TransactionCommitPause>, RandomState>,
 }
 
 #[derive(Debug, Default)]
@@ -151,7 +151,10 @@ impl RuntimeTestHooks {
         completed_statements: usize,
     ) {
         self.transaction_commit_pauses.pauses.insert(
-            (node_id, completed_statements),
+            TransactionCommitPauseKey {
+                node_id,
+                completed_statements,
+            },
             Arc::new(TransactionCommitPause::default()),
         );
     }
@@ -198,7 +201,10 @@ impl RuntimeTestHooks {
         node_id: &ClusterNodeName,
         completed_statements: usize,
     ) {
-        let key = (node_id.clone(), completed_statements);
+        let key = TransactionCommitPauseKey {
+            node_id: node_id.clone(),
+            completed_statements,
+        };
         let pause = self
             .transaction_commit_pauses
             .pauses
@@ -225,7 +231,10 @@ impl RuntimeTestHooks {
         node_id: &ClusterNodeName,
         completed_statements: usize,
     ) {
-        let key = (node_id.clone(), completed_statements);
+        let key = TransactionCommitPauseKey {
+            node_id: node_id.clone(),
+            completed_statements,
+        };
         let pause = self
             .transaction_commit_pauses
             .pauses
@@ -265,6 +274,14 @@ impl TransactionBindingDropInjector {
     }
 }
 
+/// Where a transaction commit is armed to pause: the node running the commit and how many of its
+/// statements have completed when it stops.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TransactionCommitPauseKey {
+    node_id: ClusterNodeName,
+    completed_statements: usize,
+}
+
 impl TransactionCommitPauseInjector {
     #[cfg(feature = "testing")]
     pub(crate) async fn pause_if_armed(
@@ -272,7 +289,10 @@ impl TransactionCommitPauseInjector {
         node_id: &ClusterNodeName,
         completed_statements: usize,
     ) {
-        let key = (node_id.clone(), completed_statements);
+        let key = TransactionCommitPauseKey {
+            node_id: node_id.clone(),
+            completed_statements,
+        };
         let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
             return;
         };

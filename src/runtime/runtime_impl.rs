@@ -6,6 +6,38 @@ use rdkafka::consumer::StreamConsumer;
 
 use super::{schedule_delta::ScheduleDelta, *};
 
+/// One reingestor input this node runs: the reingestor model, the relay that input reads from,
+/// and the fan-in that delivers that relay's batches.
+struct ReingestorInputSpec {
+    reingestor: CreateReingestor,
+    from_relay: RelayName,
+    receiver: RelayRuntimeFanIn,
+}
+
+/// The instantiated relay a remote payload is delivered into: the registry that accepts it, the
+/// boundary services that own it, and the schema its Arrow batch must decode against.
+pub(in crate::runtime) struct RemoteRelayTarget {
+    registry: RelayRegistry,
+    services: Arc<RelayBoundaryServices>,
+    schema: Arc<CompiledSchema>,
+}
+
+/// One instantiated lookup as this node sees it: the model it was built from, the resource
+/// version it loaded, and how many entries that version produced.
+pub struct LocalLookupDescription {
+    pub model: CreateLookup,
+    pub resource_version: u64,
+    pub entry_count: usize,
+}
+
+/// A connector's reconnect state, reported alongside its dataflow node status.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DataflowNodeTransientState {
+    pub error: Option<String>,
+    pub reconnect_backoff: Option<String>,
+    pub reconnect_wait_millis: Option<u64>,
+}
+
 struct MaterializedRelayRead<'a> {
     relay: &'a RelayName,
     key_mode: MaterializedLookupKeyMode,
@@ -657,7 +689,7 @@ impl Runtime {
     ) -> EntityGateHold {
         let mut gates = Vec::with_capacity(relays.len());
         for relay in relays {
-            let key = (domain.clone(), relay.clone());
+            let key = RuntimeKey::new(domain.clone(), relay.clone());
             let Some(fanout) = self.relay_boundary_fanouts.get(&key) else {
                 continue;
             };
@@ -677,7 +709,10 @@ impl Runtime {
         lease: EntityGateLease<'_>,
     ) -> Result<(), String> {
         let EntityGateLease { deadline, reason } = lease;
-        let hold_key = (domain.clone(), operation_id);
+        let hold_key = EntityGateHoldKey {
+            domain: domain.clone(),
+            operation_id,
+        };
         if self.entity_gate_holds.contains_key(&hold_key) {
             return Ok(());
         }
@@ -737,7 +772,10 @@ impl Runtime {
         let domain = domain.clone();
         drop(tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
-            if entity_gate_holds.contains_key(&(domain.clone(), operation_id)) {
+            if entity_gate_holds.contains_key(&EntityGateHoldKey {
+                domain: domain.clone(),
+                operation_id,
+            }) {
                 debug!(
                     domain = domain.as_str(),
                     operation_id, "entity gate lease reached its deadline"
@@ -777,13 +815,16 @@ impl Runtime {
     }
 
     async fn release_entity_gate_operation_from_state(
-        entity_gate_holds: &DashMap<(DomainName, u64), EntityAlterHold, RandomState>,
+        entity_gate_holds: &DashMap<EntityGateHoldKey, EntityAlterHold, RandomState>,
         ingestors: &DashMap<RuntimeKey, IngestorRuntime, RandomState>,
         ingestor_quiescence: &DashMap<RuntimeKey, Arc<IngestorQuiesceControl>, RandomState>,
         operation_id: u64,
         domain: &DomainName,
     ) -> Result<(), String> {
-        let hold_key = (domain.clone(), operation_id);
+        let hold_key = EntityGateHoldKey {
+            domain: domain.clone(),
+            operation_id,
+        };
         let Some(quiesced_ingestors) = entity_gate_holds
             .get(&hold_key)
             .map(|hold| hold.quiesced_ingestors.clone())
@@ -820,8 +861,10 @@ impl Runtime {
         operation_id: u64,
         domain: &DomainName,
     ) -> bool {
-        self.entity_gate_holds
-            .contains_key(&(domain.clone(), operation_id))
+        self.entity_gate_holds.contains_key(&EntityGateHoldKey {
+            domain: domain.clone(),
+            operation_id,
+        })
     }
 
     pub fn entity_drain_status(
@@ -835,7 +878,7 @@ impl Runtime {
             .iter()
             .filter_map(|relay| {
                 self.relay_boundary_fanouts
-                    .get(&(domain.clone(), relay.clone()))
+                    .get(&RuntimeKey::new(domain.clone(), relay.clone()))
                     .map(|fanout| fanout.outstanding_work_len())
             })
             .sum();
@@ -1517,7 +1560,10 @@ impl Runtime {
     pub fn sync_resource_versions(&self, resources: &nervix_models::ResourceVersionStatus) {
         self.latest_resource_versions.clear();
         for resource in &resources.versions {
-            let key = (resource.id.domain.clone(), resource.id.identifier.clone());
+            let key = DomainResourceKey {
+                domain: resource.id.domain.clone(),
+                resource: resource.id.identifier.clone(),
+            };
             if let Some(mut existing) = self.latest_resource_versions.get_mut(&key) {
                 if resource.id.version > *existing {
                     *existing = resource.id.version;
@@ -2012,7 +2058,7 @@ impl Runtime {
     pub(in crate::runtime) async fn reset_domain_kafka_offsets(
         &self,
         state: &ReplicatedKafkaOffsetState,
-        offsets: HashMap<(String, i32), i64>,
+        offsets: HashMap<KafkaTopicPartition, i64>,
     ) -> Result<(), String> {
         let (lsm, payload) = state
             .replace_offsets(offsets)
@@ -3219,14 +3265,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<
-        (
-            RelayRegistry,
-            Arc<RelayBoundaryServices>,
-            Arc<CompiledSchema>,
-        ),
-        RuntimeError,
-    > {
+    ) -> Result<RemoteRelayTarget, RuntimeError> {
         let Some(execution) = self.executions.get(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
@@ -3257,21 +3296,18 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         };
-        Ok((registry, services, schema))
+        Ok(RemoteRelayTarget {
+            registry,
+            services,
+            schema,
+        })
     }
 
     pub(in crate::runtime) async fn wait_for_remote_stream_target(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<
-        (
-            RelayRegistry,
-            Arc<RelayBoundaryServices>,
-            Arc<CompiledSchema>,
-        ),
-        RuntimeError,
-    > {
+    ) -> Result<RemoteRelayTarget, RuntimeError> {
         let deadline = Instant::now() + REMOTE_RELAY_INSTANTIATION_WAIT;
         loop {
             tokio::task::consume_budget().await;
@@ -3300,7 +3336,11 @@ impl Runtime {
         remote: RelayPayload,
         owner_ingress: bool,
     ) -> Result<(), RuntimeError> {
-        let (registry, services, schema) = self
+        let RemoteRelayTarget {
+            registry,
+            services,
+            schema,
+        } = self
             .wait_for_remote_stream_target(&remote.domain, &remote.relay)
             .await?;
         if owner_ingress && !services.is_owned_by(self.local_node_id.read().as_ref()) {
@@ -3924,7 +3964,23 @@ impl Runtime {
             materialized_state,
             ingest_metadata,
         } = context;
-        let (schema, target, branching, program, flush_policy) = {
+        /// Everything the error route needs from the domain execution, resolved while the
+        /// execution is borrowed so the delivery below runs without holding that borrow.
+        struct MessageErrorRoutePlan {
+            schema: Arc<CompiledSchema>,
+            target: MessageErrorRouteTarget,
+            branching: Vec<FieldName>,
+            program: CompiledProgramWithMaterializedInterest,
+            flush_policy: Option<RuntimeFlushPolicy>,
+        }
+
+        let MessageErrorRoutePlan {
+            schema,
+            target,
+            branching,
+            program,
+            flush_policy,
+        } = {
             let Some(execution) = self.executions.get(domain) else {
                 return Err(format!("domain '{}' is not instantiated", domain.as_str()));
             };
@@ -3994,13 +4050,13 @@ impl Runtime {
                     udfs: Some(&execution.udfs),
                 },
             )?;
-            (
+            MessageErrorRoutePlan {
                 schema,
-                MessageErrorRouteTarget { registry, services },
+                target: MessageErrorRouteTarget { registry, services },
                 branching,
                 program,
                 flush_policy,
-            )
+            }
         };
         let dlq_record = Self::execute_message_error_set_program(
             &program,
@@ -4447,13 +4503,13 @@ impl Runtime {
         let groups = collector.drain_groups();
         let Some(execution) = self.executions.get(domain) else {
             let error = format!("domain '{}' is not running", domain.as_str());
-            for (_, messages) in &groups {
+            for group in &groups {
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor.as_str(),
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
-                    messages.iter().map(|message| &message.acks),
+                    group.messages.iter().map(|message| &message.acks),
                     error.clone(),
                 );
             }
@@ -4463,7 +4519,7 @@ impl Runtime {
         drop(execution);
 
         let mut first_error = None;
-        for (relay, messages) in groups {
+        for RoutedGroup { relay, messages } in groups {
             tokio::task::consume_budget().await;
             let acks = messages
                 .iter()
@@ -4737,7 +4793,32 @@ impl Runtime {
         // Every route filters the same surviving group in one VM execution. Outcomes are
         // transposed back onto their originating row so each record's ack split still
         // counts only the routes that actually took it.
-        let mut routed = (0..rows.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+        /// One output route's result for one input row, kept with the branch key that route
+        /// constructed so the row's ACK can be split across every route it reached.
+        struct RoutedOutcome {
+            output_index: usize,
+            outcome: SingleRecordFilterMapOutcome,
+            key: Option<BranchKey>,
+        }
+
+        /// One route that produced a record, waiting for its share of the input row's ACK.
+        struct RouteOutput {
+            output_index: usize,
+            key: Option<BranchKey>,
+            record: RuntimeRow,
+        }
+
+        /// One route that failed, waiting for its share of the input row's ACK.
+        struct RouteError {
+            output_index: usize,
+            error: StructuredMessageError,
+            partial_output: Option<RuntimeRecordBatch>,
+            materialized_state: HashMap<String, RuntimeValue>,
+        }
+
+        let mut routed = (0..rows.len())
+            .map(|_| Vec::<RoutedOutcome>::new())
+            .collect::<Vec<_>>();
         for (output_index, output) in output_routes.routes.iter().enumerate() {
             tokio::task::consume_budget().await;
             let outcomes = if let Some(filter_map) = output.compiled_program.as_ref() {
@@ -4854,14 +4935,14 @@ impl Runtime {
                                 row
                             )
                         })? {
-                            Ok(key) => routed[row].push((
+                            Ok(key) => routed[row].push(RoutedOutcome {
                                 output_index,
-                                SingleRecordFilterMapOutcome::Output(record),
+                                outcome: SingleRecordFilterMapOutcome::Output(record),
                                 key,
-                            )),
-                            Err(reason) => routed[row].push((
+                            }),
+                            Err(reason) => routed[row].push(RoutedOutcome {
                                 output_index,
-                                SingleRecordFilterMapOutcome::MessageError {
+                                outcome: SingleRecordFilterMapOutcome::MessageError {
                                     error: structured_message_error(
                                         MessageErrorCode::Evaluation,
                                         reason,
@@ -4872,11 +4953,15 @@ impl Runtime {
                                     partial_output: Some(record.one_row_batch()),
                                     materialized_state: branch_state_snapshot.clone(),
                                 },
-                                None,
-                            )),
+                                key: None,
+                            }),
                         }
                     }
-                    outcome => routed[row].push((output_index, outcome, None)),
+                    outcome => routed[row].push(RoutedOutcome {
+                        output_index,
+                        outcome,
+                        key: None,
+                    }),
                 }
             }
         }
@@ -4890,19 +4975,26 @@ impl Runtime {
             }
             let mut route_errors = Vec::new();
             let mut route_outputs = Vec::new();
-            for (output_index, outcome, key) in outcomes {
-                match outcome {
+            for routed in outcomes {
+                match routed.outcome {
                     SingleRecordFilterMapOutcome::Filtered => {}
                     SingleRecordFilterMapOutcome::Output(record) => {
-                        route_outputs.push((output_index, key, record));
+                        route_outputs.push(RouteOutput {
+                            output_index: routed.output_index,
+                            key: routed.key,
+                            record,
+                        });
                     }
                     SingleRecordFilterMapOutcome::MessageError {
                         error,
                         partial_output,
                         materialized_state,
-                    } => {
-                        route_errors.push((output_index, error, partial_output, materialized_state))
-                    }
+                    } => route_errors.push(RouteError {
+                        output_index: routed.output_index,
+                        error,
+                        partial_output,
+                        materialized_state,
+                    }),
                 }
             }
             let routed_count = route_errors.len() + route_outputs.len();
@@ -4911,11 +5003,11 @@ impl Runtime {
                 ack_queue.push_back(acks.attached());
             }
             ack_queue.push_front(acks);
-            for (output_index, error, partial_output, materialized_state) in route_errors {
+            for route_error in route_errors {
                 let acks = ack_queue
                     .pop_front()
                     .verified("the queue above was filled with one ACK entry per route");
-                let output = &output_routes.routes[output_index];
+                let output = &output_routes.routes[route_error.output_index];
                 self.handle_structured_message_error(MessageErrorHandling {
                     domain,
                     node_kind: ModelKind::Ingestor.as_str(),
@@ -4927,18 +5019,18 @@ impl Runtime {
                         record: rows.row(row)?,
                         acks,
                     },
-                    error,
-                    partial_output,
-                    materialized_state,
+                    error: route_error.error,
+                    partial_output: route_error.partial_output,
+                    materialized_state: route_error.materialized_state,
                     ingest_metadata: rows.metadata_row(row),
                 })
                 .await;
             }
-            for (output_index, key, output_record) in route_outputs {
+            for route_output in route_outputs {
                 let acks = ack_queue
                     .pop_front()
                     .verified("the queue above was filled with one ACK entry per route");
-                let output = &output_routes.routes[output_index];
+                let output = &output_routes.routes[route_output.output_index];
                 let relay = output.relay.clone();
                 output.branch.as_ref().ok_or_else(|| {
                     format!(
@@ -4950,8 +5042,8 @@ impl Runtime {
                 collector.push(
                     relay,
                     RelayMessage {
-                        key,
-                        record: output_record,
+                        key: route_output.key,
+                        record: route_output.record,
                         acks,
                     },
                 );
@@ -5215,7 +5307,7 @@ impl Runtime {
         use_branch_collapse: bool,
         capacity: NonZeroUsize,
     ) -> RelayBoundaryFanout {
-        let key = (domain.clone(), relay.clone());
+        let key = RuntimeKey::new(domain.clone(), relay.clone());
         if let Some(fanout) = self.relay_boundary_fanouts.get(&key)
             && fanout.uses_branch_collapse() == use_branch_collapse
         {
@@ -5839,7 +5931,15 @@ impl Runtime {
         let desired_model_index = schedule
             .nodes
             .iter()
-            .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
+            .map(|node| {
+                (
+                    RegistryEntity {
+                        kind: node.kind,
+                        identifier: node.identifier.clone(),
+                    },
+                    (*node.config).clone(),
+                )
+            })
             .collect::<HashMap<_, _>>();
 
         // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
@@ -6179,6 +6279,17 @@ impl Runtime {
                 let executes_locally = local_node_id
                     .as_ref()
                     .is_some_and(|node_id| desired_node.executes_on(node_id));
+                /// What spawning the swapped emitter's task needs from the domain execution,
+                /// taken while it is borrowed so the spawn itself runs without holding that
+                /// borrow.
+                struct EmitterSpawnInputs {
+                    shutdown: watch::Sender<bool>,
+                    codecs: HashMap<CodecName, Arc<CompiledCodec>>,
+                    clients: HashMap<ClientName, Arc<Model>>,
+                    deps: EmitterTaskDeps,
+                    inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
+                }
+
                 let spawn = {
                     let execution = self.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
@@ -6230,26 +6341,26 @@ impl Runtime {
                             },
                             &desired_emitter,
                         )?;
-                        Some((
-                            execution.shutdown.clone(),
-                            execution.codecs.clone(),
-                            execution.clients.clone(),
+                        Some(EmitterSpawnInputs {
+                            shutdown: execution.shutdown.clone(),
+                            codecs: execution.codecs.clone(),
+                            clients: execution.clients.clone(),
                             deps,
                             inputs,
-                        ))
+                        })
                     }
                 };
-                if let Some((shutdown, codecs, clients, deps, inputs)) = spawn {
+                if let Some(spawn) = spawn {
                     let task = self.spawn_emitter_task(
                         EmitterTaskBuildDeps {
                             domain,
-                            shutdown_tx: &shutdown,
-                            codecs: &codecs,
-                            clients: &clients,
-                            deps,
+                            shutdown_tx: &spawn.shutdown,
+                            codecs: &spawn.codecs,
+                            clients: &spawn.clients,
+                            deps: spawn.deps,
                         },
                         desired_emitter,
-                        inputs,
+                        spawn.inputs,
                     )?;
                     self.executions
                         .get_mut(domain)
@@ -6286,7 +6397,19 @@ impl Runtime {
                     });
                 };
                 let desired_reingestor = desired_reingestor.clone();
-                let (old_tasks, old_entrypoints, shutdown) = {
+                /// What the outgoing reingestor left behind, taken out while the execution is
+                /// borrowed so the tasks below are awaited without holding that borrow.
+                struct RetiredReingestor {
+                    tasks: Vec<JoinHandle<()>>,
+                    entrypoints: Vec<Arc<IngestorRouteRuntime>>,
+                    shutdown: watch::Sender<bool>,
+                }
+
+                let RetiredReingestor {
+                    tasks: old_tasks,
+                    entrypoints: old_entrypoints,
+                    shutdown,
+                } = {
                     let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -6335,7 +6458,11 @@ impl Runtime {
                         .remove(&entity.identifier)
                         .unwrap_or_default();
                     execution.branched_ingestors.remove(&entity.identifier);
-                    (old_tasks, old_entrypoints, execution.shutdown.clone())
+                    RetiredReingestor {
+                        tasks: old_tasks,
+                        entrypoints: old_entrypoints,
+                        shutdown: execution.shutdown.clone(),
+                    }
                 };
                 for task in old_tasks {
                     tokio::task::consume_budget().await;
@@ -6661,8 +6788,7 @@ impl Runtime {
                     execution.schedule.nodes.iter().find(|node| {
                         node.kind == entity.kind && node.identifier == entity.identifier
                     })
-                && let Some(desired_model) =
-                    desired_model_index.get(&(entity.kind, entity.identifier.clone()))
+                && let Some(desired_model) = desired_model_index.get(entity)
             {
                 old_node
                     .config
@@ -6950,7 +7076,7 @@ impl Runtime {
     }
 
     fn set_relay_capacity(&self, domain: &DomainName, relay: &RelayName, capacity: NonZeroUsize) {
-        let key = (domain.clone(), relay.clone());
+        let key = RuntimeKey::new(domain.clone(), relay.clone());
         if let Some(fanout) = self.relay_boundary_fanouts.get(&key) {
             fanout.set_capacity(capacity);
         }
@@ -7238,7 +7364,7 @@ impl Runtime {
         let mut lookup_specs = Vec::new();
         let mut relay_state_specs = Vec::new();
         let mut emitter_specs = Vec::new();
-        let mut reingestor_specs = Vec::new();
+        let mut reingestor_specs = Vec::<ReingestorInputSpec>::new();
         let mut ingestor_specs = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
@@ -7248,7 +7374,15 @@ impl Runtime {
         let model_index = schedule
             .nodes
             .iter()
-            .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
+            .map(|node| {
+                (
+                    RegistryEntity {
+                        kind: node.kind,
+                        identifier: node.identifier.clone(),
+                    },
+                    (*node.config).clone(),
+                )
+            })
             .collect::<HashMap<_, _>>();
         for node in &schedule.nodes {
             match node.config.as_ref() {
@@ -7708,11 +7842,11 @@ impl Runtime {
                         };
                         if node.executes_on(local_node_id) {
                             let receiver = relay.runtime_consumer_fan_in_for_mode(reingestor.mode);
-                            reingestor_specs.push((
-                                reingestor.clone(),
-                                from_relay.clone(),
+                            reingestor_specs.push(ReingestorInputSpec {
+                                reingestor: reingestor.clone(),
+                                from_relay: from_relay.clone(),
                                 receiver,
-                            ));
+                            });
                         }
                     }
                 }
@@ -8013,10 +8147,10 @@ impl Runtime {
             );
         }
 
-        for (reingestor, from_relay, receiver) in reingestor_specs {
+        for spec in reingestor_specs {
             let entity = RegistryEntity {
                 kind: ModelKind::Reingestor,
-                identifier: ModelName::from(&reingestor.name),
+                identifier: ModelName::from(&spec.reingestor.name),
             };
             reingestor_tasks
                 .entry(entity)
@@ -8025,9 +8159,9 @@ impl Runtime {
                     domain,
                     &shutdown_tx,
                     &branched_entrypoint_senders,
-                    reingestor,
-                    from_relay,
-                    receiver,
+                    spec.reingestor,
+                    spec.from_relay,
+                    spec.receiver,
                 )?);
         }
 
@@ -8212,7 +8346,7 @@ impl Runtime {
     pub(in crate::runtime) fn purge_stale_runtime_state(
         &self,
         domain: &DomainName,
-    ) -> Result<(), RuntimePersistenceError> {
+    ) -> Result<(), error_stack::Report<RuntimePersistenceError>> {
         let stale_deduplicators = self
             .replicated_deduplicator_states
             .iter()
@@ -8305,8 +8439,15 @@ impl Runtime {
                 .iter()
                 .filter_map(|entry| {
                     let key = entry.key();
-                    (&key.domain == domain)
-                        .then(|| ((key.kind, key.identifier.clone()), *entry.value()))
+                    (&key.domain == domain).then(|| {
+                        (
+                            RegistryEntity {
+                                kind: key.kind,
+                                identifier: key.identifier.clone(),
+                            },
+                            *entry.value(),
+                        )
+                    })
                 })
                 .collect::<HashMap<_, _>>();
             store.purge_stale_schema_fingerprints(domain, &current)?;
@@ -8733,11 +8874,7 @@ impl Runtime {
         domain: &DomainName,
         kind: &str,
         identifier: impl Into<ModelName>,
-    ) -> (
-        nervix_dataflow_graph::DataflowNodeStatus,
-        Option<String>,
-        Option<u64>,
-    ) {
+    ) -> nervix_dataflow_graph::DataflowNodeHealth {
         let identifier = identifier.into();
         let reconnect_wait_millis = if kind.eq_ignore_ascii_case("INGESTOR") {
             self.ingestor_reconnect_wait_millis(domain, &IngestorName::from(&identifier))
@@ -8789,37 +8926,44 @@ impl Runtime {
             None
         };
         if let Some(detail) = detail {
-            (
-                nervix_dataflow_graph::DataflowNodeStatus::Error,
-                Some(detail),
+            nervix_dataflow_graph::DataflowNodeHealth {
+                status: nervix_dataflow_graph::DataflowNodeStatus::Error,
+                detail: Some(detail),
                 reconnect_wait_millis,
-            )
+            }
         } else {
-            (nervix_dataflow_graph::DataflowNodeStatus::Ok, None, None)
+            nervix_dataflow_graph::DataflowNodeHealth::default()
         }
     }
 
+    /// A connector's reconnect state: the transient error it last hit, the backoff it is waiting
+    /// out, and how much of that wait is left. A node that is neither an ingestor nor an emitter
+    /// has none of the three.
     pub fn dataflow_node_transient_state(
         &self,
         domain: &DomainName,
         kind: &str,
         identifier: impl Into<ModelName>,
-    ) -> (Option<String>, Option<String>, Option<u64>) {
+    ) -> DataflowNodeTransientState {
         let identifier = identifier.into();
         if kind.eq_ignore_ascii_case("INGESTOR") {
-            (
-                self.ingestor_transient_error(domain, &IngestorName::from(&identifier)),
-                self.ingestor_reconnect_backoff(domain, &IngestorName::from(&identifier)),
-                self.ingestor_reconnect_wait_millis(domain, &IngestorName::from(&identifier)),
-            )
+            DataflowNodeTransientState {
+                error: self.ingestor_transient_error(domain, &IngestorName::from(&identifier)),
+                reconnect_backoff: self
+                    .ingestor_reconnect_backoff(domain, &IngestorName::from(&identifier)),
+                reconnect_wait_millis: self
+                    .ingestor_reconnect_wait_millis(domain, &IngestorName::from(&identifier)),
+            }
         } else if kind.eq_ignore_ascii_case("EMITTER") {
-            (
-                self.emitter_transient_error(domain, &EmitterName::from(&identifier)),
-                self.emitter_reconnect_backoff(domain, &EmitterName::from(&identifier)),
-                self.emitter_reconnect_wait_millis(domain, &EmitterName::from(&identifier)),
-            )
+            DataflowNodeTransientState {
+                error: self.emitter_transient_error(domain, &EmitterName::from(&identifier)),
+                reconnect_backoff: self
+                    .emitter_reconnect_backoff(domain, &EmitterName::from(&identifier)),
+                reconnect_wait_millis: self
+                    .emitter_reconnect_wait_millis(domain, &EmitterName::from(&identifier)),
+            }
         } else {
-            (None, None, None)
+            DataflowNodeTransientState::default()
         }
     }
 
@@ -9662,7 +9806,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         name: &LookupName,
-    ) -> Result<(CreateLookup, u64, usize), String> {
+    ) -> Result<LocalLookupDescription, String> {
         let Some(execution) = self.executions.get(domain) else {
             if let Some(error) = self.domain_instantiation_errors.get(domain) {
                 return Err(error.value().clone());
@@ -9676,11 +9820,11 @@ impl Runtime {
                 domain.as_str()
             ));
         };
-        Ok((
-            lookup.model.clone(),
-            lookup.resource_version,
-            lookup.entries.len(),
-        ))
+        Ok(LocalLookupDescription {
+            model: lookup.model.clone(),
+            resource_version: lookup.resource_version,
+            entry_count: lookup.entries.len(),
+        })
     }
 
     pub(crate) fn udf_executor(&self, domain: &DomainName) -> Option<UdfExecutor> {
@@ -9849,7 +9993,7 @@ impl Runtime {
         let mut generator_specs = Vec::new();
         let mut lookup_specs = Vec::new();
         let mut emitter_specs = Vec::new();
-        let mut reingestor_specs = Vec::new();
+        let mut reingestor_specs = Vec::<ReingestorInputSpec>::new();
         let tasks = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
@@ -9860,7 +10004,15 @@ impl Runtime {
         let model_index = graph
             .nodes()
             .into_iter()
-            .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
+            .map(|node| {
+                (
+                    RegistryEntity {
+                        kind: node.kind,
+                        identifier: node.identifier.clone(),
+                    },
+                    (*node.config).clone(),
+                )
+            })
             .collect::<HashMap<_, _>>();
         let udf_executor = self
             .compile_domain_udfs(
@@ -10196,7 +10348,11 @@ impl Runtime {
                             });
                         };
                         let receiver = relay.runtime_consumer_fan_in_for_mode(reingestor.mode);
-                        reingestor_specs.push((reingestor.clone(), from_relay.clone(), receiver));
+                        reingestor_specs.push(ReingestorInputSpec {
+                            reingestor: reingestor.clone(),
+                            from_relay: from_relay.clone(),
+                            receiver,
+                        });
                     }
                 }
                 _ => {}
@@ -10425,10 +10581,10 @@ impl Runtime {
             );
         }
 
-        for (reingestor, from_relay, receiver) in reingestor_specs {
+        for spec in reingestor_specs {
             let entity = RegistryEntity {
                 kind: ModelKind::Reingestor,
-                identifier: ModelName::from(&reingestor.name),
+                identifier: ModelName::from(&spec.reingestor.name),
             };
             reingestor_tasks
                 .entry(entity)
@@ -10437,9 +10593,9 @@ impl Runtime {
                     domain,
                     &shutdown_tx,
                     &branched_entrypoint_senders,
-                    reingestor,
-                    from_relay,
-                    receiver,
+                    spec.reingestor,
+                    spec.from_relay,
+                    spec.receiver,
                 )?);
         }
 
@@ -10775,7 +10931,7 @@ impl Runtime {
         let task_generator = generator.name.clone();
         let source_gate = self
             .relay_boundary_fanouts
-            .get(&(domain.clone(), source_relay.clone()))
+            .get(&RuntimeKey::new(domain.clone(), source_relay.clone()))
             .map(|fanout| fanout.dispatch_gate())
             .ok_or_else(|| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
@@ -10899,17 +11055,32 @@ impl Runtime {
                 activity.set_active(true);
                 let wall_now = current_timestamp();
                 let execution_now;
-                let paced_state = runtime.domains.get(&task_domain).map(|domain_state| {
-                    (
-                        domain_state.config.pace,
-                        domain_state.clock.clone(),
-                        domain_state.ticks.lock().back().cloned(),
-                    )
-                });
+                /// The domain's pacing as this generator tick observes it: whether the domain is
+                /// paced, the clock it started under, and the last tick it advanced to.
+                struct PacedDomainState {
+                    pace: DomainPace,
+                    clock: Option<RuntimeDomainClockState>,
+                    latest_tick: Option<ObservedDomainTick>,
+                }
+
+                let paced_state =
+                    runtime
+                        .domains
+                        .get(&task_domain)
+                        .map(|domain_state| PacedDomainState {
+                            pace: domain_state.config.pace,
+                            clock: domain_state.clock.clone(),
+                            latest_tick: domain_state.ticks.lock().back().cloned(),
+                        });
                 let is_paced = paced_state
                     .as_ref()
-                    .is_some_and(|(pace, _, _)| *pace == DomainPace::Paced);
-                if let Some((DomainPace::Paced, ref clock, ref latest_tick)) = paced_state {
+                    .is_some_and(|state| state.pace == DomainPace::Paced);
+                if let Some(PacedDomainState {
+                    pace: DomainPace::Paced,
+                    clock,
+                    latest_tick,
+                }) = &paced_state
+                {
                     let Some(clock) = clock else {
                         next_state_refresh = None;
                         for state in branch_states.values_mut() {
@@ -11325,7 +11496,9 @@ impl Runtime {
                         .min();
                 let sleep_duration = if let Some(next) = next_deadline {
                     if is_paced {
-                        if let Some((_, Some(clock), _)) = paced_state.as_ref() {
+                        if let Some(clock) =
+                            paced_state.as_ref().and_then(|state| state.clock.as_ref())
+                        {
                             match wall_duration_until_logical_target(clock, execution_now, next) {
                                 Ok(duration) => duration,
                                 Err(_) => Duration::from_millis(100),
@@ -13852,7 +14025,15 @@ impl Runtime {
             .schedule
             .nodes
             .iter()
-            .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
+            .map(|node| {
+                (
+                    RegistryEntity {
+                        kind: node.kind,
+                        identifier: node.identifier.clone(),
+                    },
+                    (*node.config).clone(),
+                )
+            })
             .collect::<HashMap<_, _>>();
         let mut branched_templates = HashMap::default();
         if let Some(specs) = execution
@@ -13893,7 +14074,10 @@ impl Runtime {
         };
         let Some(resource_version) = self
             .latest_resource_versions
-            .get(&(domain.clone(), lookup.resource.clone()))
+            .get(&DomainResourceKey {
+                domain: domain.clone(),
+                resource: lookup.resource.clone(),
+            })
             .map(|value| *value)
         else {
             return Err(format!(

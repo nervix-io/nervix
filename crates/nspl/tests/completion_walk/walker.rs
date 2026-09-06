@@ -116,14 +116,15 @@ impl WalkState {
 
 /// What one worker produced for one state.
 enum Evaluated {
-    Panicked {
-        message: String,
-    },
-    Parsed {
-        suggestions: Vec<String>,
-        outcome: ParseOutcome,
-        prefix_probe: Option<PrefixProbe>,
-    },
+    Panicked { message: String },
+    Parsed(ParsedState),
+}
+
+/// What one grammar evaluation of a walk state produced.
+struct ParsedState {
+    suggestions: Vec<String>,
+    outcome: ParseOutcome,
+    prefix_probe: Option<PrefixProbe>,
 }
 
 /// The result of typing the first characters of a suggestion and asking again.
@@ -251,15 +252,15 @@ impl Walker {
             let suggestions = self.grammar.suggest(&state.input);
             let outcome = self.grammar.parse(&state.input);
             let prefix_probe = self.probe_prefix(&state.input, &suggestions);
-            (suggestions, outcome, prefix_probe)
-        }));
-
-        match evaluated {
-            Ok((suggestions, outcome, prefix_probe)) => Evaluated::Parsed {
+            ParsedState {
                 suggestions,
                 outcome,
                 prefix_probe,
-            },
+            }
+        }));
+
+        match evaluated {
+            Ok(parsed) => Evaluated::Parsed(parsed),
             Err(payload) => Evaluated::Panicked {
                 message: panic_message(payload.as_ref()),
             },
@@ -293,7 +294,11 @@ impl Walker {
             self.report.stats.states_evaluated += 1;
             self.report.stats.deepest_path = self.report.stats.deepest_path.max(state.path.len());
 
-            let (suggestions, outcome, prefix_probe) = match evaluated {
+            let ParsedState {
+                suggestions,
+                outcome,
+                prefix_probe,
+            } = match evaluated {
                 Evaluated::Panicked { message } => {
                     self.push(
                         &state,
@@ -304,11 +309,7 @@ impl Walker {
                     );
                     continue;
                 }
-                Evaluated::Parsed {
-                    suggestions,
-                    outcome,
-                    prefix_probe,
-                } => (suggestions, outcome, prefix_probe),
+                Evaluated::Parsed(parsed) => parsed,
             };
 
             if !self.record_edge(&state, &outcome) {

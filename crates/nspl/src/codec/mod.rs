@@ -2,18 +2,27 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CreateCodec, CreateStatement,
+    CodecWireFormat, CreateCodec, CreateStatement, SchemaName, WireSchemaName,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, codec_name, config_entries_block, field_ref,
+        LexedInput, ParseError, ParseFromSourceError, codec_name, config_entries_block, field_ref,
         if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref, schema_ref,
         string_lit, suggest_from, tok, u64_value, wire_avro_schema_ref, wire_cbor_schema_ref,
         wire_json_schema_ref,
     },
 };
+
+/// The part of `CREATE CODEC` that follows `FROM`: the wire format the codec reads, the wire schema
+/// that format needs, the Nervix schema it decodes into, and the per-field encoding rules.
+struct CodecBody {
+    wire_format: CodecWireFormat,
+    wire_schema: Option<WireSchemaName>,
+    schema: SchemaName,
+    encoding_rules: Vec<CodecEncodingRule>,
+}
 
 pub fn create_codec_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateCodec>, extra::Err<ParseError<'src>>> + Clone
@@ -66,15 +75,15 @@ pub fn create_codec_parser<'src>()
     let json_wire = kw(Identifier::Json)
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(wire_json_schema_ref())
-        .map(|wire_schema| (CodecWireFormat::Json, Some(wire_schema)));
+        .map(|wire_schema| (CodecWireFormat::Json, wire_schema));
     let cbor_wire = kw(Identifier::Cbor)
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(wire_cbor_schema_ref())
-        .map(|wire_schema| (CodecWireFormat::Cbor, Some(wire_schema)));
+        .map(|wire_schema| (CodecWireFormat::Cbor, wire_schema));
     let avro_wire = kw(Identifier::Avro)
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(wire_avro_schema_ref())
-        .map(|wire_schema| (CodecWireFormat::Avro, Some(wire_schema)));
+        .map(|wire_schema| (CodecWireFormat::Avro, wire_schema));
     let schemaful_codec = kw(Identifier::Wire)
         .ignore_then(choice((json_wire, cbor_wire, avro_wire)))
         .then_ignore(kw(Identifier::To))
@@ -82,9 +91,14 @@ pub fn create_codec_parser<'src>()
         .then(schema_ref())
         .boxed()
         .then(encoding_rules.clone())
-        .map(|(((wire_format, wire_schema), schema), encoding_rules)| {
-            (wire_format, wire_schema, schema, encoding_rules)
-        })
+        .map(
+            |(((wire_format, wire_schema), schema), encoding_rules)| CodecBody {
+                wire_format,
+                wire_schema: Some(wire_schema),
+                schema,
+                encoding_rules,
+            },
+        )
         .boxed();
     let jaq_format = choice((
         kw(Identifier::Json).to(CodecJaqFormat::Json),
@@ -101,17 +115,17 @@ pub fn create_codec_parser<'src>()
         .then(jaq_transformations.clone())
         .boxed()
         .then(encoding_rules.clone())
-        .map(|(((format, schema), transformations), encoding_rules)| {
-            (
-                CodecWireFormat::JaqNative {
+        .map(
+            |(((format, schema), transformations), encoding_rules)| CodecBody {
+                wire_format: CodecWireFormat::JaqNative {
                     format,
                     transformations,
                 },
-                None,
+                wire_schema: None,
                 schema,
                 encoding_rules,
-            )
-        })
+            },
+        )
         .boxed();
     let protobuf_codec = kw(Identifier::Protobuf)
         .ignore_then(kw(Identifier::Using))
@@ -133,18 +147,18 @@ pub fn create_codec_parser<'src>()
                 (((((resource, resource_version), config), message), schema), transformations),
                 encoding_rules,
             )| {
-                (
-                    CodecWireFormat::Protobuf(CodecProtobufConfig {
+                CodecBody {
+                    wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
                         resource,
                         resource_version,
                         config,
                         message,
                         transformations,
                     }),
-                    None,
+                    wire_schema: None,
                     schema,
                     encoding_rules,
-                )
+                }
             },
         )
         .boxed();
@@ -152,7 +166,12 @@ pub fn create_codec_parser<'src>()
         .ignore_then(kw(Identifier::To))
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(schema_ref())
-        .map(|schema| (CodecWireFormat::Syslog, None, schema, Vec::new()))
+        .map(|schema| CodecBody {
+            wire_format: CodecWireFormat::Syslog,
+            wire_schema: None,
+            schema,
+            encoding_rules: Vec::new(),
+        })
         .boxed();
 
     kw(Identifier::Create)
@@ -171,20 +190,18 @@ pub fn create_codec_parser<'src>()
             .boxed(),
         )
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |((if_not_exists, name), (wire_format, wire_schema, schema, encoding_rules))| {
-                CreateStatement::new(
-                    CreateCodec {
-                        name,
-                        wire_format,
-                        wire_schema,
-                        schema,
-                        encoding_rules,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
+        .map(|((if_not_exists, name), body)| {
+            CreateStatement::new(
+                CreateCodec {
+                    name,
+                    wire_format: body.wire_format,
+                    wire_schema: body.wire_schema,
+                    schema: body.schema,
+                    encoding_rules: body.encoding_rules,
+                },
+                if_not_exists,
+            )
+        })
         .boxed()
 }
 
@@ -204,7 +221,11 @@ pub fn parse_create_codec_tokens(
 pub fn parse_create_codec(
     input: &str,
 ) -> Result<CreateStatement<CreateCodec>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_codec_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

@@ -202,15 +202,16 @@ impl SqsEmitter {
         let mut prepared = Vec::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
+            let position = record.position();
             match PreparedSqsRecord::new(
-                (record.batch_index, record.row_index),
+                position,
                 record.payload,
                 record.headers,
                 record.sqs_message_group,
                 record.acks,
             ) {
                 Ok(record) => prepared.push(record),
-                Err(reason) => outcome.reject((record.batch_index, record.row_index), reason),
+                Err(reason) => outcome.reject(position, reason),
             }
         }
         match self.mode {
@@ -522,7 +523,10 @@ mod tests {
 
     fn prepared(payload_bytes: usize) -> PreparedSqsRecord {
         PreparedSqsRecord::new(
-            (0, 0),
+            BrokerRecordPosition {
+                batch_index: 0,
+                row_index: 0,
+            },
             vec![b'x'; payload_bytes],
             Vec::new(),
             Ok(None),
@@ -533,21 +537,30 @@ mod tests {
 
     fn prepared_in_group(row: usize, group: &str) -> PreparedSqsRecord {
         let mut record = PreparedSqsRecord::new(
-            (0, row),
+            BrokerRecordPosition {
+                batch_index: 0,
+                row_index: row,
+            },
             vec![b'x'],
             Vec::new(),
             Ok(Some(group.to_string())),
             AckSet::empty(),
         )
         .expect("test SQS FIFO record should be valid");
-        record.position = (0, row);
+        record.position = BrokerRecordPosition {
+            batch_index: 0,
+            row_index: row,
+        };
         record
     }
 
     #[test]
     fn rejects_a_record_larger_than_the_declared_sqs_protocol_limit() {
         let error = PreparedSqsRecord::new(
-            (0, 0),
+            BrokerRecordPosition {
+                batch_index: 0,
+                row_index: 0,
+            },
             vec![b'x'; SQS_MAX_REQUEST_BYTES + 1],
             Vec::new(),
             Ok(None),
@@ -563,7 +576,10 @@ mod tests {
         let mut records = (0..11)
             .map(|row| {
                 let mut record = prepared(1);
-                record.position = (0, row);
+                record.position = BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: row,
+                };
                 record
             })
             .collect::<Vec<_>>();
@@ -581,8 +597,8 @@ mod tests {
             chunks.iter().map(Vec::len).collect::<Vec<_>>(),
             [10, 1, 1, 1]
         );
-        assert_eq!(positions[0], (0, 0));
-        assert_eq!(positions[10], (0, 10));
+        assert_eq!(positions[0].row_index, 0);
+        assert_eq!(positions[10].row_index, 10);
     }
 
     #[test]
@@ -595,17 +611,17 @@ mod tests {
         ];
 
         let chunks = SqsEmitter::batch_chunks(records);
-        let positions = chunks
+        let rows = chunks
             .iter()
             .map(|chunk| {
                 chunk
                     .iter()
-                    .map(|record| record.position)
+                    .map(|record| record.position.row_index)
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(positions, [vec![(0, 0), (0, 1)], vec![(0, 2), (0, 3)]]);
+        assert_eq!(rows, [vec![0, 1], vec![2, 3]]);
     }
 
     #[test]

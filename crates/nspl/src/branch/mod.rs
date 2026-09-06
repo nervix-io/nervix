@@ -5,7 +5,7 @@ use nervix_models::{BranchEviction, CreateBranch, CreateStatement};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, branch_definition_header, branch_name,
+        LexedInput, ParseError, ParseFromSourceError, branch_definition_header, branch_name,
         if_not_exists_clause, into_parse_error, kw, lex_input, suggest_from, tok, u64_value,
     },
 };
@@ -65,7 +65,11 @@ pub fn parse_create_branch_tokens(
 pub fn parse_create_branch(
     input: &str,
 ) -> Result<CreateStatement<CreateBranch>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_branch_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

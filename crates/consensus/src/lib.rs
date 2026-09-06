@@ -13,7 +13,7 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     ClusterNodeName, ClusterSchedule, DomainClockState, DomainName, DomainSchedule,
     DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceVersion,
-    ResourceVersionStatus, Statement, UserName,
+    ResourceVersionCounter, ResourceVersionStatus, Statement, UserName,
 };
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
@@ -512,21 +512,21 @@ impl ConsensusHandle {
                     break;
                 }
                 let metrics = rx.borrow_watched().clone();
-                let transition = (
-                    format!("{:?}", metrics.state),
-                    metrics.current_term,
-                    metrics
+                let transition = RaftTransition {
+                    state: format!("{:?}", metrics.state),
+                    term: metrics.current_term,
+                    leader: metrics
                         .current_leader
                         .as_ref()
                         .map_or_else(|| "(none)".to_string(), ClusterNodeName::to_string),
-                );
+                };
                 if last_transition.as_ref() != Some(&transition) {
                     let summary = format!(
                         "raft transition: state={} leader={} term={} last_log_index={} \
                          last_applied={}",
-                        transition.0,
-                        transition.2,
-                        transition.1,
+                        transition.state,
+                        transition.leader,
+                        transition.term,
                         metrics.last_log_index.unwrap_or_default(),
                         metrics
                             .last_applied
@@ -1532,23 +1532,44 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
                 .map_err(unreachable_err)
                 .map_err(StreamingError::from)?,
         );
+        /// How far the snapshot relay body has been written: the framed header until it is sent,
+        /// the encoded snapshot, and the offset the next chunk starts at.
+        struct SnapshotRelayProgress {
+            header: Option<Vec<u8>>,
+            bytes: Vec<u8>,
+            offset: usize,
+            chunk_size: usize,
+        }
+
         let stream = futures_util::stream::unfold(
-            (Some(header), bytes, 0usize, chunk_size),
-            |(header, bytes, offset, chunk_size)| async move {
-                if let Some(header) = header {
+            SnapshotRelayProgress {
+                header: Some(header),
+                bytes,
+                offset: 0,
+                chunk_size,
+            },
+            |progress| async move {
+                if let Some(header) = progress.header {
                     return Some((
                         Ok::<Vec<u8>, io::Error>(header),
-                        (None, bytes, offset, chunk_size),
+                        SnapshotRelayProgress {
+                            header: None,
+                            ..progress
+                        },
                     ));
                 }
-                if offset >= bytes.len() {
+                if progress.offset >= progress.bytes.len() {
                     return None;
                 }
 
-                let end = (offset + chunk_size).min(bytes.len());
+                let end = (progress.offset + progress.chunk_size).min(progress.bytes.len());
+                let chunk = progress.bytes[progress.offset..end].to_vec();
                 Some((
-                    Ok::<Vec<u8>, io::Error>(bytes[offset..end].to_vec()),
-                    (None, bytes, end, chunk_size),
+                    Ok::<Vec<u8>, io::Error>(chunk),
+                    SnapshotRelayProgress {
+                        offset: end,
+                        ..progress
+                    },
                 ))
             },
         );
@@ -2536,6 +2557,15 @@ fn apply_transaction_step_effect(
     }
 }
 
+/// The raft state a node last reported, compared as a whole so a repeated metrics update that
+/// changes nothing is not logged again.
+#[derive(PartialEq, Eq)]
+struct RaftTransition {
+    state: String,
+    term: u64,
+    leader: String,
+}
+
 fn resource_catalog_slot(
     resources: &ResourceVersionStatus,
     domain: &DomainName,
@@ -2543,10 +2573,11 @@ fn resource_catalog_slot(
 ) -> Result<usize, usize> {
     resources
         .next_version_by_resource
-        .binary_search_by(|(stored_domain, stored_identifier, _)| {
-            stored_domain
+        .binary_search_by(|stored| {
+            stored
+                .domain
                 .cmp(domain)
-                .then_with(|| stored_identifier.cmp(identifier))
+                .then_with(|| stored.identifier.cmp(identifier))
         })
 }
 
@@ -2556,9 +2587,16 @@ fn ensure_resource_catalog(
     identifier: &ResourceName,
 ) {
     if let Err(index) = resource_catalog_slot(resources, domain, identifier) {
-        resources
-            .next_version_by_resource
-            .mutate_vec(|entries| entries.insert(index, (domain.clone(), identifier.clone(), 1)));
+        resources.next_version_by_resource.mutate_vec(|entries| {
+            entries.insert(
+                index,
+                ResourceVersionCounter {
+                    domain: domain.clone(),
+                    identifier: identifier.clone(),
+                    next_version: 1,
+                },
+            );
+        });
     }
 }
 
@@ -2570,12 +2608,19 @@ fn advance_resource_version(
     match resource_catalog_slot(resources, domain, identifier) {
         Ok(index) => {
             resources.next_version_by_resource.mutate_vec(|entries| {
-                entries[index].2 = entries[index].2.saturating_add(1);
+                entries[index].next_version = entries[index].next_version.saturating_add(1);
             });
         }
         Err(index) => {
             resources.next_version_by_resource.mutate_vec(|entries| {
-                entries.insert(index, (domain.clone(), identifier.clone(), 2))
+                entries.insert(
+                    index,
+                    ResourceVersionCounter {
+                        domain: domain.clone(),
+                        identifier: identifier.clone(),
+                        next_version: 2,
+                    },
+                );
             });
         }
     }
@@ -2652,7 +2697,8 @@ mod tests {
     use nervix_models::{
         DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
         DomainStatus, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus,
-        ResourceReplicaKey, ResourceVersion, ResourceVersionStatus, Statement,
+        ResourceReplicaKey, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
+        Statement,
     };
     use openraft::{
         SnapshotMeta,
@@ -3127,11 +3173,11 @@ mod tests {
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec![(
-                domain("tenant"),
-                ResourceName::parse("fraud_model").expect("valid resource name"),
-                2
-            )]
+            vec![ResourceVersionCounter {
+                domain: domain("tenant"),
+                identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
+                next_version: 2,
+            }]
         );
         assert!(
             !state.resources.is_declared(

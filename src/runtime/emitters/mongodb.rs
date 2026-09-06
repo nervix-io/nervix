@@ -247,14 +247,20 @@ impl MongoDbEmitter {
             if let Some(code) = errors.get(&local_index) {
                 if Self::is_record_write_error(*code) {
                     outcome.reject(
-                        (batch_index, *row),
+                        BrokerRecordPosition {
+                            batch_index,
+                            row_index: *row,
+                        },
                         format!("MongoDB rejected document with code {code}"),
                     );
                 } else {
                     has_infrastructure_error = true;
                 }
             } else {
-                outcome.deliver((batch_index, *row));
+                outcome.deliver(BrokerRecordPosition {
+                    batch_index,
+                    row_index: *row,
+                });
             }
         }
         if has_infrastructure_error {
@@ -285,7 +291,10 @@ impl MongoDbEmitter {
                 .chain(result.delete_results.keys())
             {
                 if let Some(row) = chunk.get(*local_index) {
-                    outcome.deliver((batch_index, *row));
+                    outcome.deliver(BrokerRecordPosition {
+                        batch_index,
+                        row_index: *row,
+                    });
                     accounted[*local_index] = true;
                 }
             }
@@ -298,7 +307,10 @@ impl MongoDbEmitter {
             };
             if Self::is_record_write_error(error.code) {
                 outcome.reject(
-                    (batch_index, *row),
+                    BrokerRecordPosition {
+                        batch_index,
+                        row_index: *row,
+                    },
                     format!("MongoDB rejected document with code {}", error.code),
                 );
                 accounted[*local_index] = true;
@@ -436,7 +448,10 @@ impl MongoDbEmitter {
                     {
                         Ok(_) => {
                             for row in chunk {
-                                outcome.deliver((batch_index, *row));
+                                outcome.deliver(BrokerRecordPosition {
+                                    batch_index,
+                                    row_index: *row,
+                                });
                             }
                         }
                         Err(error) => {
@@ -474,7 +489,10 @@ impl MongoDbEmitter {
                     {
                         Ok(_) => {
                             for row in chunk {
-                                outcome.deliver((batch_index, *row));
+                                outcome.deliver(BrokerRecordPosition {
+                                    batch_index,
+                                    row_index: *row,
+                                });
                             }
                         }
                         Err(error) => {
@@ -528,9 +546,21 @@ mod tests {
             &mut outcome,
         );
 
-        assert_eq!(outcome.delivered, [(7, 10)]);
+        assert_eq!(
+            outcome.delivered,
+            [BrokerRecordPosition {
+                batch_index: 7,
+                row_index: 10,
+            }]
+        );
         assert_eq!(outcome.rejected.len(), 1);
-        assert_eq!(outcome.rejected[0].position, (7, 11));
+        assert_eq!(
+            outcome.rejected[0].position,
+            BrokerRecordPosition {
+                batch_index: 7,
+                row_index: 11,
+            }
+        );
         assert!(outcome.infrastructure_error.is_some());
     }
 }

@@ -49,14 +49,33 @@ impl KafkaIngestor {
             });
         }
 
-        let (topic, offset_mode, instances, ack_mode) = match &ingestor.source {
+        /// The parts of a Kafka ingest source this task drives, taken from the model once so the
+        /// rest of startup reads named values rather than re-matching the source.
+        struct KafkaSource {
+            topic: nervix_models::TopicName,
+            offset_mode: KafkaOffsetMode,
+            instances: u64,
+            ack_mode: KafkaIngestMode,
+        }
+
+        let KafkaSource {
+            topic,
+            offset_mode,
+            instances,
+            ack_mode,
+        } = match &ingestor.source {
             IngestSource::Kafka {
                 topic,
                 offset_mode,
                 instances,
                 mode,
                 ..
-            } => (topic.clone(), offset_mode.clone(), *instances, mode.clone()),
+            } => KafkaSource {
+                topic: topic.clone(),
+                offset_mode: offset_mode.clone(),
+                instances: *instances,
+                ack_mode: mode.clone(),
+            },
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),
@@ -1222,14 +1241,14 @@ impl KafkaIngestor {
     pub(in crate::runtime) fn assign_offsets_for_instance(
         consumer: &StreamConsumer,
         topic: &str,
-        offsets: &HashMap<(String, i32), Offset>,
+        offsets: &HashMap<KafkaTopicPartition, Offset>,
         schedule: Option<&KafkaPartitionSchedule>,
         instance_idx: u64,
     ) -> Result<bool, String> {
         let mut partitions = Vec::new();
-        for ((entry_topic, partition), offset) in offsets {
-            if entry_topic == topic {
-                partitions.push((*partition, *offset));
+        for (key, offset) in offsets {
+            if key.topic == topic {
+                partitions.push((key.partition, *offset));
             }
         }
         partitions.sort_by_key(|(partition, _)| *partition);
@@ -1296,7 +1315,7 @@ impl KafkaIngestor {
         consumer: &StreamConsumer,
         topic: &str,
         timestamp: Timestamp,
-    ) -> Result<HashMap<(String, i32), Offset>, String> {
+    ) -> Result<HashMap<KafkaTopicPartition, Offset>, String> {
         Self::offsets_for_partitions_by_timestamp(
             consumer,
             topic,
@@ -1310,7 +1329,7 @@ impl KafkaIngestor {
         topic: &str,
         partitions: I,
         timestamp: Timestamp,
-    ) -> Result<HashMap<(String, i32), Offset>, String>
+    ) -> Result<HashMap<KafkaTopicPartition, Offset>, String>
     where
         I: IntoIterator<Item = i32>,
     {
@@ -1330,7 +1349,13 @@ impl KafkaIngestor {
                 Offset::Invalid => Offset::End,
                 other => other,
             };
-            offsets.insert((element.topic().to_string(), element.partition()), offset);
+            offsets.insert(
+                KafkaTopicPartition {
+                    topic: element.topic().to_string(),
+                    partition: element.partition(),
+                },
+                offset,
+            );
         }
         Ok(offsets)
     }
@@ -1353,13 +1378,16 @@ impl KafkaIngestor {
         topic: &str,
         state: &ReplicatedKafkaOffsetState,
         missing_partition_timestamp: Option<Timestamp>,
-    ) -> Result<HashMap<(String, i32), Offset>, String> {
+    ) -> Result<HashMap<KafkaTopicPartition, Offset>, String> {
         let mut offsets = HashMap::default();
         let mut missing_partitions = Vec::new();
         for partition in Self::topic_partitions(consumer, topic)? {
             if let Some(next_offset) = state.next_offset(topic, partition) {
                 offsets.insert(
-                    (topic.to_string(), partition),
+                    KafkaTopicPartition {
+                        topic: topic.to_string(),
+                        partition,
+                    },
                     Self::normalized_resume_offset(consumer, topic, partition, next_offset)?,
                 );
             } else {
@@ -1375,7 +1403,13 @@ impl KafkaIngestor {
             )?);
         } else {
             for partition in missing_partitions {
-                offsets.insert((topic.to_string(), partition), Offset::Beginning);
+                offsets.insert(
+                    KafkaTopicPartition {
+                        topic: topic.to_string(),
+                        partition,
+                    },
+                    Offset::Beginning,
+                );
             }
         }
         Ok(offsets)
@@ -1384,28 +1418,28 @@ impl KafkaIngestor {
     pub(in crate::runtime) fn concrete_next_offsets_from_assignment(
         consumer: &StreamConsumer,
         topic: &str,
-        offsets: &HashMap<(String, i32), Offset>,
-    ) -> Result<HashMap<(String, i32), i64>, String> {
+        offsets: &HashMap<KafkaTopicPartition, Offset>,
+    ) -> Result<HashMap<KafkaTopicPartition, i64>, String> {
         let mut concrete = HashMap::default();
-        for ((entry_topic, partition), offset) in offsets {
-            if entry_topic != topic {
+        for (key, offset) in offsets {
+            if key.topic != topic {
                 continue;
             }
             let next_offset = match offset {
                 Offset::Offset(value) => *value,
                 Offset::Beginning => consumer
-                    .fetch_watermarks(entry_topic, *partition, Duration::from_secs(5))
+                    .fetch_watermarks(&key.topic, key.partition, Duration::from_secs(5))
                     .map(|(low, _)| low)
                     .map_err(|source| source.to_string())?,
                 Offset::End | Offset::Invalid => consumer
-                    .fetch_watermarks(entry_topic, *partition, Duration::from_secs(5))
+                    .fetch_watermarks(&key.topic, key.partition, Duration::from_secs(5))
                     .map(|(_, high)| high)
                     .map_err(|source| source.to_string())?,
                 Offset::Stored | Offset::OffsetTail(_) => {
                     return Err("unsupported kafka domain offset assignment".to_string());
                 }
             };
-            concrete.insert((entry_topic.clone(), *partition), next_offset);
+            concrete.insert(key.clone(), next_offset);
         }
         Ok(concrete)
     }

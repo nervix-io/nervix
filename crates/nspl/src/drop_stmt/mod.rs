@@ -5,11 +5,11 @@ use nervix_models::{DropModel, DropNode, ModelKind};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, client_ref, cluster_node_name, codec_ref,
-        correlator_ref, deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref, ingestor_ref,
-        into_parse_error, junction_ref, kw, lex_input, placement_ref, reingestor_ref, relay_ref,
-        reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref, wire_avro_schema_ref,
-        wire_cbor_schema_ref, wire_json_schema_ref,
+        LexedInput, ParseError, ParseFromSourceError, boxed_choice, client_ref, cluster_node_name,
+        codec_ref, correlator_ref, deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref,
+        ingestor_ref, into_parse_error, junction_ref, kw, lex_input, placement_ref, reingestor_ref,
+        relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref,
+        wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
 
@@ -164,7 +164,11 @@ pub fn parse_drop_tokens(tokens: &[Token]) -> Result<DropModel, Vec<ParseError<'
 }
 
 pub fn parse_drop(input: &str) -> Result<DropModel, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_drop_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

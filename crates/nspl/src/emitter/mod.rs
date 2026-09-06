@@ -4,17 +4,18 @@ use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CodecName, CreateEmitter,
-    CreateStatement, EmitSink, EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend,
-    IcebergValueMapping, MongoDbConflictAction, MySqlConflictAction, OtelAggregationTemporality,
-    OtelMetric, OtelMetricKind, OtelScope, OtelSignal, PostgresConflictAction, SqsFifoGroup,
+    CreateStatement, EmitSink, EmitterName, EmitterPublishingMode, IcebergCatalog,
+    IcebergStorageBackend, IcebergValueMapping, MaterializedStateDependency, MongoDbConflictAction,
+    MySqlConflictAction, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope,
+    OtelSignal, PostgresConflictAction, ProcessorInputs, SqsFifoGroup,
 };
 
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, ack_timeout, alter_op_separator, boxed_choice,
-        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, collection_ref,
-        duration_lit, emitter_ack_window, emitter_name, emitter_ref, flush_each,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, alter_op_separator,
+        boxed_choice, byte_size_lit, channel_ref, client_ref, codec_ref, collect_for,
+        collection_ref, duration_lit, emitter_ack_window, emitter_name, emitter_ref, flush_each,
         from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
         kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
         queue_ref, relay_ref, render_vm_program_tokens, retry_policy, route_construction,
@@ -892,7 +893,11 @@ fn encode_using_clause<'src>()
         .boxed()
 }
 
-type SinkWithPublishingMode = (EmitSink, EmitterPublishingMode);
+/// A sink together with the publishing mode written after it, which every sink accepts.
+struct SinkWithPublishingMode {
+    sink: EmitSink,
+    publishing_mode: EmitterPublishingMode,
+}
 
 fn sink_with_publishing_mode<'src>(
     sink: impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone + 'src,
@@ -901,7 +906,13 @@ fn sink_with_publishing_mode<'src>(
     + 'src,
 ) -> impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>> + Clone
 {
-    sink.then_ignore(kw(Identifier::Mode)).then(mode).boxed()
+    sink.then_ignore(kw(Identifier::Mode))
+        .then(mode)
+        .map(|(sink, publishing_mode)| SinkWithPublishingMode {
+            sink,
+            publishing_mode,
+        })
+        .boxed()
 }
 
 /// A sink that writes an encoded payload, and so requires a codec and supports transforming route
@@ -913,7 +924,12 @@ fn encoded_sink<'src>(
 ) -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
     sink.then(encode_using_clause())
         .then(route_construction().or_not())
-        .map(|(((sink, mode), codec), construction)| (sink, mode, Some(codec), construction))
+        .map(|((sink, codec), construction)| ParsedSink {
+            sink: sink.sink,
+            publishing_mode: sink.publishing_mode,
+            codec: Some(codec),
+            construction,
+        })
         .boxed()
 }
 
@@ -925,17 +941,22 @@ fn codec_free_sink<'src>(
     + 'src,
 ) -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
     sink.then(where_only_route_construction().or_not())
-        .map(|((sink, mode), construction)| (sink, mode, None, construction))
+        .map(|(sink, construction)| ParsedSink {
+            sink: sink.sink,
+            publishing_mode: sink.publishing_mode,
+            codec: None,
+            construction,
+        })
         .boxed()
 }
 
 /// A parsed sink together with the route surface that sink supports.
-type ParsedSink = (
-    EmitSink,
-    EmitterPublishingMode,
-    Option<CodecName>,
-    Option<nervix_models::RouteConstruction>,
-);
+struct ParsedSink {
+    sink: EmitSink,
+    publishing_mode: EmitterPublishingMode,
+    codec: Option<CodecName>,
+    construction: Option<nervix_models::RouteConstruction>,
+}
 
 fn emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
@@ -1067,9 +1088,9 @@ pub fn alter_emitter_parser<'src>()
     let set_sink = kw(Identifier::Set)
         .ignore_then(kw(Identifier::To))
         .ignore_then(alter_emit_sink_parser())
-        .map(|(sink, publishing_mode)| AlterEmitterOperation::SetSink {
-            sink: Box::new(sink),
-            publishing_mode,
+        .map(|sink| AlterEmitterOperation::SetSink {
+            sink: Box::new(sink.sink),
+            publishing_mode: sink.publishing_mode,
         });
     let set_client = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Client))
@@ -1143,6 +1164,20 @@ pub fn alter_emitter_parser<'src>()
         .boxed()
 }
 
+/// Everything `CREATE EMITTER` states before its flush and error clauses, gathered so the tail of
+/// the grammar threads one named value instead of a tuple that grows with each clause.
+struct EmitterHead {
+    if_not_exists: bool,
+    mode: Option<AckMode>,
+    name: EmitterName,
+    from: ProcessorInputs,
+    materialized_state: Vec<MaterializedStateDependency>,
+    sink: EmitSink,
+    publishing_mode: EmitterPublishingMode,
+    encode_using_codec: Option<CodecName>,
+    construction: Option<nervix_models::RouteConstruction>,
+}
+
 pub fn create_emitter_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateEmitter>, extra::Err<ParseError<'src>>> + Clone
 {
@@ -1157,150 +1192,161 @@ pub fn create_emitter_parser<'src>()
         .then(materialized_state_dependencies())
         .then_ignore(kw(Identifier::To))
         .then(emit_sink_parser())
-        .map(
-            |((head, state), (sink, publishing_mode, codec, construction))| {
-                (
-                    ((((head, codec), publishing_mode), state), sink),
-                    construction,
-                )
-            },
-        )
+        .map(|((head, materialized_state), parsed_sink)| {
+            let (((if_not_exists, mode), name), from) = head;
+            EmitterHead {
+                if_not_exists,
+                mode,
+                name,
+                from,
+                materialized_state,
+                sink: parsed_sink.sink,
+                publishing_mode: parsed_sink.publishing_mode,
+                encode_using_codec: parsed_sink.codec,
+                construction: parsed_sink.construction,
+            }
+        })
         .boxed()
         .then(flush_each())
         .boxed()
         .then(message_error_policy())
         .then(general_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|(parsed, general_error_policy)| {
-            let (parsed, message_error_policy) = parsed;
-            let (parsed, sink_flush_each) = parsed;
-            let (parsed, construction) = parsed;
-            let (parsed, sink) = parsed;
-            let (parsed, materialized_state) = parsed;
-            let (parsed, publishing_mode) = parsed;
-            let (parsed, encode_using_codec) = parsed;
-            let (((if_not_exists, mode), name), from) = parsed;
-            let construction = construction.unwrap_or_default();
-            let sink = match (sink, sink_flush_each.clone()) {
-                (
-                    EmitSink::ClickHouse {
+        .map(
+            |(((head, sink_flush_each), message_error_policy), general_error_policy)| {
+                let EmitterHead {
+                    if_not_exists,
+                    mode,
+                    name,
+                    from,
+                    materialized_state,
+                    sink,
+                    publishing_mode,
+                    encode_using_codec,
+                    construction,
+                } = head;
+                let construction = construction.unwrap_or_default();
+                let sink = match (sink, sink_flush_each.clone()) {
+                    (
+                        EmitSink::ClickHouse {
+                            client,
+                            table,
+                            values,
+                            max_batch,
+                            ..
+                        },
+                        (flush_each, _max_batch_size),
+                    ) => EmitSink::ClickHouse {
                         client,
                         table,
                         values,
                         max_batch,
-                        ..
+                        flush_each,
                     },
-                    (flush_each, _max_batch_size),
-                ) => EmitSink::ClickHouse {
-                    client,
-                    table,
-                    values,
-                    max_batch,
-                    flush_each,
-                },
-                (
-                    EmitSink::Postgres {
-                        client,
-                        table,
-                        values,
-                        conflict_action,
-                        max_batch,
-                        ..
-                    },
-                    (flush_each, _max_batch_size),
-                ) => EmitSink::Postgres {
-                    client,
-                    table,
-                    values,
-                    conflict_action,
-                    max_batch,
-                    flush_each,
-                },
-                (
-                    EmitSink::MySql {
+                    (
+                        EmitSink::Postgres {
+                            client,
+                            table,
+                            values,
+                            conflict_action,
+                            max_batch,
+                            ..
+                        },
+                        (flush_each, _max_batch_size),
+                    ) => EmitSink::Postgres {
                         client,
                         table,
                         values,
                         conflict_action,
                         max_batch,
-                        ..
+                        flush_each,
                     },
-                    (flush_each, _max_batch_size),
-                ) => EmitSink::MySql {
-                    client,
-                    table,
-                    values,
-                    conflict_action,
-                    max_batch,
-                    flush_each,
-                },
-                (
-                    EmitSink::MongoDb {
+                    (
+                        EmitSink::MySql {
+                            client,
+                            table,
+                            values,
+                            conflict_action,
+                            max_batch,
+                            ..
+                        },
+                        (flush_each, _max_batch_size),
+                    ) => EmitSink::MySql {
+                        client,
+                        table,
+                        values,
+                        conflict_action,
+                        max_batch,
+                        flush_each,
+                    },
+                    (
+                        EmitSink::MongoDb {
+                            client,
+                            collection,
+                            values,
+                            conflict_action,
+                            max_batch,
+                            ..
+                        },
+                        (flush_each, _max_batch_size),
+                    ) => EmitSink::MongoDb {
                         client,
                         collection,
                         values,
                         conflict_action,
                         max_batch,
-                        ..
+                        flush_each,
                     },
-                    (flush_each, _max_batch_size),
-                ) => EmitSink::MongoDb {
-                    client,
-                    collection,
-                    values,
-                    conflict_action,
-                    max_batch,
-                    flush_each,
-                },
-                (
-                    // The commit cadence arrives with the sink, which is where it is written.
-                    EmitSink::Iceberg {
+                    (
+                        // The commit cadence arrives with the sink, which is where it is written.
+                        EmitSink::Iceberg {
+                            backend,
+                            client,
+                            table,
+                            values,
+                            location,
+                            catalog,
+                            commit_each,
+                            max_commit_size,
+                            ..
+                        },
+                        (flush_each, max_batch_size),
+                    ) => EmitSink::Iceberg {
                         backend,
                         client,
                         table,
                         values,
                         location,
                         catalog,
+                        flush_each,
+                        max_batch_size,
                         commit_each,
                         max_commit_size,
-                        ..
                     },
-                    (flush_each, max_batch_size),
-                ) => EmitSink::Iceberg {
-                    backend,
-                    client,
-                    table,
-                    values,
-                    location,
-                    catalog,
-                    flush_each,
-                    max_batch_size,
-                    commit_each,
-                    max_commit_size,
-                },
-                (sink, _) => sink,
-            };
-            let (flush_each, max_batch_size) = sink_flush_each;
-            CreateStatement::new(
-                CreateEmitter {
-                    name,
-                    from,
-                    encode_using_codec,
-                    sink: Box::new(sink),
-                    flush_each,
-                    max_batch_size,
-                    error_policies: nervix_models::ErrorPolicies {
-                        message: message_error_policy,
-                        general: general_error_policy,
+                    (sink, _) => sink,
+                };
+                let (flush_each, max_batch_size) = sink_flush_each;
+                CreateStatement::new(
+                    CreateEmitter {
+                        name,
+                        from,
+                        encode_using_codec,
+                        sink: Box::new(sink),
+                        flush_each,
+                        max_batch_size,
+                        error_policies: nervix_models::ErrorPolicies {
+                            message: message_error_policy,
+                            general: general_error_policy,
+                        },
+                        publishing_mode,
+                        mode: mode.unwrap_or(AckMode::Attached),
+                        construction,
+                        materialized_state,
                     },
-                    publishing_mode,
-                    mode: mode.unwrap_or(AckMode::Attached),
-                    construction,
-                    materialized_state,
-                },
-                if_not_exists,
-            )
-        })
+                    if_not_exists,
+                )
+            },
+        )
         .boxed()
 }
 
@@ -1331,13 +1377,21 @@ pub fn parse_alter_emitter_tokens(tokens: &[Token]) -> Result<AlterEmitter, Vec<
 pub fn parse_create_emitter(
     input: &str,
 ) -> Result<CreateStatement<CreateEmitter>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_emitter_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
 pub fn parse_alter_emitter(input: &str) -> Result<AlterEmitter, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_emitter_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

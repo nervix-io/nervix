@@ -114,7 +114,7 @@ impl Documentation {
         paths
     }
 
-    fn parse_failures(&self) -> (usize, usize, Vec<String>) {
+    fn parse_failures(&self) -> DocumentationParseOutcome {
         let mut parsed_block_count = 0;
         let mut ignored_block_count = 0;
         let mut failures = Vec::new();
@@ -149,8 +149,20 @@ impl Documentation {
             }
         }
 
-        (parsed_block_count, ignored_block_count, failures)
+        DocumentationParseOutcome {
+            parsed_block_count,
+            ignored_block_count,
+            failures,
+        }
     }
+}
+
+/// What one sweep over the documentation found: how many NSPL blocks were parser-checked, how many
+/// were explicitly ignored, and the rendered diagnostics for the blocks that failed.
+struct DocumentationParseOutcome {
+    parsed_block_count: usize,
+    ignored_block_count: usize,
+    failures: Vec<String>,
 }
 
 impl NsplBlock {
@@ -267,7 +279,11 @@ fn all_documented_nspl_blocks_parse() {
         .canonicalize()
         .expect("repository root should exist");
     let documentation = Documentation::new(repository_root);
-    let (parsed_block_count, ignored_block_count, failures) = documentation.parse_failures();
+    let DocumentationParseOutcome {
+        parsed_block_count,
+        ignored_block_count,
+        failures,
+    } = documentation.parse_failures();
 
     assert!(
         parsed_block_count > 0,

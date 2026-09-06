@@ -61,7 +61,7 @@ impl SentryEmitter {
 
         for record in records {
             tokio::task::consume_budget().await;
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let body = match Self::encode_envelope(&record.payload) {
                 Ok(body) => body,
                 Err(error) => {

@@ -55,7 +55,7 @@ pub struct LayoutEdge {
     pub badge: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -174,6 +174,32 @@ struct Segment {
     edge: usize,
     from: usize,
     to: usize,
+}
+
+/// The turning edge a gutter lane belongs to: the row the edge leaves and which edge it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct LaneKey {
+    from: usize,
+    edge: usize,
+}
+
+/// Where a row sorts within its column. Branch members sort together on their group's median
+/// weight first, and the row key breaks ties so ordering is reproducible across renders.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ColumnSortKey {
+    group_weight: i64,
+    group_name: String,
+    weight: i64,
+    key: String,
+}
+
+/// A comparable position for an edge's far endpoint, ordered by column, then by the row within
+/// that column, with the item id breaking ties.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct FarPosition {
+    column: usize,
+    order: usize,
+    id: String,
 }
 
 struct Builder<'a> {
@@ -496,11 +522,7 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    fn column_sort_key(
-        &self,
-        slot: usize,
-        medians: &BTreeMap<String, i64>,
-    ) -> (i64, String, i64, String) {
+    fn column_sort_key(&self, slot: usize, medians: &BTreeMap<String, i64>) -> ColumnSortKey {
         let row = &self.slots[slot];
         let (group_weight, group_name) = match &row.branch {
             Some(branch) => (
@@ -509,11 +531,16 @@ impl<'a> Builder<'a> {
             ),
             None => (row.weight, String::new()),
         };
-        (group_weight, group_name, row.weight, row.key.clone())
+        ColumnSortKey {
+            group_weight,
+            group_name,
+            weight: row.weight,
+            key: row.key.clone(),
+        }
     }
 
-    /// Port offsets, keyed by (slot, edge) and measured from the item's vertical centre. The edge
-    /// that continues a straight chain keeps the centre so the chain stays collinear.
+    /// Port offsets, measured from each item's vertical centre. The edge that continues a
+    /// straight chain keeps the centre so the chain stays collinear.
     fn assign_ports(&mut self, forward: &[usize]) -> Ports {
         let mut outgoing: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         let mut incoming: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -556,7 +583,14 @@ impl<'a> Builder<'a> {
                 None => (2 * position as i32 - (edges.len() as i32 - 1)) * PORT_PITCH / 2,
             };
             extent = extent.max(offset.abs());
-            ports.offsets.insert((slot, *edge, outgoing), offset);
+            ports.offsets.insert(
+                PortKey {
+                    slot,
+                    edge: *edge,
+                    outgoing,
+                },
+                offset,
+            );
         }
         let needed = extent * 2 + PORT_PITCH;
         if needed > self.slots[slot].height {
@@ -566,15 +600,15 @@ impl<'a> Builder<'a> {
 
     /// A comparable position for an edge's far endpoint, used to order ports so edges leave and
     /// arrive without crossing each other at the item.
-    fn far_position(&self, edge: usize, outgoing: bool) -> (usize, usize, String) {
+    fn far_position(&self, edge: usize, outgoing: bool) -> FarPosition {
         let edge = self.edges[edge];
         let id = if outgoing { &edge.target } else { &edge.source };
         let slot = self.item_slot[self.index_by_id[id.as_str()]];
-        (
-            self.slots[slot].column,
-            self.slots[slot].order,
-            id.to_string(),
-        )
+        FarPosition {
+            column: self.slots[slot].column,
+            order: self.slots[slot].order,
+            id: id.to_string(),
+        }
     }
 
     /// Give every row a y, pulling each item towards the items it connects to so that a straight
@@ -637,7 +671,11 @@ impl<'a> Builder<'a> {
         centre
             + ports
                 .offsets
-                .get(&(slot, edge, outgoing))
+                .get(&PortKey {
+                    slot,
+                    edge,
+                    outgoing,
+                })
                 .copied()
                 .unwrap_or(0)
     }
@@ -789,7 +827,10 @@ impl<'a> Builder<'a> {
                 }
                 if start.1 != end.1 {
                     let lane = lanes
-                        .get(&(segment.from, segment.edge))
+                        .get(&LaneKey {
+                            from: segment.from,
+                            edge: segment.edge,
+                        })
                         .copied()
                         .unwrap_or_else(|| self.default_lane(segment));
                     points.push((lane, start.1));
@@ -855,7 +896,7 @@ impl<'a> Builder<'a> {
 
     /// Give every turning edge its own vertical line inside the gutter, ordered so that no two
     /// edges ever run along the same horizontal line.
-    fn assign_lanes(&self, ports: &Ports) -> BTreeMap<(usize, usize), i32> {
+    fn assign_lanes(&self, ports: &Ports) -> BTreeMap<LaneKey, i32> {
         let mut by_gutter: BTreeMap<usize, Vec<Segment>> = BTreeMap::new();
         for segment in &self.segments {
             let start = self.segment_start(segment, ports);
@@ -877,7 +918,13 @@ impl<'a> Builder<'a> {
             let ordered = self.order_lanes(&segments, ports);
             for (position, segment) in ordered.iter().enumerate() {
                 let x = gutter_x + SOURCE_PLUG + (position as i32 + 1) * LANE_PITCH;
-                lanes.insert((segment.from, segment.edge), x);
+                lanes.insert(
+                    LaneKey {
+                        from: segment.from,
+                        edge: segment.edge,
+                    },
+                    x,
+                );
             }
         }
         lanes
@@ -979,7 +1026,13 @@ impl<'a> Builder<'a> {
     /// A band per column a branch group spans. Members are contiguous within every column, so
     /// each band holds its members and nothing else.
     fn group_regions(&self) -> Vec<GroupRegion> {
-        let mut by_branch: BTreeMap<String, BTreeMap<usize, (i32, i32)>> = BTreeMap::new();
+        /// The vertical extent one branch group covers in one column.
+        struct BandExtent {
+            top: i32,
+            bottom: i32,
+        }
+
+        let mut by_branch: BTreeMap<String, BTreeMap<usize, BandExtent>> = BTreeMap::new();
         for slot in 0..self.slots.len() {
             let Some(branch) = self.slots[slot].branch.clone() else {
                 continue;
@@ -993,9 +1046,12 @@ impl<'a> Builder<'a> {
                 .entry(branch)
                 .or_default()
                 .entry(column)
-                .or_insert((rect.y, rect.bottom()));
-            entry.0 = entry.0.min(rect.y);
-            entry.1 = entry.1.max(rect.bottom());
+                .or_insert(BandExtent {
+                    top: rect.y,
+                    bottom: rect.bottom(),
+                });
+            entry.top = entry.top.min(rect.y);
+            entry.bottom = entry.bottom.max(rect.bottom());
         }
 
         by_branch
@@ -1004,7 +1060,7 @@ impl<'a> Builder<'a> {
                 let bands = columns
                     .into_iter()
                     .enumerate()
-                    .map(|(position, (column, (top, bottom)))| {
+                    .map(|(position, (column, extent))| {
                         let header = if position == 0 {
                             GROUP_HEADER_HEIGHT
                         } else {
@@ -1012,9 +1068,9 @@ impl<'a> Builder<'a> {
                         };
                         Rect {
                             x: self.column_x[column] - GROUP_PADDING,
-                            y: top - GROUP_PADDING - header,
+                            y: extent.top - GROUP_PADDING - header,
                             width: self.column_width[column] + GROUP_PADDING * 2,
-                            height: (bottom - top) + GROUP_PADDING * 2 + header,
+                            height: (extent.bottom - extent.top) + GROUP_PADDING * 2 + header,
                         }
                     })
                     .collect();
@@ -1133,10 +1189,19 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// One attachment point on an item: which row it sits on, which edge attaches there, and whether
+/// the edge leaves the item or arrives at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PortKey {
+    slot: usize,
+    edge: usize,
+    outgoing: bool,
+}
+
 #[derive(Debug, Default)]
 struct Ports {
-    /// (slot, edge, outgoing) to the offset of that port from the item's vertical centre.
-    offsets: BTreeMap<(usize, usize, bool), i32>,
+    /// Each port's offset from its item's vertical centre.
+    offsets: BTreeMap<PortKey, i32>,
 }
 
 /// Drop repeated and needlessly collinear points so an edge reports the turns it actually makes.

@@ -5,8 +5,8 @@ use nervix_models::DescribeCorrelator;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, correlator_ref, into_parse_error, kw, lex_input,
-        suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, correlator_ref, into_parse_error, kw,
+        lex_input, suggest_from, tok,
     },
 };
 
@@ -35,7 +35,11 @@ pub fn parse_describe_correlator_tokens(
 }
 
 pub fn parse_describe_correlator(input: &str) -> Result<DescribeCorrelator, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_describe_correlator_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

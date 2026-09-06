@@ -1468,9 +1468,16 @@ mod tests {
         )
     }
 
+    /// One declared argument of a test UDF, before its name is parsed into a `FieldName`.
+    struct TestArgument {
+        name: &'static str,
+        ty: ParseAsType,
+        optional: bool,
+    }
+
     fn model(
         name: &str,
-        arguments: impl IntoIterator<Item = (&'static str, ParseAsType, bool)>,
+        arguments: impl IntoIterator<Item = TestArgument>,
         returns: ParseAsType,
         volatile: bool,
         code: &str,
@@ -1480,10 +1487,10 @@ mod tests {
             UdfLanguage::Roto0_11,
             arguments
                 .into_iter()
-                .map(|(name, ty, optional)| UdfArgument {
-                    name: FieldName::parse(name).expect("valid field name"),
-                    ty,
-                    optional,
+                .map(|argument| UdfArgument {
+                    name: FieldName::parse(argument.name).expect("valid field name"),
+                    ty: argument.ty,
+                    optional: argument.optional,
                 })
                 .collect(),
             UdfReturn {
@@ -1600,8 +1607,16 @@ test increments_by_one {
             model(
                 "display_name",
                 [
-                    ("nick", ParseAsType::String, true),
-                    ("email", ParseAsType::String, false),
+                    TestArgument {
+                        name: "nick",
+                        ty: ParseAsType::String,
+                        optional: true,
+                    },
+                    TestArgument {
+                        name: "email",
+                        ty: ParseAsType::String,
+                        optional: false,
+                    },
                 ],
                 ParseAsType::String,
                 false,
@@ -1611,7 +1626,11 @@ test increments_by_one {
             ),
             model(
                 "risk_band",
-                [("score", ParseAsType::F64, false)],
+                [TestArgument {
+                    name: "score",
+                    ty: ParseAsType::F64,
+                    optional: false,
+                }],
                 ParseAsType::String,
                 false,
                 r#"fn risk_band(score: F64Column) -> StringColumn {
@@ -1624,8 +1643,16 @@ test increments_by_one {
             model(
                 "unit_price",
                 [
-                    ("total", ParseAsType::F64, false),
-                    ("qty", ParseAsType::I64, false),
+                    TestArgument {
+                        name: "total",
+                        ty: ParseAsType::F64,
+                        optional: false,
+                    },
+                    TestArgument {
+                        name: "qty",
+                        ty: ParseAsType::I64,
+                        optional: false,
+                    },
                 ],
                 ParseAsType::F64,
                 false,
@@ -1636,7 +1663,11 @@ test increments_by_one {
             ),
             model(
                 "minmax_norm",
-                [("x", ParseAsType::F64, false)],
+                [TestArgument {
+                    name: "x",
+                    ty: ParseAsType::F64,
+                    optional: false,
+                }],
                 ParseAsType::F64,
                 false,
                 r#"fn minmax_norm(x: F64Column) -> F64Column {
@@ -1657,13 +1688,13 @@ test increments_by_one {
             ),
             model(
                 "has_pii_tag",
-                [(
-                    "tags",
-                    ParseAsType::Vec {
+                [TestArgument {
+                    name: "tags",
+                    ty: ParseAsType::Vec {
                         element: Box::new(ParseAsType::String),
                     },
-                    false,
-                )],
+                    optional: false,
+                }],
                 ParseAsType::Bool,
                 false,
                 r#"fn has_pii_tag(tags: VecStringColumn) -> BoolColumn {
@@ -1672,7 +1703,11 @@ test increments_by_one {
             ),
             model(
                 "sample_flag",
-                [("rate", ParseAsType::F64, false)],
+                [TestArgument {
+                    name: "rate",
+                    ty: ParseAsType::F64,
+                    optional: false,
+                }],
                 ParseAsType::Bool,
                 true,
                 r#"fn sample_flag(rate: F64Column) -> BoolColumn {
@@ -1681,7 +1716,11 @@ test increments_by_one {
             ),
             model(
                 "is_expired",
-                [("expires", ParseAsType::Datetime, false)],
+                [TestArgument {
+                    name: "expires",
+                    ty: ParseAsType::Datetime,
+                    optional: false,
+                }],
                 ParseAsType::Bool,
                 true,
                 r#"fn is_expired(expires: DatetimeColumn) -> BoolColumn {

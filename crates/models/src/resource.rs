@@ -113,9 +113,19 @@ pub struct ResourceNodeStatus {
     pub error: Option<String>,
 }
 
+/// The version counter of one declared resource. Resources are domain-owned, so the counter is
+/// keyed by the owning domain as well as the resource name, and the field order is the order the
+/// catalog is sorted and searched by.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ResourceVersionCounter {
+    pub domain: DomainName,
+    pub identifier: ResourceName,
+    pub next_version: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResourceVersionStatus {
-    pub next_version_by_resource: SortedVec<(DomainName, ResourceName, u64)>,
+    pub next_version_by_resource: SortedVec<ResourceVersionCounter>,
     pub versions: SortedVec<ResourceVersion>,
     pub replicas: SortedVec<ResourceNodeStatus>,
 }
@@ -125,11 +135,10 @@ impl ResourceVersionStatus {
     /// until the resource is declared there. Resources are domain-owned, so the same name in two
     /// domains is two independent resources with independent version sequences.
     pub fn next_version(&self, domain: &DomainName, identifier: &ResourceName) -> Option<u64> {
-        self.next_version_by_resource.iter().find_map(
-            |(known_domain, known_identifier, next_version)| {
-                (known_domain == domain && known_identifier == identifier).then_some(*next_version)
-            },
-        )
+        self.next_version_by_resource.iter().find_map(|counter| {
+            (counter.domain == *domain && counter.identifier == *identifier)
+                .then_some(counter.next_version)
+        })
     }
 
     /// Returns the highest installed version of the named resource in `domain`, which is `None`

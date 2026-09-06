@@ -277,38 +277,47 @@ impl BenchmarkSuiteReport {
             "## Benchmark comparison\n\n**Execution:** {successful} of {total} catalog executions \
              succeeded; all {total} were attempted across {benchmark_count} workloads.\n"
         );
+        /// Whether one workload ran under one implementation, so the status table lists attempts
+        /// that failed next to the ones that produced results.
+        struct ExecutionStatus<'a> {
+            benchmark: &'a str,
+            implementation: &'a str,
+            succeeded: bool,
+        }
+
         let mut statuses = Vec::with_capacity(total);
         if let Some(comparison) = &self.comparison {
             for benchmark in &comparison.benchmarks {
                 for run in &benchmark.runs {
-                    statuses.push((
-                        benchmark.slug.as_str(),
-                        run.manifest.implementation.as_str(),
-                        true,
-                    ));
+                    statuses.push(ExecutionStatus {
+                        benchmark: benchmark.slug.as_str(),
+                        implementation: run.manifest.implementation.as_str(),
+                        succeeded: true,
+                    });
                 }
             }
         }
         for failure in &self.failures {
-            statuses.push((
-                failure.benchmark.as_str(),
-                failure.implementation.as_str(),
-                false,
-            ));
+            statuses.push(ExecutionStatus {
+                benchmark: failure.benchmark.as_str(),
+                implementation: failure.implementation.as_str(),
+                succeeded: false,
+            });
         }
         statuses.sort_by(|left, right| {
-            left.0.cmp(right.0).then_with(|| {
-                implementation_sort_key(left.1).cmp(&implementation_sort_key(right.1))
+            left.benchmark.cmp(right.benchmark).then_with(|| {
+                implementation_sort_key(left.implementation)
+                    .cmp(&implementation_sort_key(right.implementation))
             })
         });
         markdown.push_str("\n### Execution status\n\n| Workload | Implementation | Status |\n");
         markdown.push_str("|:--|:--|:--|\n");
-        for (benchmark, implementation, succeeded) in statuses {
+        for status in statuses {
             markdown.push_str(&format!(
                 "| {} | {} | {} |\n",
-                display_name(benchmark),
-                display_name(implementation),
-                if succeeded {
+                display_name(status.benchmark),
+                display_name(status.implementation),
+                if status.succeeded {
                     "✅ Passed"
                 } else {
                     "❌ Failed"

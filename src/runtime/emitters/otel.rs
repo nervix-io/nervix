@@ -668,17 +668,30 @@ impl OtelEmitter {
                 for row in pending_rows {
                     tokio::task::consume_budget().await;
                     if let Some(error) = Self::side_error(program, &output, *row) {
-                        outcome.reject_structured((batch_index, *row), error);
+                        outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error,
+                        );
                         continue;
                     }
                     match mapped.log_record(*row, observed_time) {
                         Ok(record) => {
                             records.push(record);
-                            positions.push((batch_index, *row));
+                            positions.push(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            });
                         }
-                        Err(error) => {
-                            outcome.reject_structured((batch_index, *row), error.structured())
-                        }
+                        Err(error) => outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.structured(),
+                        ),
                     }
                 }
                 OtelExportRequest::Logs(ExportLogsServiceRequest {
@@ -698,17 +711,30 @@ impl OtelEmitter {
                 for row in pending_rows {
                     tokio::task::consume_budget().await;
                     if let Some(error) = Self::side_error(program, &output, *row) {
-                        outcome.reject_structured((batch_index, *row), error);
+                        outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error,
+                        );
                         continue;
                     }
                     match mapped.span(*row) {
                         Ok(span) => {
                             spans.push(span);
-                            positions.push((batch_index, *row));
+                            positions.push(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            });
                         }
-                        Err(error) => {
-                            outcome.reject_structured((batch_index, *row), error.structured())
-                        }
+                        Err(error) => outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.structured(),
+                        ),
                     }
                 }
                 OtelExportRequest::Traces(ExportTraceServiceRequest {
@@ -728,7 +754,13 @@ impl OtelEmitter {
                 for row in pending_rows {
                     tokio::task::consume_budget().await;
                     if let Some(error) = Self::side_error(program, &output, *row) {
-                        outcome.reject_structured((batch_index, *row), error);
+                        outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error,
+                        );
                     } else {
                         metric_rows.push(*row);
                     }
@@ -935,20 +967,34 @@ impl OtelTransport {
         compression: OtelCompression,
         request: OtelExportRequest,
     ) -> OtelTransportOutcome {
-        let (path, body, response_kind) = match request {
-            OtelExportRequest::Logs(request) => {
-                ("logs", request.encode_to_vec(), OtelHttpResponseKind::Logs)
-            }
-            OtelExportRequest::Traces(request) => (
-                "traces",
-                request.encode_to_vec(),
-                OtelHttpResponseKind::Traces,
-            ),
-            OtelExportRequest::Metrics(request) => (
-                "metrics",
-                request.encode_to_vec(),
-                OtelHttpResponseKind::Metrics,
-            ),
+        /// One OTLP signal encoded for HTTP export: the path segment it posts to, its protobuf
+        /// body, and the response type the receiver answers with.
+        struct EncodedSignal {
+            path: &'static str,
+            body: Vec<u8>,
+            response_kind: OtelHttpResponseKind,
+        }
+
+        let EncodedSignal {
+            path,
+            body,
+            response_kind,
+        } = match request {
+            OtelExportRequest::Logs(request) => EncodedSignal {
+                path: "logs",
+                body: request.encode_to_vec(),
+                response_kind: OtelHttpResponseKind::Logs,
+            },
+            OtelExportRequest::Traces(request) => EncodedSignal {
+                path: "traces",
+                body: request.encode_to_vec(),
+                response_kind: OtelHttpResponseKind::Traces,
+            },
+            OtelExportRequest::Metrics(request) => EncodedSignal {
+                path: "metrics",
+                body: request.encode_to_vec(),
+                response_kind: OtelHttpResponseKind::Metrics,
+            },
         };
         let body = match Self::http_body(body, compression) {
             Ok(body) => body,
@@ -1314,11 +1360,18 @@ impl OtelMappedBatch<'_> {
                     match self.number_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
-                            positions.push((batch_index, *row));
+                            positions.push(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            });
                         }
-                        Err(error) => {
-                            outcome.reject_structured((batch_index, *row), error.structured())
-                        }
+                        Err(error) => outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.structured(),
+                        ),
                     }
                 }
                 match &model.kind {
@@ -1344,11 +1397,18 @@ impl OtelMappedBatch<'_> {
                     match self.histogram_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
-                            positions.push((batch_index, *row));
+                            positions.push(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            });
                         }
-                        Err(error) => {
-                            outcome.reject_structured((batch_index, *row), error.structured())
-                        }
+                        Err(error) => outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.structured(),
+                        ),
                     }
                 }
                 metric::Data::Histogram(Histogram {

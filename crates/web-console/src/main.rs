@@ -2549,7 +2549,14 @@ fn SidebarIcon(kind: &'static str) -> impl IntoView {
     }
 }
 
-fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<(String, String, DataflowEdgeKind)> {
+/// The edge a click landed on, named the way the graph identifies it.
+struct GraphEdgeFocusRequest {
+    source: String,
+    target: String,
+    kind: DataflowEdgeKind,
+}
+
+fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<GraphEdgeFocusRequest> {
     let pointer_hit = if let Some(window) = web_sys::window()
         && let Some(document) = window.document()
         && let Some(element) =
@@ -2571,7 +2578,11 @@ fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<(String, String, D
     let source = hit.get_attribute("data-source")?;
     let target = hit.get_attribute("data-target")?;
     let kind = graph_edge_kind_from_label(hit.get_attribute("data-kind")?.as_str())?;
-    Some((source, target, kind))
+    Some(GraphEdgeFocusRequest {
+        source,
+        target,
+        kind,
+    })
 }
 
 fn graph_edge_hit_from_element(element: web_sys::Element) -> Option<web_sys::Element> {
@@ -2728,9 +2739,10 @@ fn GraphPanel(
             focus_graph_bounds(&graph, graph.canvas_bounds(), GRAPH_FIT_MAX_ZOOM);
         }
     };
-    let focus_graph_edge = move |source: String, target: String, kind: DataflowEdgeKind| {
+    let focus_graph_edge = move |request: GraphEdgeFocusRequest| {
         let graph = current_topology_graph();
-        let Some(bounds) = graph.edge_focus_bounds(&source, &target, kind) else {
+        let Some(bounds) = graph.edge_focus_bounds(&request.source, &request.target, request.kind)
+        else {
             return;
         };
         focus_graph_bounds(&graph, bounds, GRAPH_MAX_ZOOM);
@@ -2922,10 +2934,10 @@ fn GraphPanel(
                         graph_hover.set(None);
                     }
                     on:click=move |event: ev::MouseEvent| {
-                        if let Some((source, target, kind)) = graph_edge_focus_request(&event) {
+                        if let Some(request) = graph_edge_focus_request(&event) {
                             event.prevent_default();
                             event.stop_propagation();
-                            focus_graph_edge(source, target, kind);
+                            focus_graph_edge(request);
                         }
                     }
                 >
@@ -2980,10 +2992,10 @@ fn GraphPanel(
                             aria-hidden="true"
                             focusable="false"
                             on:click:capture=move |event: ev::MouseEvent| {
-                                if let Some((source, target, kind)) = graph_edge_focus_request(&event) {
+                                if let Some(request) = graph_edge_focus_request(&event) {
                                     event.prevent_default();
                                     event.stop_propagation();
-                                    focus_graph_edge(source, target, kind);
+                                    focus_graph_edge(request);
                                 }
                             }
                         >
@@ -3061,11 +3073,11 @@ fn GraphPanel(
                                                 .is_some_and(|hover| hover.emphasises_edge(&emphasis_edge))
                                         }
                                         on:mouseenter=move |_| {
-                                            graph_hover.set(Some(GraphHover::Edge(
-                                                hover_source.clone(),
-                                                hover_target.clone(),
+                                            graph_hover.set(Some(GraphHover::Edge {
+                                                source: hover_source.clone(),
+                                                target: hover_target.clone(),
                                                 kind,
-                                            )));
+                                            }));
                                         }
                                         on:mouseleave=move |_| graph_hover.set(None)
                                     >
@@ -3144,17 +3156,7 @@ fn GraphPanel(
                             }} />
                         </div>
                         <div class="graph-hit-layer" aria-label="Execution graph interactions">
-                            <For each={move || current_graph().relays.clone()} key=|relay| {
-                                (
-                                    relay.id.clone(),
-                                    relay.rect_key(),
-                                    relay.label.clone(),
-                                    relay.statistics.relay_buffer_capacity,
-                                    relay.statistics.relay_buffer_len_p50.map(f64::to_bits),
-                                    relay.statistics.relay_buffer_len_p90.map(f64::to_bits),
-                                    relay.statistics.relay_buffer_len_p99.map(f64::to_bits),
-                                )
-                            } children={move |relay| {
+                            <For each={move || current_graph().relays.clone()} key=GraphViewRelayKey::of children={move |relay| {
                             let click_relay = relay.clone();
                             let relay_label = relay.label.clone();
                             let relay_title = relay.buffer_summary();
@@ -3269,17 +3271,7 @@ fn GraphPanel(
                                     </Show>
                                 }
                             }} />
-                            <For each={move || current_graph().nodes.clone()} key=|node| {
-                                (
-                                    node.id.clone(),
-                                    node.rect_key(),
-                                    node.label.clone(),
-                                    node.detail_label().to_string(),
-                                    node.status,
-                                    node.status_detail.clone(),
-                                    node.reconnect_wait_millis,
-                                )
-                            } children={move |node| {
+                            <For each={move || current_graph().nodes.clone()} key=GraphViewNodeKey::of children={move |node| {
                             let class_node = node.clone();
                             let click_node = node.clone();
                             let detail = node.detail_label().to_string();
@@ -4407,6 +4399,33 @@ struct GraphViewNode {
     branches: Vec<GraphBranchStatistics>,
 }
 
+/// Everything a drawn node card shows. The hit layer re-renders a card exactly when one of these
+/// changes, so a node that only gains statistics keeps its element.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GraphViewNodeKey {
+    id: String,
+    rect: Rect,
+    label: String,
+    detail: String,
+    status: DataflowNodeStatus,
+    status_detail: Option<String>,
+    reconnect_wait_millis: Option<u64>,
+}
+
+impl GraphViewNodeKey {
+    fn of(node: &GraphViewNode) -> Self {
+        Self {
+            id: node.id.clone(),
+            rect: node.rect,
+            label: node.label.clone(),
+            detail: node.detail_label().to_string(),
+            status: node.status,
+            status_detail: node.status_detail.clone(),
+            reconnect_wait_millis: node.reconnect_wait_millis,
+        }
+    }
+}
+
 impl GraphViewNode {
     fn hit_class(&self) -> &'static str {
         match (self.kind, self.status) {
@@ -4441,11 +4460,6 @@ impl GraphViewNode {
 
     fn kind_label(&self) -> String {
         self.role.kind().as_ref().to_string()
-    }
-
-    /// The drawn rectangle as a keyable value, so a card is re-rendered exactly when it moves.
-    const fn rect_key(&self) -> (i32, i32, i32, i32) {
-        rect_key(self.rect)
     }
 
     /// The caption drawn on the card: the transport for a connector, the processor for a
@@ -4603,11 +4617,34 @@ impl From<DataflowSchemaField> for GraphSchemaField {
     }
 }
 
-impl GraphViewRelay {
-    const fn rect_key(&self) -> (i32, i32, i32, i32) {
-        rect_key(self.rect)
-    }
+/// Everything a drawn relay card shows, including the buffer percentages its meter renders. The
+/// float percentiles are keyed by their bit pattern because they are compared, never ordered.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GraphViewRelayKey {
+    id: String,
+    rect: Rect,
+    label: String,
+    buffer_capacity: Option<u64>,
+    buffer_len_p50: Option<u64>,
+    buffer_len_p90: Option<u64>,
+    buffer_len_p99: Option<u64>,
+}
 
+impl GraphViewRelayKey {
+    fn of(relay: &GraphViewRelay) -> Self {
+        Self {
+            id: relay.id.clone(),
+            rect: relay.rect,
+            label: relay.label.clone(),
+            buffer_capacity: relay.statistics.relay_buffer_capacity,
+            buffer_len_p50: relay.statistics.relay_buffer_len_p50.map(f64::to_bits),
+            buffer_len_p90: relay.statistics.relay_buffer_len_p90.map(f64::to_bits),
+            buffer_len_p99: relay.statistics.relay_buffer_len_p99.map(f64::to_bits),
+        }
+    }
+}
+
+impl GraphViewRelay {
     fn hit_style(&self) -> String {
         format!(
             "{} --relay-buffer-p50: {:.2}%; --relay-buffer-p90: {:.2}%; --relay-buffer-p99: \
@@ -5170,23 +5207,29 @@ struct GraphDrag {
 #[derive(Clone, PartialEq, Eq)]
 enum GraphHover {
     Item(String),
-    Edge(String, String, DataflowEdgeKind),
+    Edge {
+        source: String,
+        target: String,
+        kind: DataflowEdgeKind,
+    },
 }
 
 impl GraphHover {
     fn emphasises_item(&self, id: &str) -> bool {
         match self {
             Self::Item(hovered) => hovered == id,
-            Self::Edge(source, target, _) => source == id || target == id,
+            Self::Edge { source, target, .. } => source == id || target == id,
         }
     }
 
     fn emphasises_edge(&self, edge: &GraphViewEdge) -> bool {
         match self {
             Self::Item(hovered) => *hovered == edge.source || *hovered == edge.target,
-            Self::Edge(source, target, kind) => {
-                *source == edge.source && *target == edge.target && *kind == edge.kind
-            }
+            Self::Edge {
+                source,
+                target,
+                kind,
+            } => *source == edge.source && *target == edge.target && *kind == edge.kind,
         }
     }
 }
@@ -5196,11 +5239,6 @@ fn graph_position_style(rect: Rect) -> String {
         "left: {}px; top: {}px; width: {}px; height: {}px;",
         rect.x, rect.y, rect.width, rect.height
     )
-}
-
-/// A rectangle reduced to the hashable tuple keyed views compare.
-const fn rect_key(rect: Rect) -> (i32, i32, i32, i32) {
-    (rect.x, rect.y, rect.width, rect.height)
 }
 
 #[derive(Clone)]
@@ -5837,11 +5875,11 @@ mod tests {
         assert!(hover.emphasises_edge(first));
         assert!(!hover.emphasises_edge(second));
 
-        let hover = GraphHover::Edge(
-            "relay:telemetry".to_string(),
-            "emitter:redis".to_string(),
-            DataflowEdgeKind::Data,
-        );
+        let hover = GraphHover::Edge {
+            source: "relay:telemetry".to_string(),
+            target: "emitter:redis".to_string(),
+            kind: DataflowEdgeKind::Data,
+        };
         assert!(hover.emphasises_item("relay:telemetry"));
         assert!(hover.emphasises_item("emitter:redis"));
         assert!(!hover.emphasises_item("ingestor:mqtt"));

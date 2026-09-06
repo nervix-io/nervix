@@ -44,13 +44,29 @@ impl SqsIngestor {
             });
         }
 
-        let (queue, instances, ack_mode) = match &ingestor.source {
+        /// The parts of an SQS ingest source this task drives, taken from the model once so the
+        /// rest of startup reads named values rather than re-matching the source.
+        struct SqsSource {
+            queue: nervix_models::QueueName,
+            instances: u64,
+            ack_mode: SqsIngestMode,
+        }
+
+        let SqsSource {
+            queue,
+            instances,
+            ack_mode,
+        } = match &ingestor.source {
             IngestSource::Sqs {
                 queue,
                 instances,
                 mode,
                 ..
-            } => (queue.clone(), *instances, mode.clone()),
+            } => SqsSource {
+                queue: queue.clone(),
+                instances: *instances,
+                ack_mode: mode.clone(),
+            },
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),

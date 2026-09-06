@@ -316,7 +316,10 @@ impl MySqlEmitter {
             {
                 Ok(_) => {
                     for row in chunk {
-                        outcome.deliver((batch_index, *row));
+                        outcome.deliver(BrokerRecordPosition {
+                            batch_index,
+                            row_index: *row,
+                        });
                     }
                 }
                 Err(error) if error.is_record_error() && chunk.len() > 1 => {
@@ -342,10 +345,17 @@ impl MySqlEmitter {
                         )
                         .await
                         {
-                            Ok(_) => outcome.deliver((batch_index, *row)),
-                            Err(error) if error.is_record_error() => {
-                                outcome.reject((batch_index, *row), error.record_reason())
-                            }
+                            Ok(_) => outcome.deliver(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            }),
+                            Err(error) if error.is_record_error() => outcome.reject(
+                                BrokerRecordPosition {
+                                    batch_index,
+                                    row_index: *row,
+                                },
+                                error.record_reason(),
+                            ),
                             Err(error) => {
                                 outcome.fail(error.into_report());
                                 return outcome;
@@ -355,7 +365,13 @@ impl MySqlEmitter {
                 }
                 Err(error) if error.is_record_error() => {
                     if let Some(row) = chunk.first() {
-                        outcome.reject((batch_index, *row), error.record_reason());
+                        outcome.reject(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.record_reason(),
+                        );
                     }
                 }
                 Err(error) => {

@@ -730,8 +730,8 @@ impl CompiledWindowAggregateProgram {
         let output_schema = StdArc::new(arrow_schema::Schema::new(
             inferred
                 .into_iter()
-                .map(|(name, data_type, nullable)| {
-                    arrow_schema::Field::new(name, data_type, nullable)
+                .map(|inferred| {
+                    arrow_schema::Field::new(inferred.field, inferred.data_type, inferred.nullable)
                 })
                 .collect::<Vec<_>>(),
         ));

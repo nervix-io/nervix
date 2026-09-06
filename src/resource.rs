@@ -38,6 +38,15 @@ pub struct ResourceStore {
     root: PathBuf,
 }
 
+/// Where one resource version is installed: the directory it will finally occupy, the staging
+/// directory it is built in, and the content directory inside that staging directory.
+#[derive(Debug)]
+struct InstallPaths {
+    install_root: PathBuf,
+    staging_root: PathBuf,
+    content_root: PathBuf,
+}
+
 #[derive(Debug)]
 struct PendingInstall {
     id: ResourceId,
@@ -198,7 +207,7 @@ impl ResourceStore {
     async fn prepare_install_paths(
         &self,
         id: &ResourceId,
-    ) -> Result<(PathBuf, PathBuf, PathBuf), ResourceStoreError> {
+    ) -> Result<InstallPaths, ResourceStoreError> {
         let install_root = self.version_root(id);
         if install_root.exists() {
             tokio::fs::remove_dir_all(&install_root)
@@ -216,7 +225,11 @@ impl ResourceStore {
         tokio::fs::create_dir_all(&content_root)
             .await
             .map_err(|_| ResourceStoreError::CreateResourceDir)?;
-        Ok((install_root, staging_root, content_root))
+        Ok(InstallPaths {
+            install_root,
+            staging_root,
+            content_root,
+        })
     }
 
     async fn prepare_install(
@@ -225,12 +238,12 @@ impl ResourceStore {
         created_by_node: ClusterNodeName,
         created_at: Timestamp,
     ) -> Result<PendingInstall, ResourceStoreError> {
-        let (install_root, staging_root, content_root) = self.prepare_install_paths(&id).await?;
+        let paths = self.prepare_install_paths(&id).await?;
         Ok(PendingInstall {
             id,
-            install_root,
-            staging_root,
-            content_root,
+            install_root: paths.install_root,
+            staging_root: paths.staging_root,
+            content_root: paths.content_root,
             created_by_node,
             created_at,
         })

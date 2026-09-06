@@ -52,7 +52,7 @@ fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
 }
 use nervix_models::{
     BranchName, ClientName, ClusterNodeName, CodecName, DeduplicatorName, EmitterName,
-    ReingestorName, SchemaName, WireSchemaName,
+    ReingestorName, ResourceVersionCounter, SchemaName, WireSchemaName,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -62,10 +62,11 @@ use tokio::{
 use triomphe::Arc;
 
 use super::{
-    BranchInstanceRegistry, BranchKey, BranchedProcessorOperationSpec, RelayMessage,
-    RuntimeStateKind, RuntimeStatePlacement, RuntimeStateStore, STUPID_CHANNEL_CAPACITY_REMOVE_ME,
-    ScheduledEmitterTask, WindowAggregateFunction, WindowProcessorState, advance_window,
-    evaluate_window_aggregate, message_timestamp, window_output_metadata,
+    BranchInstanceRegistry, BranchKey, BranchedProcessorOperationSpec, KafkaTopicPartition,
+    PlannedModel, RelayMessage, RuntimeStateKind, RuntimeStatePlacement, RuntimeStateStore,
+    STUPID_CHANNEL_CAPACITY_REMOVE_ME, ScheduledEmitterTask, WindowAggregateFunction,
+    WindowProcessorState, advance_window, evaluate_window_aggregate, message_timestamp,
+    window_output_metadata,
 };
 use crate::{
     metrics::RuntimeMetrics,
@@ -495,22 +496,18 @@ fn branch_mappings(fields: &[&str]) -> Vec<Assignment> {
         .collect()
 }
 
-fn branch_model_tuple(
-    schema: &str,
-    relay: &str,
-    _fields: &[&str],
-) -> (ModelKind, ModelName, nervix_models::Model) {
+fn branch_model(schema: &str, relay: &str, _fields: &[&str]) -> PlannedModel {
     let branch = named::<BranchName>(&format!("by_{relay}"));
-    (
-        ModelKind::Branch,
-        ModelName::from(&branch.clone()),
-        nervix_models::Model::Branch(CreateBranch {
+    PlannedModel {
+        kind: ModelKind::Branch,
+        identifier: ModelName::from(&branch.clone()),
+        model: nervix_models::Model::Branch(CreateBranch {
             name: branch,
             schema: named(schema),
             ttl: "5m".to_string(),
             eviction: None,
         }),
-    )
+    }
 }
 
 fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices> {
@@ -1736,15 +1733,22 @@ fn test_schema(fields: &[(&str, ParseAsType)]) -> Arc<super::CompiledSchema> {
     }))
 }
 
-fn test_optional_schema(fields: &[(&str, ParseAsType, bool)]) -> Arc<super::CompiledSchema> {
+/// One field of a test schema whose optionality varies per field.
+struct OptionalTestField {
+    name: &'static str,
+    ty: ParseAsType,
+    optional: bool,
+}
+
+fn test_optional_schema(fields: &[OptionalTestField]) -> Arc<super::CompiledSchema> {
     Arc::new(compile_schema(&CreateSchema {
         name: named("test_schema"),
         fields: fields
             .iter()
-            .map(|(name, ty, optional)| nervix_models::SchemaField {
-                name: named(name),
-                ty: ty.clone(),
-                optional: *optional,
+            .map(|field| nervix_models::SchemaField {
+                name: named(field.name),
+                ty: field.ty.clone(),
+                optional: field.optional,
                 sensitive: false,
             })
             .collect(),
@@ -2161,7 +2165,11 @@ fn wasm_zero_row_output_builds_exact_empty_destination_columns() {
 #[test]
 fn wasm_uninitialized_column_uses_destination_type_and_ack_row_count() {
     let input_schema = test_schema(&[("input", ParseAsType::I32)]);
-    let output_schema = test_optional_schema(&[("value", ParseAsType::I64, true)]);
+    let output_schema = test_optional_schema(&[OptionalTestField {
+        name: "value",
+        ty: ParseAsType::I64,
+        optional: true,
+    }]);
     let rows = vec![
         WasmOutputRow {
             tokens: Vec::new(),
@@ -2377,7 +2385,11 @@ fn wasm_generated_pool_rejects_route_shape_type_and_row_mismatches() {
         }
     ));
 
-    let nullable_output_schema = test_optional_schema(&[("generated", ParseAsType::String, true)]);
+    let nullable_output_schema = test_optional_schema(&[OptionalTestField {
+        name: "generated",
+        ty: ParseAsType::String,
+        optional: true,
+    }]);
     let nullability = validate_wasm_test_outputs(
         &input_schema,
         &nullable_output_schema,
@@ -2689,7 +2701,11 @@ fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
     let input_schema = test_schema(&[("value", ParseAsType::I32)]);
     let renamed_schema = test_schema(&[("renamed_value", ParseAsType::I32)]);
     let string_schema = test_schema(&[("value", ParseAsType::String)]);
-    let nullable_schema = test_optional_schema(&[("value", ParseAsType::I32, true)]);
+    let nullable_schema = test_optional_schema(&[OptionalTestField {
+        name: "value",
+        ty: ParseAsType::I32,
+        optional: true,
+    }]);
     let (input, ack_map) = wasm_input_for_values(&input_schema, &[10]);
     let rows = wasm_input_acks(&input).rows.clone();
 
@@ -3037,9 +3053,10 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
 
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
     let gate = fanout.dispatch_gate();
-    runtime
-        .relay_boundary_fanouts
-        .insert((domain.clone(), relay.clone()), fanout);
+    runtime.relay_boundary_fanouts.insert(
+        super::RuntimeKey::new(domain.clone(), relay.clone()),
+        fanout,
+    );
 
     let key = super::RuntimeKey::new(domain.clone(), ingestor.clone());
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -3123,9 +3140,10 @@ async fn entity_gate_operation_releases_when_its_lease_deadline_expires() {
     let operation_id = 42;
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
     let gate = fanout.dispatch_gate();
-    runtime
-        .relay_boundary_fanouts
-        .insert((domain.clone(), relay.clone()), fanout);
+    runtime.relay_boundary_fanouts.insert(
+        super::RuntimeKey::new(domain.clone(), relay.clone()),
+        fanout,
+    );
 
     runtime
         .engage_entity_gate_operation(
@@ -4514,9 +4532,10 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
     let _owner_receiver = services.activate_owner_buffer();
-    runtime
-        .relay_boundary_fanouts
-        .insert((domain.clone(), relay.clone()), services.fanout.clone());
+    runtime.relay_boundary_fanouts.insert(
+        super::RuntimeKey::new(domain.clone(), relay.clone()),
+        services.fanout.clone(),
+    );
     services
         .enqueue_owner_batch(
             &runtime.metrics,
@@ -5052,7 +5071,10 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
         .purge_stale_schema_fingerprints(
             &base.domain,
             &HashMap::from_iter([(
-                (base.kind, base.identifier.clone()),
+                crate::registry::RegistryEntity {
+                    kind: base.kind,
+                    identifier: base.identifier.clone(),
+                },
                 current.schema_fingerprint,
             )]),
         )
@@ -5191,8 +5213,20 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
             .expect("kafka state should initialize");
     let (offset_lsm, offset_payload) = state
         .replace_offsets(HashMap::from_iter([
-            (("notifications".to_string(), 0), 12),
-            (("notifications".to_string(), 1), 18),
+            (
+                KafkaTopicPartition {
+                    topic: "notifications".to_string(),
+                    partition: 0,
+                },
+                12,
+            ),
+            (
+                KafkaTopicPartition {
+                    topic: "notifications".to_string(),
+                    partition: 1,
+                },
+                18,
+            ),
         ]))
         .expect("offsets should update");
     store
@@ -6108,19 +6142,27 @@ fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
 
 #[tokio::test]
 async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sidecars() {
+    /// One row fed into the reorderer buffer: the sequence it carries, the watermark it arrived
+    /// with, and the ACKs the reordered output must keep aligned with it.
+    struct ReorderedRow {
+        sequence: u32,
+        ingested_at: i64,
+        acks: AckSet,
+    }
+
     let schema = test_schema(&[("sequence", ParseAsType::U32)]);
-    let batch = |rows: Vec<(u32, i64, AckSet)>| {
+    let batch = |rows: Vec<ReorderedRow>| {
         super::RelayRecordBatch::from_messages(
             schema.clone(),
             rows.into_iter()
-                .map(|(sequence, ingested_at, acks)| RelayMessage {
+                .map(|row| RelayMessage {
                     key: None,
                     record: test_runtime_row([(
                         "sequence".to_string(),
-                        RuntimeValue::U32(sequence),
+                        RuntimeValue::U32(row.sequence),
                     )])
-                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(ingested_at)),
-                    acks,
+                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(row.ingested_at)),
+                    acks: row.acks,
                 })
                 .collect(),
         )
@@ -6130,8 +6172,16 @@ async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sideca
     let mut buffer = super::ReordererOutputBuffer::default();
     buffer.push(
         batch(vec![
-            (3, 300, AckSet::empty()),
-            (1, 100, first_ordered_acks),
+            ReorderedRow {
+                sequence: 3,
+                ingested_at: 300,
+                acks: AckSet::empty(),
+            },
+            ReorderedRow {
+                sequence: 1,
+                ingested_at: 100,
+                acks: first_ordered_acks,
+            },
         ]),
         Arc::new(vec![
             super::ReordererRowOrder {
@@ -6146,7 +6196,18 @@ async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sideca
         Timestamp::from_unix_nanos(10),
     );
     buffer.push(
-        batch(vec![(2, 200, AckSet::empty()), (1, 101, AckSet::empty())]),
+        batch(vec![
+            ReorderedRow {
+                sequence: 2,
+                ingested_at: 200,
+                acks: AckSet::empty(),
+            },
+            ReorderedRow {
+                sequence: 1,
+                ingested_at: 101,
+                acks: AckSet::empty(),
+            },
+        ]),
         Arc::new(vec![
             super::ReordererRowOrder {
                 key: vec![super::ReorderKeyPart::UInt64(2)],
@@ -7074,12 +7135,36 @@ async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
     let partial_schema = test_schema(&[("total", ParseAsType::I64)]);
     let state_schema = test_schema(&[("plan", ParseAsType::String)]);
     let output_schema = test_optional_schema(&[
-        ("input_id", ParseAsType::U32, false),
-        ("message_digest", ParseAsType::String, false),
-        ("attempted", ParseAsType::I64, true),
-        ("plan", ParseAsType::String, false),
-        ("operation", ParseAsType::String, false),
-        ("operation_index", ParseAsType::U32, true),
+        OptionalTestField {
+            name: "input_id",
+            ty: ParseAsType::U32,
+            optional: false,
+        },
+        OptionalTestField {
+            name: "message_digest",
+            ty: ParseAsType::String,
+            optional: false,
+        },
+        OptionalTestField {
+            name: "attempted",
+            ty: ParseAsType::I64,
+            optional: true,
+        },
+        OptionalTestField {
+            name: "plan",
+            ty: ParseAsType::String,
+            optional: false,
+        },
+        OptionalTestField {
+            name: "operation",
+            ty: ParseAsType::String,
+            optional: false,
+        },
+        OptionalTestField {
+            name: "operation_index",
+            ty: ParseAsType::U32,
+            optional: true,
+        },
     ]);
     let materialized_specs = HashMap::from_iter([(
         named("profiles"),
@@ -7819,11 +7904,11 @@ async fn client_resource_mounts_expand_into_runtime_paths() {
     runtime.attach_resources(
         Arc::new(store),
         ResourceVersionStatus {
-            next_version_by_resource: SortedVec::from_unsorted(vec![(
-                mount_domain.clone(),
-                named("dev_tls"),
-                2,
-            )]),
+            next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {
+                domain: mount_domain.clone(),
+                identifier: named("dev_tls"),
+                next_version: 2,
+            }]),
             versions: SortedVec::from_unsorted(vec![ResourceVersion {
                 id: ResourceId::new(mount_domain.clone(), named("dev_tls"), 1),
                 root_checksum: "root".to_string(),
@@ -8214,12 +8299,12 @@ fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
 fn branched_node_specs_capture_downstream_processing_tree() {
     let specs = super::branched_node_specs_from_models(
         [
-            branch_model_tuple("tenant", "orders", &["tenant"]),
-            branch_model_tuple("tenant", "projected_orders", &["tenant"]),
-            (
-                ModelKind::Ingestor,
-                named("orders_ingestor"),
-                nervix_models::Model::Ingestor(CreateIngestor {
+            branch_model("tenant", "orders", &["tenant"]),
+            branch_model("tenant", "projected_orders", &["tenant"]),
+            PlannedModel {
+                kind: ModelKind::Ingestor,
+                identifier: named("orders_ingestor"),
+                model: nervix_models::Model::Ingestor(CreateIngestor {
                     name: named("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
@@ -8234,11 +8319,11 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_orders"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_orders"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("orders"))
                         .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
@@ -8251,11 +8336,11 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_projected_orders"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_projected_orders"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_projected_orders"),
                     from: ProcessorInputs::single(named("projected_orders")),
                     output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
@@ -8267,11 +8352,11 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
-            (
-                ModelKind::Emitter,
-                named("orders_emitter"),
-                nervix_models::Model::Emitter(CreateEmitter {
+            },
+            PlannedModel {
+                kind: ModelKind::Emitter,
+                identifier: named("orders_emitter"),
+                model: nervix_models::Model::Emitter(CreateEmitter {
                     name: named("orders_emitter"),
                     from: ProcessorInputs::single(named("aggregated_orders")),
                     encode_using_codec: Some(named("orders_codec")),
@@ -8291,7 +8376,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     construction: nervix_models::RouteConstruction::default(),
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -8341,12 +8426,12 @@ fn branched_node_specs_capture_downstream_processing_tree() {
 fn branched_node_specs_capture_window_processor_as_branch_node() {
     let specs = super::branched_node_specs_from_models(
         [
-            branch_model_tuple("host", "metrics", &["host"]),
-            branch_model_tuple("host", "metric_summary", &["host"]),
-            (
-                ModelKind::Ingestor,
-                named("metrics_ingestor"),
-                nervix_models::Model::Ingestor(CreateIngestor {
+            branch_model("host", "metrics", &["host"]),
+            branch_model("host", "metric_summary", &["host"]),
+            PlannedModel {
+                kind: ModelKind::Ingestor,
+                identifier: named("metrics_ingestor"),
+                model: nervix_models::Model::Ingestor(CreateIngestor {
                     name: named("metrics_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("metrics")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
@@ -8361,11 +8446,11 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
-            ),
-            (
-                ModelKind::WindowProcessor,
-                named("metric_window"),
-                nervix_models::Model::WindowProcessor(CreateWindowProcessor {
+            },
+            PlannedModel {
+                kind: ModelKind::WindowProcessor,
+                identifier: named("metric_window"),
+                model: nervix_models::Model::WindowProcessor(CreateWindowProcessor {
                     name: named("metric_window"),
                     from: ProcessorInputs::single(named("metrics")),
                     output_routes: window_outputs(
@@ -8385,11 +8470,11 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_summary"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_summary"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_summary"),
                     from: ProcessorInputs::single(named("metric_summary")),
                     output_routes: (ProcessorOutputs::single(named("projected_summary")))
@@ -8401,7 +8486,7 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -8444,12 +8529,12 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
 fn branched_node_specs_capture_inferencer_as_branch_node() {
     let specs = super::branched_node_specs_from_models(
         [
-            branch_model_tuple("tenant", "features", &["tenant"]),
-            branch_model_tuple("tenant", "scores", &["tenant"]),
-            (
-                ModelKind::Ingestor,
-                named("features_ingestor"),
-                nervix_models::Model::Ingestor(CreateIngestor {
+            branch_model("tenant", "features", &["tenant"]),
+            branch_model("tenant", "scores", &["tenant"]),
+            PlannedModel {
+                kind: ModelKind::Ingestor,
+                identifier: named("features_ingestor"),
+                model: nervix_models::Model::Ingestor(CreateIngestor {
                     name: named("features_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("features")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
@@ -8464,11 +8549,11 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
-            ),
-            (
-                ModelKind::Inferencer,
-                named("score_model"),
-                nervix_models::Model::Inferencer(CreateInferencer {
+            },
+            PlannedModel {
+                kind: ModelKind::Inferencer,
+                identifier: named("score_model"),
+                model: nervix_models::Model::Inferencer(CreateInferencer {
                     name: named("score_model"),
                     from: ProcessorInputs::single(named("features")),
                     output_routes: (ProcessorOutputs::single(named("scores")))
@@ -8490,11 +8575,11 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                     filter_where: Some(expression("input.active")),
                     materialized_state: Vec::new(),
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_scores"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_scores"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_scores"),
                     from: ProcessorInputs::single(named("scores")),
                     output_routes: (ProcessorOutputs::single(named("projected_scores")))
@@ -8506,7 +8591,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -8560,11 +8645,11 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
 fn branched_node_specs_capture_reingestor_entrypoint_tree() {
     let specs = super::branched_node_specs_from_models(
         [
-            branch_model_tuple("tenant", "tenant_orders", &["tenant"]),
-            (
-                ModelKind::Reingestor,
-                named("tenant_partition"),
-                nervix_models::Model::Reingestor(CreateReingestor {
+            branch_model("tenant", "tenant_orders", &["tenant"]),
+            PlannedModel {
+                kind: ModelKind::Reingestor,
+                identifier: named("tenant_partition"),
+                model: nervix_models::Model::Reingestor(CreateReingestor {
                     name: named("tenant_partition"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: with_inherit_all(ProcessorOutputs::single(named(
@@ -8576,11 +8661,11 @@ fn branched_node_specs_capture_reingestor_entrypoint_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_orders"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_orders"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("tenant_orders")),
                     output_routes: (ProcessorOutputs::single(named("projected_orders")))
@@ -8592,7 +8677,7 @@ fn branched_node_specs_capture_reingestor_entrypoint_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -8620,13 +8705,13 @@ fn branched_node_specs_capture_reingestor_entrypoint_tree() {
 fn branched_node_specs_capture_processor_output_route_tree() {
     let specs = super::branched_node_specs_from_models(
         [
-            branch_model_tuple("tenant", "orders", &["tenant"]),
-            branch_model_tuple("tenant", "urgent_orders", &["tenant"]),
-            branch_model_tuple("tenant", "default_orders", &["tenant"]),
-            (
-                ModelKind::Ingestor,
-                named("orders_ingestor"),
-                nervix_models::Model::Ingestor(CreateIngestor {
+            branch_model("tenant", "orders", &["tenant"]),
+            branch_model("tenant", "urgent_orders", &["tenant"]),
+            branch_model("tenant", "default_orders", &["tenant"]),
+            PlannedModel {
+                kind: ModelKind::Ingestor,
+                identifier: named("orders_ingestor"),
+                model: nervix_models::Model::Ingestor(CreateIngestor {
                     name: named("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
@@ -8641,11 +8726,11 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("orders_splitter"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("orders_splitter"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("orders_splitter"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: (ProcessorOutputs::new(vec![
@@ -8675,11 +8760,11 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                     filter_where: Some(expression("input.active")),
                     materialized_state: Vec::new(),
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_urgent"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_urgent"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_urgent"),
                     from: ProcessorInputs::single(named("urgent_orders")),
                     output_routes: (ProcessorOutputs::single(named("urgent_projected")))
@@ -8691,11 +8776,11 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_default"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_default"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_default"),
                     from: ProcessorInputs::single(named("default_orders")),
                     output_routes: (ProcessorOutputs::single(named("default_projected")))
@@ -8707,7 +8792,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -8752,13 +8837,13 @@ fn branched_node_specs_capture_processor_output_route_tree() {
 fn branched_node_specs_capture_junction_as_single_branch_processor() {
     let specs = super::branched_node_specs_from_models(
         [
-            branch_model_tuple("tenant", "left_stream", &["tenant"]),
-            branch_model_tuple("tenant", "right_stream", &["tenant"]),
-            branch_model_tuple("tenant", "joined_stream", &["tenant"]),
-            (
-                ModelKind::Ingestor,
-                named("left_ingestor"),
-                nervix_models::Model::Ingestor(CreateIngestor {
+            branch_model("tenant", "left_stream", &["tenant"]),
+            branch_model("tenant", "right_stream", &["tenant"]),
+            branch_model("tenant", "joined_stream", &["tenant"]),
+            PlannedModel {
+                kind: ModelKind::Ingestor,
+                identifier: named("left_ingestor"),
+                model: nervix_models::Model::Ingestor(CreateIngestor {
                     name: named("left_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("left_stream")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
@@ -8774,11 +8859,11 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
 
                     filter_where: None,
                 }),
-            ),
-            (
-                ModelKind::Ingestor,
-                named("right_ingestor"),
-                nervix_models::Model::Ingestor(CreateIngestor {
+            },
+            PlannedModel {
+                kind: ModelKind::Ingestor,
+                identifier: named("right_ingestor"),
+                model: nervix_models::Model::Ingestor(CreateIngestor {
                     name: named("right_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("right_stream")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
@@ -8794,11 +8879,11 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
 
                     filter_where: None,
                 }),
-            ),
-            (
-                ModelKind::Junction,
-                named("join_streams"),
-                nervix_models::Model::Junction(CreateJunction {
+            },
+            PlannedModel {
+                kind: ModelKind::Junction,
+                identifier: named("join_streams"),
+                model: nervix_models::Model::Junction(CreateJunction {
                     name: named("join_streams"),
                     from: ProcessorInputs::new(
                         vec![named("left_stream"), named("right_stream")],
@@ -8811,11 +8896,11 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_joined"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_joined"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_joined"),
                     from: ProcessorInputs::single(named("joined_stream")),
                     output_routes: (ProcessorOutputs::single(named("projected_joined")))
@@ -8827,7 +8912,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -8871,12 +8956,12 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
 fn branched_node_specs_capture_single_processor_output_route_tree() {
     let specs = super::branched_node_specs_from_models(
         [
-            branch_model_tuple("tenant", "orders", &["tenant"]),
-            branch_model_tuple("tenant", "projected_orders", &["tenant"]),
-            (
-                ModelKind::Ingestor,
-                named("orders_ingestor"),
-                nervix_models::Model::Ingestor(CreateIngestor {
+            branch_model("tenant", "orders", &["tenant"]),
+            branch_model("tenant", "projected_orders", &["tenant"]),
+            PlannedModel {
+                kind: ModelKind::Ingestor,
+                identifier: named("orders_ingestor"),
+                model: nervix_models::Model::Ingestor(CreateIngestor {
                     name: named("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
@@ -8892,11 +8977,11 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
 
                     filter_where: None,
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("orders_filter"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("orders_filter"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("orders_filter"),
                     from: ProcessorInputs::new(
                         vec![named("orders")],
@@ -8914,11 +8999,11 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                     filter_where: Some(expression("input.active")),
                     materialized_state: Vec::new(),
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_projected"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_projected"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_projected"),
                     from: ProcessorInputs::single(named("projected_orders")),
                     output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
@@ -8930,7 +9015,7 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -8972,10 +9057,10 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
 fn branched_node_specs_include_singleton_branch_for_empty_branching() {
     let specs = super::branched_node_specs_from_models(
         [
-            (
-                ModelKind::Ingestor,
-                named("orders_ingestor"),
-                nervix_models::Model::Ingestor(CreateIngestor {
+            PlannedModel {
+                kind: ModelKind::Ingestor,
+                identifier: named("orders_ingestor"),
+                model: nervix_models::Model::Ingestor(CreateIngestor {
                     name: named("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
@@ -8991,11 +9076,11 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
 
                     filter_where: None,
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_orders"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_orders"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: (ProcessorOutputs::single(named("projected_orders")))
@@ -9007,7 +9092,7 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -9028,21 +9113,21 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
 fn branched_processor_specs_do_not_require_an_entrypoint() {
     let specs = super::branched_node_specs_from_models(
         [
-            (
-                ModelKind::Relay,
-                named("orders"),
-                nervix_models::Model::Relay(CreateRelay {
+            PlannedModel {
+                kind: ModelKind::Relay,
+                identifier: named("orders"),
+                model: nervix_models::Model::Relay(CreateRelay {
                     name: named("orders"),
                     schema: named("order_event"),
                     buffer: 1,
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
-            ),
-            (
-                ModelKind::Deduplicator,
-                named("dedup_orders"),
-                nervix_models::Model::Deduplicator(CreateDeduplicator {
+            },
+            PlannedModel {
+                kind: ModelKind::Deduplicator,
+                identifier: named("dedup_orders"),
+                model: nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: (ProcessorOutputs::single(named("projected_orders")))
@@ -9054,7 +9139,7 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -9070,21 +9155,21 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
 fn branched_wasm_processor_specs_preserve_global_error_policy() {
     let specs = super::branched_node_specs_from_models(
         [
-            (
-                ModelKind::Relay,
-                named("orders"),
-                nervix_models::Model::Relay(CreateRelay {
+            PlannedModel {
+                kind: ModelKind::Relay,
+                identifier: named("orders"),
+                model: nervix_models::Model::Relay(CreateRelay {
                     name: named("orders"),
                     schema: named("order_event"),
                     buffer: 1,
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
-            ),
-            (
-                ModelKind::WasmProcessor,
-                named("filter_orders"),
-                nervix_models::Model::WasmProcessor(CreateWasmProcessor {
+            },
+            PlannedModel {
+                kind: ModelKind::WasmProcessor,
+                identifier: named("filter_orders"),
+                model: nervix_models::Model::WasmProcessor(CreateWasmProcessor {
                     name: named("filter_orders"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: ProcessorOutputs::single(named("filtered_orders")),
@@ -9101,7 +9186,7 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -9121,11 +9206,11 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
 fn branched_node_specs_include_reingestor_with_declared_branching() {
     let specs = super::branched_node_specs_from_models(
         [
-            branch_model_tuple("tenant", "tenant_notifications", &["tenant"]),
-            (
-                ModelKind::Reingestor,
-                named("tenant_partition"),
-                nervix_models::Model::Reingestor(CreateReingestor {
+            branch_model("tenant", "tenant_notifications", &["tenant"]),
+            PlannedModel {
+                kind: ModelKind::Reingestor,
+                identifier: named("tenant_partition"),
+                model: nervix_models::Model::Reingestor(CreateReingestor {
                     name: named("tenant_partition"),
                     from: ProcessorInputs::single(named("notifications")),
                     output_routes: (ProcessorOutputs::single(named("tenant_notifications")))
@@ -9135,7 +9220,7 @@ fn branched_node_specs_include_reingestor_with_declared_branching() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-            ),
+            },
         ]
         .into_iter(),
     );
@@ -12114,8 +12199,16 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let state_schema = test_optional_schema(&[
-        ("status", ParseAsType::String, false),
-        ("note", ParseAsType::String, true),
+        OptionalTestField {
+            name: "status",
+            ty: ParseAsType::String,
+            optional: false,
+        },
+        OptionalTestField {
+            name: "note",
+            ty: ParseAsType::String,
+            optional: true,
+        },
     ]);
     let (shutdown, _) = watch::channel(false);
     let materialized_stream_specs = ["profiles", "rules"]
