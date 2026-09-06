@@ -137,9 +137,7 @@ impl RuntimeTestHooks {
     }
 
     pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {
-        self.transaction_binding_drops
-            .nodes
-            .insert(node_id.into(), ());
+        self.transaction_binding_drops.nodes.insert(node_id, ());
     }
 
     pub fn pause_transaction_commit_after(

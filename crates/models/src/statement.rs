@@ -4419,12 +4419,10 @@ mod tests {
         PlacementPolicy, RelayBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
-        BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, CreateIngestor,
-        CreateJunction, DomainName, EmitterName, EndpointIngestMode, Expression, FieldName,
-        IngestQuiesceMode, IngestSource, IngestorName, Literal, LookupName,
-        MaterializedStateDependency, MaterializedStatePolicy, ModelName, ParseAsType,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayName, ResourceName, SchemaField,
-        SchemaName, SubscriptionName, TopicName, UdfName, UserName, WireSchemaName,
+        ClusterNodeName, CreateIngestor, CreateJunction, DomainName, EndpointIngestMode,
+        Expression, IngestQuiesceMode, IngestSource, Literal, MaterializedStateDependency,
+        MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        SchemaField,
     };
 
     fn named<N>(raw: &str) -> N

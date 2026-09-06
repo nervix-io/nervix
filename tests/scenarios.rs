@@ -2996,7 +2996,7 @@ async fn given_leader_forgets_transaction_bindings(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
     world
         .runtime_test_hooks
-        .drop_transaction_bindings_on(leader);
+        .drop_transaction_bindings_on(crate::common::cluster::node_name(&leader));
 }
 
 #[given(expr = "transaction commit on node {string} pauses after {int} statement")]
@@ -3006,9 +3006,10 @@ async fn given_transaction_commit_pause(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    world
-        .runtime_test_hooks
-        .pause_transaction_commit_after(node_id, completed_statements);
+    world.runtime_test_hooks.pause_transaction_commit_after(
+        crate::common::cluster::node_name(&node_id),
+        completed_statements,
+    );
 }
 
 #[given(expr = "the entity gate for domain {string} pauses after engagement")]
@@ -3043,9 +3044,10 @@ async fn then_transaction_commit_pause_is_reached(
     let node_id = expand_placeholders(world, &node_id);
     tokio::time::timeout(
         Duration::from_secs(10),
-        world
-            .runtime_test_hooks
-            .wait_for_transaction_commit_pause(&node_id, completed_statements),
+        world.runtime_test_hooks.wait_for_transaction_commit_pause(
+            &crate::common::cluster::node_name(&node_id),
+            completed_statements,
+        ),
     )
     .await
     .expect("transaction commit did not reach the armed pause");
@@ -3058,9 +3060,10 @@ async fn when_transaction_commit_pause_is_released(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    world
-        .runtime_test_hooks
-        .release_transaction_commit_pause(&node_id, completed_statements);
+    world.runtime_test_hooks.release_transaction_commit_pause(
+        &crate::common::cluster::node_name(&node_id),
+        completed_statements,
+    );
 }
 
 #[when("the cluster is restarted")]

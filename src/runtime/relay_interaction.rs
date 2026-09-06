@@ -24,7 +24,7 @@ use std::{future::pending, task::Poll};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt as _;
-use nervix_models::{FieldName, RelayName, SchemaName};
+use nervix_models::RelayName;
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, watch},
@@ -865,7 +865,9 @@ async fn wait_until(deadline: Option<Instant>) {
 mod tests {
     use std::{num::NonZeroUsize, sync::OnceLock};
 
-    use nervix_models::{CreateSchema, ModelName, ParseAsType, RelayName, Timestamp};
+    use nervix_models::{
+        CreateSchema, FieldName, ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
+    };
 
     use super::*;
     use crate::{
@@ -886,13 +888,7 @@ mod tests {
                         &ModelName::parse("relay_interaction_test").expect("valid schema"),
                     ),
                     fields: vec![nervix_models::SchemaField {
-                        name: FieldName::from(FieldName::from(FieldName::from(
-                            &ModelName::parse("value")
-                                .expect("valid field")
-                                .clone()
-                                .clone()
-                                .clone(),
-                        ))),
+                        name: FieldName::parse("value").expect("valid field"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
@@ -923,13 +919,7 @@ mod tests {
                 &ModelName::parse("relay_interaction_alternate").expect("valid alternate schema"),
             ),
             fields: vec![nervix_models::SchemaField {
-                name: FieldName::from(FieldName::from(FieldName::from(
-                    &ModelName::parse("value")
-                        .expect("valid field")
-                        .clone()
-                        .clone()
-                        .clone(),
-                ))),
+                name: FieldName::parse("value").expect("valid field"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,

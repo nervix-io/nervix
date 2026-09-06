@@ -1,5 +1,5 @@
 use chumsky::prelude::*;
-use nervix_models::{ClusterNodeName, CordonNode, DrainNode, UncordonNode};
+use nervix_models::{CordonNode, DrainNode, UncordonNode};
 
 use crate::{
     lexer::{Identifier, Token},
@@ -35,6 +35,8 @@ pub fn drain_node_parser<'src>()
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::ClusterNodeName;
+
     use super::*;
     use crate::lexer::{Token, lex};
 

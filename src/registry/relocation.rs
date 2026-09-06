@@ -7,7 +7,7 @@
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClusterNodeName, Model, PlacementName, PlacementPolicy, PlacementRuntimeNode, RelocationMember,
+    Model, PlacementName, PlacementPolicy, PlacementRuntimeNode, RelocationMember,
     RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
 };
 use strum::AsRefStr;

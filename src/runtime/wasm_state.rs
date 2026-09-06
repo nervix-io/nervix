@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::RandomState;
 use dashmap::DashMap;
-use nervix_models::{ClusterNodeName, FieldName};
+use nervix_models::ClusterNodeName;
 use tokio::sync::Notify;
 
 use super::{PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement};
@@ -98,7 +98,7 @@ impl ReplicatedWasmProcessorState {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{DomainName, ModelKind, ModelName};
+    use nervix_models::{DomainName, FieldName, ModelKind, ModelName};
 
     use super::*;
     use crate::{

@@ -1256,7 +1256,7 @@ impl MqttIngestor {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{ClientConfigEntry, DomainName, IngestorName, MqttSession};
+    use nervix_models::{ClientConfigEntry, MqttSession};
     use rumqttc::BrokerSessionResumePolicy;
 
     use super::{MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor};

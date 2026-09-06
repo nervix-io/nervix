@@ -1,7 +1,4 @@
-use nervix_models::{
-    DomainName, DomainSchedule, DynamicModelUpdate, ModelKind, ModelName, QuiesceLevel,
-    ScheduledNode,
-};
+use nervix_models::{DomainSchedule, DynamicModelUpdate, ModelKind, QuiesceLevel, ScheduledNode};
 use sorted_vec::SortedSet;
 
 use crate::registry::RegistryEntity;
@@ -467,7 +464,6 @@ mod tests {
                     kind: ModelKind::Ingestor,
                     identifier: named("event_source"),
                 }],
-                reassignments: Vec::new(),
                 dynamic_updates: Vec::new(),
             }
         );

@@ -50,7 +50,10 @@ fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
         dimensions: vec![InferencerTensorDimension::Fixed(size)],
     }
 }
-use nervix_models::{BranchName, ClusterNodeName, ReingestorName, SchemaName};
+use nervix_models::{
+    BranchName, ClientName, ClusterNodeName, CodecName, DeduplicatorName, EmitterName,
+    ReingestorName, SchemaName, WireSchemaName,
+};
 use tempfile::tempdir;
 use tokio::{
     sync::{Mutex, mpsc, watch},
@@ -169,9 +172,9 @@ async fn execute_filter_map_for_test(
 fn domain_drain_status_reports_structured_emitter_publishing_state() {
     let runtime = super::Runtime::new();
     let domain = domain("default");
-    let confirming = named("confirming");
-    let retrying = named("retrying");
-    let iceberg = named("iceberg");
+    let confirming = named::<EmitterName>("confirming");
+    let retrying = named::<EmitterName>("retrying");
+    let iceberg = named::<EmitterName>("iceberg");
 
     for (emitter, pending_messages) in [
         (&confirming, 3_usize),
@@ -242,7 +245,7 @@ fn domain_drain_status_reports_structured_emitter_publishing_state() {
     .into_iter()
     .map(|identifier| crate::registry::RegistryEntity {
         kind: ModelKind::Emitter,
-        identifier,
+        identifier: ModelName::from(&identifier),
     })
     .collect::<Vec<_>>();
     let entity_status = runtime
@@ -386,9 +389,9 @@ fn compile_window_aggregate_for_test(
     output_schema: &super::CompiledSchema,
 ) -> super::CompiledWindowAggregateProgram {
     let input_relay = named::<RelayName>("events");
-    let output_relay = named("summary");
+    let output_relay = named::<RelayName>("summary");
     let input_schema = compile_schema(&CreateSchema {
-        name: SchemaName::from(&input_relay.clone()),
+        name: SchemaName::from(&ModelName::from(&input_relay)),
         fields: vec![SchemaField {
             name: named("latency"),
             ty: input_type,
@@ -1806,13 +1809,13 @@ fn validate_wasm_test_output_groups(
 ) -> Result<Vec<super::WasmMaterializedOutput>, super::WasmOutputError> {
     let output_schemas = schemas
         .into_iter()
-        .map(|(relay, schema)| (named::<ModelName>(relay), schema))
+        .map(|(relay, schema)| (named::<RelayName>(relay), schema))
         .collect::<Vec<_>>();
     let output_routes = super::RelayProcessorOutputsNode {
         routes: output_schemas
             .iter()
             .map(|(relay, _)| super::RelayProcessorOutputNode {
-                relay: RelayName::from(&relay.clone()),
+                relay: relay.clone(),
                 construction: nervix_models::RouteConstruction::default(),
                 branch: None,
                 flush_policy: None,
@@ -3156,7 +3159,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let schema = named::<SchemaName>("notification");
-    let relay = named("notifications");
+    let relay = named::<RelayName>("notifications");
     let running = DomainState {
         id: domain.clone(),
         config: DomainConfig {
@@ -3190,7 +3193,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
                 ),
                 scheduled_model(
                     ModelKind::Relay,
-                    relay.clone(),
+                    ModelName::from(&relay),
                     nervix_models::Model::Relay(CreateRelay {
                         name: relay.clone(),
                         schema,
@@ -3242,7 +3245,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let schema = named::<SchemaName>("notification");
-    let relay = named("notifications");
+    let relay = named::<RelayName>("notifications");
     let domains = BTreeMap::from([(
         domain.clone(),
         DomainState {
@@ -3286,7 +3289,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
                 schema_node,
                 scheduled_model(
                     ModelKind::Relay,
-                    relay.clone(),
+                    ModelName::from(&relay),
                     nervix_models::Model::Relay(CreateRelay {
                         name: relay.clone(),
                         schema,
@@ -3349,11 +3352,11 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
     )]));
 
     let schema = named::<SchemaName>("notification");
-    let wire_schema = named("notification_wire");
-    let codec = named("notification_json");
-    let relay = named("notifications");
-    let client = named("mqtt_main");
-    let ingestor = named("mqtt_notifications");
+    let wire_schema = named::<WireSchemaName>("notification_wire");
+    let codec = named::<CodecName>("notification_json");
+    let relay = named::<RelayName>("notifications");
+    let client = named::<ClientName>("mqtt_main");
+    let ingestor = named::<IngestorName>("mqtt_notifications");
     let result = runtime
         .apply_cluster_schedule(
             &ClusterNodeName::parse("node-1").expect("valid name"),
@@ -3376,7 +3379,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::WireJsonSchema,
-                            wire_schema.clone(),
+                            ModelName::from(&wire_schema),
                             nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
                                 name: wire_schema.clone(),
                                 strictness: Default::default(),
@@ -3389,7 +3392,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::Codec,
-                            codec.clone(),
+                            ModelName::from(&codec),
                             nervix_models::Model::Codec(CreateCodec {
                                 name: codec.clone(),
                                 wire_format: CodecWireFormat::Json,
@@ -3400,7 +3403,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::Relay,
-                            relay.clone(),
+                            ModelName::from(&relay),
                             nervix_models::Model::Relay(CreateRelay {
                                 name: relay.clone(),
                                 schema: schema.clone(),
@@ -3411,7 +3414,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::Client,
-                            client.clone(),
+                            ModelName::from(&client),
                             nervix_models::Model::ClientMqtt(CreateClientMqtt {
                                 name: client.clone(),
                                 mount: None,
@@ -3429,7 +3432,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         ),
                         scheduled_model(
                             ModelKind::Ingestor,
-                            ingestor.clone(),
+                            ModelName::from(&ingestor),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
                                 output_routes: with_inherit_all(ProcessorOutputs::single(
@@ -3497,11 +3500,11 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
     )]));
 
     let schema = named::<SchemaName>("notification");
-    let wire_schema = named("notification_wire");
-    let codec = named("notification_json");
-    let relay = named("notifications");
-    let client = named("mqtt_main");
-    let ingestor = named("mqtt_notifications");
+    let wire_schema = named::<WireSchemaName>("notification_wire");
+    let codec = named::<CodecName>("notification_json");
+    let relay = named::<RelayName>("notifications");
+    let client = named::<ClientName>("mqtt_main");
+    let ingestor = named::<IngestorName>("mqtt_notifications");
     let result = runtime
         .apply_cluster_schedule(
             &ClusterNodeName::parse("node-1").expect("valid name"),
@@ -3524,7 +3527,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::WireJsonSchema,
-                            wire_schema.clone(),
+                            ModelName::from(&wire_schema),
                             nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
                                 name: wire_schema.clone(),
                                 strictness: Default::default(),
@@ -3537,7 +3540,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::Codec,
-                            codec.clone(),
+                            ModelName::from(&codec),
                             nervix_models::Model::Codec(CreateCodec {
                                 name: codec.clone(),
                                 wire_format: CodecWireFormat::Json,
@@ -3548,7 +3551,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::Relay,
-                            relay.clone(),
+                            ModelName::from(&relay),
                             nervix_models::Model::Relay(CreateRelay {
                                 name: relay.clone(),
                                 schema: schema.clone(),
@@ -3559,7 +3562,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::Client,
-                            client.clone(),
+                            ModelName::from(&client),
                             nervix_models::Model::ClientMqtt(CreateClientMqtt {
                                 name: client.clone(),
                                 mount: None,
@@ -3571,7 +3574,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         ),
                         scheduled_model(
                             ModelKind::Ingestor,
-                            ingestor.clone(),
+                            ModelName::from(&ingestor),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
                                 output_routes: with_inherit_all(ProcessorOutputs::single(
@@ -3855,7 +3858,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     *runtime.local_node_id.write() = Some(ClusterNodeName::parse("node-1").expect("valid name"));
     let domain = domain("default");
     let event_schema = named::<SchemaName>("event");
-    let processor = named("deduplicate_events");
+    let processor = named::<DeduplicatorName>("deduplicate_events");
     let schedule = DomainSchedule {
         domain: domain.clone(),
         nodes: vec![
@@ -3896,7 +3899,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
             ),
             scheduled_model(
                 ModelKind::Deduplicator,
-                processor.clone(),
+                ModelName::from(&processor),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: processor.clone(),
                     from: ProcessorInputs::single(named("events")),
@@ -3927,7 +3930,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
         .expect("scheduled deduplicator must build");
     let entity = crate::registry::RegistryEntity {
         kind: ModelKind::Deduplicator,
-        identifier: processor.clone(),
+        identifier: ModelName::from(&processor),
     };
     assert_eq!(
         runtime.entity_pause_relays(&domain, std::slice::from_ref(&entity)),
@@ -3962,7 +3965,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
             .node_tasks
             .contains_key(&crate::registry::RegistryEntity {
                 kind: ModelKind::Deduplicator,
-                identifier: processor,
+                identifier: ModelName::from(&processor),
             })
     );
 }
@@ -3973,7 +3976,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     *runtime.local_node_id.write() = Some(ClusterNodeName::parse("node-1").expect("valid name"));
     let domain = domain("default");
     let event_schema = named::<SchemaName>("event");
-    let processor = named("deduplicate_events");
+    let processor = named::<DeduplicatorName>("deduplicate_events");
     let schedule = DomainSchedule {
         domain: domain.clone(),
         nodes: vec![
@@ -4014,7 +4017,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
             ),
             scheduled_model(
                 ModelKind::Deduplicator,
-                processor.clone(),
+                ModelName::from(&processor),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: processor.clone(),
                     from: ProcessorInputs::single(named("events")),
@@ -4057,7 +4060,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     config.mode = AckMode::Detached;
     let entity = crate::registry::RegistryEntity {
         kind: ModelKind::Deduplicator,
-        identifier: processor.clone(),
+        identifier: ModelName::from(&processor),
     };
 
     runtime
@@ -4070,7 +4073,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
         .get(&super::RuntimeStateSchemaKey::new(
             domain,
             ModelKind::Deduplicator,
-            processor,
+            ModelName::from(&processor),
         ))
         .map(|entry| *entry.value());
     assert_eq!(
@@ -4085,8 +4088,8 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
 fn processor_template_refresh_is_not_junction_specific() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
-    let input = named("events");
-    let output = named("unique_events");
+    let input = named::<RelayName>("events");
+    let output = named::<RelayName>("unique_events");
     let processor = named::<ModelName>("deduplicate_events");
     let collect_policy = super::RuntimeInputCollectPolicy {
         interval: Duration::from_secs(1),
@@ -4233,7 +4236,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
     let now = super::current_timestamp();
     let dequeued_work = || {
         super::NodeQuiesceWorkGuard::begin(
-            runtime.node_quiesce_counters(&domain, &named::<ModelName>("dedup_users")),
+            runtime.node_quiesce_counters(&domain, named::<ModelName>("dedup_users")),
         )
     };
     let branch_batch = |user_id: i64, tenant: &str| {
@@ -4645,8 +4648,8 @@ async fn processor_handoff_drains_ready_batches_from_every_input() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let processor = named::<ModelName>("route_orders");
-    let orders = named("orders");
-    let returns = named("returns");
+    let orders = named::<RelayName>("orders");
+    let returns = named::<RelayName>("returns");
     let mut template = junction_branch_template(processor.as_str(), orders.as_str());
     template
         .processors
@@ -5976,7 +5979,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let schema = named::<SchemaName>("notification");
-    let relay = named("notifications");
+    let relay = named::<RelayName>("notifications");
 
     runtime
         .rebuild_domain_from_schedule(
@@ -6000,7 +6003,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
                     ),
                     scheduled_model(
                         ModelKind::Relay,
-                        relay.clone(),
+                        ModelName::from(&relay),
                         nervix_models::Model::Relay(CreateRelay {
                             name: relay.clone(),
                             schema,
@@ -7407,15 +7410,13 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
     ]);
     let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
     let state_schema = test_schema(&[("status", ParseAsType::String)]);
-    let branch = named::<BranchName>("by_tenant");
+    let branch = named::<FieldName>("by_tenant");
     let materialized_specs = HashMap::from_iter([(
         named("profiles"),
         super::RuntimeMaterializedRelaySpec::new(
             state_schema.arrow_schema(),
             super::VmSchemaSensitivity::default(),
-            vec![FieldName::from(FieldName::from(FieldName::from(
-                &branch.clone().clone().clone(),
-            )))],
+            vec![branch.clone()],
         ),
     )]);
     let program = super::CorrelatorOutputCompileContext {
@@ -7434,9 +7435,7 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
         runtime: super::RuntimeVmCompileContext {
             available_materialized_streams: &materialized_specs,
             available_lookups: &HashMap::default(),
-            current_branching: std::slice::from_ref(&FieldName::from(FieldName::from(
-                FieldName::from(&branch.clone().clone().clone()),
-            ))),
+            current_branching: std::slice::from_ref(&branch),
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
             udfs: None,
@@ -11035,7 +11034,7 @@ async fn filter_map_on_runtime_row_evaluates_only_selected_arrow_row() {
     let where_clause = expression("input.value = (3 AS U32)");
     let program = super::compile_session_filter_map_program(
         &domain("default"),
-        &named::<ModelName>("selected_row_subscription"),
+        named::<ModelName>("selected_row_subscription"),
         Some(&where_clause),
         schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
@@ -11198,7 +11197,7 @@ async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
     }));
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
-        &named::<ModelName>("logic_ingestor"),
+        named::<ModelName>("logic_ingestor"),
         &IngestSource::Endpoint {
             endpoint: named("logic_endpoint"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
@@ -11467,7 +11466,7 @@ async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
     }));
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
-        &named::<ModelName>("logic_ingestor"),
+        named::<ModelName>("logic_ingestor"),
         &IngestSource::Endpoint {
             endpoint: named("logic_endpoint"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
@@ -11526,7 +11525,7 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     ]);
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
-        &named::<ModelName>("logic_ingestor"),
+        named::<ModelName>("logic_ingestor"),
         &IngestSource::Kafka {
             client: named("logic_kafka"),
             topic: named("logic_notifications"),
@@ -11722,7 +11721,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     };
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
-        &named::<ModelName>("header_ingestor"),
+        named::<ModelName>("header_ingestor"),
         &source,
         &construction(
             "INHERIT tenant SET first = read_header(lower(input.header_name)), total = \

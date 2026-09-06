@@ -1,7 +1,7 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClusterNodeName, ModelKind, Relocation, RelocationMember, RelocationPreferenceOverride,
+    ModelKind, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection,
 };
 
@@ -208,7 +208,7 @@ pub fn suggest_describe_relocation(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::Statement;
+    use nervix_models::{ClusterNodeName, Statement};
 
     use super::*;
     use crate::statement::{parse_statement, suggest_statement};

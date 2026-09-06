@@ -22,7 +22,13 @@ use lapin::{
     types::FieldTable,
 };
 use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
+use nervix_models::ClusterNodeName;
 pub use nervix_proto as proto;
+
+/// Cucumber node ids are fixed strings from the feature files, so they always parse.
+pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
+    ClusterNodeName::parse(raw).expect("cucumber node ids are valid cluster node names")
+}
 #[cfg(feature = "testing")]
 use nervix_server::SchedulerMode;
 use nervix_server::{
@@ -498,7 +504,7 @@ impl Cluster {
             let node_id = format!("node-{index}");
             let spec = NodeSpec::new(&root_dir, &node_id, index == 1)?;
             runtime_test_hooks
-                .set_syslog_ingestor_bind_ip(node_id.clone(), spec.syslog_ingestor_host);
+                .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
             nodes.insert(
                 node_id.clone(),
                 NodeHandle::new(spec, runtime_test_hooks.clone(), config.clone()),
@@ -655,7 +661,7 @@ impl Cluster {
         let mut spec = NodeSpec::new(&self._root_dir, node_id, false)?;
         spec.bootstrap_host = Some(bootstrap_host);
         self.runtime_test_hooks
-            .set_syslog_ingestor_bind_ip(node_id.to_string(), spec.syslog_ingestor_host);
+            .set_syslog_ingestor_bind_ip(node_name(node_id), spec.syslog_ingestor_host);
         self.nodes.insert(
             node_id.to_string(),
             NodeHandle::new(spec, self.runtime_test_hooks.clone(), config),
@@ -1745,7 +1751,7 @@ impl Cluster {
 
     pub(crate) fn transfer_leadership(&self, from_node_id: &str, to_node_id: &str) {
         self.runtime_test_hooks
-            .request_leadership_transfer(from_node_id.to_string(), to_node_id.to_string());
+            .request_leadership_transfer(node_name(from_node_id), node_name(to_node_id));
     }
     async fn wait_until<F>(&self, node_id: &str, predicate: F) -> io::Result<()>
     where
@@ -1850,7 +1856,7 @@ impl NodeHandle {
             .web_console_listen_addr(parse_addr(&self.spec.web_console_addr())?)
             .web_console_advertise_addr(Some(parse_addr(&self.spec.web_console_addr())?.into()))
             .cluster_id("cucumber".to_string())
-            .node_id(self.spec.node_id.clone())
+            .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
             .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
             .cluster_listen_addr(parse_addr(&self.spec.cluster_addr())?)

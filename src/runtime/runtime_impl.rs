@@ -8997,7 +8997,7 @@ impl Runtime {
             let placement = state.key();
             if placement.domain == *domain
                 && placement.kind == ModelKind::Relay
-                && placement.identifier == ModelName::from(&*relay)
+                && placement.identifier == ModelName::from(relay)
             {
                 entries.extend(
                     self.visible_materialized_stream_remote_entries(placement, state.value())?

@@ -4558,7 +4558,12 @@ mod tests {
             None,
         );
 
-        let snapshot = metrics.snapshot_global_target(&domain, ModelKind::Relay, &relay, "node-1");
+        let snapshot = metrics.snapshot_global_target(
+            &domain,
+            ModelKind::Relay,
+            &ModelName::from(&relay),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+        );
         assert_eq!(snapshot.counters.len(), 3);
         assert!(
             snapshot
@@ -4598,8 +4603,8 @@ mod tests {
             r#"{"tenant":"acme"}"#,
             &domain,
             ModelKind::Relay,
-            &relay,
-            "node-1",
+            &ModelName::from(&relay),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
         );
         assert_eq!(snapshot.counters.len(), 3);
         assert!(
@@ -4614,8 +4619,8 @@ mod tests {
             r#"{"tenant":"acme"}"#,
             &domain,
             ModelKind::Relay,
-            &relay,
-            "node-1",
+            &ModelName::from(&relay),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
             snapshot,
         );
         assert!(!has_graph_prometheus_samples(&restored.prometheus_text()));
@@ -4623,8 +4628,8 @@ mod tests {
             r#"{"tenant":"acme"}"#,
             &domain,
             ModelKind::Relay,
-            &relay,
-            "node-1",
+            &ModelName::from(&relay),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
         );
         assert!(
             restored_branch

@@ -1,6 +1,6 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{ClusterNodeName, DropModel, DropNode, ModelKind};
+use nervix_models::{DropModel, DropNode, ModelKind};
 
 use crate::{
     lexer::{Identifier, Token},
@@ -175,6 +175,8 @@ pub fn suggest_drop(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::ClusterNodeName;
+
     use super::*;
     use crate::lexer::lex;
 

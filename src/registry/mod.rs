@@ -26,10 +26,10 @@ use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
     AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
     AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchName, BranchSelection, CborType,
-    ClientName, ClusterNodeName, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecName,
-    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator,
-    CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateLookup, CreatePlacement, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
+    ClusterNodeName, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecName, CodecWireFormat,
+    CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
+    CreatePlacement, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
     CreateWireSchema, DomainName, DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType,
     Expression, FieldName, IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
     MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
@@ -37,8 +37,7 @@ use nervix_models::{
     OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType,
     PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode, ProcessorOutput,
     ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, SchemaField,
-    SchemaName, SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WireSchemaDefinition,
-    WireSchemaName,
+    SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -12050,8 +12049,8 @@ mod tests {
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
                 transformations: CodecJaqTransformations {
-                    on_ingestion: on_ingestion.cloned(),
-                    on_emitting: on_emitting.cloned(),
+                    on_ingestion: on_ingestion.map(str::to_string),
+                    on_emitting: on_emitting.map(str::to_string),
                 },
             },
             wire_schema: None,
@@ -12077,8 +12076,8 @@ mod tests {
                 }],
                 message: "nervix.test.Notification".to_string(),
                 transformations: CodecJaqTransformations {
-                    on_ingestion: on_ingestion.cloned(),
-                    on_emitting: on_emitting.cloned(),
+                    on_ingestion: on_ingestion.map(str::to_string),
+                    on_emitting: on_emitting.map(str::to_string),
                 },
             }),
             wire_schema: None,
@@ -13154,7 +13153,7 @@ mod tests {
                 .get(
                     &ns,
                     ModelKind::Schema,
-                    &ModelName::parse("shared_name").expect("valid model name"),
+                    ModelName::parse("shared_name").expect("valid model name"),
                 )
                 .expect("schema read should succeed")
                 .is_some()
@@ -13164,7 +13163,7 @@ mod tests {
                 .get(
                     &ns,
                     ModelKind::Client,
-                    &ModelName::parse("shared_name").expect("valid model name"),
+                    ModelName::parse("shared_name").expect("valid model name"),
                 )
                 .expect("client read should succeed")
                 .is_some()
@@ -13193,7 +13192,7 @@ mod tests {
             .put(
                 &domain,
                 wire_schema.kind(),
-                wire_schema.name(),
+                &wire_schema.name(),
                 &wire_schema,
             )
             .expect("write should succeed");
@@ -13301,7 +13300,10 @@ mod tests {
             .iter()
             .find(|node| node.kind == ModelKind::Relay && node.identifier == named("notifications"))
             .expect("fixture schedule must include its materialized relay");
-        assert_eq!(scheduled_relay.assigned_nodes, ["node-1"]);
+        assert_eq!(
+            scheduled_relay.assigned_nodes,
+            [named::<ClusterNodeName>("node-1")]
+        );
 
         let replica_path = temp_db_path();
         {
@@ -13316,10 +13318,10 @@ mod tests {
         let reopened = Registry::open(&replica_path).expect("replica registry should reopen");
         assert_eq!(
             reopened
-                .get(&domain, ModelKind::Ingestor, &named("ing"))
+                .get(&domain, ModelKind::Ingestor, named::<ModelName>("ing"))
                 .expect("replica model read should succeed"),
             source
-                .get(&domain, ModelKind::Ingestor, &named("ing"))
+                .get(&domain, ModelKind::Ingestor, named::<ModelName>("ing"))
                 .expect("source model read should succeed")
         );
 
@@ -13384,7 +13386,7 @@ mod tests {
             .get(
                 &domain,
                 ModelKind::Relay,
-                &named::<ModelName>("notifications"),
+                named::<ModelName>("notifications"),
             )
             .expect("read should succeed")
             .expect("relay should exist");
@@ -13739,7 +13741,7 @@ mod tests {
                 .get(
                     &domain,
                     ModelKind::Relay,
-                    &named::<ModelName>("notifications")
+                    named::<ModelName>("notifications")
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -16204,7 +16206,7 @@ mod tests {
                 .get(
                     &domain,
                     ModelKind::Ingestor,
-                    &IngestorName::parse("kafka_ingestor").expect("valid ingestor name")
+                    IngestorName::parse("kafka_ingestor").expect("valid ingestor name")
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -18414,7 +18416,7 @@ mod tests {
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: ModelName::parse("transaction_id").expect("valid identifier"),
+                                name: FieldName::parse("transaction_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18431,7 +18433,7 @@ mod tests {
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: ModelName::parse("transaction_id").expect("valid identifier"),
+                                name: FieldName::parse("transaction_id").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18945,7 +18947,7 @@ mod tests {
                 .get(
                     &domain,
                     ModelKind::Schema,
-                    &SchemaName::parse("event_schema").expect("valid schema name")
+                    SchemaName::parse("event_schema").expect("valid schema name")
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -18955,7 +18957,7 @@ mod tests {
                 .get(
                     &domain,
                     ModelKind::Client,
-                    &RelayName::parse("broker_out").expect("valid relay name")
+                    RelayName::parse("broker_out").expect("valid relay name")
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -18965,7 +18967,7 @@ mod tests {
                 .get(
                     &domain,
                     ModelKind::Emitter,
-                    &EmitterName::parse("emit").expect("valid emitter name")
+                    EmitterName::parse("emit").expect("valid emitter name")
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -19022,7 +19024,7 @@ mod tests {
             .get(
                 &domain,
                 ModelKind::Schema,
-                &named::<ModelName>("event_schema"),
+                named::<ModelName>("event_schema"),
             )
             .expect("read should succeed")
             .expect("schema should exist")
@@ -19039,7 +19041,7 @@ mod tests {
             .get(
                 &domain,
                 ModelKind::Schema,
-                &named::<ModelName>("event_schema"),
+                named::<ModelName>("event_schema"),
             )
             .expect("read should succeed")
             .expect("schema should exist")
@@ -19091,11 +19093,7 @@ mod tests {
         ));
         assert!(
             registry
-                .get(
-                    &domain,
-                    ModelKind::Schema,
-                    &named::<ModelName>("new_schema")
-                )
+                .get(&domain, ModelKind::Schema, named::<ModelName>("new_schema"))
                 .expect("read should succeed")
                 .is_none()
         );
@@ -19103,7 +19101,7 @@ mod tests {
             .get(
                 &domain,
                 ModelKind::Schema,
-                &named::<ModelName>("event_schema"),
+                named::<ModelName>("event_schema"),
             )
             .expect("read should succeed")
             .expect("schema should exist")
@@ -19152,7 +19150,7 @@ mod tests {
             .get(
                 &domain,
                 ModelKind::Schema,
-                &named::<ModelName>("event_schema"),
+                named::<ModelName>("event_schema"),
             )
             .expect("read should succeed")
             .expect("schema should exist")
@@ -19772,7 +19770,7 @@ mod tests {
                 .get(
                     &domain,
                     ModelKind::Client,
-                    &RelayName::parse("broker_in").expect("valid relay name")
+                    RelayName::parse("broker_in").expect("valid relay name")
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -19815,7 +19813,7 @@ mod tests {
                 .get(
                     &domain,
                     ModelKind::Schema,
-                    &SchemaName::parse("event_schema").expect("valid schema name")
+                    SchemaName::parse("event_schema").expect("valid schema name")
                 )
                 .expect("read should succeed")
                 .is_some()
@@ -19849,7 +19847,7 @@ mod tests {
                 .get(
                     &domain,
                     ModelKind::Emitter,
-                    &EmitterName::parse("emit").expect("valid emitter name")
+                    EmitterName::parse("emit").expect("valid emitter name")
                 )
                 .expect("read should succeed")
                 .is_none()

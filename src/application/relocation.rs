@@ -8,9 +8,9 @@
 use std::collections::BTreeSet;
 
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, DomainStatus, JunctionName, Model, ModelName,
-    PlacementPolicy, PlacementRuntimeNode, QuiesceLevel, RelayName, Relocation,
-    RelocationPreferenceStrategy, ScheduledNode,
+    ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, PlacementPolicy,
+    PlacementRuntimeNode, QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy,
+    ScheduledNode,
 };
 
 use super::{
@@ -622,14 +622,14 @@ fn format_node_list(nodes: &[ClusterNodeName]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{CreateJunction, ModelKind};
+    use nervix_models::{CreateJunction, JunctionName, ModelKind, ModelName};
 
     use super::*;
 
     fn junction_node(name: &str, primary: &str, replicas: &[&str]) -> ScheduledNode {
         let identifier = ModelName::try_from(name).expect("test name must be an identifier");
-        let mut assigned_nodes = vec![primary.to_string()];
-        assigned_nodes.extend(replicas.iter().map(|node| (*node).to_string()));
+        let mut assigned_nodes = vec![node_name(primary)];
+        assigned_nodes.extend(replicas.iter().map(|node| node_name(node)));
         ScheduledNode {
             identifier: identifier.clone(),
             kind: ModelKind::Junction,
@@ -666,6 +666,10 @@ mod tests {
         )
     }
 
+    fn node_name(raw: &str) -> ClusterNodeName {
+        ClusterNodeName::parse(raw).expect("valid node name")
+    }
+
     fn live(nodes: &[&str]) -> BTreeSet<ClusterNodeName> {
         nodes
             .iter()
@@ -680,7 +684,7 @@ mod tests {
         assert_eq!(
             relocation_member_owner(&domain, &schedule, &member("route"), &live(&["node-1"]))
                 .expect("a live owner must resolve"),
-            "node-1"
+            &node_name("node-1")
         );
     }
 
@@ -727,11 +731,11 @@ mod tests {
         );
         let node =
             scheduled_node(&planned, &member("route")).expect("member must remain scheduled");
+        assert_eq!(node.primary_node.as_ref(), Some(&node_name("node-2")));
         assert_eq!(
-            node.primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-2"))
+            node.assigned_nodes,
+            vec![node_name("node-2"), node_name("node-1")]
         );
-        assert_eq!(node.assigned_nodes, vec!["node-2", "node-1"]);
     }
 
     #[test]
@@ -749,6 +753,6 @@ mod tests {
         );
         let node =
             scheduled_node(&planned, &member("route")).expect("member must remain scheduled");
-        assert_eq!(node.assigned_nodes, vec!["node-2"]);
+        assert_eq!(node.assigned_nodes, vec![node_name("node-2")]);
     }
 }

@@ -107,7 +107,7 @@ impl ResourceStore {
         }
 
         let install = self
-            .prepare_install(id, created_by_node.into(), created_at)
+            .prepare_install(id, created_by_node, created_at)
             .await?;
         copy_directory_recursive(source_dir, &install.content_root).await?;
         self.finalize_install(install).await
@@ -155,7 +155,6 @@ impl ResourceStore {
         created_at: Timestamp,
     ) -> Result<ResourceManifest, ResourceStoreError> {
         let archive_path = archive_path.as_ref().to_path_buf();
-        let created_by_node = created_by_node.into();
         let install = self
             .prepare_install(id, created_by_node, created_at)
             .await?;

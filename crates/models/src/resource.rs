@@ -94,7 +94,7 @@ impl ResourceReplicaKey {
             domain,
             identifier,
             version,
-            node_id: node_id.into(),
+            node_id,
         }
     }
 

@@ -1,7 +1,7 @@
 use std::{future::Future, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use nervix_models::{CreateSignalingProtocol, SignalingProtocolName};
+use nervix_models::CreateSignalingProtocol;
 use prost_reflect::MessageDescriptor;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
@@ -553,8 +553,8 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use nervix_models::{
-        ModelName, ResourceName, SignalingProtobufConfig, SignalingProtocolOnConnect,
-        SignalingStep, SignalingWaitStep, SignalingWireFormat,
+        ModelName, ResourceName, SignalingProtobufConfig, SignalingProtocolName,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
     };
     use parking_lot::Mutex;
     use serde_json::json;

@@ -5,9 +5,7 @@ use std::sync::{
 
 use ahash::RandomState;
 use dashmap::DashMap;
-use nervix_models::{
-    ClusterNodeName, DomainName, ModelName, RelayName, RemoteRuntimeField, RemoteRuntimeRecord,
-};
+use nervix_models::{ClusterNodeName, RemoteRuntimeField, RemoteRuntimeRecord};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
@@ -226,7 +224,7 @@ fn snapshot_key_sort(key: &Option<Vec<RemoteRuntimeField>>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{DomainName, ModelKind};
+    use nervix_models::{DomainName, ModelKind, ModelName, RelayName};
 
     use super::*;
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};

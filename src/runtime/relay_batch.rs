@@ -645,13 +645,7 @@ mod tests {
                 &ModelName::parse("relay_batch_test").expect("valid schema name"),
             ),
             fields: vec![SchemaField {
-                name: FieldName::from(FieldName::from(FieldName::from(
-                    &ModelName::parse("value")
-                        .expect("valid field name")
-                        .clone()
-                        .clone()
-                        .clone(),
-                ))),
+                name: FieldName::parse("value").expect("valid field name"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,

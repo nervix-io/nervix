@@ -58,9 +58,9 @@ use nervix_models::{
     OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
     PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
-    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode, SchemaName,
+    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
     SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp, UserName, WireSchemaDefinition,
+    StructuredMessageError, SubscriptionName, Timestamp, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -11127,10 +11127,7 @@ fn compile_finalized_output_filter_program(
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     compile_scoped_filter_program(
-        RuntimeCompileTarget {
-            domain,
-            identifier: &identifier,
-        },
+        RuntimeCompileTarget { domain, identifier },
         filter,
         RuntimeVmSchema {
             schema: output_schema,

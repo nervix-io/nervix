@@ -4704,7 +4704,7 @@ mod tests {
 
     use nervix_models::{
         ChannelName, ClientName, CollectionName, CreateSchema, DomainName, EmitterName, ModelName,
-        ParseAsType, QueueName, RelayName, SubjectName, TableName, TopicName,
+        ParseAsType, QueueName, RelayName, SchemaName, SubjectName, TableName, TopicName,
     };
 
     use super::*;

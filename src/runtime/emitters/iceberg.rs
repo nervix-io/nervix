@@ -36,7 +36,7 @@ use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filt
 use error_stack::{Report, ResultExt};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_storage_opendal::OpenDalStorageFactory;
-use nervix_models::{DomainName, TableName};
+use nervix_models::TableName;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 use triomphe::Arc;
@@ -1490,6 +1490,7 @@ mod tests {
     };
     use arrow_array::{Array, Int64Array, TimestampMicrosecondArray, TimestampNanosecondArray};
     use arrow_schema::{DataType, Field, TimeUnit};
+    use nervix_models::DomainName;
     use tokio::time::timeout;
 
     use super::*;

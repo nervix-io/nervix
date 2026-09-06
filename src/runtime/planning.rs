@@ -1,6 +1,6 @@
 use nervix_models::{
     BranchName, CreateBranch, ModelName, OutputBranch, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs, SchemaName,
+    ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
 };
 
 use super::*;

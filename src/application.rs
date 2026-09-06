@@ -92,19 +92,18 @@ use nervix_interconnect::{
     TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AlterDomain, BranchName, BranchSelection, ClusterNodeName, CreateCorrelator,
-    CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateInferencer,
-    CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateReorderer,
-    CreateResource, CreateStatement, CreateUser, CreateWindowProcessor, DescribeCorrelator,
-    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
-    DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainClockState, DomainConfig, DomainName, DomainPace,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, FieldName, IcebergCatalog,
-    InferencerTensorDimension, InferencerTensorSchema, IngestSource, IngestTimestampSource,
-    IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName, LookupQuery, Model,
-    ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, ParseAsType,
-    PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode,
+    AlterDomain, BranchSelection, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
+    CreateDomain, CreateEmitter, CreateEndpoint, CreateInferencer, CreateIngestor, CreateJunction,
+    CreateLookup, CreateReingestor, CreateReorderer, CreateResource, CreateStatement, CreateUser,
+    CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
+    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
+    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainClockState, DomainConfig,
+    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
+    FieldName, IcebergCatalog, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
+    IngestTimestampSource, IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName,
+    LookupQuery, Model, ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction,
+    ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode,
     PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId,
     ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
     ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
@@ -15074,14 +15073,6 @@ fn format_f64_for_describe(value: f64) -> String {
     }
 }
 
-fn format_identifiers(identifiers: &[ModelName]) -> String {
-    identifiers
-        .iter()
-        .map(|name| name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn format_placement_runtime_nodes(nodes: &[PlacementRuntimeNode]) -> String {
     format_placement_runtime_nodes_in_context(nodes, nodes)
 }
@@ -19361,6 +19352,11 @@ mod tests {
         );
     }
 
+    fn test_node_name(id: impl std::fmt::Display) -> ClusterNodeName {
+        ClusterNodeName::parse(&format!("test-node-{id}"))
+            .expect("test node names satisfy the name grammar")
+    }
+
     async fn test_interconnect(node_id: &ClusterNodeName) -> Arc<Transport> {
         ensure_dev_tls_assets();
         let tls = TlsConfigBundle::from_pem_files(
@@ -19470,7 +19466,7 @@ mod tests {
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -19493,7 +19489,7 @@ mod tests {
         if create_default_domain_flag {
             create_test_domain(&consensus, "default").await;
         }
-        let expected_leader = format!("test-node-{id}");
+        let expected_leader = test_node_name(id);
         for _ in 0..50 {
             if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
@@ -19505,7 +19501,7 @@ mod tests {
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,
@@ -21393,7 +21389,7 @@ mod tests {
             .get(
                 &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Schema,
-                &named::<ModelName>("notification"),
+                named::<ModelName>("notification"),
             )
             .expect("registry get should succeed")
             .expect("schema should exist");
@@ -21433,7 +21429,7 @@ mod tests {
                 .get(
                     &DomainName::parse("prod").expect("valid domain"),
                     ModelKind::Schema,
-                    &named::<ModelName>("notification"),
+                    named::<ModelName>("notification"),
                 )
                 .expect("registry get should succeed")
                 .is_none(),
@@ -21480,7 +21476,7 @@ mod tests {
             .get(
                 &DomainName::parse("prod").expect("valid domain"),
                 ModelKind::Schema,
-                &named::<ModelName>("notification"),
+                named::<ModelName>("notification"),
             )
             .expect("registry get should succeed");
         assert!(
@@ -21491,7 +21487,7 @@ mod tests {
             .get(
                 &DomainName::parse("prod").expect("valid domain"),
                 ModelKind::Relay,
-                &named::<ModelName>("notifications"),
+                named::<ModelName>("notifications"),
             )
             .expect("registry get should succeed");
         assert!(
@@ -21546,7 +21542,7 @@ mod tests {
                 .get(
                     &DomainName::parse("default").expect("valid domain"),
                     ModelKind::Schema,
-                    &named::<ModelName>("queued_event"),
+                    named::<ModelName>("queued_event"),
                 )
                 .expect("registry get should succeed")
                 .is_none(),
@@ -21578,7 +21574,7 @@ mod tests {
                 .get(
                     &DomainName::parse("default").expect("valid domain"),
                     ModelKind::Schema,
-                    &named::<ModelName>("queued_event"),
+                    named::<ModelName>("queued_event"),
                 )
                 .expect("registry get should succeed")
                 .is_none(),
@@ -21664,7 +21660,7 @@ mod tests {
                 .get(
                     &DomainName::parse("prod").expect("valid domain"),
                     ModelKind::Schema,
-                    &named::<ModelName>("duplicated"),
+                    named::<ModelName>("duplicated"),
                 )
                 .expect("registry get should succeed")
                 .is_none(),
@@ -21923,7 +21919,7 @@ mod tests {
             .get(
                 &domain,
                 ModelKind::Relay,
-                &named::<ModelName>("notifications"),
+                named::<ModelName>("notifications"),
             )
             .expect("registry get should succeed");
         assert!(relay.is_none(), "failed model batch must not persist relay");
@@ -21931,7 +21927,7 @@ mod tests {
             .get(
                 &domain,
                 ModelKind::Schema,
-                &named::<ModelName>("notification"),
+                named::<ModelName>("notification"),
             )
             .expect("registry get should succeed");
         assert!(
@@ -21970,7 +21966,7 @@ mod tests {
             .get(
                 &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Schema,
-                &named::<ModelName>("web_console_event"),
+                named::<ModelName>("web_console_event"),
             )
             .expect("registry get should succeed");
         assert!(schema.is_some());
@@ -22453,7 +22449,7 @@ mod tests {
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -22473,7 +22469,7 @@ mod tests {
             .maybe_initialize()
             .await
             .expect("single-node consensus should initialize");
-        let expected_leader = format!("test-node-{id}");
+        let expected_leader = test_node_name(id);
         for _ in 0..50 {
             if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
@@ -22491,7 +22487,7 @@ mod tests {
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,
@@ -22596,7 +22592,7 @@ mod tests {
             .get(
                 &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Deduplicator,
-                &ModelName::parse("passthrough").expect("valid model name"),
+                ModelName::parse("passthrough").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("deduplicator should exist");
@@ -22604,7 +22600,7 @@ mod tests {
             .get(
                 &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Emitter,
-                &ModelName::parse("kafka_forward").expect("valid model name"),
+                ModelName::parse("kafka_forward").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("emitter should exist");
@@ -22644,7 +22640,7 @@ mod tests {
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -22665,7 +22661,7 @@ mod tests {
             .await
             .expect("single-node consensus should initialize");
         create_test_domain(&consensus, "default").await;
-        let expected_leader = format!("test-node-{id}");
+        let expected_leader = test_node_name(id);
         for _ in 0..50 {
             if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
@@ -22677,7 +22673,7 @@ mod tests {
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,
@@ -22780,7 +22776,7 @@ mod tests {
             .get(
                 &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Junction,
-                &ModelName::parse("join_streams").expect("valid model name"),
+                ModelName::parse("join_streams").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("junction should exist");
@@ -22824,7 +22820,7 @@ mod tests {
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -22845,7 +22841,7 @@ mod tests {
             .await
             .expect("single-node consensus should initialize");
         create_test_domain(&consensus, "default").await;
-        let expected_leader = format!("test-node-{id}");
+        let expected_leader = test_node_name(id);
         for _ in 0..50 {
             if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
@@ -22857,7 +22853,7 @@ mod tests {
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,
@@ -22956,7 +22952,7 @@ mod tests {
             .get(
                 &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Deduplicator,
-                &ModelName::parse("dedup_txns").expect("valid model name"),
+                ModelName::parse("dedup_txns").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("deduplicator should exist");
@@ -23004,7 +23000,7 @@ mod tests {
                 .expect("registry should open"),
         );
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let expected_leader = format!("test-node-{id}");
+        let expected_leader = test_node_name(id);
         let grpc_addr = test_addr(61000u16.saturating_add(id));
         let cluster_listen_addr = test_addr(62000u16.saturating_add(id));
         let raft_addr = test_addr(63000u16.saturating_add(id));
@@ -23014,7 +23010,7 @@ mod tests {
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -23122,7 +23118,7 @@ mod tests {
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,

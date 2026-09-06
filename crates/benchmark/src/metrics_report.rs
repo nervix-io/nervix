@@ -5,7 +5,6 @@ use std::{
 };
 
 use meticulous::OptionExt as _;
-use nervix_models::ClusterNodeName;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
