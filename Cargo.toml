@@ -196,6 +196,7 @@ nervix-client-core = { workspace = true }
 nervix-test-environment = { workspace = true }
 playwright-rs = { workspace = true }
 rcgen = { workspace = true }
+rstest = { workspace = true }
 tempfile = { workspace = true }
 
 [[test]]
@@ -417,6 +418,7 @@ reqwest = "0.13"
 rkyv = "0.8"
 roto = "0.12"
 rpassword = "7"
+rstest = "0.26.1"
 # This rumqttc-next line exposes the MQTT 5 facade with explicit AWS-LC selection.
 rumqttc = { package = "rumqttc-next", version = "0.34.0-alpha", default-features = false, features = [
   "use-rustls-aws-lc",
