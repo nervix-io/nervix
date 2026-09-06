@@ -62,6 +62,11 @@ struct MessageErrorRouteTask {
     pending: HashMap<Option<BranchKey>, PendingMessageErrorDelivery>,
 }
 
+/// Resolves the output route a message-error policy belongs to.
+///
+/// Both passes walk the node's own declared routes, whose order is part of the Model, and each
+/// call resolves a single route while an error route is compiled. Building an index would cost the
+/// same walk it replaces.
 pub(super) fn matching_message_error_output<'a>(
     outputs: &'a nervix_models::ProcessorOutputs,
     source_route: Option<&Identifier>,

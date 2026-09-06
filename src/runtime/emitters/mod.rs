@@ -686,12 +686,12 @@ pub(in crate::runtime) struct PublishReport {
 pub(in crate::runtime) struct CompiledSqlValuesProgram {
     program: Arc<VmCompiledProgram>,
     label: &'static str,
-    error_sites: Vec<CompiledMessageErrorSite>,
+    error_sites: CompiledMessageErrorSites,
 }
 
 impl CompiledSqlValuesProgram {
     fn structured_side_error(&self, reason: String, span: VmSpan) -> StructuredMessageError {
-        let site = self.error_sites.iter().find(|site| site.span == span);
+        let site = self.error_sites.get(&span);
         structured_message_error(
             MessageErrorCode::Evaluation,
             reason,
@@ -1156,7 +1156,19 @@ fn compile_sql_values_program(
             emitter.as_str()
         ),
     })?;
-    for (index, (site, mapping)) in error_sites.iter_mut().zip(values).enumerate() {
+    for site in error_sites.values_mut() {
+        if site.operation != MessageErrorOperation::Values {
+            continue;
+        }
+        let Some(index) = site
+            .operation_index
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            continue;
+        };
+        let Some(mapping) = values.get(index) else {
+            continue;
+        };
         let internal_target = format!("{namespace}.c{index}");
         let external_target = format!("{namespace}.{}", mapping.column);
         site.fields = SortedSet::from_unsorted(

@@ -279,6 +279,13 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   `AsRefStr`, `EnumString`, and `EnumProperty`, over manual match-based helpers.
 - When sorted vectors or arrays are an invariant, use `sorted-vec`'s `SortedVec` or `SortedSet`
   instead of a plain `Vec` with manual sorting and deduplication.
+- Do not scan a `Vec` to look a value up. Treat "`n` is small" as a claim that needs proof at the
+  call site and has to keep holding as domains, graphs, and clusters grow. Key the data instead:
+  `BTreeMap` for small keys where ordered comparison costs less than hashing, `HashMap` otherwise.
+  Sequence types are for data that is genuinely a sequence. Where a collection must keep its order
+  and still resolve by key, use `IndexMap` or a sorted sequence with a binary search rather than
+  scanning it, and never keep a map and a parallel order sequence in sync by hand. Any scan that
+  survives must state the bound that makes it correct.
 - Prefer synchronous locks from `parking_lot` over `std::sync` lock types.
 - Prefer `DashMap` over `Arc<Mutex<HashMap<...>>>` for shared concurrent maps.
 - `triomphe::Arc` is the default shared-ownership type for Nervix-owned state. Use

@@ -24,11 +24,8 @@ impl ScheduleDelta {
 
         let mut updates = Vec::new();
         let mut entities = Vec::new();
-        for desired_node in &desired.nodes {
-            let Some(existing_node) = existing.nodes.iter().find(|existing_node| {
-                existing_node.kind == desired_node.kind
-                    && existing_node.identifier == desired_node.identifier
-            }) else {
+        for (identity, desired_node) in &desired.nodes {
+            let Some(existing_node) = existing.nodes.get(identity) else {
                 return Self::Rebuild;
             };
             let aspects = existing_node
@@ -158,9 +155,9 @@ mod tests {
     }
 
     fn schedule(capacity: usize) -> DomainSchedule {
-        DomainSchedule {
-            domain: Domain::parse("testing").expect("valid domain"),
-            nodes: vec![ScheduledNode {
+        DomainSchedule::new(
+            Domain::parse("testing").expect("valid domain"),
+            vec![ScheduledNode {
                 identifier: identifier("events"),
                 kind: ModelKind::Relay,
                 config: Box::new(Model::Relay(CreateRelay {
@@ -177,14 +174,14 @@ mod tests {
                 primary_node: Some("node-1".to_string()),
                 assigned_nodes: vec!["node-1".to_string()],
             }],
-            placement_groups: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     fn ingestor_schedule(endpoint: &str) -> DomainSchedule {
-        DomainSchedule {
-            domain: Domain::parse("testing").expect("valid domain"),
-            nodes: vec![ScheduledNode {
+        DomainSchedule::new(
+            Domain::parse("testing").expect("valid domain"),
+            vec![ScheduledNode {
                 identifier: identifier("event_source"),
                 kind: ModelKind::Ingestor,
                 config: Box::new(Model::Ingestor(CreateIngestor {
@@ -218,8 +215,8 @@ mod tests {
                 primary_node: Some("node-1".to_string()),
                 assigned_nodes: vec!["node-1".to_string()],
             }],
-            placement_groups: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -280,9 +277,9 @@ mod tests {
             filter_where: None,
             materialized_state: Vec::new(),
         };
-        let existing = DomainSchedule {
-            domain: Domain::parse("testing").expect("valid domain"),
-            nodes: vec![ScheduledNode {
+        let existing = DomainSchedule::new(
+            Domain::parse("testing").expect("valid domain"),
+            vec![ScheduledNode {
                 identifier: identifier("route_events"),
                 kind: ModelKind::Junction,
                 config: Box::new(Model::Junction(junction.clone())),
@@ -293,8 +290,8 @@ mod tests {
                 primary_node: Some("node-1".to_string()),
                 assigned_nodes: vec!["node-1".to_string()],
             }],
-            placement_groups: Vec::new(),
-        };
+            Vec::new(),
+        );
         let mut dynamic_config = junction;
         dynamic_config.filter_where = Some(Expression::Literal(Literal::Bool(true)));
         let mut desired = existing.clone();
@@ -367,9 +364,9 @@ mod tests {
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),
         };
-        let existing = DomainSchedule {
-            domain: Domain::parse("testing").expect("valid domain"),
-            nodes: vec![ScheduledNode {
+        let existing = DomainSchedule::new(
+            Domain::parse("testing").expect("valid domain"),
+            vec![ScheduledNode {
                 identifier: emitter.name.clone(),
                 kind: ModelKind::Emitter,
                 config: Box::new(Model::Emitter(emitter.clone())),
@@ -380,8 +377,8 @@ mod tests {
                 primary_node: Some("node-1".to_string()),
                 assigned_nodes: vec!["node-1".to_string()],
             }],
-            placement_groups: Vec::new(),
-        };
+            Vec::new(),
+        );
 
         let mut dynamic_emitter = emitter.clone();
         dynamic_emitter.flush_each = "IMMEDIATE".to_string();

@@ -2878,38 +2878,36 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
         clock: None,
     };
     runtime.sync_domains(&BTreeMap::from([(domain.clone(), running.clone())]));
-    let schedule = ClusterSchedule {
-        domains: vec![DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![
-                scheduled_model(
-                    ModelKind::Schema,
-                    schema.clone(),
-                    nervix_models::Model::Schema(CreateSchema {
-                        name: schema.clone(),
-                        fields: vec![SchemaField {
-                            name: identifier("user_id"),
-                            ty: ParseAsType::I64,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                ),
-                scheduled_model(
-                    ModelKind::Relay,
-                    relay.clone(),
-                    nervix_models::Model::Relay(CreateRelay {
-                        name: relay.clone(),
-                        schema,
-                        buffer: 2,
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                ),
-            ],
-            placement_groups: Vec::new(),
-        }],
-    };
+    let schedule = ClusterSchedule::from_iter([DomainSchedule::new(
+        domain.clone(),
+        vec![
+            scheduled_model(
+                ModelKind::Schema,
+                schema.clone(),
+                nervix_models::Model::Schema(CreateSchema {
+                    name: schema.clone(),
+                    fields: vec![SchemaField {
+                        name: identifier("user_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                }),
+            ),
+            scheduled_model(
+                ModelKind::Relay,
+                relay.clone(),
+                nervix_models::Model::Relay(CreateRelay {
+                    name: relay.clone(),
+                    schema,
+                    buffer: 2,
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                }),
+            ),
+        ],
+        Vec::new(),
+    )]);
     runtime
         .apply_cluster_schedule("node-1", &schedule)
         .await
@@ -2973,33 +2971,29 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
             }],
         }),
     );
-    let stale_schedule = ClusterSchedule {
-        domains: vec![DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![schema_node.clone()],
-            placement_groups: Vec::new(),
-        }],
-    };
-    let current_schedule = ClusterSchedule {
-        domains: vec![DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![
-                schema_node,
-                scheduled_model(
-                    ModelKind::Relay,
-                    relay.clone(),
-                    nervix_models::Model::Relay(CreateRelay {
-                        name: relay.clone(),
-                        schema,
-                        buffer: 2,
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                ),
-            ],
-            placement_groups: Vec::new(),
-        }],
-    };
+    let stale_schedule = ClusterSchedule::from_iter([DomainSchedule::new(
+        domain.clone(),
+        vec![schema_node.clone()],
+        Vec::new(),
+    )]);
+    let current_schedule = ClusterSchedule::from_iter([DomainSchedule::new(
+        domain.clone(),
+        vec![
+            schema_node,
+            scheduled_model(
+                ModelKind::Relay,
+                relay.clone(),
+                nervix_models::Model::Relay(CreateRelay {
+                    name: relay.clone(),
+                    schema,
+                    buffer: 2,
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                }),
+            ),
+        ],
+        Vec::new(),
+    )]);
 
     runtime
         .apply_cluster_state("node-1", 2, &domains, &current_schedule)
@@ -3014,7 +3008,10 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
         .executions
         .get(&domain)
         .expect("current execution should remain");
-    assert_eq!(execution.schedule, current_schedule.domains[0]);
+    assert_eq!(
+        Some(&execution.schedule),
+        current_schedule.domains.get(&domain)
+    );
     assert!(execution.relay_registries.contains_key(&relay));
 }
 
@@ -3048,106 +3045,104 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
     let result = runtime
         .apply_cluster_schedule(
             "node-1",
-            &ClusterSchedule {
-                domains: vec![DomainSchedule {
-                    domain: domain.clone(),
-                    nodes: vec![
-                        scheduled_model(
-                            ModelKind::Schema,
-                            schema.clone(),
-                            nervix_models::Model::Schema(CreateSchema {
-                                name: schema.clone(),
-                                fields: vec![SchemaField {
-                                    name: identifier("user_id"),
-                                    ty: ParseAsType::I64,
-                                    optional: false,
-                                    sensitive: false,
-                                }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::WireJsonSchema,
-                            wire_schema.clone(),
-                            nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
-                                name: wire_schema.clone(),
-                                strictness: Default::default(),
-                                fields: vec![WireSchemaField {
-                                    name: identifier("user_id"),
-                                    ty: JsonType::Integer,
-                                    optional: false,
-                                }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Codec,
-                            codec.clone(),
-                            nervix_models::Model::Codec(CreateCodec {
-                                name: codec.clone(),
-                                wire_format: CodecWireFormat::Json,
-                                wire_schema: Some(wire_schema.clone()),
-                                schema: schema.clone(),
-                                encoding_rules: Vec::new(),
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Relay,
-                            relay.clone(),
-                            nervix_models::Model::Relay(CreateRelay {
-                                name: relay.clone(),
-                                schema: schema.clone(),
-                                buffer: 2,
-                                branching: RelayBranching::unbranched(),
-                                materialized_state: None,
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Client,
-                            client.clone(),
-                            nervix_models::Model::ClientMqtt(CreateClientMqtt {
-                                name: client.clone(),
-                                mount: None,
-                                config: vec![
-                                    ClientConfigEntry {
-                                        key: "addr".to_string(),
-                                        value: "mqtt://127.0.0.1:1883".to_string(),
-                                    },
-                                    ClientConfigEntry {
-                                        key: "client_id".to_string(),
-                                        value: "fixed-client".to_string(),
-                                    },
-                                ],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Ingestor,
-                            ingestor.clone(),
-                            nervix_models::Model::Ingestor(CreateIngestor {
-                                name: ingestor.clone(),
-                                output_routes: with_inherit_all(ProcessorOutputs::single(
-                                    relay.clone(),
-                                ))
-                                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
-                                .with_branch(OutputBranch::Unbranched),
-                                decode_using_codec: codec.clone(),
-                                timestamp_source: None,
-                                source: IngestSource::Mqtt {
-                                    client,
-                                    topic: "notifications".to_string(),
-                                    instances: 2,
-                                    mode: MqttIngestMode::NoAckSequential {
-                                        session: MqttSession::Clean,
-                                        qos: MqttQos::AtMostOnce,
-                                    },
-                                    quiesce: nervix_models::IngestQuiesceMode::Drop,
+            &ClusterSchedule::from_iter([DomainSchedule::new(
+                domain.clone(),
+                vec![
+                    scheduled_model(
+                        ModelKind::Schema,
+                        schema.clone(),
+                        nervix_models::Model::Schema(CreateSchema {
+                            name: schema.clone(),
+                            fields: vec![SchemaField {
+                                name: identifier("user_id"),
+                                ty: ParseAsType::I64,
+                                optional: false,
+                                sensitive: false,
+                            }],
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::WireJsonSchema,
+                        wire_schema.clone(),
+                        nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
+                            name: wire_schema.clone(),
+                            strictness: Default::default(),
+                            fields: vec![WireSchemaField {
+                                name: identifier("user_id"),
+                                ty: JsonType::Integer,
+                                optional: false,
+                            }],
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::Codec,
+                        codec.clone(),
+                        nervix_models::Model::Codec(CreateCodec {
+                            name: codec.clone(),
+                            wire_format: CodecWireFormat::Json,
+                            wire_schema: Some(wire_schema.clone()),
+                            schema: schema.clone(),
+                            encoding_rules: Vec::new(),
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::Relay,
+                        relay.clone(),
+                        nervix_models::Model::Relay(CreateRelay {
+                            name: relay.clone(),
+                            schema: schema.clone(),
+                            buffer: 2,
+                            branching: RelayBranching::unbranched(),
+                            materialized_state: None,
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::Client,
+                        client.clone(),
+                        nervix_models::Model::ClientMqtt(CreateClientMqtt {
+                            name: client.clone(),
+                            mount: None,
+                            config: vec![
+                                ClientConfigEntry {
+                                    key: "addr".to_string(),
+                                    value: "mqtt://127.0.0.1:1883".to_string(),
                                 },
-                                general_error_policy: GeneralErrorPolicy::Log,
-                                filter_where: None,
-                            }),
-                        ),
-                    ],
-                    placement_groups: Vec::new(),
-                }],
-            },
+                                ClientConfigEntry {
+                                    key: "client_id".to_string(),
+                                    value: "fixed-client".to_string(),
+                                },
+                            ],
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::Ingestor,
+                        ingestor.clone(),
+                        nervix_models::Model::Ingestor(CreateIngestor {
+                            name: ingestor.clone(),
+                            output_routes: with_inherit_all(ProcessorOutputs::single(
+                                relay.clone(),
+                            ))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(OutputBranch::Unbranched),
+                            decode_using_codec: codec.clone(),
+                            timestamp_source: None,
+                            source: IngestSource::Mqtt {
+                                client,
+                                topic: "notifications".to_string(),
+                                instances: 2,
+                                mode: MqttIngestMode::NoAckSequential {
+                                    session: MqttSession::Clean,
+                                    qos: MqttQos::AtMostOnce,
+                                },
+                                quiesce: nervix_models::IngestQuiesceMode::Drop,
+                            },
+                            general_error_policy: GeneralErrorPolicy::Log,
+                            filter_where: None,
+                        }),
+                    ),
+                ],
+                Vec::new(),
+            )]),
         )
         .await;
 
@@ -3196,103 +3191,101 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
     let result = runtime
         .apply_cluster_schedule(
             "node-1",
-            &ClusterSchedule {
-                domains: vec![DomainSchedule {
-                    domain: domain.clone(),
-                    nodes: vec![
-                        scheduled_model(
-                            ModelKind::Schema,
-                            schema.clone(),
-                            nervix_models::Model::Schema(CreateSchema {
-                                name: schema.clone(),
-                                fields: vec![SchemaField {
-                                    name: identifier("user_id"),
-                                    ty: ParseAsType::I64,
-                                    optional: false,
-                                    sensitive: false,
-                                }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::WireJsonSchema,
-                            wire_schema.clone(),
-                            nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
-                                name: wire_schema.clone(),
-                                strictness: Default::default(),
-                                fields: vec![WireSchemaField {
-                                    name: identifier("user_id"),
-                                    ty: JsonType::Integer,
-                                    optional: false,
-                                }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Codec,
-                            codec.clone(),
-                            nervix_models::Model::Codec(CreateCodec {
-                                name: codec.clone(),
-                                wire_format: CodecWireFormat::Json,
-                                wire_schema: Some(wire_schema.clone()),
-                                schema: schema.clone(),
-                                encoding_rules: Vec::new(),
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Relay,
-                            relay.clone(),
-                            nervix_models::Model::Relay(CreateRelay {
-                                name: relay.clone(),
-                                schema: schema.clone(),
-                                buffer: 2,
-                                branching: RelayBranching::unbranched(),
-                                materialized_state: None,
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Client,
-                            client.clone(),
-                            nervix_models::Model::ClientMqtt(CreateClientMqtt {
-                                name: client.clone(),
-                                mount: None,
-                                config: vec![ClientConfigEntry {
-                                    key: "addr".to_string(),
-                                    value: "mqtt://127.0.0.1:1883".to_string(),
-                                }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Ingestor,
-                            ingestor.clone(),
-                            nervix_models::Model::Ingestor(CreateIngestor {
-                                name: ingestor.clone(),
-                                output_routes: with_inherit_all(ProcessorOutputs::single(
-                                    relay.clone(),
-                                ))
-                                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
-                                .with_branch(OutputBranch::Unbranched),
-                                decode_using_codec: codec.clone(),
-                                timestamp_source: None,
-                                source: IngestSource::Mqtt {
-                                    client,
-                                    topic: "notifications".to_string(),
-                                    instances: 1,
-                                    mode: MqttIngestMode::AckSequential {
-                                        timeout: "oops".to_string(),
-                                        retry_policy: RetryPolicy {
-                                            backoff: "100ms".to_string(),
-                                            max_backoff: "200ms".to_string(),
-                                        },
+            &ClusterSchedule::from_iter([DomainSchedule::new(
+                domain.clone(),
+                vec![
+                    scheduled_model(
+                        ModelKind::Schema,
+                        schema.clone(),
+                        nervix_models::Model::Schema(CreateSchema {
+                            name: schema.clone(),
+                            fields: vec![SchemaField {
+                                name: identifier("user_id"),
+                                ty: ParseAsType::I64,
+                                optional: false,
+                                sensitive: false,
+                            }],
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::WireJsonSchema,
+                        wire_schema.clone(),
+                        nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
+                            name: wire_schema.clone(),
+                            strictness: Default::default(),
+                            fields: vec![WireSchemaField {
+                                name: identifier("user_id"),
+                                ty: JsonType::Integer,
+                                optional: false,
+                            }],
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::Codec,
+                        codec.clone(),
+                        nervix_models::Model::Codec(CreateCodec {
+                            name: codec.clone(),
+                            wire_format: CodecWireFormat::Json,
+                            wire_schema: Some(wire_schema.clone()),
+                            schema: schema.clone(),
+                            encoding_rules: Vec::new(),
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::Relay,
+                        relay.clone(),
+                        nervix_models::Model::Relay(CreateRelay {
+                            name: relay.clone(),
+                            schema: schema.clone(),
+                            buffer: 2,
+                            branching: RelayBranching::unbranched(),
+                            materialized_state: None,
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::Client,
+                        client.clone(),
+                        nervix_models::Model::ClientMqtt(CreateClientMqtt {
+                            name: client.clone(),
+                            mount: None,
+                            config: vec![ClientConfigEntry {
+                                key: "addr".to_string(),
+                                value: "mqtt://127.0.0.1:1883".to_string(),
+                            }],
+                        }),
+                    ),
+                    scheduled_model(
+                        ModelKind::Ingestor,
+                        ingestor.clone(),
+                        nervix_models::Model::Ingestor(CreateIngestor {
+                            name: ingestor.clone(),
+                            output_routes: with_inherit_all(ProcessorOutputs::single(
+                                relay.clone(),
+                            ))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(OutputBranch::Unbranched),
+                            decode_using_codec: codec.clone(),
+                            timestamp_source: None,
+                            source: IngestSource::Mqtt {
+                                client,
+                                topic: "notifications".to_string(),
+                                instances: 1,
+                                mode: MqttIngestMode::AckSequential {
+                                    timeout: "oops".to_string(),
+                                    retry_policy: RetryPolicy {
+                                        backoff: "100ms".to_string(),
+                                        max_backoff: "200ms".to_string(),
                                     },
-                                    quiesce: nervix_models::IngestQuiesceMode::Drop,
                                 },
-                                general_error_policy: GeneralErrorPolicy::Log,
-                                filter_where: None,
-                            }),
-                        ),
-                    ],
-                    placement_groups: Vec::new(),
-                }],
-            },
+                                quiesce: nervix_models::IngestQuiesceMode::Drop,
+                            },
+                            general_error_policy: GeneralErrorPolicy::Log,
+                            filter_where: None,
+                        }),
+                    ),
+                ],
+                Vec::new(),
+            )]),
         )
         .await;
 
@@ -3338,9 +3331,9 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
             }),
         )
     };
-    let schedule = DomainSchedule {
-        domain: domain.clone(),
-        nodes: vec![
+    let schedule = DomainSchedule::new(
+        domain.clone(),
+        vec![
             scheduled_model(
                 ModelKind::Schema,
                 order_schema.clone(),
@@ -3393,8 +3386,8 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
                 }),
             ),
         ],
-        placement_groups: Vec::new(),
-    };
+        Vec::new(),
+    );
 
     runtime
         .rebuild_domain_from_schedule("node-1", &domain, Some(schedule), true)
@@ -3431,15 +3424,15 @@ fn emitter_entity_pause_gates_every_input_relay() {
         construction: nervix_models::RouteConstruction::default(),
         materialized_state: Vec::new(),
     };
-    let mut schedule = DomainSchedule {
-        domain: domain("testing"),
-        nodes: vec![scheduled_model(
+    let mut schedule = DomainSchedule::new(
+        domain("testing"),
+        vec![scheduled_model(
             ModelKind::Emitter,
             emitter.name.clone(),
             nervix_models::Model::Emitter(emitter.clone()),
         )],
-        placement_groups: Vec::new(),
-    };
+        Vec::new(),
+    );
     schedule.nodes[0].primary_node = Some("node-2".to_string());
     schedule.nodes[0].assigned_nodes = vec!["node-2".to_string()];
     let entity = crate::registry::RegistryEntity {
@@ -3471,9 +3464,9 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     let domain = domain("default");
     let event_schema = identifier("event");
     let processor = identifier("deduplicate_events");
-    let schedule = DomainSchedule {
-        domain: domain.clone(),
-        nodes: vec![
+    let schedule = DomainSchedule::new(
+        domain.clone(),
+        vec![
             scheduled_model(
                 ModelKind::Schema,
                 event_schema.clone(),
@@ -3528,8 +3521,8 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
                 }),
             ),
         ],
-        placement_groups: Vec::new(),
-    };
+        Vec::new(),
+    );
 
     runtime
         .rebuild_domain_from_schedule("node-1", &domain, Some(schedule.clone()), true)
@@ -3548,7 +3541,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     let mut desired = schedule;
     let nervix_models::Model::Deduplicator(config) = desired
         .nodes
-        .iter_mut()
+        .values_mut()
         .find(|node| node.kind == ModelKind::Deduplicator)
         .expect("schedule must contain the processor")
         .config
@@ -3584,9 +3577,9 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     let domain = domain("default");
     let event_schema = identifier("event");
     let processor = identifier("deduplicate_events");
-    let schedule = DomainSchedule {
-        domain: domain.clone(),
-        nodes: vec![
+    let schedule = DomainSchedule::new(
+        domain.clone(),
+        vec![
             scheduled_model(
                 ModelKind::Schema,
                 event_schema.clone(),
@@ -3641,8 +3634,8 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
                 }),
             ),
         ],
-        placement_groups: Vec::new(),
-    };
+        Vec::new(),
+    );
 
     runtime
         .rebuild_domain_from_schedule("node-1", &domain, Some(schedule.clone()), true)
@@ -3652,7 +3645,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     let mut desired = schedule;
     let processor_node = desired
         .nodes
-        .iter_mut()
+        .values_mut()
         .find(|node| node.kind == ModelKind::Deduplicator)
         .expect("schedule must contain the processor");
     processor_node.schema_fingerprint = [7; 32];
@@ -5043,23 +5036,25 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let identifier = identifier("dedup_orders");
-    let schedule = |fingerprint| DomainSchedule {
-        domain: domain.clone(),
-        nodes: vec![ScheduledNode {
-            identifier: identifier.clone(),
-            kind: ModelKind::Deduplicator,
-            config: Box::new(nervix_models::Model::Schema(CreateSchema {
-                name: identifier.clone(),
-                fields: Vec::new(),
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: fingerprint,
-            kafka_partition_schedule: None,
-            primary_node: Some("node-1".to_string()),
-            assigned_nodes: vec!["node-1".to_string()],
-        }],
-        placement_groups: Vec::new(),
+    let schedule = |fingerprint| {
+        DomainSchedule::new(
+            domain.clone(),
+            vec![ScheduledNode {
+                identifier: identifier.clone(),
+                kind: ModelKind::Deduplicator,
+                config: Box::new(nervix_models::Model::Schema(CreateSchema {
+                    name: identifier.clone(),
+                    fields: Vec::new(),
+                })),
+                effective_branching: None,
+                effective_branching_schema: None,
+                schema_fingerprint: fingerprint,
+                kafka_partition_schedule: None,
+                primary_node: Some("node-1".to_string()),
+                assigned_nodes: vec!["node-1".to_string()],
+            }],
+            Vec::new(),
+        )
     };
 
     runtime.install_state_schema_fingerprints(&schedule([1; 32]));
@@ -5354,9 +5349,9 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
         .rebuild_domain_from_schedule(
             "node-1",
             &domain,
-            Some(DomainSchedule {
-                domain: domain.clone(),
-                nodes: vec![
+            Some(DomainSchedule::new(
+                domain.clone(),
+                vec![
                     scheduled_model(
                         ModelKind::Schema,
                         schema.clone(),
@@ -5382,8 +5377,8 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
                         }),
                     ),
                 ],
-                placement_groups: Vec::new(),
-            }),
+                Vec::new(),
+            )),
             true,
         )
         .await
@@ -5633,11 +5628,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
     runtime.executions.insert(
         domain.clone(),
         super::DomainExecution {
-            schedule: DomainSchedule {
-                domain: domain.clone(),
-                nodes: Vec::new(),
-                placement_groups: Vec::new(),
-            },
+            schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
             passive_only: false,
             start_version: 0,
             shutdown,
@@ -5710,11 +5701,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
         .stop_domain_execution(
             &domain,
             super::DomainExecution {
-                schedule: DomainSchedule {
-                    domain: domain.clone(),
-                    nodes: Vec::new(),
-                    placement_groups: Vec::new(),
-                },
+                schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
                 passive_only: false,
                 start_version: 0,
                 shutdown,
@@ -5844,11 +5831,7 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
     runtime.executions.insert(
         domain.clone(),
         super::DomainExecution {
-            schedule: DomainSchedule {
-                domain: domain.clone(),
-                nodes: Vec::new(),
-                placement_groups: Vec::new(),
-            },
+            schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
             passive_only: false,
             start_version: 0,
             shutdown,
@@ -8715,11 +8698,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     runtime.executions.insert(
         domain.clone(),
         super::DomainExecution {
-            schedule: DomainSchedule {
-                domain: domain.clone(),
-                nodes: Vec::new(),
-                placement_groups: Vec::new(),
-            },
+            schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
             passive_only: false,
             start_version: 0,
             shutdown: execution_shutdown,
@@ -8934,11 +8913,7 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
     runtime.executions.insert(
         domain.clone(),
         super::DomainExecution {
-            schedule: DomainSchedule {
-                domain: domain.clone(),
-                nodes: Vec::new(),
-                placement_groups: Vec::new(),
-            },
+            schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
             passive_only: false,
             start_version: 0,
             shutdown: execution_shutdown,
@@ -11553,11 +11528,7 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
     runtime.executions.insert(
         domain.clone(),
         super::DomainExecution {
-            schedule: DomainSchedule {
-                domain: domain.clone(),
-                nodes: Vec::new(),
-                placement_groups: Vec::new(),
-            },
+            schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
             passive_only: false,
             start_version: 0,
             shutdown,

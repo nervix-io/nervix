@@ -465,6 +465,8 @@ fn App() -> impl IntoView {
             return;
         };
         let title = subscription_tab_title(&relay, &filter);
+        // Bounded by the subscription tabs the operator has open in this console, and the tab
+        // strip renders them in this order.
         if let Some(existing) = subscription_tabs.get_untracked().into_iter().find(|tab| {
             tab.domain == domain
                 && tab.relay == relay

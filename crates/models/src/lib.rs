@@ -85,7 +85,7 @@ pub use statement::{
     PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
     RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, RetryPolicy, S3ConfigEntry, ScheduledNode, SentryConfigEntry,
+    RelayBranching, RetryPolicy, S3ConfigEntry, ScheduledNode, ScheduledNodes, SentryConfigEntry,
     ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
     ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,

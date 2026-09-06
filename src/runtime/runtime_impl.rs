@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use nervix_models::CreateUdf;
 use rdkafka::consumer::StreamConsumer;
 
@@ -491,6 +493,7 @@ impl Runtime {
             state_schema_fingerprints: Arc::new(DashMap::default()),
             domain_graphs: Arc::new(DashMap::default()),
             endpoint_bindings: Arc::new(DashMap::default()),
+            routed_endpoints: Arc::new(DashMap::default()),
             relay_boundary_fanouts: Arc::new(DashMap::default()),
             events,
             emitter_faults: hooks.emitter_faults,
@@ -585,8 +588,10 @@ impl Runtime {
                 }
                 schedule
                     .nodes
-                    .iter()
-                    .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
+                    .get(&PlacementRuntimeNode::new(
+                        entity.kind,
+                        entity.identifier.clone(),
+                    ))
                     .and_then(|node| match node.config.as_ref() {
                         Model::Emitter(emitter) => Some(emitter.from.from.clone()),
                         Model::Reingestor(reingestor) => Some(reingestor.from.from.clone()),
@@ -3757,11 +3762,14 @@ impl Runtime {
         error_relay: &Identifier,
         assignments: &[Assignment],
     ) -> Result<Option<RuntimeFlushPolicy>, String> {
-        let scheduled = execution
-            .schedule
-            .nodes
-            .iter()
-            .find(|scheduled| &scheduled.identifier == node && scheduled.kind.as_str() == node_kind)
+        let scheduled = ModelKind::from_str(node_kind)
+            .ok()
+            .and_then(|kind| {
+                execution
+                    .schedule
+                    .nodes
+                    .get(&PlacementRuntimeNode::new(kind, node.clone()))
+            })
             .ok_or_else(|| {
                 format!(
                     "runtime model for {node_kind} '{}' is unavailable",
@@ -3828,11 +3836,14 @@ impl Runtime {
         error_relay: &Identifier,
         assignments: &[Assignment],
     ) -> Result<MessageErrorCompileSchemas, String> {
-        let scheduled = execution
-            .schedule
-            .nodes
-            .iter()
-            .find(|scheduled| &scheduled.identifier == node && scheduled.kind.as_str() == node_kind)
+        let scheduled = ModelKind::from_str(node_kind)
+            .ok()
+            .and_then(|kind| {
+                execution
+                    .schedule
+                    .nodes
+                    .get(&PlacementRuntimeNode::new(kind, node.clone()))
+            })
             .ok_or_else(|| {
                 format!(
                     "runtime model for {node_kind} '{}' is unavailable",
@@ -4831,8 +4842,10 @@ impl Runtime {
             execution
                 .schedule
                 .nodes
-                .iter()
-                .find(|node| node.kind == ModelKind::Ingestor && node.identifier == *ingestor)
+                .get(&PlacementRuntimeNode::new(
+                    ModelKind::Ingestor,
+                    ingestor.clone(),
+                ))
                 .and_then(|node| node.kafka_partition_schedule.clone())
         });
 
@@ -5044,8 +5057,8 @@ impl Runtime {
     ) -> Result<(), RuntimeError> {
         let scheduled_domains = schedule
             .domains
-            .iter()
-            .map(|domain| domain.domain.clone())
+            .keys()
+            .cloned()
             .collect::<std::collections::BTreeSet<_>>();
         let existing_domains = {
             self.executions
@@ -5088,8 +5101,8 @@ impl Runtime {
             }
         }
 
-        for domain in &schedule.domains {
-            let Some(domain_state) = self.domains.get(&domain.domain) else {
+        for (domain_id, domain) in &schedule.domains {
+            let Some(domain_state) = self.domains.get(domain_id) else {
                 continue;
             };
             let domain_status = domain_state.status.clone();
@@ -5246,7 +5259,7 @@ impl Runtime {
         graph_handle.store(Some(desired_graph));
         let desired_model_index = schedule
             .nodes
-            .iter()
+            .values()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
         let local_node_id = self.local_node_id.read().clone();
@@ -5256,10 +5269,10 @@ impl Runtime {
             if entity.kind == ModelKind::Relay {
                 let desired_node = schedule
                     .nodes
-                    .iter()
-                    .find(|node| {
-                        node.kind == ModelKind::Relay && node.identifier == entity.identifier
-                    })
+                    .get(&PlacementRuntimeNode::new(
+                        ModelKind::Relay,
+                        entity.identifier.clone(),
+                    ))
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!("missing desired relay '{}'", entity.identifier.as_str()),
@@ -5326,10 +5339,10 @@ impl Runtime {
             if entity.kind == ModelKind::Ingestor {
                 let desired_node = schedule
                     .nodes
-                    .iter()
-                    .find(|node| {
-                        node.kind == ModelKind::Ingestor && node.identifier == entity.identifier
-                    })
+                    .get(&PlacementRuntimeNode::new(
+                        ModelKind::Ingestor,
+                        entity.identifier.clone(),
+                    ))
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
@@ -5381,10 +5394,10 @@ impl Runtime {
             if entity.kind == ModelKind::Emitter {
                 let desired_node = schedule
                     .nodes
-                    .iter()
-                    .find(|node| {
-                        node.kind == ModelKind::Emitter && node.identifier == entity.identifier
-                    })
+                    .get(&PlacementRuntimeNode::new(
+                        ModelKind::Emitter,
+                        entity.identifier.clone(),
+                    ))
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!("missing desired emitter '{}'", entity.identifier.as_str()),
@@ -5409,10 +5422,10 @@ impl Runtime {
                     let old_emitter = execution
                         .schedule
                         .nodes
-                        .iter()
-                        .find(|node| {
-                            node.kind == ModelKind::Emitter && node.identifier == entity.identifier
-                        })
+                        .get(&PlacementRuntimeNode::new(
+                            ModelKind::Emitter,
+                            entity.identifier.clone(),
+                        ))
                         .and_then(|node| {
                             if let Model::Emitter(emitter) = node.config.as_ref() {
                                 Some(emitter.clone())
@@ -5535,10 +5548,10 @@ impl Runtime {
             if entity.kind == ModelKind::Reingestor {
                 let desired_node = schedule
                     .nodes
-                    .iter()
-                    .find(|node| {
-                        node.kind == ModelKind::Reingestor && node.identifier == entity.identifier
-                    })
+                    .get(&PlacementRuntimeNode::new(
+                        ModelKind::Reingestor,
+                        entity.identifier.clone(),
+                    ))
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
@@ -5567,11 +5580,10 @@ impl Runtime {
                     let old_reingestor = execution
                         .schedule
                         .nodes
-                        .iter()
-                        .find(|node| {
-                            node.kind == ModelKind::Reingestor
-                                && node.identifier == entity.identifier
-                        })
+                        .get(&PlacementRuntimeNode::new(
+                            ModelKind::Reingestor,
+                            entity.identifier.clone(),
+                        ))
                         .and_then(|node| {
                             if let Model::Reingestor(reingestor) = node.config.as_ref() {
                                 Some(reingestor.clone())
@@ -5732,10 +5744,10 @@ impl Runtime {
             if entity.kind == ModelKind::Generator {
                 let desired_node = schedule
                     .nodes
-                    .iter()
-                    .find(|node| {
-                        node.kind == ModelKind::Generator && node.identifier == entity.identifier
-                    })
+                    .get(&PlacementRuntimeNode::new(
+                        ModelKind::Generator,
+                        entity.identifier.clone(),
+                    ))
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
@@ -5879,8 +5891,10 @@ impl Runtime {
             }
             let desired_node = schedule
                 .nodes
-                .iter()
-                .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
+                .get(&PlacementRuntimeNode::new(
+                    entity.kind,
+                    entity.identifier.clone(),
+                ))
                 .ok_or_else(|| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: format!(
@@ -5928,10 +5942,10 @@ impl Runtime {
                     execution
                         .schedule
                         .nodes
-                        .iter()
-                        .find(|node| {
-                            node.kind == entity.kind && node.identifier == entity.identifier
-                        })
+                        .get(&PlacementRuntimeNode::new(
+                            entity.kind,
+                            entity.identifier.clone(),
+                        ))
                         .map(|node| (*node.config).clone())
                 })
                 .and_then(|old_model| {
@@ -6079,11 +6093,10 @@ impl Runtime {
         let mut consumers = HashMap::<Identifier, Vec<RemoteRuntimeConsumer>>::new();
         let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         for spec in processor_specs.processors {
-            let Some(node) = schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == spec.spec.kind && node.identifier == spec.spec.processor)
-            else {
+            let Some(node) = schedule.nodes.get(&PlacementRuntimeNode::new(
+                spec.spec.kind,
+                spec.spec.processor.clone(),
+            )) else {
                 continue;
             };
             if node.executes_on(local_node_id) {
@@ -6101,7 +6114,7 @@ impl Runtime {
                 );
             }
         }
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             if node.executes_on(local_node_id) {
                 continue;
             }
@@ -6213,6 +6226,41 @@ impl Runtime {
         }
     }
 
+    /// Installs a built execution and publishes its endpoint routes in one step, so the routing
+    /// index can never drift from the executions it describes.
+    fn install_domain_execution(&self, domain: &Domain, execution: DomainExecution) {
+        self.publish_routed_endpoints(domain, &execution);
+        self.executions.insert(domain.clone(), execution);
+    }
+
+    /// Publishes an execution's endpoint routes into the routing index. Called with the execution
+    /// that is about to become live so inbound requests resolve it by host and path.
+    fn publish_routed_endpoints(&self, domain: &Domain, execution: &DomainExecution) {
+        for (key, endpoint) in execution.routed_endpoints() {
+            self.routed_endpoints
+                .entry(key)
+                .or_default()
+                .insert(domain.clone(), endpoint);
+        }
+    }
+
+    /// Withdraws an execution's endpoint routes from the routing index. Called with the execution
+    /// that has just been removed, so only the routes that domain published are dropped.
+    fn withdraw_routed_endpoints(&self, domain: &Domain, execution: &DomainExecution) {
+        for (key, _) in execution.routed_endpoints() {
+            let Some(mut domains) = self.routed_endpoints.get_mut(&key) else {
+                continue;
+            };
+            domains.remove(domain);
+            let emptied = domains.is_empty();
+            drop(domains);
+            if emptied {
+                self.routed_endpoints
+                    .remove_if(&key, |_, domains| domains.is_empty());
+            }
+        }
+    }
+
     pub async fn has_websocket_endpoint(&self, host: &str, path: &str) -> bool {
         self.has_endpoint(host, path, EndpointType::Websockets)
             .await
@@ -6223,18 +6271,15 @@ impl Runtime {
         host: &str,
         path: &str,
     ) -> Option<Arc<CompiledSignalingProtocol>> {
-        let host = normalize_http_host(host);
-        self.executions.iter().find_map(|execution| {
-            execution
-                .endpoint_routes
-                .values()
-                .find(|route| {
-                    route.endpoint_type == EndpointType::Websockets
-                        && route.path == path
-                        && route.hostnames.iter().any(|hostname| hostname == &host)
-                })
-                .and_then(|route| route.signaling_protocol.clone())
-        })
+        let key = HttpRouteKey {
+            host: normalize_http_host(host),
+            path: path.to_string(),
+        };
+        let domains = self.routed_endpoints.get(&key)?;
+        domains
+            .values()
+            .find(|endpoint| endpoint.endpoint_type == EndpointType::Websockets)
+            .and_then(|endpoint| endpoint.signaling_protocol.clone())
     }
 
     pub(in crate::runtime) async fn signaling_protocol(
@@ -6260,13 +6305,14 @@ impl Runtime {
         path: &str,
         endpoint_type: EndpointType,
     ) -> bool {
-        let host = normalize_http_host(host);
-        self.executions.iter().any(|execution| {
-            execution.endpoint_routes.values().any(|route| {
-                route.endpoint_type == endpoint_type
-                    && route.path == path
-                    && route.hostnames.iter().any(|hostname| hostname == &host)
-            })
+        let key = HttpRouteKey {
+            host: normalize_http_host(host),
+            path: path.to_string(),
+        };
+        self.routed_endpoints.get(&key).is_some_and(|domains| {
+            domains
+                .values()
+                .any(|endpoint| endpoint.endpoint_type == endpoint_type)
         })
     }
 
@@ -6312,7 +6358,7 @@ impl Runtime {
             let execution = self
                 .build_passive_execution_from_schedule(domain, &schedule)
                 .await?;
-            self.executions.insert(domain.clone(), execution);
+            self.install_domain_execution(domain, execution);
             self.clear_domain_graph_handle(domain).await;
             return Ok(());
         }
@@ -6353,10 +6399,10 @@ impl Runtime {
         let remote_dispatcher = self.remote_dispatcher.read().clone();
         let model_index = schedule
             .nodes
-            .iter()
+            .values()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             match node.config.as_ref() {
                 Model::Ingestor(ingestor) => {
                     if let Err(error) = Self::validate_ingestor_start_settings(domain, ingestor) {
@@ -6412,14 +6458,16 @@ impl Runtime {
             .filter(|spec| {
                 schedule
                     .nodes
-                    .iter()
-                    .find(|node| node.kind == spec.kind && node.identifier == spec.identifier)
+                    .get(&PlacementRuntimeNode::new(
+                        spec.kind,
+                        spec.identifier.clone(),
+                    ))
                     .is_some_and(|node| node.executes_on(local_node_id))
             })
             .cloned()
             .collect::<Vec<_>>();
 
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             match node.config.as_ref() {
                 Model::Schema(schema) => {
                     schemas.insert(node.identifier.clone(), Arc::new(compile_schema(schema)));
@@ -6521,7 +6569,7 @@ impl Runtime {
             );
         }
 
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             if let Model::Codec(codec) = node.config.as_ref() {
                 let Some(schema) = schemas.get(&codec.schema).cloned() else {
                     return Err(RuntimeError::BuildDomainExecution {
@@ -6558,7 +6606,7 @@ impl Runtime {
             }
         }
 
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             if let Model::Relay(relay) = node.config.as_ref() {
                 let Some(schema) = schemas.get(&relay.schema).cloned() else {
                     return Err(RuntimeError::BuildDomainExecution {
@@ -6613,7 +6661,7 @@ impl Runtime {
                     if let Some(branch) = relay.branching.branch() {
                         let branch_model = schedule
                             .nodes
-                            .iter()
+                            .values()
                             .find_map(|node| {
                                 let Model::Branch(candidate) = node.config.as_ref() else {
                                     return None;
@@ -6678,7 +6726,7 @@ impl Runtime {
             }
         }
 
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             match node.config.as_ref() {
                 Model::Materializer(materializer) => {
                     let primary_node = node.execution_node().map(str::to_string);
@@ -6969,9 +7017,10 @@ impl Runtime {
 
         let mut processor_input_specs = Vec::new();
         for node_spec in &all_branched_specs.processors {
-            let Some(node) = schedule.nodes.iter().find(|node| {
-                node.kind == node_spec.spec.kind && node.identifier == node_spec.spec.processor
-            }) else {
+            let Some(node) = schedule.nodes.get(&PlacementRuntimeNode::new(
+                node_spec.spec.kind,
+                node_spec.spec.processor.clone(),
+            )) else {
                 continue;
             };
             let executes_locally = node.executes_on(local_node_id);
@@ -7037,7 +7086,7 @@ impl Runtime {
             self.metrics
                 .register_global_stream(domain, relay, Some(local_node_id));
         }
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             let primary_node = node.execution_node().map(str::to_string).or_else(|| {
                 node.executes_on(local_node_id)
                     .then(|| local_node_id.to_string())
@@ -7302,8 +7351,8 @@ impl Runtime {
                 )?);
         }
 
-        self.executions.insert(
-            domain.clone(),
+        self.install_domain_execution(
+            domain,
             DomainExecution {
                 schedule: schedule.clone(),
                 passive_only: false,
@@ -7372,7 +7421,7 @@ impl Runtime {
             .domains
             .get(&schedule.domain)
             .map_or(0, |state| state.start_version);
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             let schema_fingerprint = if node.kind == ModelKind::Materializer {
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(b"nervix/materialized-state/start-version");
@@ -8182,16 +8231,17 @@ impl Runtime {
                 kafka_domain_offsets: None,
             });
         };
-        let scheduled_ingestor = execution.schedule.nodes.iter().find_map(|node| {
-            if node.kind == ModelKind::Ingestor && node.identifier == *ingestor {
-                match node.config.as_ref() {
-                    Model::Ingestor(ingestor) => Some((node, ingestor.clone())),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        });
+        let scheduled_ingestor = execution
+            .schedule
+            .nodes
+            .get(&PlacementRuntimeNode::new(
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ))
+            .and_then(|node| match node.config.as_ref() {
+                Model::Ingestor(ingestor) => Some((node, ingestor.clone())),
+                _ => None,
+            });
         let kafka_domain_offsets = match runtime.value() {
             IngestorRuntime::Background { .. } => {
                 scheduled_ingestor.and_then(|(node, ingestor)| match &ingestor.source {
@@ -9659,12 +9709,12 @@ impl Runtime {
                 )?);
         }
 
-        self.executions.insert(
-            domain.clone(),
+        self.install_domain_execution(
+            domain,
             DomainExecution {
-                schedule: DomainSchedule {
-                    domain: domain.clone(),
-                    nodes: graph
+                schedule: DomainSchedule::new(
+                    domain.clone(),
+                    graph
                         .nodes()
                         .into_iter()
                         .map(|node| ScheduledNode {
@@ -9680,9 +9730,9 @@ impl Runtime {
                             primary_node: None,
                             assigned_nodes: Vec::new(),
                         })
-                        .collect(),
-                    placement_groups: Vec::new(),
-                },
+                        .collect::<Vec<_>>(),
+                    Vec::new(),
+                ),
                 passive_only: false,
                 start_version: self
                     .domains
@@ -9726,7 +9776,7 @@ impl Runtime {
                 domain,
                 schedule
                     .nodes
-                    .iter()
+                    .values()
                     .filter_map(|node| {
                         if let Model::Udf(udf) = node.config.as_ref() {
                             Some(udf.clone())
@@ -9750,7 +9800,7 @@ impl Runtime {
         let mut codecs = HashMap::new();
         let mut lookups = HashMap::new();
 
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             match node.config.as_ref() {
                 Model::Schema(schema) => {
                     schemas.insert(node.identifier.clone(), Arc::new(compile_schema(schema)));
@@ -9777,7 +9827,7 @@ impl Runtime {
             }
         }
 
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             let Model::Relay(relay) = node.config.as_ref() else {
                 continue;
             };
@@ -9825,7 +9875,7 @@ impl Runtime {
             relay_schemas.insert(node.identifier.clone(), schema);
         }
 
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             if let Model::Codec(codec) = node.config.as_ref() {
                 let Some(schema) = schemas.get(&codec.schema).cloned() else {
                     return Err(RuntimeError::BuildDomainExecution {
@@ -9862,7 +9912,7 @@ impl Runtime {
             }
         }
 
-        for node in &schedule.nodes {
+        for node in schedule.nodes.values() {
             if let Model::Lookup(lookup) = node.config.as_ref() {
                 let Some(codec) = codecs.get(&lookup.decode_using_codec).cloned() else {
                     return Err(RuntimeError::BuildDomainExecution {
@@ -12034,7 +12084,7 @@ impl Runtime {
                 continue;
             }
 
-            for node in &schedule.nodes {
+            for node in schedule.nodes.values() {
                 if node.kind != ModelKind::Ingestor
                     || !Self::scheduled_node_executes_locally(node, local_node_id.as_deref())
                 {
@@ -12110,8 +12160,7 @@ impl Runtime {
         };
         schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == source_kind && node.identifier == *source_ref)
+            .get(&PlacementRuntimeNode::new(source_kind, source_ref.clone()))
             .map(|node| (*node.config).clone())
     }
 
@@ -12150,6 +12199,7 @@ impl Runtime {
         domain: &Domain,
         execution: DomainExecution,
     ) {
+        self.withdraw_routed_endpoints(domain, &execution);
         let _ = execution.shutdown.send(true);
         for (entity, node_task) in execution.node_tasks {
             Self::await_shutdown_task(
@@ -12888,7 +12938,7 @@ impl Runtime {
         let model_index = execution
             .schedule
             .nodes
-            .iter()
+            .values()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
         let mut branched_templates = HashMap::default();

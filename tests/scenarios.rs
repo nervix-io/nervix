@@ -10611,6 +10611,31 @@ async fn when_http_payload_is_posted_and_fails(
     assert!(result.is_err(), "expected http post to fail");
 }
 
+#[when(expr = "http payload is posted to host {string} path {string} and is not routed")]
+async fn when_http_payload_is_posted_and_is_not_routed(
+    world: &mut ScenarioWorld,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    append_cucumber_log_line(&format!(
+        "http publish expect-unrouted: node=node-1 host={host} path={path} payload={payload}"
+    ));
+    let error = world
+        .cluster()
+        .publish_http("node-1", &host, &path, &payload)
+        .await
+        .expect_err("expected http post to be unrouted");
+    let reported = error.to_string();
+    assert!(
+        reported.contains("404"),
+        "expected http post to be unrouted, got: {reported}"
+    );
+}
+
 #[when(
     expr = "https payload is posted to host {string} path {string} using CA from resource \
             directory {string}"

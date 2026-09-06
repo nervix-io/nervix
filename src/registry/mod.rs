@@ -33,8 +33,8 @@ use nervix_models::{
     MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind,
     MqttIngestMode, OtelAggregationTemporality, OtelMetricKind, OtelSignal, OtelValueMapping,
     OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementPolicy, PlacementRuntimeNode,
-    ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode, SchemaField,
-    SignalingWireFormat, SqsFifoGroup, WireSchemaDefinition,
+    ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode,
+    ScheduledNodes, SchemaField, SignalingWireFormat, SqsFifoGroup, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -416,15 +416,11 @@ impl Registry {
         &self,
         schedule: &ClusterSchedule,
     ) -> Result<(), Report<RegistryError>> {
-        let desired_domains = schedule
-            .domains
-            .iter()
-            .map(|domain| domain.domain.clone())
-            .collect::<HashSet<_>>();
-        for domain_schedule in &schedule.domains {
+        let desired_domains = schedule.domains.keys().cloned().collect::<HashSet<_>>();
+        for domain_schedule in schedule.domains.values() {
             let models = domain_schedule
                 .nodes
-                .iter()
+                .values()
                 .filter_map(|node| {
                     if let Model::Materializer(_) = node.config.as_ref() {
                         return None;
@@ -4121,7 +4117,7 @@ impl ActiveGraph {
     pub fn from_scheduled_models(schedule: &DomainSchedule) -> Result<Self, Report<RegistryError>> {
         let models = schedule
             .nodes
-            .iter()
+            .values()
             .map(|node| {
                 (
                     RegistryKey::new(node.kind, node.identifier.clone()),
@@ -4389,7 +4385,7 @@ impl ActiveGraph {
             .map(|(index, node, _)| (node.key(), *index))
             .collect::<HashMap<_, _>>();
 
-        let mut scheduled_nodes = Vec::with_capacity(nodes.len());
+        let mut scheduled_nodes = ScheduledNodes::with_capacity(nodes.len());
         for (index, node, _) in nodes {
             let key = node.key();
             let group_index = placement.group_by_member.get(&key).copied();
@@ -4438,7 +4434,7 @@ impl ActiveGraph {
                     *node_load.entry(assigned_node.clone()).or_insert(0) += 1;
                 }
             }
-            scheduled_nodes.push(ScheduledNode {
+            let scheduled_node = ScheduledNode {
                 identifier: node.identifier,
                 kind: node.kind,
                 config: Box::new((*node.config).clone()),
@@ -4448,7 +4444,8 @@ impl ActiveGraph {
                 kafka_partition_schedule: None,
                 primary_node,
                 assigned_nodes,
-            });
+            };
+            scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
         }
         let placement_groups = placement
             .require_groups
@@ -4460,8 +4457,7 @@ impl ActiveGraph {
                     .collect::<Vec<_>>();
                 let primary_node = members.first().and_then(|first| {
                     scheduled_nodes
-                        .iter()
-                        .find(|node| node.kind == first.kind && node.identifier == first.identifier)
+                        .get(&placement_runtime_node(first))
                         .and_then(|node| node.primary_node.clone())
                 });
                 PlacementGroupSchedule {
@@ -11751,11 +11747,11 @@ mod tests {
         KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
         MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
         MqttSession, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelSignal,
-        OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
-        ScheduledNode, SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect,
-        SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, WindowBound,
-        WireSchemaField,
+        OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, PlacementRuntimeNode,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
+        RetryPolicy, ScheduledNode, SchemaField, SignalingProtobufConfig,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+        SqsFifoGroup, WindowBound, WireSchemaField,
     };
 
     #[cfg(feature = "testing")]
@@ -12943,10 +12939,11 @@ mod tests {
         kind: ModelKind,
         identifier: &str,
     ) -> &'a ScheduledNode {
+        let identity =
+            PlacementRuntimeNode::new(kind, Identifier::parse(identifier).expect("valid name"));
         schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == kind && node.identifier.as_str() == identifier)
+            .get(&identity)
             .unwrap_or_else(|| panic!("missing scheduled node {kind:?}:{identifier}"))
     }
 
@@ -13254,7 +13251,7 @@ mod tests {
         assert!(
             schedule
                 .nodes
-                .iter()
+                .values()
                 .any(|node| node.kind == ModelKind::Materializer),
             "fixture schedule must include its synthetic materializer"
         );
@@ -13263,9 +13260,7 @@ mod tests {
         {
             let replica = Registry::open(&replica_path).expect("replica registry should open");
             replica
-                .synchronize_cluster_schedule(&ClusterSchedule {
-                    domains: vec![schedule],
-                })
+                .synchronize_cluster_schedule(&ClusterSchedule::from_iter([schedule]))
                 .expect("schedule models should synchronize");
         }
 
