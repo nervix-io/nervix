@@ -1,12 +1,17 @@
+// Only the seams the `testing` feature compiles in use these.
+#[cfg(feature = "testing")]
+use std::net::SocketAddr;
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::IpAddr,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
 use ahash::RandomState;
 use dashmap::DashMap;
-use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
+#[cfg(feature = "testing")]
+use nervix_models::DomainName;
+use nervix_models::{ClusterNodeName, EmitterName, IngestorName};
 use tokio::sync::{Notify, broadcast};
 use triomphe::Arc;
 
