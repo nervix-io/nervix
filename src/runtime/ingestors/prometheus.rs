@@ -1,4 +1,4 @@
-use nervix_models::{DomainName};
+use nervix_models::DomainName;
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use url::Url;

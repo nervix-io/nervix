@@ -2357,7 +2357,8 @@ fn execute_list_item(
         let relative = match item {
             ListItem::First => (!range.is_empty()).then_some(0),
             ListItem::Last => range.len().checked_sub(1),
-            ListItem::Nth => nth_indices.as_ref().and_then(|indices| {
+            ListItem::Nth => {
+                let indices = nth_indices.as_ref()?;
                 if indices.is_null(row) {
                     return None;
                 }
@@ -2365,10 +2366,11 @@ fn execute_list_item(
                 if index < 0 {
                     return None;
                 }
-                usize::try_from(index)
-                    .ok()
-                    .filter(|index| *index < range.len())
-            }),
+                let Ok(index) = usize::try_from(index) else {
+                    return None;
+                };
+                (index < range.len()).then_some(index)
+            }
         }?;
         u64::try_from(range.start + relative).ok()
     }));
@@ -3765,11 +3767,11 @@ where
 
 fn parse_rfc3339_datetimes(input: &StringArray) -> TimestampNanosecondArray {
     TimestampNanosecondArray::from_iter(input.iter().map(|value| {
-        value.and_then(|value| {
-            DateTime::parse_from_rfc3339(value)
-                .ok()
-                .and_then(|value| value.timestamp_nanos_opt())
-        })
+        let value = value?;
+        let Ok(value) = DateTime::parse_from_rfc3339(value) else {
+            return None;
+        };
+        value.timestamp_nanos_opt()
     }))
     .with_timezone_utc()
 }
@@ -3829,7 +3831,10 @@ fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
     predicate
         .iter()
         .enumerate()
-        .filter_map(|(index, value)| value.and_then(|keep| keep.then_some(index)))
+        .filter_map(|(index, value)| match value {
+            Some(true) => Some(index),
+            Some(false) | None => None,
+        })
         .collect()
 }
 

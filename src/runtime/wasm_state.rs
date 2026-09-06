@@ -1,8 +1,8 @@
-use nervix_models::{ClusterNodeName, FieldName};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::RandomState;
 use dashmap::DashMap;
+use nervix_models::{ClusterNodeName, FieldName};
 use tokio::sync::Notify;
 
 use super::{PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement};
@@ -98,11 +98,7 @@ impl ReplicatedWasmProcessorState {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{
-    DomainName,
-    ModelKind,
-    ModelName,
-};
+    use nervix_models::{DomainName, ModelKind, ModelName};
 
     use super::*;
     use crate::{
@@ -130,7 +126,10 @@ mod tests {
     fn wasm_processor_state_tracks_replica_quorum() {
         let state = ReplicatedWasmProcessorState::new(
             placement(),
-            vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+            vec![
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ],
             2,
             None,
         )

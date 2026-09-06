@@ -1,4 +1,3 @@
-use nervix_models::{QueueName};
 use futures_util::FutureExt;
 use lapin::{
     Confirmation, Connection, ConnectionProperties, PublisherConfirm,
@@ -7,6 +6,7 @@ use lapin::{
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
+use nervix_models::QueueName;
 
 use super::*;
 

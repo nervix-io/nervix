@@ -1,4 +1,5 @@
-use nervix_models::{DomainName};
+use nervix_models::DomainName;
+
 use super::super::*;
 
 pub(in crate::runtime) struct EndpointIngestor;

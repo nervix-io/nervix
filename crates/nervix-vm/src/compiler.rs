@@ -1607,12 +1607,16 @@ impl Compiler {
         for branch in branches {
             let known_match = if operand.is_some() {
                 if let Some(operand) = &folded_operand {
-                    fold_constant_expr(&branch.when)?
-                        .and_then(|when| fold_binary_expr(BinaryOp::Eq, operand.clone(), when))
-                        .and_then(|value| match value {
+                    if let Some(when) = fold_constant_expr(&branch.when)?
+                        && let Some(value) = fold_binary_expr(BinaryOp::Eq, operand.clone(), when)
+                    {
+                        match value {
                             FoldedValue::NonNull(ScalarValue::Boolean(value)) => Some(value),
                             FoldedValue::NonNull(_) | FoldedValue::Null(_) => None,
-                        })
+                        }
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -1620,10 +1624,10 @@ impl Compiler {
                 match &branch.when.inner {
                     Expr::Literal(Literal::Bool(value)) => Some(*value),
                     Expr::Literal(Literal::Null) => Some(false),
-                    _ => fold_constant_expr(&branch.when)?.and_then(|value| match value {
-                        FoldedValue::NonNull(ScalarValue::Boolean(value)) => Some(value),
-                        FoldedValue::NonNull(_) | FoldedValue::Null(_) => None,
-                    }),
+                    _ => match fold_constant_expr(&branch.when)? {
+                        Some(FoldedValue::NonNull(ScalarValue::Boolean(value))) => Some(value),
+                        Some(FoldedValue::NonNull(_) | FoldedValue::Null(_)) | None => None,
+                    },
                 }
             };
             match known_match {

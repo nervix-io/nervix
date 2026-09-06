@@ -4,21 +4,20 @@ use chumsky::{
     error::{RichPattern, RichReason},
     prelude::*,
 };
+use error_stack::Report;
 use nervix_models::{
     AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchName, BranchSelection,
     ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CollectionName,
-    ConsumerGroupName,
-    CorrelatorName, DeduplicatorName, DomainName, EmitterAckWindow, EmitterName, EndpointName,
-    Expression, FieldName, GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName,
-    InputCollectPolicy, JunctionName, LookupName, MaterializedStateDependency,
+    ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainName, EmitterAckWindow, EmitterName,
+    EndpointName, Expression, FieldName, GeneralErrorPolicy, GeneratorName, InferencerName,
+    IngestorName, InputCollectPolicy, JunctionName, LookupName, MaterializedStateDependency,
     MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError, OutputBranch,
     OutputFlushPolicy, PlacementName, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, PulsarSubscriptionName, QueueGroupName, QueueName, RelayName, ReingestorName,
-    ReordererName, ResourceName, RetryPolicy, RouteConstruction, SchemaName, SubjectName,
-    SignalingProtocolName, SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName,
+    ProcessorOutputs, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
+    ReordererName, ResourceName, RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName,
+    SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName,
     WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
-use error_stack::Report;
 use sorted_vec::SortedSet;
 
 use crate::lexer::{Identifier, SpannedToken, Token, Word, lex};
@@ -518,12 +517,20 @@ pub fn field_ref<'src>()
 
 pub fn relay_ref<'src>()
 -> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch], RelayName::parse)
+    parse_name_excluding_reserved(
+        "ref:relay",
+        &[Identifier::Message, Identifier::Branch],
+        RelayName::parse,
+    )
 }
 
 pub fn message_error_relay_ref<'src>()
 -> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch], RelayName::parse)
+    parse_name_excluding_reserved(
+        "ref:relay",
+        &[Identifier::Message, Identifier::Branch],
+        RelayName::parse,
+    )
 }
 
 pub fn resource_ref<'src>()
@@ -533,7 +540,11 @@ pub fn resource_ref<'src>()
 
 pub fn relay_name<'src>()
 -> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name_excluding_reserved("relay_name", &[Identifier::Message, Identifier::Branch], RelayName::parse)
+    parse_name_excluding_reserved(
+        "relay_name",
+        &[Identifier::Message, Identifier::Branch],
+        RelayName::parse,
+    )
 }
 
 pub fn junction_ref<'src>()
@@ -627,8 +638,7 @@ pub fn signaling_protocol_name<'src>()
 }
 
 pub fn signaling_protocol_clause<'src>()
--> impl Parser<'src, &'src [Token], SignalingProtocolName, extra::Err<ParseError<'src>>> + Clone
-{
+-> impl Parser<'src, &'src [Token], SignalingProtocolName, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase3(
         Identifier::With,
         Identifier::Signaling,
@@ -1493,12 +1503,9 @@ pub fn from_relay_clause_with_boundary<'src>(
         .boxed()
 }
 
-pub fn from_relay_clause<'src>() -> impl Parser<
-    'src,
-    &'src [Token],
-    (RelayName, Vec<ProcessorInputWhere>),
-    extra::Err<ParseError<'src>>,
-> + Clone {
+pub fn from_relay_clause<'src>()
+-> impl Parser<'src, &'src [Token], (RelayName, Vec<ProcessorInputWhere>), extra::Err<ParseError<'src>>>
++ Clone {
     from_relay_clause_with_boundary(from_where_boundary_token)
 }
 

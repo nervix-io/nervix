@@ -4,9 +4,8 @@ use strum::{AsRefStr, IntoStaticStr};
 use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
-    EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, ProcessorInputs,
-    ProcessorOutput, RelayName,
-    ProcessorOutputs,
+    EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayName,
 };
 
 #[derive(
@@ -1644,14 +1643,17 @@ fn wire_schema_change_aspects<T>(
 
 #[cfg(test)]
 mod tests {
-    use crate::{BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, EmitterName, FieldName, IngestorName, LookupName, ModelName, RelayName, ResourceName, SchemaName, SubscriptionName, TopicName, UdfName, UserName, WireSchemaName, 
-        AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
-        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, 
-        IngestSource, IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
-        MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-        ModelChangeAspect, ModelKind, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
+    use crate::{
+        AckMode, BranchName, BranchSelection, BuiltinFunctionName, ClientName, ClusterNodeName,
+        CodecName, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor,
+        CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink, EmitterName,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FieldName, GeneralErrorPolicy,
+        IngestSource, IngestTimestampSource, IngestorName, InputCollectPolicy, Literal, LookupName,
+        MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
+        MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, ModelName, OutputFlushPolicy,
+        ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
+        RelayBranching, RelayName, ResourceName, RetryPolicy, SchemaName, SubscriptionName,
+        TopicName, UdfName, UserName, WireSchemaName,
     };
 
     fn named<N>(raw: &str) -> N
@@ -2392,13 +2394,15 @@ mod tests {
 
 #[cfg(test)]
 mod catch_all_kind_tests {
-    use crate::{BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, EmitterName, FieldName, IngestorName, LookupName, ModelName, RelayName, ResourceName, SchemaName, SubscriptionName, TopicName, UdfName, UserName, WireSchemaName, 
-        AckMode, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
-        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateCodec,
-        CreateCorrelator, CreateInferencer, CreateVhost, CreateWasmProcessor,
-        CreateWindowProcessor, GeneralErrorPolicy, Literal, Model, ModelChangeAspect,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, VhostTlsResource,
-        WasmProcessorLimits, WindowBound,
+    use crate::{
+        AckMode, BranchName, BranchSelection, BuiltinFunctionName, ClientName, ClusterNodeName,
+        CodecName, CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+        CorrelatorMatchPolicy, CreateBranch, CreateCodec, CreateCorrelator, CreateInferencer,
+        CreateVhost, CreateWasmProcessor, CreateWindowProcessor, EmitterName, FieldName,
+        GeneralErrorPolicy, IngestorName, Literal, LookupName, Model, ModelChangeAspect, ModelName,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayName, ResourceName,
+        SchemaName, SubscriptionName, TopicName, UdfName, UserName, VhostTlsResource,
+        WasmProcessorLimits, WindowBound, WireSchemaName,
     };
 
     fn named<N>(raw: &str) -> N

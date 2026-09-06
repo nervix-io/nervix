@@ -1,8 +1,8 @@
-use nervix_models::{TableName};
 use mysql_async::{
     Opts as MySqlOpts, OptsBuilder as MySqlOptsBuilder, Params as MySqlParams, Pool as MySqlPool,
     SslOpts as MySqlSslOpts, Value as MySqlValue, prelude::Queryable as MySqlQueryable,
 };
+use nervix_models::TableName;
 
 use super::*;
 
@@ -380,15 +380,19 @@ impl MySqlEmitter {
         indices
             .iter()
             .map(|row| {
-                rows.get(*row)
-                    .and_then(|values| values.as_ref().ok())
-                    .map(Vec::as_slice)
-                    .ok_or_else(|| {
-                        MySqlWriteError::InvalidValues(format!(
-                            "pending row {row} has no mapped VALUES in batch with {} rows",
-                            rows.len()
-                        ))
-                    })
+                let Some(values) = rows.get(*row) else {
+                    return Err(MySqlWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                let Ok(values) = values else {
+                    return Err(MySqlWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                Ok(values.as_slice())
             })
             .collect()
     }

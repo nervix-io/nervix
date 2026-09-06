@@ -1,4 +1,3 @@
-use nervix_models::{ClusterNodeName};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, io,
@@ -14,6 +13,7 @@ use chitchat::{
     transport::{Socket, Transport, UdpSocket},
 };
 use nervix_consensus::{GossipNode, GossipState};
+use nervix_models::ClusterNodeName;
 use parking_lot::{Mutex, RwLock};
 use tokio::{net::lookup_host, sync::broadcast, task::JoinHandle};
 use tokio_stream::StreamExt;
@@ -352,16 +352,16 @@ impl ClusterHandle {
         let self_id = chitchat.self_chitchat_id().clone();
         let cluster_id = chitchat.cluster_id().to_string();
         let self_state = chitchat.node_state(&self_id).cloned();
-        let live_nodes = chitchat
-            .live_nodes()
-            .filter(|node_id| **node_id != self_id)
-            .filter_map(|node_id| {
-                chitchat
-                    .node_state(node_id)
-                    .cloned()
-                    .map(|state| (node_id.clone(), state))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut live_nodes = BTreeMap::new();
+        for node_id in chitchat.live_nodes() {
+            if *node_id == self_id {
+                continue;
+            }
+            let Some(state) = chitchat.node_state(node_id) else {
+                continue;
+            };
+            live_nodes.insert(node_id.clone(), state.clone());
+        }
         let seed_nodes = chitchat
             .seed_nodes()
             .into_iter()
@@ -444,7 +444,10 @@ impl ClusterHandle {
             .set(KEY_RUNTIME_REVISION_READY, revision.to_string());
     }
 
-    pub async fn nodes_ready_for_runtime_revision(&self, revision: u64) -> BTreeSet<ClusterNodeName> {
+    pub async fn nodes_ready_for_runtime_revision(
+        &self,
+        revision: u64,
+    ) -> BTreeSet<ClusterNodeName> {
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
@@ -544,7 +547,11 @@ impl ClusterHandle {
         }
     }
 
-    pub fn record_interconnect_failure(&self, node_id: &ClusterNodeName, target_addr: Option<String>) {
+    pub fn record_interconnect_failure(
+        &self,
+        node_id: &ClusterNodeName,
+        target_addr: Option<String>,
+    ) {
         let mut peers = self.interconnect_state.write();
         let entry = peers
             .entry(node_id.clone())
@@ -610,14 +617,16 @@ impl ClusterHandle {
     fn unavailable_interconnect_nodes(&self) -> BTreeSet<ClusterNodeName> {
         let peers = self.interconnect_state.read();
         let now = Instant::now();
-        peers
-            .iter()
-            .filter_map(|(node_id, state)| {
-                let since = state.unavailable_since?;
-                let elapsed = now.saturating_duration_since(since);
-                (elapsed >= self.node_unavailability_timeout).then(|| node_id.clone())
-            })
-            .collect()
+        let mut unavailable = BTreeSet::new();
+        for (node_id, state) in peers.iter() {
+            let Some(since) = state.unavailable_since else {
+                continue;
+            };
+            if now.saturating_duration_since(since) >= self.node_unavailability_timeout {
+                unavailable.insert(node_id.clone());
+            }
+        }
+        unavailable
     }
 
     pub fn is_interconnect_unavailable(&self, node_id: &ClusterNodeName) -> bool {

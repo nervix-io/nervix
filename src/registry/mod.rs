@@ -22,7 +22,24 @@ use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowInputSide,
     DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind, DataflowSchemaField,
 };
-use nervix_models::{AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement, AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchName, BranchSelection, CborType, ClientName, ClusterNodeName, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreatePlacement, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, DomainName, DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType, Expression, FieldName, IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, ModelName, MqttIngestMode, OtelAggregationTemporality, OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WireSchemaDefinition, WireSchemaName};
+use nervix_models::{
+    AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
+    AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
+    AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchName, BranchSelection, CborType,
+    ClientName, ClusterNodeName, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecName,
+    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor,
+    CreateLookup, CreatePlacement, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
+    CreateWireSchema, DomainName, DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType,
+    Expression, FieldName, IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+    ModelChangeAspect, ModelKind, ModelName, MqttIngestMode, OtelAggregationTemporality,
+    OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType,
+    PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode, ProcessorOutput,
+    ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, SchemaField,
+    SchemaName, SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WireSchemaDefinition,
+    WireSchemaName,
+};
 use nervix_nspl::{
     vm_program::{
         CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
@@ -406,20 +423,20 @@ impl Registry {
     pub fn startup_runtime_changes(&self) -> Result<Vec<RuntimeChanges>, Report<RegistryError>> {
         let state = self.state.read();
         let domains = SortedSet::from_unsorted(state.domains.keys().cloned().collect()).into_vec();
-
-        Ok(domains
-            .into_iter()
-            .filter_map(|domain| {
-                let domain_state = state.domains.get(&domain)?;
-                let changes = runtime_changes_for_domain(
-                    &domain,
-                    Some(domain_state.graph.clone()),
-                    &HashMap::new(),
-                    &domain_state.models,
-                );
-                (changes.graph.is_some() || !changes.changes.is_empty()).then_some(changes)
-            })
-            .collect())
+        let mut startup_changes = Vec::new();
+        for domain in domains {
+            let domain_state = &state.domains[&domain];
+            let changes = runtime_changes_for_domain(
+                &domain,
+                Some(domain_state.graph.clone()),
+                &HashMap::new(),
+                &domain_state.models,
+            );
+            if changes.graph.is_some() || !changes.changes.is_empty() {
+                startup_changes.push(changes);
+            }
+        }
+        Ok(startup_changes)
     }
 
     pub fn synchronize_cluster_schedule(
@@ -3923,20 +3940,20 @@ fn ensure_placement_member_shape_change_allowed(
     }
 
     let member = after.name();
-    let mut placements = candidate_models
-        .values()
-        .filter_map(|model| {
-            let Model::Placement(placement) = model else {
-                return None;
-            };
-            placement
-                .from
-                .iter()
-                .chain(&placement.to)
-                .any(|candidate| *candidate == member)
-                .then_some(placement.name.clone())
-        })
-        .collect::<Vec<_>>();
+    let mut placements = Vec::new();
+    for model in candidate_models.values() {
+        let Model::Placement(placement) = model else {
+            continue;
+        };
+        if placement
+            .from
+            .iter()
+            .chain(&placement.to)
+            .any(|candidate| *candidate == member)
+        {
+            placements.push(placement.name.clone());
+        }
+    }
     placements.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     placements.dedup();
     if placements.is_empty() {
@@ -4475,12 +4492,15 @@ impl ActiveGraph {
                     .iter()
                     .map(placement_runtime_node)
                     .collect::<Vec<_>>();
-                let primary_node = members.first().and_then(|first| {
-                    scheduled_nodes
+                let primary_node = if let Some(first) = members.first()
+                    && let Some(node) = scheduled_nodes
                         .iter()
                         .find(|node| node.kind == first.kind && node.identifier == first.identifier)
-                        .and_then(|node| node.primary_node.clone())
-                });
+                {
+                    node.primary_node.clone()
+                } else {
+                    None
+                };
                 PlacementGroupSchedule {
                     members: runtime_members,
                     primary_node,
@@ -4529,19 +4549,17 @@ impl ActiveGraph {
             })
             .collect::<Vec<_>>();
 
-        let schemas =
-            self.graph
-                .node_indices()
-                .filter_map(|index| {
-                    let node = self.graph.node_weight(index).verified(
-                        "this index came from the same graph, which is not modified here",
-                    );
-                    let Model::Schema(schema) = node.config.as_ref() else {
-                        return None;
-                    };
-                    Some((node.identifier.clone(), schema.clone()))
-                })
-                .collect::<HashMap<_, _>>();
+        let mut schemas = HashMap::default();
+        for index in self.graph.node_indices() {
+            let node = self
+                .graph
+                .node_weight(index)
+                .verified("this index came from the same graph, which is not modified here");
+            let Model::Schema(schema) = node.config.as_ref() else {
+                continue;
+            };
+            schemas.insert(node.identifier.clone(), schema.clone());
+        }
 
         let mut nodes = included_nodes
             .iter()
@@ -6285,7 +6303,11 @@ impl AssignmentPlanner<'_> {
             .collect()
     }
 
-    fn for_group(&mut self, members: &[RegistryKey], indices: &[NodeIndex]) -> Vec<ClusterNodeName> {
+    fn for_group(
+        &mut self,
+        members: &[RegistryKey],
+        indices: &[NodeIndex],
+    ) -> Vec<ClusterNodeName> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
         }
@@ -6314,7 +6336,12 @@ impl AssignmentPlanner<'_> {
         self.ranked_assignment(&preferred_order, &placement_order)
     }
 
-    fn for_model(&mut self, index: NodeIndex, key: &RegistryKey, model: &Model) -> Vec<ClusterNodeName> {
+    fn for_model(
+        &mut self,
+        index: NodeIndex,
+        key: &RegistryKey,
+        model: &Model,
+    ) -> Vec<ClusterNodeName> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
         }
@@ -6383,7 +6410,10 @@ fn placement_affinity_scores(
             PlacementPolicy::SuggestSeparation => -1,
             PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => continue,
         };
-        let Some(primary) = assigned_by_key.get(other).and_then(|nodes| nodes.first()) else {
+        let Some(nodes) = assigned_by_key.get(other) else {
+            continue;
+        };
+        let Some(primary) = nodes.first() else {
             continue;
         };
         *scores.entry(primary.clone()).or_insert(0) += adjustment;
@@ -6573,8 +6603,8 @@ impl ModelStorage {
                 DomainName::parse(&key.domain).change_context(RegistryError::ModelConversion)?;
             let kind = ModelKind::from_str(&key.kind)
                 .map_err(|_| Report::new(RegistryError::ModelConversion))?;
-            let identifier = ModelName::parse(&key.identifier)
-                .change_context(RegistryError::ModelConversion)?;
+            let identifier =
+                ModelName::parse(&key.identifier).change_context(RegistryError::ModelConversion)?;
 
             records.push(StoredModelRecord {
                 domain,
@@ -10292,41 +10322,23 @@ fn infer_stream_branchings(
         changed = false;
 
         for producer_id in &producer_ids {
-            let Some(model) = models
-                .get(&RegistryKey::new(ModelKind::Generator, producer_id.clone()))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::Inferencer,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::WasmProcessor,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| models.get(&RegistryKey::new(ModelKind::Ingestor, producer_id.clone())))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::Reingestor,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::Deduplicator,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| models.get(&RegistryKey::new(ModelKind::Junction, producer_id.clone())))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::WindowProcessor,
-                        producer_id.clone(),
-                    ))
-                })
-            else {
+            let mut model = None;
+            for kind in [
+                ModelKind::Generator,
+                ModelKind::Inferencer,
+                ModelKind::WasmProcessor,
+                ModelKind::Ingestor,
+                ModelKind::Reingestor,
+                ModelKind::Deduplicator,
+                ModelKind::Junction,
+                ModelKind::WindowProcessor,
+            ] {
+                if let Some(candidate) = models.get(&RegistryKey::new(kind, producer_id.clone())) {
+                    model = Some(candidate);
+                    break;
+                }
+            }
+            let Some(model) = model else {
                 continue;
             };
 
@@ -11665,21 +11677,20 @@ fn ensure_drop_targets_are_not_in_use(
             continue;
         };
 
-        let mut blockers = graph
-            .graph
-            .edges_directed(index, Direction::Outgoing)
-            .filter_map(|blocker_index| {
-                if *blocker_index.weight() != EdgeKind::RequiredBy {
-                    return None;
-                }
-                let blocker = graph
-                    .graph
-                    .node_weight(blocker_index.target())
-                    .verified("this endpoint comes from an edge of the same graph")
-                    .clone();
-                (!drops_in_batch.contains(&blocker.key())).then_some(blocker.identifier)
-            })
-            .collect::<Vec<_>>();
+        let mut blockers = Vec::new();
+        for blocker_index in graph.graph.edges_directed(index, Direction::Outgoing) {
+            if *blocker_index.weight() != EdgeKind::RequiredBy {
+                continue;
+            }
+            let blocker = graph
+                .graph
+                .node_weight(blocker_index.target())
+                .verified("this endpoint comes from an edge of the same graph")
+                .clone();
+            if !drops_in_batch.contains(&blocker.key()) {
+                blockers.push(blocker.identifier);
+            }
+        }
         blockers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         blockers.dedup_by(|a, b| a.as_str() == b.as_str());
 
@@ -11710,7 +11721,33 @@ mod tests {
     use ahash::HashMap;
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
-    use nervix_models::{AckMode, AlterEmitter, AlterEmitterOperation, AlterIngestor, AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection, ClientConfigEntry, ClientName, ClusterNodeName, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat, ConsumerGroupName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientHttp, CreateClientKafka, CreateClientSqs, CreateClientSyslog, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DeduplicatorName, DomainName, DomainSchedule, DropModel, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, ErrorPolicies, Expression, FieldName, FieldReference, FieldScope, GeneralErrorPolicy, IngestSource, IngestTimestampSource, IngestorName, Inheritance, InputCollectPolicy, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, ReingestorName, RelayBranching, RelayName, RetryPolicy, ScheduledNode, SchemaField, SchemaName, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName};
+    use nervix_models::{
+        AckMode, AlterEmitter, AlterEmitterOperation, AlterIngestor, AlterIngestorOperation,
+        AlterJunction, AlterPlacement, AlterPlacementOperation, AlterProcessorOperation,
+        AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+        AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope, BranchName,
+        BranchSelection, ClientConfigEntry, ClientName, ClusterNodeName, ClusterSchedule,
+        CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecName,
+        CodecProtobufConfig, CodecWireFormat, ConsumerGroupName, CorrelationTimeoutAction,
+        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientHttp,
+        CreateClientKafka, CreateClientSqs, CreateClientSyslog, CreateCodec, CreateCorrelator,
+        CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
+        CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
+        CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DeduplicatorName, DomainName,
+        DomainSchedule, DropModel, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode,
+        EndpointName, ErrorPolicies, Expression, FieldName, FieldReference, FieldScope,
+        GeneralErrorPolicy, IngestSource, IngestTimestampSource, IngestorName, Inheritance,
+        InputCollectPolicy, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
+        MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, ModelName, MqttIngestMode,
+        MqttQos, MqttSession, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelSignal,
+        OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, QuiesceLevel, ReingestorName, RelayBranching, RelayName,
+        RetryPolicy, ScheduledNode, SchemaField, SchemaName, SignalingProtobufConfig,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+        SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName, WireSchemaField,
+        WireSchemaName,
+    };
 
     #[cfg(feature = "testing")]
     use super::SchedulerMode;
@@ -12525,8 +12562,13 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect_err("zero retry backoff must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("zero retry backoff must be rejected");
         assert!(format!("{error:#}").contains("BACKOFF must be greater than zero"));
 
         emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
@@ -12537,8 +12579,13 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect_err("zero confirmation timeout must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("zero confirmation timeout must be rejected");
         assert!(format!("{error:#}").contains("ACK TIMEOUT must be greater than zero"));
 
         emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
@@ -12549,8 +12596,13 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect_err("zero confirmation windows must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("zero confirmation windows must be rejected");
         assert!(format!("{error:#}").contains("PARALLEL MAX must be greater than zero"));
 
         emitter.publishing_mode = EmitterPublishingMode::MqttQos0 {
@@ -12559,8 +12611,13 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect_err("foreign publishing modes must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("foreign publishing modes must be rejected");
         assert!(format!("{error:#}").contains("KAFKA emitter does not support MODE QOS 0"));
 
         *emitter.sink = EmitSink::Sqs {
@@ -12576,15 +12633,25 @@ mod tests {
                 max_backoff: "100ms".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect_err("retry maxima below their initial backoff must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("retry maxima below their initial backoff must be rejected");
         assert!(format!("{error:#}").contains("must be at least BACKOFF"));
 
         if let EmitterPublishingMode::SqsSingle { retry_policy } = &mut emitter.publishing_mode {
             retry_policy.max_backoff = "1s".to_string();
         }
-        let error = validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect_err("FIFO GROUP on a standard queue must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("FIFO GROUP on a standard queue must be rejected");
         assert!(format!("{error:#}").contains("requires a queue name ending in .fifo"));
 
         *emitter.sink = EmitSink::ClickHouse {
@@ -12601,8 +12668,13 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect_err("zero database batch limits must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("zero database batch limits must be rejected");
         assert!(
             format!("{error:#}").contains("CLICKHOUSE WITH MAX BATCH must be greater than zero"),
             "unexpected validation error: {error:#}"
@@ -12640,15 +12712,25 @@ mod tests {
             resource: Vec::new(),
             scope: None,
         };
-        validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect("complete OTEL LOGS mappings must be accepted");
+        validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect("complete OTEL LOGS mappings must be accepted");
 
         let EmitSink::Otel { values, .. } = emitter.sink.as_mut() else {
             unreachable!("test emitter must remain OTEL")
         };
         values.push(otel_mapping("body"));
-        let error = validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect_err("duplicate OTEL VALUES keys must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("duplicate OTEL VALUES keys must be rejected");
         assert!(format!("{error:#}").contains("duplicate key 'body'"));
 
         *emitter.sink = EmitSink::Otel {
@@ -12667,8 +12749,13 @@ mod tests {
             resource: Vec::new(),
             scope: None,
         };
-        let error = validate_emitter_publishing_contract(&domain, &ModelName::from(&emitter.name), &models, &emitter)
-            .expect_err("DELTA metric streams without start_time must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("DELTA metric streams without start_time must be rejected");
         assert!(format!("{error:#}").contains("DELTA VALUES requires key 'start_time'"));
     }
 
@@ -13212,9 +13299,7 @@ mod tests {
         let scheduled_relay = schedule
             .nodes
             .iter()
-            .find(|node| {
-                node.kind == ModelKind::Relay && node.identifier == named("notifications")
-            })
+            .find(|node| node.kind == ModelKind::Relay && node.identifier == named("notifications"))
             .expect("fixture schedule must include its materialized relay");
         assert_eq!(scheduled_relay.assigned_nodes, ["node-1"]);
 
@@ -13296,7 +13381,11 @@ mod tests {
         assert!(changes.graph.is_some());
 
         let stored = registry
-            .get(&domain, ModelKind::Relay, &named::<ModelName>("notifications"))
+            .get(
+                &domain,
+                ModelKind::Relay,
+                &named::<ModelName>("notifications"),
+            )
             .expect("read should succeed")
             .expect("relay should exist");
         let Model::Relay(stored_relay) = stored else {
@@ -13647,7 +13736,11 @@ mod tests {
         ));
         assert!(
             registry
-                .get(&domain, ModelKind::Relay, &named::<ModelName>("notifications"))
+                .get(
+                    &domain,
+                    ModelKind::Relay,
+                    &named::<ModelName>("notifications")
+                )
                 .expect("read should succeed")
                 .is_none()
         );
@@ -14521,9 +14614,7 @@ mod tests {
         let deduplicator = models
             .iter_mut()
             .find_map(|model| match model {
-                Model::Deduplicator(deduplicator)
-                    if deduplicator.name == named("p99_proc") =>
-                {
+                Model::Deduplicator(deduplicator) if deduplicator.name == named("p99_proc") => {
                     Some(deduplicator)
                 }
                 _ => None,
@@ -14588,7 +14679,8 @@ mod tests {
 
         let endpoint_path = temp_db_path();
         let endpoint_registry = Registry::open(&endpoint_path).expect("registry should open");
-        let endpoint_domain = DomainName::parse("placement_endpoint_ingestor").expect("valid domain");
+        let endpoint_domain =
+            DomainName::parse("placement_endpoint_ingestor").expect("valid domain");
         let mut endpoint_models = full_graph_batch();
         let ingestor = endpoint_models
             .iter_mut()
@@ -14841,7 +14933,10 @@ mod tests {
         assert_eq!(plan.require_groups[0].members.len(), 5);
         let schedule = graph.schedule_for_domain(
             &domain,
-            &[ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-2").expect("valid name")],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::RequireColocation,
         );
@@ -14950,7 +15045,10 @@ mod tests {
             .expect("graph should be installed");
         let schedule = graph.schedule_for_domain(
             &domain,
-            &[ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-2").expect("valid name")],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
@@ -14988,11 +15086,7 @@ mod tests {
                     Model::Junction(CreateJunction {
                         name: named("join"),
                         from: ProcessorInputs::new(
-                            vec![
-                                named("source_a"),
-                                named("source_b"),
-                                named("source_c"),
-                            ],
+                            vec![named("source_a"), named("source_b"), named("source_c")],
                             Vec::new(),
                         ),
                         output_routes: unbranched_transforming_outputs("joined"),
@@ -15016,7 +15110,10 @@ mod tests {
             .expect("graph should be installed");
         let schedule = graph.schedule_for_domain(
             &domain,
-            &[ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-2").expect("valid name")],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
@@ -15110,7 +15207,10 @@ mod tests {
             .expect("graph should be installed");
         let schedule = graph.schedule_for_domain(
             &domain,
-            &[ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-2").expect("valid name")],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
@@ -15406,7 +15506,10 @@ mod tests {
             .expect("graph should be installed");
         let schedule = graph.schedule_for_domain(
             &domain,
-            &[ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-2").expect("valid name")],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
@@ -15953,7 +16056,10 @@ mod tests {
         );
         let reduced_schedule = graph.schedule_for_domain(
             &domain,
-            &[ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
@@ -15968,7 +16074,10 @@ mod tests {
         );
         assert_eq!(
             scheduled_node(&reduced_schedule, ModelKind::Ingestor, "ws_ing").assigned_nodes,
-            vec![named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]
+            vec![
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3")
+            ]
         );
 
         let _ = fs::remove_dir_all(path);
@@ -16245,10 +16354,7 @@ mod tests {
         else {
             unreachable!("emitter helper must build an emitter model")
         };
-        emitter.from = ProcessorInputs::new(
-            vec![named("source_a"), named("source_b")],
-            Vec::new(),
-        );
+        emitter.from = ProcessorInputs::new(vec![named("source_a"), named("source_b")], Vec::new());
 
         let error = registry
             .apply_batch(
@@ -16286,10 +16392,7 @@ mod tests {
         else {
             unreachable!("emitter helper must build an emitter model")
         };
-        emitter.from = ProcessorInputs::new(
-            vec![named("source_a"), named("source_b")],
-            Vec::new(),
-        );
+        emitter.from = ProcessorInputs::new(vec![named("source_a"), named("source_b")], Vec::new());
         emitter.materialized_state = vec![nervix_models::MaterializedStateDependency {
             relay: named("profiles"),
             policy: nervix_models::MaterializedStatePolicy::RequiredSkip,
@@ -18311,8 +18414,7 @@ mod tests {
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: ModelName::parse("transaction_id")
-                                    .expect("valid identifier"),
+                                name: ModelName::parse("transaction_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18329,8 +18431,7 @@ mod tests {
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: ModelName::parse("transaction_id")
-                                    .expect("valid identifier"),
+                                name: ModelName::parse("transaction_id").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18509,7 +18610,9 @@ mod tests {
         let target = graph
             .node(
                 ModelKind::Relay,
-                &ModelName::from(&RelayName::parse("tenant_notifications").expect("valid relay name")),
+                &ModelName::from(
+                    &RelayName::parse("tenant_notifications").expect("valid relay name"),
+                ),
             )
             .expect("target relay should exist");
 
@@ -18916,7 +19019,11 @@ mod tests {
             .expect("planning should succeed");
 
         let Model::Schema(before) = registry
-            .get(&domain, ModelKind::Schema, &named::<ModelName>("event_schema"))
+            .get(
+                &domain,
+                ModelKind::Schema,
+                &named::<ModelName>("event_schema"),
+            )
             .expect("read should succeed")
             .expect("schema should exist")
         else {
@@ -18929,7 +19036,11 @@ mod tests {
             .expect("commit should succeed");
 
         let Model::Schema(after) = registry
-            .get(&domain, ModelKind::Schema, &named::<ModelName>("event_schema"))
+            .get(
+                &domain,
+                ModelKind::Schema,
+                &named::<ModelName>("event_schema"),
+            )
             .expect("read should succeed")
             .expect("schema should exist")
         else {
@@ -18980,12 +19091,20 @@ mod tests {
         ));
         assert!(
             registry
-                .get(&domain, ModelKind::Schema, &named::<ModelName>("new_schema"))
+                .get(
+                    &domain,
+                    ModelKind::Schema,
+                    &named::<ModelName>("new_schema")
+                )
                 .expect("read should succeed")
                 .is_none()
         );
         let Model::Schema(schema) = registry
-            .get(&domain, ModelKind::Schema, &named::<ModelName>("event_schema"))
+            .get(
+                &domain,
+                ModelKind::Schema,
+                &named::<ModelName>("event_schema"),
+            )
             .expect("read should succeed")
             .expect("schema should exist")
         else {
@@ -19030,7 +19149,11 @@ mod tests {
         ));
 
         let Model::Schema(schema) = registry
-            .get(&domain, ModelKind::Schema, &named::<ModelName>("event_schema"))
+            .get(
+                &domain,
+                ModelKind::Schema,
+                &named::<ModelName>("event_schema"),
+            )
             .expect("read should succeed")
             .expect("schema should exist")
         else {

@@ -3,7 +3,7 @@ use nervix_models::{ClusterNodeName, CordonNode, DrainNode, UncordonNode};
 
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, kw, cluster_node_name, tok},
+    parser_support::{ParseError, cluster_node_name, kw, tok},
 };
 
 pub fn cordon_node_parser<'src>()
@@ -54,7 +54,10 @@ mod tests {
             .parse(tokens.as_slice())
             .into_result()
             .expect("parse should succeed");
-        assert_eq!(parsed.node_id, ClusterNodeName::parse("node-2").expect("valid name"));
+        assert_eq!(
+            parsed.node_id,
+            ClusterNodeName::parse("node-2").expect("valid name")
+        );
     }
 
     #[test]
@@ -65,7 +68,10 @@ mod tests {
             .parse(tokens.as_slice())
             .into_result()
             .expect("parse should succeed");
-        assert_eq!(parsed.node_id, ClusterNodeName::parse("node-2").expect("valid name"));
+        assert_eq!(
+            parsed.node_id,
+            ClusterNodeName::parse("node-2").expect("valid name")
+        );
     }
 
     #[test]
@@ -76,6 +82,9 @@ mod tests {
             .parse(tokens.as_slice())
             .into_result()
             .expect("parse should succeed");
-        assert_eq!(parsed.node_id, ClusterNodeName::parse("node-2").expect("valid name"));
+        assert_eq!(
+            parsed.node_id,
+            ClusterNodeName::parse("node-2").expect("valid name")
+        );
     }
 }

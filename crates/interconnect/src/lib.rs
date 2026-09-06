@@ -12,9 +12,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use nervix_models::{
     ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName, FieldName, IngestorName,
     LookupName, ModelKind, ModelName, RelayName, RemoteAckRegistration, RemoteAckResolution,
-    ResourceName,
     RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
-    SubscriptionBinding, Timestamp,
+    ResourceName, SubscriptionBinding, Timestamp,
 };
 use rand_core::OsRng;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -1373,8 +1372,8 @@ fn decode_stream_payload(bytes: &[u8]) -> Result<RelayPayload, TransportError> {
             1 => {
                 let ack_id = cursor.read_u64()?;
                 let reply_node_raw = cursor.read_string()?;
-                let reply_node_id = ClusterNodeName::try_from(reply_node_raw.as_str())
-                    .map_err(|error| {
+                let reply_node_id =
+                    ClusterNodeName::try_from(reply_node_raw.as_str()).map_err(|error| {
                         TransportError::Decode(format!(
                             "invalid node id '{reply_node_raw}': {error}"
                         ))
@@ -2090,7 +2089,10 @@ mod tests {
             .expect("send a->b");
 
         let first = recv_one(&mut incoming_b).await;
-        assert_eq!(first.peer_node_id, ClusterNodeName::parse("node-a").expect("valid name"));
+        assert_eq!(
+            first.peer_node_id,
+            ClusterNodeName::parse("node-a").expect("valid name")
+        );
         assert_eq!(
             first.envelope,
             Envelope::RelayPayload(dummy_stream_payload("orders"))
@@ -2103,7 +2105,10 @@ mod tests {
             .expect("reply b->a");
 
         let second = recv_one(&mut incoming_a).await;
-        assert_eq!(second.peer_node_id, ClusterNodeName::parse("node-b").expect("valid name"));
+        assert_eq!(
+            second.peer_node_id,
+            ClusterNodeName::parse("node-b").expect("valid name")
+        );
         assert_eq!(
             second.envelope,
             Envelope::RelayPayload(dummy_stream_payload("orders"))
@@ -2259,7 +2264,11 @@ mod tests {
 
         timeout(Duration::from_secs(5), async {
             loop {
-                if transport_a.is_connected_to(&ClusterNodeName::parse("node-b").expect("valid name")) && transport_b.is_connected_to(&ClusterNodeName::parse("node-a").expect("valid name")) {
+                if transport_a
+                    .is_connected_to(&ClusterNodeName::parse("node-b").expect("valid name"))
+                    && transport_b
+                        .is_connected_to(&ClusterNodeName::parse("node-a").expect("valid name"))
+                {
                     break;
                 }
                 sleep(Duration::from_millis(50)).await;
@@ -2378,7 +2387,10 @@ mod tests {
             .await
             .expect("initial send");
         let first = recv_one(&mut incoming_b).await;
-        assert_eq!(first.peer_node_id, ClusterNodeName::parse("node-a").expect("valid name"));
+        assert_eq!(
+            first.peer_node_id,
+            ClusterNodeName::parse("node-a").expect("valid name")
+        );
         assert_eq!(
             first.envelope,
             Envelope::RelayPayload(dummy_stream_payload("reconnect"))
@@ -2406,7 +2418,10 @@ mod tests {
 
         send_fut.await.expect("queued send should succeed");
         let second = recv_one(&mut incoming_b2).await;
-        assert_eq!(second.peer_node_id, ClusterNodeName::parse("node-a").expect("valid name"));
+        assert_eq!(
+            second.peer_node_id,
+            ClusterNodeName::parse("node-a").expect("valid name")
+        );
         assert_eq!(
             second.envelope,
             Envelope::RelayPayload(dummy_stream_payload("reconnect"))

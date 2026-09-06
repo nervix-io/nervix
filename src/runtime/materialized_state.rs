@@ -5,7 +5,9 @@ use std::sync::{
 
 use ahash::RandomState;
 use dashmap::DashMap;
-use nervix_models::{ClusterNodeName, DomainName, ModelName, RelayName, RemoteRuntimeField, RemoteRuntimeRecord};
+use nervix_models::{
+    ClusterNodeName, DomainName, ModelName, RelayName, RemoteRuntimeField, RemoteRuntimeRecord,
+};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{

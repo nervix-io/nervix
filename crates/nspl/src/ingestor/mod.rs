@@ -17,8 +17,7 @@ use crate::{
         flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
         into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
         parallel_ack_window, queue_ref, relay_ref, retry_policy, sequential_ack_window, string_lit,
-        subject_ref, subscription_ref, suggest_from, tok, topic_ref, u64_value,
-        where_expression,
+        subject_ref, subscription_ref, suggest_from, tok, topic_ref, u64_value, where_expression,
     },
 };
 
@@ -1396,8 +1395,10 @@ mod tests {
                     .expect("valid client identifier"),
                 topic: nervix_models::TopicName::try_from("notifications")
                     .expect("valid topic identifier"),
-                subscription: nervix_models::PulsarSubscriptionName::try_from("nervix_subscription")
-                    .expect("valid subscription identifier"),
+                subscription: nervix_models::PulsarSubscriptionName::try_from(
+                    "nervix_subscription"
+                )
+                .expect("valid subscription identifier"),
                 instances: 1,
                 mode: PulsarIngestMode::AckSequential {
                     timeout: "15s".to_string(),

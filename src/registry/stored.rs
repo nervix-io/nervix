@@ -1,6 +1,40 @@
 use error_stack::{Report, ResultExt};
 use meticulous::ResultExt as _;
-use nervix_models::{AckMode, AvroType, BranchEviction, BranchName, BranchSelection, ChannelName, ClickHouseValueMapping, ClientName, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat, CollectionName, ConsumerGroupName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CorrelatorName, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DeduplicatorName, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, ErrorPolicies, Expression, FieldName, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend, InferencerName, InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, InputCollectPolicy, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, LookupName, MaterializedRelayState, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OutputFlushPolicy, ParseAsType, PlacementName, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, PulsarSubscriptionName, QueueGroupName, QueueName, RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayBranching, RelayName, ReordererName, ResourceName, RetryPolicy, SchemaField, SchemaName, SignalingProtobufConfig, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, SubjectName, TableName, TopicName, UdfArgument, UdfLanguage, UdfName, UdfReturn, VhostName, VhostTlsResource, WasmProcessorName, WebsocketsIngestMode, WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName, WireSchemaStrictness, ZeroMqIngestMode};
+use nervix_models::{
+    AckMode, AvroType, BranchEviction, BranchName, BranchSelection, ChannelName,
+    ClickHouseValueMapping, ClientName, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+    CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat, CollectionName,
+    ConsumerGroupName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+    CorrelatorName, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
+    CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb,
+    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
+    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
+    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, CreateWireSchema, DeduplicatorName, EmitSink, EmitterAckWindow,
+    EmitterName, EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType,
+    ErrorPolicies, Expression, FieldName, GeneralErrorPolicy, GeneratorName, IcebergCatalog,
+    IcebergStorageBackend, InferencerName, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, IngestorName, InputCollectPolicy, JsonType, JunctionName,
+    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, LookupName, MaterializedRelayState,
+    MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos,
+    MqttSession, MySqlConflictAction, NameError, NatsIngestMode, OtelAggregationTemporality,
+    OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OutputFlushPolicy, ParseAsType,
+    PlacementName, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, PulsarIngestMode, PulsarSubscriptionName, QueueGroupName,
+    QueueName, RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayBranching,
+    RelayName, ReordererName, ResourceName, RetryPolicy, SchemaField, SchemaName,
+    SignalingProtobufConfig, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, SubjectName, TableName,
+    TopicName, UdfArgument, UdfLanguage, UdfName, UdfReturn, VhostName, VhostTlsResource,
+    WasmProcessorName, WebsocketsIngestMode, WindowBound, WindowProcessorName, WireSchemaField,
+    WireSchemaName, WireSchemaStrictness, ZeroMqIngestMode,
+};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -2976,9 +3010,15 @@ impl TryFrom<StoredCreatePlacement> for CreatePlacement {
             .map(|raw| ModelName::parse(raw))
             .collect::<Result<Vec<_>, _>>()
             .change_context(StoredModelConversionError::InvalidName)?;
-        CreatePlacement::new(PlacementName::from(&name), from, to, value.policy.into(), value.rank)
-            .map_err(Report::new)
-            .change_context(StoredModelConversionError::InvalidPlacement)
+        CreatePlacement::new(
+            PlacementName::from(&name),
+            from,
+            to,
+            value.policy.into(),
+            value.rank,
+        )
+        .map_err(Report::new)
+        .change_context(StoredModelConversionError::InvalidPlacement)
     }
 }
 
@@ -5694,11 +5734,8 @@ mod tests {
             }),
             Model::Junction(CreateJunction {
                 name: named("events_junction"),
-                from: ProcessorInputs::new(
-                    vec![named("events_a"), named("events_b")],
-                    Vec::new(),
-                )
-                .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
+                from: ProcessorInputs::new(vec![named("events_a"), named("events_b")], Vec::new())
+                    .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
                 output_routes: (ProcessorOutputs::single(named("events_stream")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: processor_branched_by("events"),

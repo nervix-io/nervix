@@ -1,4 +1,5 @@
-use nervix_models::{DomainName};
+use nervix_models::DomainName;
+
 use super::*;
 
 pub(in crate::runtime) mod endpoint;

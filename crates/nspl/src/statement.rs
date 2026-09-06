@@ -267,7 +267,31 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use bolero::check;
-    use nervix_models::{AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchName, BranchSelection, BuiltinFunctionName, ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CodecWireFormat, CollectionName, ConsumerGroupName, CordonNode, CorrelatorName, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, DeduplicatorName, DescribeRelay, DomainName, DrainNode, DropModel, DropNode, EmitSink, EmitterName, EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, ErrorPolicies, FieldName, GeneralErrorPolicy, GeneratorName, InferencerName, IngestQuiesceMode, IngestSource, IngestorName, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, LookupName, Model, ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, OutputBranch, ParseAsType, PlacementName, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, PulsarSubscriptionName, QueueGroupName, QueueName, RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayName, ReordererName, ResourceName, RetryPolicy, SchemaField, SchemaName, SignalingProtobufConfig, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsIngestMode, Statement, SubjectName, SubscriptionBinding, SubscriptionLiteral, SubscriptionName, TableName, TopicName, UdfName, UncordonNode, UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaField, WireSchemaName, ZeroMqIngestMode};
+    use nervix_models::{
+        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchName, BranchSelection,
+        BuiltinFunctionName, ChannelName, ClientConfigEntry, ClientName, ClusterNodeName,
+        CodecName, CodecWireFormat, CollectionName, ConsumerGroupName, CordonNode, CorrelatorName,
+        CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest, CreateClientKafka,
+        CreateClientMqtt, CreateClientNats, CreateClientPrometheus, CreateClientPulsar,
+        CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
+        CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter,
+        CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
+        CreateSignalingProtocol, CreateWireSchema, DeduplicatorName, DescribeRelay, DomainName,
+        DrainNode, DropModel, DropNode, EmitSink, EmitterName, EmitterPublishingMode,
+        EndpointIngestMode, EndpointName, EndpointType, ErrorPolicies, FieldName,
+        GeneralErrorPolicy, GeneratorName, InferencerName, IngestQuiesceMode, IngestSource,
+        IngestorName, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+        LookupName, Model, ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession,
+        NatsIngestMode, OutputBranch, ParseAsType, PlacementName, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, PulsarIngestMode, PulsarSubscriptionName, QueueGroupName, QueueName,
+        RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayName, ReordererName,
+        ResourceName, RetryPolicy, SchemaField, SchemaName, SignalingProtobufConfig,
+        SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsIngestMode, Statement, SubjectName, SubscriptionBinding,
+        SubscriptionLiteral, SubscriptionName, TableName, TopicName, UdfName, UncordonNode,
+        UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaField,
+        WireSchemaName, ZeroMqIngestMode,
+    };
 
     use super::*;
 
@@ -405,7 +429,14 @@ mod tests {
 
     /// Builds an expression tree deep enough to exercise every precedence boundary.
     fn gen_expression(g: &mut ByteGen, depth: u8) -> nervix_models::Expression {
-        use nervix_models::{BinaryOperator, ChannelName, ClientName, ClusterNodeName, CodecName, ConsumerGroupName, CorrelatorName, DeduplicatorName, EmitterName, EndpointName, Expression, FieldName, FieldReference, GeneratorName, IngestorName, JunctionName, Literal, ModelName, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName, ResourceName, SchemaName, SignalingProtocolName, SubjectName, TopicName, UnaryOperator, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName};
+        use nervix_models::{
+            BinaryOperator, ChannelName, ClientName, ClusterNodeName, CodecName, ConsumerGroupName,
+            CorrelatorName, DeduplicatorName, EmitterName, EndpointName, Expression, FieldName,
+            FieldReference, GeneratorName, IngestorName, JunctionName, Literal, ModelName,
+            PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
+            ReordererName, ResourceName, SchemaName, SignalingProtocolName, SubjectName, TopicName,
+            UnaryOperator, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+        };
 
         if depth == 0 {
             return match g.next_u8() % 4 {
@@ -1591,7 +1622,9 @@ mod tests {
             parsed,
             Statement::Drop(DropModel {
                 kind: ModelKind::Schema,
-                name: ModelName::from(&SchemaName::try_from("event_schema").expect("valid schema name")),
+                name: ModelName::from(
+                    &SchemaName::try_from("event_schema").expect("valid schema name")
+                ),
             })
         );
     }

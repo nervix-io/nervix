@@ -1,4 +1,4 @@
-use nervix_models::{DomainName};
+use nervix_models::DomainName;
 use redis::{Client as RedisClient, ClientTlsConfig, TlsCertificates as RedisTlsCertificates};
 
 use super::super::*;

@@ -519,9 +519,7 @@ mod tests {
                 AlterSchemaOperation::AddField {
                     field: original.fields[0].clone(),
                 },
-                AlterSchemaError::FieldAlreadyExists {
-                    field: field("id"),
-                },
+                AlterSchemaError::FieldAlreadyExists { field: field("id") },
             ),
             (
                 AlterSchemaOperation::DropField {
@@ -597,9 +595,7 @@ mod tests {
         let error = schema
             .apply_alter(&AlterSchema {
                 schema: schema_name("events"),
-                operations: vec![AlterSchemaOperation::DropField {
-                    field: field("id"),
-                }],
+                operations: vec![AlterSchemaOperation::DropField { field: field("id") }],
             })
             .expect_err("alter should fail");
 

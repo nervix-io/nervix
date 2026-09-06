@@ -1,4 +1,4 @@
-use nervix_models::{DomainName};
+use nervix_models::DomainName;
 use zeromq::{PullSocket, Socket, SocketRecv};
 
 use super::super::*;

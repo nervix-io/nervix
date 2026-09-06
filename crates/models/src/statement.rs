@@ -8,15 +8,14 @@ use thiserror::Error;
 
 use crate::{
     AlterSchema, AlterWireSchema, AvroType, BranchName, CborType, ChannelName, ClientName,
-    CodecName, CollectionName, ConsumerGroupName, CorrelatorName, CreateAvroWireSchema,
-    ClusterNodeName, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf,
-    DeduplicatorName,
-    DomainName, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName, IngestorName,
-    JsonType, JunctionName, LookupName, ModelName, ParseAsType, PlacementName,
-    PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName,
-    ResourceName, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName,
-    Timestamp, TopicName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
-    WireSchemaName,
+    ClusterNodeName, CodecName, CollectionName, ConsumerGroupName, CorrelatorName,
+    CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf,
+    DeduplicatorName, DomainName, EmitterName, EndpointName, FieldName, GeneratorName,
+    InferencerName, IngestorName, JsonType, JunctionName, LookupName, ModelName, ParseAsType,
+    PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
+    ReordererName, ResourceName, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName,
+    TableName, Timestamp, TopicName, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,7 +532,7 @@ impl RelocationPreferenceStrategy {
     /// The composed NSPL keyword phrase that spells this strategy.
     pub fn keyword_phrase(self) -> &'static str {
         self.get_str("keyword")
-            .expect("every relocation strategy must define a keyword phrase")
+            .assured("the strum property is declared on every variant of this enum")
     }
 
     pub fn follows_preferences(self) -> bool {
@@ -4419,11 +4418,13 @@ mod tests {
         KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, OutputFlushPolicy,
         PlacementPolicy, RelayBranching, RetryPolicy, ScheduledNode,
     };
-    use crate::{BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, EmitterName, FieldName, IngestorName, LookupName, ModelName, RelayName, ResourceName, SchemaName, SubscriptionName, TopicName, UdfName, UserName, WireSchemaName, 
-        CreateIngestor, CreateJunction, DomainName, EndpointIngestMode, Expression, 
-        IngestQuiesceMode, IngestSource, Literal, MaterializedStateDependency,
-        MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        SchemaField,
+    use crate::{
+        BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, CreateIngestor,
+        CreateJunction, DomainName, EmitterName, EndpointIngestMode, Expression, FieldName,
+        IngestQuiesceMode, IngestSource, IngestorName, Literal, LookupName,
+        MaterializedStateDependency, MaterializedStatePolicy, ModelName, ParseAsType,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayName, ResourceName, SchemaField,
+        SchemaName, SubscriptionName, TopicName, UdfName, UserName, WireSchemaName,
     };
 
     fn named<N>(raw: &str) -> N
@@ -4592,7 +4593,10 @@ mod tests {
         assert_eq!(node.assigned_single_node(), Some(&named("node-a")));
         assert_eq!(
             ScheduledNode {
-                assigned_nodes: vec![named::<ClusterNodeName>("node-a"), named::<ClusterNodeName>("node-b")],
+                assigned_nodes: vec![
+                    named::<ClusterNodeName>("node-a"),
+                    named::<ClusterNodeName>("node-b")
+                ],
                 ..node.clone()
             }
             .assigned_single_node(),
@@ -4674,7 +4678,10 @@ mod tests {
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
             primary_node: Some(named::<ClusterNodeName>("node-a")),
-            assigned_nodes: vec![named::<ClusterNodeName>("node-a"), named::<ClusterNodeName>("node-b")],
+            assigned_nodes: vec![
+                named::<ClusterNodeName>("node-a"),
+                named::<ClusterNodeName>("node-b"),
+            ],
         };
         let endpoint_ingestor = ScheduledNode {
             identifier: named("orders_http"),
@@ -4704,7 +4711,10 @@ mod tests {
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
             primary_node: Some(named::<ClusterNodeName>("node-a")),
-            assigned_nodes: vec![named::<ClusterNodeName>("node-a"), named::<ClusterNodeName>("node-b")],
+            assigned_nodes: vec![
+                named::<ClusterNodeName>("node-a"),
+                named::<ClusterNodeName>("node-b"),
+            ],
         };
         let syslog_ingestor = ScheduledNode {
             identifier: named("orders_syslog"),
@@ -4730,7 +4740,10 @@ mod tests {
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
             primary_node: Some(named::<ClusterNodeName>("node-a")),
-            assigned_nodes: vec![named::<ClusterNodeName>("node-a"), named::<ClusterNodeName>("node-b")],
+            assigned_nodes: vec![
+                named::<ClusterNodeName>("node-a"),
+                named::<ClusterNodeName>("node-b"),
+            ],
         };
 
         assert_eq!(replicated_junction.execution_node(), Some(&named("node-a")));
@@ -5469,9 +5482,7 @@ mod tests {
         CreateDeduplicator {
             name: named("dedup_events"),
             from: ProcessorInputs::single(named("incoming")),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named(
-                "outgoing",
-            ))]),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("outgoing"))]),
             branched_by: BranchSelection::unbranched(),
             deduplicate_on: vec![Expression::Literal(Literal::I64(1))],
             max_time: "10m".to_string(),
@@ -5485,9 +5496,7 @@ mod tests {
         CreateReorderer {
             name: named("order_events"),
             from: ProcessorInputs::single(named("incoming")),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named(
-                "outgoing",
-            ))]),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("outgoing"))]),
             branched_by: BranchSelection::unbranched(),
             order_by: vec![Expression::Literal(Literal::I64(1))],
             max_time: "10m".to_string(),
@@ -5628,9 +5637,7 @@ mod tests {
         let mut reingestor = CreateReingestor {
             name: named("repartition"),
             from: ProcessorInputs::single(named("incoming")),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named(
-                "outgoing",
-            ))]),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("outgoing"))]),
             mode: AckMode::Attached,
             materialized_state: Vec::new(),
             filter_where: None,

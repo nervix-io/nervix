@@ -1,8 +1,8 @@
-use nervix_models::{ClusterNodeName};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::{HashMap, RandomState};
 use dashmap::DashMap;
+use nervix_models::ClusterNodeName;
 #[cfg(test)]
 use nervix_models::KafkaPartitionSchedule;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

@@ -7,7 +7,11 @@
 
 use std::collections::BTreeSet;
 
-use nervix_models::{ClusterNodeName, DomainName, DomainSchedule, DomainStatus, JunctionName, Model, ModelName, PlacementPolicy, PlacementRuntimeNode, QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode};
+use nervix_models::{
+    ClusterNodeName, DomainName, DomainSchedule, DomainStatus, JunctionName, Model, ModelName,
+    PlacementPolicy, PlacementRuntimeNode, QuiesceLevel, RelayName, Relocation,
+    RelocationPreferenceStrategy, ScheduledNode,
+};
 
 use super::{
     CommandResult, DomainAlterError, SessionServiceImpl, command_error, command_ok,
@@ -122,7 +126,11 @@ impl SessionServiceImpl {
         }
     }
 
-    pub(super) async fn relocate(&self, domain: &DomainName, relocation: Relocation) -> CommandResult {
+    pub(super) async fn relocate(
+        &self,
+        domain: &DomainName,
+        relocation: Relocation,
+    ) -> CommandResult {
         let Some(_alter_guard) = self.runtime.try_begin_domain_alter(domain) else {
             return command_error(
                 DomainAlterError::ConcurrentAlter {
@@ -342,9 +350,7 @@ impl SessionServiceImpl {
                     owner: owner.clone(),
                     moves,
                     replicas: assignment
-                        .map(|node| {
-                            node.replica_nodes().into_iter().cloned().collect()
-                        })
+                        .map(|node| node.replica_nodes().into_iter().cloned().collect())
                         .unwrap_or_default(),
                     promoted_replica: moves
                         && scheduled_node(current, &member.runtime_node)
@@ -518,27 +524,37 @@ fn unsatisfied_preference_lines(
             }
         }
     }
-    unit.preferences
-        .iter()
-        .filter_map(|preference| {
-            let left = scheduled_node(schedule, &preference.left)?.execution_node()?;
-            let right = scheduled_node(schedule, &preference.right)?.execution_node()?;
-            let unsatisfied = match preference.policy {
-                PlacementPolicy::PreferColocation => left != right,
-                PlacementPolicy::SuggestSeparation => left == right,
-                PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => false,
-            };
-            unsatisfied.then(|| {
-                format!(
-                    "- {} {} <-> {} ({})",
-                    preference.policy.as_ref().to_lowercase(),
-                    format_placement_runtime_node(&preference.left, &context),
-                    format_placement_runtime_node(&preference.right, &context),
-                    placement_claim_owner(&preference.winning_rules)
-                )
-            })
-        })
-        .collect()
+    let mut lines = Vec::new();
+    for preference in &unit.preferences {
+        let Some(left_node) = scheduled_node(schedule, &preference.left) else {
+            continue;
+        };
+        let Some(left) = left_node.execution_node() else {
+            continue;
+        };
+        let Some(right_node) = scheduled_node(schedule, &preference.right) else {
+            continue;
+        };
+        let Some(right) = right_node.execution_node() else {
+            continue;
+        };
+        let unsatisfied = match preference.policy {
+            PlacementPolicy::PreferColocation => left != right,
+            PlacementPolicy::SuggestSeparation => left == right,
+            PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => false,
+        };
+        if !unsatisfied {
+            continue;
+        }
+        lines.push(format!(
+            "- {} {} <-> {} ({})",
+            preference.policy.as_ref().to_lowercase(),
+            format_placement_runtime_node(&preference.left, &context),
+            format_placement_runtime_node(&preference.right, &context),
+            placement_claim_owner(&preference.winning_rules)
+        ));
+    }
+    lines
 }
 
 /// The owner a unit member is relocated away from.
@@ -711,7 +727,10 @@ mod tests {
         );
         let node =
             scheduled_node(&planned, &member("route")).expect("member must remain scheduled");
-        assert_eq!(node.primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-2")));
+        assert_eq!(
+            node.primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-2"))
+        );
         assert_eq!(node.assigned_nodes, vec!["node-2", "node-1"]);
     }
 

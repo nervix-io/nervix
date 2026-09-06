@@ -1,7 +1,7 @@
-use nervix_models::{TopicName};
 use std::{future::Future, pin::Pin};
 
 use futures_util::FutureExt;
+use nervix_models::TopicName;
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, Event, MqttOptions,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNoticeError,

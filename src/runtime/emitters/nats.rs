@@ -1,4 +1,3 @@
-use nervix_models::{SubjectName};
 use std::{future::Future, pin::Pin};
 
 use async_nats::{
@@ -12,6 +11,7 @@ use async_nats::{
     message::OutboundMessage,
 };
 use futures_util::{FutureExt, SinkExt};
+use nervix_models::SubjectName;
 
 use super::*;
 

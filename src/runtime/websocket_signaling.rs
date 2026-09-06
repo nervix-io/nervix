@@ -553,14 +553,9 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use nervix_models::{
-    ModelName,
-    ResourceName,
-    SignalingProtobufConfig,
-    SignalingProtocolOnConnect,
-    SignalingStep,
-    SignalingWaitStep,
-    SignalingWireFormat,
-};
+        ModelName, ResourceName, SignalingProtobufConfig, SignalingProtocolOnConnect,
+        SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    };
     use parking_lot::Mutex;
     use serde_json::json;
     use tokio_tungstenite::tungstenite::protocol::Role;
@@ -572,7 +567,9 @@ mod tests {
         on_connect: SignalingProtocolOnConnect,
     ) -> CreateSignalingProtocol {
         CreateSignalingProtocol {
-            name: SignalingProtocolName::from(&ModelName::parse("handshake").expect("valid identifier")),
+            name: SignalingProtocolName::from(
+                &ModelName::parse("handshake").expect("valid identifier"),
+            ),
             format,
             on_connect,
         }

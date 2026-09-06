@@ -5,7 +5,11 @@
 //! replicas, cluster liveness, and execution belong to the command that consumes this plan.
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use nervix_models::{ClusterNodeName, Model, PlacementName, PlacementPolicy, PlacementRuntimeNode, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection};
+use meticulous::OptionExt as _;
+use nervix_models::{
+    ClusterNodeName, Model, PlacementName, PlacementPolicy, PlacementRuntimeNode, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+};
 use strum::AsRefStr;
 use thiserror::Error;
 
@@ -327,8 +331,14 @@ impl ActiveGraph {
             }
             candidates.sort_by(|left, right| {
                 registry_key_cmp(
-                    left.first().expect("a hard group has at least one member"),
-                    right.first().expect("a hard group has at least one member"),
+                    left.first().verified(
+                        "the empty-candidates branch above already returned and a group is never \
+                         built empty",
+                    ),
+                    right.first().verified(
+                        "the empty-candidates branch above already returned and a group is never \
+                         built empty",
+                    ),
                 )
             });
 

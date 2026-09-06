@@ -246,16 +246,15 @@ impl RelayDispatchGate {
         }
         let now = Instant::now();
         let mut state = self.state.lock();
-        let expired = state
-            .engagements
-            .iter()
-            .filter_map(|(generation, engagement)| {
-                engagement
-                    .fence_deadline()
-                    .is_some_and(|deadline| now >= deadline)
-                    .then_some((*generation, engagement.reason.clone()))
-            })
-            .collect::<Vec<_>>();
+        let mut expired = Vec::new();
+        for (generation, engagement) in &state.engagements {
+            let Some(deadline) = engagement.fence_deadline() else {
+                continue;
+            };
+            if now >= deadline {
+                expired.push((*generation, engagement.reason.clone()));
+            }
+        }
         if expired.is_empty() {
             return;
         }

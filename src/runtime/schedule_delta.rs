@@ -1,4 +1,7 @@
-use nervix_models::{DomainName, DomainSchedule, DynamicModelUpdate, ModelKind, ModelName, QuiesceLevel, ScheduledNode};
+use nervix_models::{
+    DomainName, DomainSchedule, DynamicModelUpdate, ModelKind, ModelName, QuiesceLevel,
+    ScheduledNode,
+};
 use sorted_vec::SortedSet;
 
 use crate::registry::RegistryEntity;
@@ -144,7 +147,14 @@ impl ScheduleDelta {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{AckMode, BranchSelection, ClusterNodeName, CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink, EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, ModelName, OutputBranch, OutputFlushPolicy, PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode};
+    use nervix_models::{
+        AckMode, BranchSelection, ClusterNodeName, CreateEmitter, CreateIngestor, CreateJunction,
+        CreatePlacement, CreateRelay, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, GeneralErrorPolicy,
+        IngestSource, Literal, Model, ModelKind, ModelName, OutputBranch, OutputFlushPolicy,
+        PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
+        RetryPolicy, RouteConstruction, ScheduledNode,
+    };
 
     use super::ScheduleDelta;
 
@@ -330,7 +340,8 @@ mod tests {
         let mut desired = ingestor_schedule("ingress_b");
         desired.nodes[0].schema_fingerprint = [2; 32];
         desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
-        desired.nodes[0].assigned_nodes = vec![ClusterNodeName::parse("node-2").expect("valid name")];
+        desired.nodes[0].assigned_nodes =
+            vec![ClusterNodeName::parse("node-2").expect("valid name")];
 
         let ScheduleDelta::EntitySwap {
             entities,
@@ -423,7 +434,8 @@ mod tests {
         let existing = ingestor_schedule("ingress_a");
         let mut desired = ingestor_schedule("ingress_a");
         desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
-        desired.nodes[0].assigned_nodes = vec![ClusterNodeName::parse("node-2").expect("valid name")];
+        desired.nodes[0].assigned_nodes =
+            vec![ClusterNodeName::parse("node-2").expect("valid name")];
 
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
@@ -442,7 +454,10 @@ mod tests {
     fn replica_set_change_alone_reassigns_without_a_rebuild() {
         let existing = ingestor_schedule("ingress_a");
         let mut desired = ingestor_schedule("ingress_a");
-        desired.nodes[0].assigned_nodes = vec![ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")];
+        desired.nodes[0].assigned_nodes = vec![
+            ClusterNodeName::parse("node-1").expect("valid name"),
+            ClusterNodeName::parse("node-3").expect("valid name"),
+        ];
 
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
@@ -486,7 +501,8 @@ mod tests {
             .push(placement_node(PlacementPolicy::PreferColocation));
         let mut desired = ingestor_schedule("ingress_a");
         desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
-        desired.nodes[0].assigned_nodes = vec![ClusterNodeName::parse("node-2").expect("valid name")];
+        desired.nodes[0].assigned_nodes =
+            vec![ClusterNodeName::parse("node-2").expect("valid name")];
         desired
             .nodes
             .push(placement_node(PlacementPolicy::RequireColocation));

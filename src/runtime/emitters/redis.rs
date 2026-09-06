@@ -1,8 +1,8 @@
-use nervix_models::{ChannelName};
 use ::redis::{
     AsyncCommands, Client as RedisClient, ClientTlsConfig, ErrorKind as RedisErrorKind,
     ServerErrorKind, TlsCertificates as RedisTlsCertificates,
 };
+use nervix_models::ChannelName;
 
 use super::*;
 

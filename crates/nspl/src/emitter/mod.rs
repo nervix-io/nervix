@@ -13,12 +13,12 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, ack_timeout, alter_op_separator, boxed_choice,
-        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, duration_lit,
-        emitter_ack_window, emitter_name, emitter_ref, flush_each, from_relay_clauses,
-        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
-        lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
-        render_vm_program_tokens, retry_policy, route_construction, string_lit, suggest_from,
-        collection_ref, subject_ref, table_ref, tok, topic_ref, where_expression,
+        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, collection_ref,
+        duration_lit, emitter_ack_window, emitter_name, emitter_ref, flush_each,
+        from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
+        kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
+        queue_ref, relay_ref, render_vm_program_tokens, retry_policy, route_construction,
+        string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref, where_expression,
         where_only_route_construction, word_raw,
     },
 };
@@ -528,19 +528,17 @@ fn max_batch<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseEr
     kw_phrase3(Identifier::With, Identifier::Max, Identifier::Batch)
         .ignore_then(select! { Token::NumberLiteral(value) => value }.labelled("batch_size"))
         .try_map(|value, span| {
-            value
+            let value = value
                 .parse::<u64>()
-                .map_err(|_| Rich::custom(span, format!("invalid max batch size '{value}'")))
-                .and_then(|value| {
-                    if value == 0 {
-                        Err(Rich::custom(
-                            span,
-                            "max batch size must be greater than zero",
-                        ))
-                    } else {
-                        Ok(value)
-                    }
-                })
+                .map_err(|_| Rich::custom(span, format!("invalid max batch size '{value}'")))?;
+            if value == 0 {
+                Err(Rich::custom(
+                    span,
+                    "max batch size must be greater than zero",
+                ))
+            } else {
+                Ok(value)
+            }
         })
 }
 
@@ -1953,8 +1951,7 @@ mod tests {
             &EmitSink::Kafka {
                 client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
-                topic: nervix_models::TopicName::try_from("topic")
-                    .expect("valid topic identifier"),
+                topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
             }
         );
         assert_eq!(parsed.mode, AckMode::Attached);
@@ -3169,8 +3166,7 @@ mod tests {
             &EmitSink::Pulsar {
                 client: nervix_models::ClientName::try_from("pulsar1")
                     .expect("valid client identifier"),
-                topic: nervix_models::TopicName::try_from("topic")
-                    .expect("valid topic identifier"),
+                topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
             }
         );
     }
@@ -3312,8 +3308,7 @@ mod tests {
             &EmitSink::Mqtt {
                 client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
-                topic: nervix_models::TopicName::try_from("topic")
-                    .expect("valid topic identifier"),
+                topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
             }
         );
     }

@@ -1,7 +1,12 @@
 use std::{collections::VecDeque, sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashSet};
-use nervix_models::{AckMode, Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, ErrorPolicies, FieldName, InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName, RouteConstruction, StructuredMessageError, Timestamp, WindowBound};
+use nervix_models::{
+    AckMode, Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction,
+    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, ErrorPolicies, FieldName,
+    InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorPolicy, ModelKind, ModelName,
+    RelayName, ResourceName, RouteConstruction, StructuredMessageError, Timestamp, WindowBound,
+};
 use nervix_nspl::{
     vm_program::{
         FieldRef, Program as VmProgram, SemanticNamespaces, Span, SpannedNode,
@@ -682,23 +687,22 @@ impl CompiledWindowAggregateProgram {
                     .map(|_| format!("demand_{}", demand.id))
             })
             .collect::<Vec<_>>();
-        let set = aggregate
-            .demands()
-            .iter()
-            .filter_map(|demand| {
-                let input = demand.input.as_ref()?;
-                Some((
-                    FieldRef {
-                        relay: OUTPUT_NAMESPACE.to_string(),
-                        field: format!("demand_{}", demand.id),
-                    },
-                    SpannedNode {
-                        inner: input.clone(),
-                        span,
-                    },
-                ))
-            })
-            .collect::<Vec<_>>();
+        let mut set = Vec::new();
+        for demand in aggregate.demands() {
+            let Some(input) = demand.input.as_ref() else {
+                continue;
+            };
+            set.push((
+                FieldRef {
+                    relay: OUTPUT_NAMESPACE.to_string(),
+                    field: format!("demand_{}", demand.id),
+                },
+                SpannedNode {
+                    inner: input.clone(),
+                    span,
+                },
+            ));
+        }
         let program = SpannedNode {
             inner: VmProgram {
                 filter: None,

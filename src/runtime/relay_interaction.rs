@@ -20,11 +20,11 @@
 //! lifecycle code must stop graph sources and prove relay buffers, node work, and force-flush
 //! obligations are quiescent before broadcasting the terminal watch value.
 
-use nervix_models::{FieldName, RelayName, SchemaName};
 use std::{future::pending, task::Poll};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt as _;
+use nervix_models::{FieldName, RelayName, SchemaName};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, watch},
@@ -469,9 +469,7 @@ impl RelayInteractionInputs {
         self.take_collection(|collection| collection.take_due(now))
     }
 
-    fn take_any(
-        &mut self,
-    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
+    fn take_any(&mut self) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         self.take_collection(RelayInputCollection::take_any)
     }
 
@@ -867,13 +865,7 @@ async fn wait_until(deadline: Option<Instant>) {
 mod tests {
     use std::{num::NonZeroUsize, sync::OnceLock};
 
-    use nervix_models::{
-    CreateSchema,
-    ModelName,
-    ParseAsType,
-    RelayName,
-    Timestamp,
-};
+    use nervix_models::{CreateSchema, ModelName, ParseAsType, RelayName, Timestamp};
 
     use super::*;
     use crate::{
@@ -890,9 +882,17 @@ mod tests {
         SCHEMA
             .get_or_init(|| {
                 triomphe::Arc::new(compile_schema(&CreateSchema {
-                    name: SchemaName::from(&ModelName::parse("relay_interaction_test").expect("valid schema")),
+                    name: SchemaName::from(
+                        &ModelName::parse("relay_interaction_test").expect("valid schema"),
+                    ),
                     fields: vec![nervix_models::SchemaField {
-                        name: FieldName::from(FieldName::from(FieldName::from(&ModelName::parse("value").expect("valid field").clone().clone().clone()))),
+                        name: FieldName::from(FieldName::from(FieldName::from(
+                            &ModelName::parse("value")
+                                .expect("valid field")
+                                .clone()
+                                .clone()
+                                .clone(),
+                        ))),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
@@ -919,9 +919,17 @@ mod tests {
 
     fn alternate_batch(acks: AckSet) -> RelayRecordBatch {
         let alternate_schema = triomphe::Arc::new(compile_schema(&CreateSchema {
-            name: SchemaName::from(&ModelName::parse("relay_interaction_alternate").expect("valid alternate schema")),
+            name: SchemaName::from(
+                &ModelName::parse("relay_interaction_alternate").expect("valid alternate schema"),
+            ),
             fields: vec![nervix_models::SchemaField {
-                name: FieldName::from(FieldName::from(FieldName::from(&ModelName::parse("value").expect("valid field").clone().clone().clone()))),
+                name: FieldName::from(FieldName::from(FieldName::from(
+                    &ModelName::parse("value")
+                        .expect("valid field")
+                        .clone()
+                        .clone()
+                        .clone(),
+                ))),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
@@ -1377,18 +1385,16 @@ mod tests {
             tokio::task::consume_budget().await;
             match event(&mut interaction, None).await {
                 RelayInteractionEvent::Batch { relay, batch } => {
-                    let tenant = batch
-                        .key
-                        .as_ref()
-                        .and_then(|key| key.field_value("tenant"))
-                        .and_then(|value| {
-                            if let RuntimeValue::String(value) = value {
-                                Some(value.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .expect("collected branch must be retained");
+                    let Some(key) = batch.key.as_ref() else {
+                        panic!("collected branch must be retained");
+                    };
+                    let Some(value) = key.field_value("tenant") else {
+                        panic!("collected branch must retain its tenant");
+                    };
+                    let RuntimeValue::String(tenant) = value else {
+                        panic!("collected tenant branch value must be STRING");
+                    };
+                    let tenant = tenant.clone();
                     groups.push((relay.as_str().to_string(), tenant, batch.message_count()));
                 }
                 RelayInteractionEvent::ForceFlush(completion) => {

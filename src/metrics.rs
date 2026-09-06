@@ -9,7 +9,10 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use hdrhistogram::Histogram as HdrHistogram;
 use meticulous::ResultExt as _;
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
-use nervix_models::{BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName, Timestamp};
+use nervix_models::{
+    BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
+    Timestamp,
+};
 use parking_lot::Mutex;
 use prometheus::{
     Encoder, Gauge, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry,
@@ -105,7 +108,8 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: "RELAY".to_string(),
             target: relay.as_str().to_string(),
-            physical_node_id: physical_node_id.map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
+            physical_node_id: physical_node_id
+                .map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
             relay: relay.as_str().to_string(),
             peer_kind: String::new(),
             peer: String::new(),
@@ -127,7 +131,8 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: kind.as_str().to_ascii_uppercase(),
             target: node.as_str().to_string(),
-            physical_node_id: physical_node_id.map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
+            physical_node_id: physical_node_id
+                .map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
             relay: relay.as_str().to_string(),
             peer_kind: "RELAY".to_string(),
             peer: relay.as_str().to_string(),
@@ -148,7 +153,8 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: kind.as_str().to_ascii_uppercase(),
             target: node.as_str().to_string(),
-            physical_node_id: physical_node_id.map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
+            physical_node_id: physical_node_id
+                .map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
             relay: "-".to_string(),
             peer_kind: String::new(),
             peer: String::new(),
@@ -1814,7 +1820,8 @@ impl RuntimeMetrics {
         let labels = IngestorQuiesceMetricLabels {
             domain: domain.as_str().to_string(),
             ingestor: ingestor.as_str().to_string(),
-            physical_node_id: physical_node_id.map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
+            physical_node_id: physical_node_id
+                .map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
         };
         let values = labels.values();
         self.prometheus
@@ -4015,7 +4022,14 @@ mod tests {
             len: 2,
             capacity: 3,
         });
-        metrics.observe_global_stream_received(&domain, &relay, Some(&ClusterNodeName::parse("node-1").expect("valid name")), 2, 64, None);
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
 
         let rendered = metrics.describe_global_target(&domain, "RELAY", &relay);
         let line = rendered
@@ -4225,7 +4239,14 @@ mod tests {
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
 
-        metrics.observe_global_stream_received(&domain, &relay, Some(&ClusterNodeName::parse("node-1").expect("valid name")), 2, 64, None);
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
 
         let rendered = metrics.prometheus_text();
         assert!(rendered.contains("nervix_messages_total"));
@@ -4241,7 +4262,14 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
-        metrics.observe_global_stream_received(&domain, &relay, Some(&ClusterNodeName::parse("node-1").expect("valid name")), 2, 64, None);
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
         metrics.observe_branch_stream_received(
             r#"{"tenant":"acme"}"#,
             RelayBatchObservation {
@@ -4308,9 +4336,23 @@ mod tests {
             })
         };
 
-        metrics.register_branch(&domain, &branch, Some(&ClusterNodeName::parse("node-1").expect("valid name")));
-        metrics.observe_branch_instance_created(&domain, &branch, Some(&ClusterNodeName::parse("node-1").expect("valid name")), concrete_key);
-        metrics.observe_branch_instance_created(&domain, &branch, Some(&ClusterNodeName::parse("node-1").expect("valid name")), concrete_key);
+        metrics.register_branch(
+            &domain,
+            &branch,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+        );
+        metrics.observe_branch_instance_created(
+            &domain,
+            &branch,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            concrete_key,
+        );
+        metrics.observe_branch_instance_created(
+            &domain,
+            &branch,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            concrete_key,
+        );
 
         let rendered = metrics.prometheus_text();
         assert!(has_sample(
@@ -4431,8 +4473,12 @@ mod tests {
         assert!(prometheus.contains("nervix_messages_per_batch_bucket"));
         assert!(prometheus.contains("nervix_messages_per_batch_count"));
 
-        let snapshot =
-            metrics.snapshot_global_target(&domain, ModelKind::Deduplicator, &node, &ClusterNodeName::parse("node-1").expect("valid name"));
+        let snapshot = metrics.snapshot_global_target(
+            &domain,
+            ModelKind::Deduplicator,
+            &node,
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+        );
         let histogram = snapshot
             .histograms
             .iter()
@@ -4503,7 +4549,14 @@ mod tests {
                 domain_timestamp: None,
             },
         );
-        metrics.observe_global_stream_received(&domain, &relay, Some(&ClusterNodeName::parse("node-1").expect("valid name")), 2, 64, None);
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
 
         let snapshot = metrics.snapshot_global_target(&domain, ModelKind::Relay, &relay, "node-1");
         assert_eq!(snapshot.counters.len(), 3);
@@ -4532,7 +4585,14 @@ mod tests {
                 domain_timestamp: None,
             },
         );
-        metrics.observe_global_stream_received(&domain, &relay, Some(&ClusterNodeName::parse("node-1").expect("valid name")), 2, 64, None);
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
 
         let snapshot = metrics.snapshot_branch_target(
             r#"{"tenant":"acme"}"#,

@@ -27,19 +27,17 @@ use crate::{
     IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
     KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
     MaterializedStatePolicy, MessageErrorPolicy, Model, ModelName, MongoDbConfigEntry,
-    MongoDbConflictAction,
-    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
-    NatsConfigEntry, NatsIngestMode, OtelConfigEntry, OtelMetricKind, OtelSignal, OutputBranch,
-    ParseAsType, PlacementPolicy, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
-    QueueName, RelayName, ResourceName,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    SignalingProtocolName, TopicName,
-    RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup,
-    SqsIngestMode, Statement, SubscriptionLiteral, UnaryOperator, WebsocketsConfigEntry,
-    WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqConfigEntry,
-    ZeroMqIngestMode,
+    MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
+    MySqlConflictAction, NatsConfigEntry, NatsIngestMode, OtelConfigEntry, OtelMetricKind,
+    OtelSignal, OutputBranch, ParseAsType, PlacementPolicy, PostgresConfigEntry,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
+    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, QueueName, RabbitMqConfigEntry,
+    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RelayName,
+    ResourceName, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
+    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry,
+    SqsFifoGroup, SqsIngestMode, Statement, SubscriptionLiteral, TopicName, UnaryOperator,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaDefinition,
+    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -4083,9 +4081,10 @@ impl NativeTypeToNspl for AvroType {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, EmitterName, FieldName, IngestorName, LookupName, ModelName, RelayName, ResourceName, SchemaName, SubscriptionName, TopicName, UdfName, UserName, WireSchemaName, 
-        AckMode, AvroType, BinaryOperator, BranchSelection, CodecEncoding, CodecEncodingRule,
-        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
+    use crate::{
+        AckMode, AvroType, BinaryOperator, BranchName, BranchSelection, BuiltinFunctionName,
+        ClientName, ClusterNodeName, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+        CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat,
         CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
         CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
         CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis, CreateClientSentry,
@@ -4093,17 +4092,19 @@ mod tests {
         CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint,
         CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
         CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWindowProcessor,
-        CreateWireSchema, EmitSink, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-        ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, 
-        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal,
-        MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
-        MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch,
-        ParseAsType, PlacementPolicy, PostgresConflictAction, PostgresValueMapping,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
-        RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction,
-        SchemaField, SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
-        WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
+        CreateWireSchema, EmitSink, EmitterName, EmitterPublishingMode, EndpointIngestMode,
+        EndpointType, ErrorPolicies, Expression, FieldName, FieldScope, GeneralErrorPolicy,
+        HttpConfigEntry, IngestSource, IngestorName, JsonType, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, Literal, LookupName, MessageErrorPolicy, Model, ModelName,
+        MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
+        PlacementPolicy, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RelayBranching, RelayName, ResourceName, RetryPolicy,
+        RouteConstruction, SchemaField, SchemaName, SentryConfigEntry, SignalingProtobufConfig,
+        SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsIngestMode, SubscriptionName,
+        TopicName, UdfArgument, UdfLanguage, UdfName, UdfReturn, UserName, WebsocketsIngestMode,
+        WindowBound, WireSchemaDefinition, WireSchemaField, WireSchemaName, ZeroMqIngestMode,
         expression_to_nspl,
     };
 
@@ -4804,11 +4805,8 @@ mod tests {
 
         let junction = CreateJunction {
             name: named("orders_junction"),
-            from: ProcessorInputs::new(
-                vec![named("orders_a"), named("orders_b")],
-                Vec::new(),
-            )
-            .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
+            from: ProcessorInputs::new(vec![named("orders_a"), named("orders_b")], Vec::new())
+                .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
             output_routes: flushed_outputs("orders_all"),
             branched_by: processor_branched_by("tenant_branch"),
             mode: AckMode::Attached,
@@ -4853,10 +4851,7 @@ mod tests {
                 "orders_matched",
                 Some(route_set(
                     "id",
-                    Expression::Field(crate::FieldReference::scoped(
-                        FieldScope::Left,
-                        named("id"),
-                    )),
+                    Expression::Field(crate::FieldReference::scoped(FieldScope::Left, named("id"))),
                 )),
             )]),
             branched_by: processor_branched_by("tenant_branch"),

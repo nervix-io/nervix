@@ -7,12 +7,7 @@ use std::{
 };
 
 use nervix_expiry_map::ExpiryMap;
-use nervix_models::{
-    Expression,
-    ModelName,
-    RelayName,
-    Timestamp,
-};
+use nervix_models::{Expression, ModelName, RelayName, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
 use ordered_float::OrderedFloat;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

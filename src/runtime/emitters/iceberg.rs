@@ -1,4 +1,3 @@
-use nervix_models::{DomainName, TableName};
 use std::{
     collections::VecDeque,
     fs::File,
@@ -37,6 +36,7 @@ use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filt
 use error_stack::{Report, ResultExt};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_storage_opendal::OpenDalStorageFactory;
+use nervix_models::{DomainName, TableName};
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 use triomphe::Arc;
@@ -1032,29 +1032,23 @@ impl IcebergEmitter {
             );
         }
         let mut rejected = Vec::new();
-        let accepted_rows = result
-            .batch
-            .errors()
-            .iter()
-            .enumerate()
-            .filter_map(|(row, errors)| {
-                if let Some(side_error) = errors.first() {
-                    let reason = format!(
-                        "Iceberg VALUES side error {}: {} at {}",
-                        side_error.code.as_str(),
-                        side_error.message,
-                        side_error.span
-                    );
-                    rejected.push(IcebergRejectedRow {
-                        row,
-                        error: program.structured_side_error(reason, side_error.span),
-                    });
-                    None
-                } else {
-                    Some(row)
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut accepted_rows = Vec::new();
+        for (row, errors) in result.batch.errors().iter().enumerate() {
+            let Some(side_error) = errors.first() else {
+                accepted_rows.push(row);
+                continue;
+            };
+            let reason = format!(
+                "Iceberg VALUES side error {}: {} at {}",
+                side_error.code.as_str(),
+                side_error.message,
+                side_error.span
+            );
+            rejected.push(IcebergRejectedRow {
+                row,
+                error: program.structured_side_error(reason, side_error.span),
+            });
+        }
         if accepted_rows.is_empty() {
             return Ok(IcebergMappedBatch {
                 accepted: None,

@@ -91,7 +91,26 @@ use nervix_interconnect::{
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
     TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
 };
-use nervix_models::{AlterDomain, BranchName, BranchSelection, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateReorderer, CreateResource, CreateStatement, CreateUser, CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainClockState, DomainConfig, DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, FieldName, IcebergCatalog, InferencerTensorDimension, InferencerTensorSchema, IngestSource, IngestTimestampSource, IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName, LookupQuery, Model, ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode, PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp, UploadResource, UserName, VhostTlsResource, expression_to_nspl, ingest_quiesce_to_nspl};
+use nervix_models::{
+    AlterDomain, BranchName, BranchSelection, ClusterNodeName, CreateCorrelator,
+    CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateInferencer,
+    CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateReorderer,
+    CreateResource, CreateStatement, CreateUser, CreateWindowProcessor, DescribeCorrelator,
+    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
+    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
+    DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainClockState, DomainConfig, DomainName, DomainPace,
+    DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, FieldName, IcebergCatalog,
+    InferencerTensorDimension, InferencerTensorSchema, IngestSource, IngestTimestampSource,
+    IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName, LookupQuery, Model,
+    ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, ParseAsType,
+    PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode,
+    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId,
+    ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
+    ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp, UploadResource,
+    UserName, VhostTlsResource, expression_to_nspl, ingest_quiesce_to_nspl,
+};
 use nervix_nspl::{
     Token, Word,
     client_statement::{
@@ -1358,14 +1377,13 @@ async fn handle_http_request(
         // once here and appended from that copy for every later frame.
         let headers = RetainedIngestHeaders::capture(&HyperRequestHeaders(request.headers()));
 
-        let Some(sec_websocket_key) = request
-            .headers()
-            .get(SEC_WEBSOCKET_KEY)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned)
-        else {
+        let Some(sec_websocket_key) = request.headers().get(SEC_WEBSOCKET_KEY) else {
             return Ok(response_with_status(StatusCode::BAD_REQUEST));
         };
+        let Ok(sec_websocket_key) = sec_websocket_key.to_str() else {
+            return Ok(response_with_status(StatusCode::BAD_REQUEST));
+        };
+        let sec_websocket_key = sec_websocket_key.to_owned();
 
         let response = HyperResponse::builder()
             .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -1948,17 +1966,19 @@ async fn handle_web_console_request(
             ));
         }
 
-        let Some(sec_websocket_key) = request
-            .headers()
-            .get(SEC_WEBSOCKET_KEY)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned)
-        else {
+        let Some(sec_websocket_key) = request.headers().get(SEC_WEBSOCKET_KEY) else {
             return Ok(text_response(
                 StatusCode::BAD_REQUEST,
                 "missing websocket key",
             ));
         };
+        let Ok(sec_websocket_key) = sec_websocket_key.to_str() else {
+            return Ok(text_response(
+                StatusCode::BAD_REQUEST,
+                "missing websocket key",
+            ));
+        };
+        let sec_websocket_key = sec_websocket_key.to_owned();
 
         let response = HyperResponse::builder()
             .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -2383,24 +2403,24 @@ fn credentials_from_basic_authorization(value: &str) -> Option<BasicAuthCredenti
 }
 
 fn credentials_from_metadata(metadata: &MetadataMap) -> Option<BasicAuthCredentials> {
-    metadata
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(credentials_from_basic_authorization)
+    let value = metadata.get("authorization")?;
+    let Ok(value) = value.to_str() else {
+        return None;
+    };
+    credentials_from_basic_authorization(value)
 }
 
 fn credentials_from_web_console_request(
     request: &HyperRequest<HyperIncoming>,
 ) -> Option<BasicAuthCredentials> {
-    request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(credentials_from_basic_authorization)
-        .or_else(|| {
-            web_console_query_param(request.uri().query(), WEB_CONSOLE_AUTH_QUERY_PARAM)
-                .and_then(|token| credentials_from_basic_token(&token))
-        })
+    if let Some(value) = request.headers().get(AUTHORIZATION)
+        && let Ok(value) = value.to_str()
+        && let Some(credentials) = credentials_from_basic_authorization(value)
+    {
+        return Some(credentials);
+    }
+    let token = web_console_query_param(request.uri().query(), WEB_CONSOLE_AUTH_QUERY_PARAM)?;
+    credentials_from_basic_token(&token)
 }
 
 fn unauthorized_basic_response() -> HyperResponse<Full<Bytes>> {
@@ -5181,12 +5201,13 @@ impl SessionServiceImpl {
         };
 
         let schedule = self.consensus.current_schedule().await;
-        let scheduled_relay = schedule.domain(domain).and_then(|domain_schedule| {
-            domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == ModelKind::Relay && node.identifier == ModelName::from(&describe.relay))
-        });
+        let scheduled_relay = if let Some(domain_schedule) = schedule.domain(domain) {
+            domain_schedule.nodes.iter().find(|node| {
+                node.kind == ModelKind::Relay && node.identifier == ModelName::from(&describe.relay)
+            })
+        } else {
+            None
+        };
         if describe.bindings.is_empty() {
             let metrics = match self
                 .describe_metrics_for_scheduled_node(
@@ -5437,7 +5458,11 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn describe_domain(&self, domain: &DomainName, _describe: DescribeDomain) -> CommandResult {
+    async fn describe_domain(
+        &self,
+        domain: &DomainName,
+        _describe: DescribeDomain,
+    ) -> CommandResult {
         let Some(domain_state) = self.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
@@ -5469,7 +5494,8 @@ impl SessionServiceImpl {
                 ));
                 lines.push(format!(
                     "    host: {}",
-                    placement_group_host(domain_schedule, &group.members).map_or("(unassigned)", ClusterNodeName::as_str)
+                    placement_group_host(domain_schedule, &group.members)
+                        .map_or("(unassigned)", ClusterNodeName::as_str)
                 ));
                 for bond in &group.bonds {
                     lines.push(format!(
@@ -5530,7 +5556,11 @@ impl SessionServiceImpl {
         else {
             return command_error(format!("placement '{}' not found", describe.name.as_str()));
         };
-        let Some(rule) = plan.rules.iter().find(|rule| rule.name == ModelName::from(&describe.name)) else {
+        let Some(rule) = plan
+            .rules
+            .iter()
+            .find(|rule| rule.name == ModelName::from(&describe.name))
+        else {
             return command_error(format!("placement '{}' not found", describe.name.as_str()));
         };
         let form = match self
@@ -5620,7 +5650,8 @@ impl SessionServiceImpl {
             ));
             lines.push(format!(
                 "group host: {}",
-                placement_group_host(domain_schedule, &group.members).map_or("(unassigned)", ClusterNodeName::as_str)
+                placement_group_host(domain_schedule, &group.members)
+                    .map_or("(unassigned)", ClusterNodeName::as_str)
             ));
             for bond in &group.bonds {
                 lines.push(format!(
@@ -5643,9 +5674,10 @@ impl SessionServiceImpl {
             .registry
             .get(domain, ModelKind::Endpoint, &describe.name)
         {
-            Ok(Some(Model::Endpoint(endpoint))) => {
-                command_ok(format_endpoint_describe_output(&ModelName::from(&describe.name), &endpoint))
-            }
+            Ok(Some(Model::Endpoint(endpoint))) => command_ok(format_endpoint_describe_output(
+                &ModelName::from(&describe.name),
+                &endpoint,
+            )),
             Ok(Some(_)) => command_error(format!(
                 "model '{}' is not an endpoint",
                 describe.name.as_str()
@@ -5717,12 +5749,14 @@ impl SessionServiceImpl {
                     Err(_) if tokio::time::Instant::now() < deadline => {}
                     Err(_) => {
                         self.pending_cluster_commands.remove(&correlation_id);
-                        break Err(dispatch_result.err().unwrap_or_else(|| {
-                            format!(
+                        let error = match dispatch_result {
+                            Err(error) => error,
+                            Ok(()) => format!(
                                 "timed out waiting for DESCRIBE INGESTOR response from '{}'",
                                 owner
-                            )
-                        }));
+                            ),
+                        };
+                        break Err(error);
                     }
                 }
             }
@@ -5859,7 +5893,8 @@ impl SessionServiceImpl {
     ) -> DataflowNodeStatusEnvelope {
         let identifier = identifier.into();
         let (status, detail, reconnect_wait_millis) =
-            self.runtime.dataflow_node_status(domain, kind, identifier.clone());
+            self.runtime
+                .dataflow_node_status(domain, kind, identifier.clone());
         let (transient_error, reconnect_backoff, transient_wait_millis) = self
             .runtime
             .dataflow_node_transient_state(domain, kind, identifier);
@@ -6863,7 +6898,11 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn describe_lookup(&self, domain: &DomainName, describe: DescribeLookup) -> CommandResult {
+    async fn describe_lookup(
+        &self,
+        domain: &DomainName,
+        describe: DescribeLookup,
+    ) -> CommandResult {
         let lookup_target = match self
             .lookup_target_from_schedule(domain, &describe.name)
             .await
@@ -7270,7 +7309,11 @@ impl SessionServiceImpl {
         ))
     }
 
-    async fn describe_emitter(&self, domain: &DomainName, describe: DescribeEmitter) -> CommandResult {
+    async fn describe_emitter(
+        &self,
+        domain: &DomainName,
+        describe: DescribeEmitter,
+    ) -> CommandResult {
         let scheduled_node = self
             .scheduled_model_node(domain, ModelKind::Emitter, &describe.name)
             .await;
@@ -7484,13 +7527,12 @@ impl SessionServiceImpl {
     ) -> Option<ScheduledNode> {
         let identifier = identifier.into();
         let schedule = self.consensus.current_schedule().await;
-        schedule.domain(domain).and_then(|domain_schedule| {
-            domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == kind && node.identifier == identifier)
-                .cloned()
-        })
+        let domain_schedule = schedule.domain(domain)?;
+        domain_schedule
+            .nodes
+            .iter()
+            .find(|node| node.kind == kind && node.identifier == identifier)
+            .cloned()
     }
 
     async fn prepare_owner_control_request(
@@ -7732,11 +7774,14 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result.and_then(|record| {
-                record
-                    .map(|bytes| runtime_schema::RuntimeRecordBatch::from_arrow_ipc_bytes(&bytes))
-                    .transpose()
-            }));
+            let result = match response.result {
+                Ok(Some(bytes)) => {
+                    runtime_schema::RuntimeRecordBatch::from_arrow_ipc_bytes(&bytes).map(Some)
+                }
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            };
+            let _ = sender.send(result);
         }
     }
 
@@ -7872,13 +7917,11 @@ impl SessionServiceImpl {
                 && !expects_runtime_node_ref)
         {
             let domains = self.consensus.current_domains().await;
-            suggestions.extend(domains.into_keys().filter_map(|id| {
+            for id in domains.into_keys() {
                 if prefix.is_empty() || id.as_str().starts_with(&prefix) {
-                    Some(id.to_string())
-                } else {
-                    None
+                    suggestions.push(id.to_string());
                 }
-            }));
+            }
         }
 
         let mut response_suggestions = SortedSet::from_unsorted(suggestions)
@@ -8774,9 +8817,9 @@ impl SessionServiceImpl {
                 error: result.message.clone(),
             })
         };
-        let effect = result.success.then_some(effect).flatten();
-        let planned_relocations = effect.as_ref().and_then(|effect| {
-            let count = match effect {
+        let effect = if result.success { effect } else { None };
+        let planned_relocations = match effect.as_ref() {
+            Some(
                 TransactionStepEffect::ReplaceDomainSchedule {
                     expected_schedule,
                     schedule,
@@ -8786,13 +8829,15 @@ impl SessionServiceImpl {
                     expected_schedule,
                     schedule,
                     ..
-                } => {
-                    planned_ownership_moves(expected_schedule.as_deref(), schedule.as_deref()).len()
-                }
-                _ => 0,
-            };
-            (count > 0).then_some(count)
-        });
+                },
+            ) => {
+                let count =
+                    planned_ownership_moves(expected_schedule.as_deref(), schedule.as_deref())
+                        .len();
+                (count > 0).then_some(count)
+            }
+            _ => None,
+        };
         self.consensus
             .advance_transaction_commit(TransactionCommitAdvance {
                 id: transaction.id.clone(),
@@ -9175,8 +9220,7 @@ impl SessionServiceImpl {
     }
 
     async fn reconcile_transactions_once(&self) {
-        if self.consensus.current_leader().await.as_ref() != Some(self.consensus.local_node_id())
-        {
+        if self.consensus.current_leader().await.as_ref() != Some(self.consensus.local_node_id()) {
             return;
         }
         let now = current_timestamp();
@@ -9871,10 +9915,14 @@ impl SessionServiceImpl {
                             if let Some(gate) = cluster_entity_gate.take() {
                                 self.release_cluster_entity_gates(gate).await;
                             }
-                            let rollback_error = rollback_plan
-                                .take()
-                                .and_then(|plan| self.registry.rollback_committed(plan).err())
-                                .map(|rollback| rollback.to_string());
+                            let rollback_error = if let Some(plan) = rollback_plan.take() {
+                                match self.registry.rollback_committed(plan) {
+                                    Ok(_) => None,
+                                    Err(rollback) => Some(rollback.to_string()),
+                                }
+                            } else {
+                                None
+                            };
                             if requires_domain_pause {
                                 let _ = self.resume_domain_after_alter(&domain).await;
                             }
@@ -10024,9 +10072,11 @@ impl SessionServiceImpl {
             ));
         }
 
-        let result = completed_result.unwrap_or_else(|| {
+        let result = if let Some(result) = completed_result {
+            result
+        } else {
             model_mutation_success_result(&results, &applied, QuiesceLevel::Dynamic, 0)
-        });
+        };
         if let Some(transaction_step) = transaction_step
             && transaction_step.outcome.lock().is_none()
         {
@@ -11336,28 +11386,29 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let references = self
-            .registry
-            .active_graph(domain)
-            .map(|graph| {
-                let mut references = graph
-                    .edges()
-                    .into_iter()
-                    .filter_map(|(from, to, edge)| {
-                        (edge == crate::registry::EdgeKind::RequiredBy && from == ModelName::from(&model.name))
-                            .then_some(to)
-                    })
-                    .collect::<Vec<_>>();
-                references.sort();
-                references.dedup();
+        let references = if let Some(graph) = self.registry.active_graph(domain) {
+            let mut references = Vec::new();
+            for (from, to, edge) in graph.edges() {
+                if edge == crate::registry::EdgeKind::RequiredBy
+                    && from == ModelName::from(&model.name)
+                {
+                    references.push(to);
+                }
+            }
+            references.sort();
+            references.dedup();
+            if references.is_empty() {
+                "(none)".to_string()
+            } else {
                 references
                     .iter()
                     .map(|name| name.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
-            })
-            .filter(|references| !references.is_empty())
-            .unwrap_or_else(|| "(none)".to_string());
+            }
+        } else {
+            "(none)".to_string()
+        };
         command_ok(format!(
             "name: {}\nlanguage: {}\nsignature: ({arguments}) -> {}{}\nvolatile: {}\ncode_hash: \
              {}\nreferencing_nodes: {references}",
@@ -11553,24 +11604,34 @@ impl SessionServiceImpl {
                     },
                     |replica| replica.state.as_ref(),
                 );
+                let checksum = if let Some(replica) = replica {
+                    replica.root_checksum.as_deref().unwrap_or("-")
+                } else {
+                    "-"
+                };
+                let verified_at = if let Some(replica) = replica
+                    && let Some(value) = replica.last_verified_at
+                {
+                    value.to_string()
+                } else {
+                    "-".to_string()
+                };
+                let source = if let Some(replica) = replica {
+                    replica
+                        .source_node_id
+                        .as_ref()
+                        .map_or("-", ClusterNodeName::as_str)
+                } else {
+                    "-"
+                };
+                let error = if let Some(replica) = replica {
+                    replica.error.as_deref().unwrap_or("-")
+                } else {
+                    "-"
+                };
                 lines.push(format!(
                     "- {} topology={} state={} checksum={} verified_at={} source={} error={}",
-                    node_id,
-                    topology,
-                    state,
-                    replica
-                        .and_then(|replica| replica.root_checksum.as_deref())
-                        .unwrap_or("-"),
-                    replica
-                        .and_then(|replica| replica.last_verified_at)
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "-".to_string()),
-                    replica
-                        .and_then(|replica| replica.source_node_id.as_ref())
-                        .map_or("-", ClusterNodeName::as_str),
-                    replica
-                        .and_then(|replica| replica.error.as_deref())
-                        .unwrap_or("-"),
+                    node_id, topology, state, checksum, verified_at, source, error,
                 ));
             }
         }
@@ -12324,7 +12385,9 @@ impl SessionServiceImpl {
         node_id: &ClusterNodeName,
         live_nodes: &BTreeSet<ClusterNodeName>,
         target_nodes: &BTreeSet<ClusterNodeName>,
-        excluded: &BTreeSet<ClusterNodeName>,
+        // Failed units are keyed by their human-readable label, which is a node id for a single
+        // node and a bracketed member list for a placement group, so this stays a string set.
+        excluded: &BTreeSet<String>,
     ) -> Option<DrainMove> {
         let mut groups = desired.placement_groups.iter().collect::<Vec<_>>();
         groups.sort_by(|left, right| {
@@ -12441,16 +12504,18 @@ impl SessionServiceImpl {
             .iter()
             .map(|member| scheduled_node_for_placement_member(desired, member).cloned())
             .collect::<Option<Vec<_>>>()?;
-        let old_primary = schedule
+        let old_primary = if let Some(candidate) = schedule
             .placement_groups
             .iter()
             .find(|candidate| placement_group_members_equal(&candidate.members, &group.members))
-            .and_then(|candidate| candidate.primary_node.clone())
-            .or_else(|| {
-                current_nodes
-                    .first()
-                    .and_then(|node| node.primary_node.clone())
-            });
+            && let Some(primary) = candidate.primary_node.as_ref()
+        {
+            Some(primary.clone())
+        } else if let Some(node) = current_nodes.first() {
+            node.primary_node.clone()
+        } else {
+            None
+        };
         let preserved_primary = old_primary.as_ref().filter(|primary| {
             *primary != unavailable_node_id
                 && live_nodes.contains(*primary)
@@ -12459,27 +12524,23 @@ impl SessionServiceImpl {
                         && node.assigned_nodes.contains(*primary)
                 })
         });
-        let desired_target = group
-            .primary_node
-            .as_ref()
-            .filter(|node_id| target_nodes.contains(*node_id))
-            .cloned()
-            .or_else(|| {
-                desired_nodes
-                    .first()
-                    .and_then(|node| node.primary_node.clone())
-                    .filter(|node_id| target_nodes.contains(node_id))
-            })
-            .or_else(|| {
-                desired_nodes
-                    .first()
-                    .and_then(|node| {
-                        node.assigned_nodes
-                            .iter()
-                            .find(|node_id| target_nodes.contains(*node_id))
-                    })
-                    .cloned()
-            });
+        let desired_target = if let Some(node_id) = group.primary_node.as_ref()
+            && target_nodes.contains(node_id)
+        {
+            Some(node_id.clone())
+        } else if let Some(node) = desired_nodes.first()
+            && let Some(node_id) = node.primary_node.as_ref()
+            && target_nodes.contains(node_id)
+        {
+            Some(node_id.clone())
+        } else if let Some(node) = desired_nodes.first() {
+            node.assigned_nodes
+                .iter()
+                .find(|node_id| target_nodes.contains(*node_id))
+                .cloned()
+        } else {
+            None
+        };
         let mut common_replicas = current_nodes
             .first()?
             .assigned_nodes
@@ -12493,10 +12554,15 @@ impl SessionServiceImpl {
                 .iter()
                 .all(|node| node.assigned_nodes.contains(candidate))
         });
-        let target = preserved_primary
-            .cloned()
-            .or_else(|| relocation.target(desired_target, common_replicas.first().cloned()))
-            .or_else(|| target_nodes.first().cloned())?;
+        let target = if let Some(primary) = preserved_primary {
+            primary.clone()
+        } else if let Some(target) =
+            relocation.target(desired_target, common_replicas.first().cloned())
+        {
+            target
+        } else {
+            target_nodes.first()?.clone()
+        };
         let primary_changed = old_primary.as_ref() != Some(&target);
         let promoted_replica = (primary_changed
             && current_nodes
@@ -12576,31 +12642,32 @@ impl SessionServiceImpl {
         let old_primary = node.primary_node.clone();
         let preserved_primary = old_primary
             .as_ref()
-            .filter(|primary| {
-                *primary != unavailable_node_id && live_nodes.contains(*primary)
-            })
+            .filter(|primary| *primary != unavailable_node_id && live_nodes.contains(*primary))
             .cloned();
-        let desired_target = desired_node
-            .primary_node
-            .as_ref()
-            .filter(|node_id| target_nodes.contains(*node_id))
-            .cloned()
-            .or_else(|| {
-                desired_node
-                    .assigned_nodes
-                    .iter()
-                    .find(|node_id| target_nodes.contains(*node_id))
-                    .cloned()
-            });
+        let desired_target = if let Some(node_id) = desired_node.primary_node.as_ref()
+            && target_nodes.contains(node_id)
+        {
+            Some(node_id.clone())
+        } else {
+            desired_node
+                .assigned_nodes
+                .iter()
+                .find(|node_id| target_nodes.contains(*node_id))
+                .cloned()
+        };
         let existing_replica = node
             .assigned_nodes
             .iter()
             .filter(|assigned| *assigned != unavailable_node_id)
             .find(|assigned| target_nodes.contains(*assigned))
             .cloned();
-        let target = preserved_primary
-            .or_else(|| relocation.target(desired_target, existing_replica))
-            .or_else(|| target_nodes.first().cloned())?;
+        let target = if let Some(primary) = preserved_primary {
+            primary
+        } else if let Some(target) = relocation.target(desired_target, existing_replica) {
+            target
+        } else {
+            target_nodes.first()?.clone()
+        };
         let replica_slots = node
             .assigned_nodes
             .len()
@@ -12688,18 +12755,17 @@ impl SessionServiceImpl {
             if !has_unavailable_assignment {
                 continue;
             }
-            let unavailable_node_id = group
-                .primary_node
-                .as_ref()
-                .filter(|node_id| !live_nodes.contains(*node_id))
-                .cloned()
-                .or_else(|| {
-                    current_nodes
-                        .iter()
-                        .flat_map(|node| node.assigned_nodes.iter())
-                        .find(|node_id| !live_nodes.contains(*node_id))
-                        .cloned()
-                });
+            let unavailable_node_id = if let Some(node_id) = group.primary_node.as_ref()
+                && !live_nodes.contains(node_id)
+            {
+                Some(node_id.clone())
+            } else {
+                current_nodes
+                    .iter()
+                    .flat_map(|node| node.assigned_nodes.iter())
+                    .find(|node_id| !live_nodes.contains(*node_id))
+                    .cloned()
+            };
             let Some(unavailable_node_id) = unavailable_node_id else {
                 continue;
             };
@@ -12790,15 +12856,18 @@ impl SessionServiceImpl {
                 .iter()
                 .map(|member| scheduled_node_for_placement_member(existing, member))
                 .collect::<Option<Vec<_>>>();
-            let common_primary = existing_nodes.as_ref().and_then(|nodes| {
-                let primary = nodes.first()?.primary_node.as_ref()?;
-                (live_node_ids.contains(primary)
-                    && nodes.iter().all(|node| {
-                        node.primary_node.as_ref() == Some(primary)
-                            && node.assigned_nodes.contains(primary)
-                    }))
-                .then(|| primary.clone())
-            });
+            let common_primary = if let Some(nodes) = existing_nodes.as_ref()
+                && let Some(first) = nodes.first()
+                && let Some(primary) = first.primary_node.as_ref()
+                && live_node_ids.contains(primary)
+                && nodes.iter().all(|node| {
+                    node.primary_node.as_ref() == Some(primary)
+                        && node.assigned_nodes.contains(primary)
+                }) {
+                Some(primary.clone())
+            } else {
+                None
+            };
 
             if let (Some(existing_nodes), Some(primary)) = (existing_nodes, common_primary) {
                 for (member, existing_node) in members.iter().zip(existing_nodes) {
@@ -12827,10 +12896,14 @@ impl SessionServiceImpl {
                     node.assigned_nodes = assigned_nodes;
                 }
             }
-            schedule.placement_groups[group_index].primary_node = members
-                .first()
-                .and_then(|member| scheduled_node_for_placement_member(schedule, member))
-                .and_then(|node| node.primary_node.clone());
+            schedule.placement_groups[group_index].primary_node = if let Some(member) =
+                members.first()
+                && let Some(node) = scheduled_node_for_placement_member(schedule, member)
+            {
+                node.primary_node.clone()
+            } else {
+                None
+            };
         }
 
         for node in &mut schedule.nodes {
@@ -12925,7 +12998,8 @@ impl SessionServiceImpl {
                     continue;
                 };
                 let Some(client_node) = domain_schedule.nodes.iter().find(|candidate| {
-                    candidate.kind == ModelKind::Client && candidate.identifier == ModelName::from(&*client)
+                    candidate.kind == ModelKind::Client
+                        && candidate.identifier == ModelName::from(&*client)
                 }) else {
                     continue;
                 };
@@ -12967,11 +13041,9 @@ impl SessionServiceImpl {
             return Ok(());
         };
         let mut next_domain_schedule = existing_domain_schedule.clone();
-        let Some(ingestor_node) = next_domain_schedule
-            .nodes
-            .iter_mut()
-            .find(|node| node.kind == ModelKind::Ingestor && node.identifier == ModelName::from(&*ingestor))
-        else {
+        let Some(ingestor_node) = next_domain_schedule.nodes.iter_mut().find(|node| {
+            node.kind == ModelKind::Ingestor && node.identifier == ModelName::from(&*ingestor)
+        }) else {
             return Ok(());
         };
         let Model::Ingestor(ingestor_model) = ingestor_node.config.as_ref() else {
@@ -13038,16 +13110,12 @@ impl SessionServiceImpl {
             })
             .collect::<HashMap<_, _>>();
 
-        let stale_keys = tasks
-            .iter()
-            .filter_map(|(key, (spec, _, _))| {
-                desired
-                    .get(key)
-                    .filter(|desired_spec| *desired_spec == spec)
-                    .is_none()
-                    .then_some(key.clone())
-            })
-            .collect::<Vec<_>>();
+        let mut stale_keys = Vec::new();
+        for (key, (spec, _, _)) in tasks.iter() {
+            if desired.get(key) != Some(spec) {
+                stale_keys.push(key.clone());
+            }
+        }
         for key in stale_keys {
             if let Some((_, cancel, handle)) = tasks.remove(&key) {
                 cancel.cancel();
@@ -13185,21 +13253,17 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
-        let Some(relay_node) = domain_schedule
-            .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay))
-        else {
+        let Some(relay_node) = domain_schedule.nodes.iter().find(|node| {
+            node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
+        }) else {
             return Ok(None);
         };
         let Model::Relay(ack_model) = relay_node.config.as_ref() else {
             return Err("scheduled relay node has invalid model kind".to_string());
         };
-        let Some(schema_node) = domain_schedule
-            .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Schema && node.identifier == ModelName::from(&ack_model.schema))
-        else {
+        let Some(schema_node) = domain_schedule.nodes.iter().find(|node| {
+            node.kind == ModelKind::Schema && node.identifier == ModelName::from(&ack_model.schema)
+        }) else {
             return Err(format!(
                 "stream '{}' references missing scheduled schema '{}'",
                 relay.as_str(),
@@ -13333,22 +13397,18 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
-        let Some(relay_node) = domain_schedule
-            .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay))
-        else {
+        let Some(relay_node) = domain_schedule.nodes.iter().find(|node| {
+            node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
+        }) else {
             return Ok(None);
         };
         let Model::Relay(relay_model) = relay_node.config.as_ref() else {
             return Err("scheduled relay node has invalid model kind".to_string());
         };
         if let Some(branch_ref) = relay_model.branching.branch() {
-            let Some(branch_node) = domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == ModelKind::Branch && node.identifier == ModelName::from(&*branch_ref))
-            else {
+            let Some(branch_node) = domain_schedule.nodes.iter().find(|node| {
+                node.kind == ModelKind::Branch && node.identifier == ModelName::from(&*branch_ref)
+            }) else {
                 return Err(format!(
                     "stream '{}' references missing scheduled branch '{}'",
                     relay.as_str(),
@@ -13358,11 +13418,9 @@ impl SessionServiceImpl {
             let Model::Branch(branch) = branch_node.config.as_ref() else {
                 return Err("scheduled branch node has invalid model kind".to_string());
             };
-            let Some(schema_node) = domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == ModelKind::Schema && node.identifier == ModelName::from(&branch.schema))
-            else {
+            let Some(schema_node) = domain_schedule.nodes.iter().find(|node| {
+                node.kind == ModelKind::Schema && node.identifier == ModelName::from(&branch.schema)
+            }) else {
                 return Err(format!(
                     "stream '{}' references missing scheduled branch schema '{}'",
                     relay.as_str(),
@@ -13382,11 +13440,10 @@ impl SessionServiceImpl {
         if branching.is_empty() {
             return Ok(None);
         }
-        let Some(schema_node) = domain_schedule
-            .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Schema && node.identifier == ModelName::from(&relay_model.schema))
-        else {
+        let Some(schema_node) = domain_schedule.nodes.iter().find(|node| {
+            node.kind == ModelKind::Schema
+                && node.identifier == ModelName::from(&relay_model.schema)
+        }) else {
             return Err(format!(
                 "stream '{}' references missing scheduled schema '{}'",
                 relay.as_str(),
@@ -13450,11 +13507,10 @@ impl SessionServiceImpl {
             if ack_model.materialized_state.is_none() {
                 continue;
             }
-            let Some(schema_node) = domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == ModelKind::Schema && node.identifier == ModelName::from(&ack_model.schema))
-            else {
+            let Some(schema_node) = domain_schedule.nodes.iter().find(|node| {
+                node.kind == ModelKind::Schema
+                    && node.identifier == ModelName::from(&ack_model.schema)
+            }) else {
                 return Err(format!(
                     "stream '{}' references missing scheduled schema '{}'",
                     ack_model.name.as_str(),
@@ -13473,10 +13529,7 @@ impl SessionServiceImpl {
                     relay_node.effective_branching.clone().unwrap_or_default(),
                 ),
             );
-            owners.insert(
-                ack_model.name.clone(),
-                relay_node.primary_node().cloned(),
-            );
+            owners.insert(ack_model.name.clone(), relay_node.primary_node().cloned());
         }
 
         Ok((specs, owners))
@@ -13503,7 +13556,8 @@ impl SessionServiceImpl {
             return Err("scheduled lookup node has invalid model kind".to_string());
         };
         let Some(codec_node) = domain_schedule.nodes.iter().find(|node| {
-            node.kind == ModelKind::Codec && node.identifier == ModelName::from(&lookup.decode_using_codec)
+            node.kind == ModelKind::Codec
+                && node.identifier == ModelName::from(&lookup.decode_using_codec)
         }) else {
             return Err(format!(
                 "lookup '{}' references missing scheduled codec '{}'",
@@ -13514,11 +13568,9 @@ impl SessionServiceImpl {
         let Model::Codec(codec) = codec_node.config.as_ref() else {
             return Err("scheduled codec node has invalid model kind".to_string());
         };
-        let Some(schema_node) = domain_schedule
-            .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Schema && node.identifier == ModelName::from(&codec.schema))
-        else {
+        let Some(schema_node) = domain_schedule.nodes.iter().find(|node| {
+            node.kind == ModelKind::Schema && node.identifier == ModelName::from(&codec.schema)
+        }) else {
             return Err(format!(
                 "lookup '{}' references missing scheduled schema '{}'",
                 name.as_str(),
@@ -14276,20 +14328,15 @@ fn format_relay_describe_output(
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
         format!("schema: {}", relay.schema.as_str()),
-        format!(
-            "branched by: {}",
-            relay
-                .branching
-                .branch()
-                .map(|name| name.as_str())
-                .unwrap_or_else(|| {
-                    if relay.branching.is_unbranched() {
-                        "UNBRANCHED"
-                    } else {
-                        "-"
-                    }
-                })
-        ),
+        format!("branched by: {}", {
+            if let Some(branch) = relay.branching.branch() {
+                branch.as_str()
+            } else if relay.branching.is_unbranched() {
+                "UNBRANCHED"
+            } else {
+                "-"
+            }
+        }),
         format!(
             "branch fields: {}",
             if branching.is_empty() {
@@ -15154,8 +15201,7 @@ fn placement_runtime_node_ref_suggestions(
     let eligible = models
         .iter()
         .filter(|model| {
-            placement_member_model_is_eligible(model)
-                && model.name().as_str().starts_with(&prefix)
+            placement_member_model_is_eligible(model) && model.name().as_str().starts_with(&prefix)
         })
         .map(|model| model.name())
         .collect::<Vec<_>>();
@@ -15191,18 +15237,17 @@ fn placement_member_model_is_eligible(model: &Model) -> bool {
 }
 
 fn ordered_placement_corridor(endpoint: &PlacementEndpointPairPlan) -> Vec<PlacementRuntimeNode> {
-    let mut ordered = endpoint
+    let longest_witness = endpoint
         .witnesses
         .iter()
-        .max_by_key(|witness| witness.path.len())
-        .map(|witness| witness.path.clone())
-        .unwrap_or_else(|| {
-            if endpoint.source == endpoint.destination {
-                vec![endpoint.source.clone()]
-            } else {
-                vec![endpoint.source.clone(), endpoint.destination.clone()]
-            }
-        });
+        .max_by_key(|witness| witness.path.len());
+    let mut ordered = if let Some(witness) = longest_witness {
+        witness.path.clone()
+    } else if endpoint.source == endpoint.destination {
+        vec![endpoint.source.clone()]
+    } else {
+        vec![endpoint.source.clone(), endpoint.destination.clone()]
+    };
     let mut unique = Vec::with_capacity(endpoint.corridor.len());
     for node in ordered.drain(..).chain(endpoint.corridor.iter().cloned()) {
         if !unique.contains(&node) {
@@ -15255,14 +15300,12 @@ fn placement_group_host<'a>(
     schedule: Option<&'a nervix_models::DomainSchedule>,
     members: &[PlacementRuntimeNode],
 ) -> Option<&'a ClusterNodeName> {
-    schedule
-        .and_then(|schedule| {
-            schedule
-                .placement_groups
-                .iter()
-                .find(|group| placement_group_members_equal(&group.members, members))
-        })
-        .and_then(|group| group.primary_node.as_ref())
+    let schedule = schedule?;
+    let group = schedule
+        .placement_groups
+        .iter()
+        .find(|group| placement_group_members_equal(&group.members, members))?;
+    group.primary_node.as_ref()
 }
 
 fn placement_groups_claimed_by_rule<'a>(
@@ -15316,10 +15359,7 @@ fn prefer_former_owners_as_replicas(
             continue;
         };
         let replica_slots = planned_node.assigned_nodes.len();
-        if *former_owner == destination
-            || replica_slots < 2
-            || !live_nodes.contains(former_owner)
-        {
+        if *former_owner == destination || replica_slots < 2 || !live_nodes.contains(former_owner) {
             continue;
         }
         let mut assigned_nodes = vec![destination, former_owner.clone()];
@@ -15340,31 +15380,34 @@ fn planned_ownership_moves(
     let (Some(current), Some(planned)) = (current, planned) else {
         return Vec::new();
     };
-    let mut moves = planned
-        .nodes
-        .iter()
-        .filter_map(|planned_node| {
-            let current_node = current.nodes.iter().find(|current_node| {
-                current_node.kind == planned_node.kind
-                    && current_node.identifier == planned_node.identifier
-            })?;
-            let former_owner = current_node.execution_node()?;
-            let destination = planned_node.execution_node()?;
-            if former_owner == destination {
-                return None;
-            }
-            Some(PlannedOwnershipMove {
-                entity: crate::registry::RegistryEntity {
-                    kind: planned_node.kind,
-                    identifier: planned_node.identifier.clone(),
-                },
-                former_owner: former_owner.clone(),
-                destination: destination.clone(),
-                replicas: planned_node.replica_nodes().into_iter().cloned().collect(),
-                promoted_replica: current_node.is_assigned_to(destination),
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut moves = Vec::new();
+    for planned_node in &planned.nodes {
+        let Some(current_node) = current.nodes.iter().find(|current_node| {
+            current_node.kind == planned_node.kind
+                && current_node.identifier == planned_node.identifier
+        }) else {
+            continue;
+        };
+        let Some(former_owner) = current_node.execution_node() else {
+            continue;
+        };
+        let Some(destination) = planned_node.execution_node() else {
+            continue;
+        };
+        if former_owner == destination {
+            continue;
+        }
+        moves.push(PlannedOwnershipMove {
+            entity: crate::registry::RegistryEntity {
+                kind: planned_node.kind,
+                identifier: planned_node.identifier.clone(),
+            },
+            former_owner: former_owner.clone(),
+            destination: destination.clone(),
+            replicas: planned_node.replica_nodes().into_iter().cloned().collect(),
+            promoted_replica: current_node.is_assigned_to(destination),
+        });
+    }
     moves.sort_by(|left, right| left.entity.cmp(&right.entity));
     moves
 }
@@ -16302,10 +16345,10 @@ fn create_registry_error_response(
             }
         }
         RegistryError::MissingReference { reference, .. } => {
-            let span = ModelName::try_from(reference.as_str())
-                .ok()
-                .and_then(|id| find_identifier_span(query, &id))
-                .unwrap_or(0..0);
+            let span = match ModelName::try_from(reference.as_str()) {
+                Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
+                Err(_) => 0..0,
+            };
             CommandResult {
                 success: false,
                 message: format!("{err}"),
@@ -16319,10 +16362,10 @@ fn create_registry_error_response(
             }
         }
         RegistryError::InvalidReferenceKind { reference, .. } => {
-            let span = ModelName::try_from(reference.as_str())
-                .ok()
-                .and_then(|id| find_identifier_span(query, &id))
-                .unwrap_or(0..0);
+            let span = match ModelName::try_from(reference.as_str()) {
+                Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
+                Err(_) => 0..0,
+            };
             CommandResult {
                 success: false,
                 message: format!("{err}"),
@@ -16605,19 +16648,14 @@ fn resource_ref_suggestions(
     domain: &DomainName,
     prefix: &str,
 ) -> Vec<String> {
-    resources
-        .next_version_by_resource
-        .iter()
-        .filter_map(|(known_domain, identifier, _)| {
-            if known_domain == domain
-                && (prefix.is_empty() || identifier.as_str().starts_with(prefix))
-            {
-                Some(identifier.to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut suggestions = Vec::new();
+    for (known_domain, identifier, _) in &resources.next_version_by_resource {
+        if known_domain == domain && (prefix.is_empty() || identifier.as_str().starts_with(prefix))
+        {
+            suggestions.push(identifier.to_string());
+        }
+    }
+    suggestions
 }
 
 fn resource_version_suggestions(
@@ -16626,19 +16664,17 @@ fn resource_version_suggestions(
     identifier: &ResourceName,
     prefix: &str,
 ) -> Vec<String> {
-    resources
-        .versions
-        .iter()
-        .filter(|resource| resource.id.domain == *domain && resource.id.identifier == *identifier)
-        .filter_map(|resource| {
-            let version = resource.id.version.to_string();
-            if prefix.is_empty() || version.starts_with(prefix) {
-                Some(version)
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut suggestions = Vec::new();
+    for resource in &resources.versions {
+        if resource.id.domain != *domain || resource.id.identifier != *identifier {
+            continue;
+        }
+        let version = resource.id.version.to_string();
+        if prefix.is_empty() || version.starts_with(prefix) {
+            suggestions.push(version);
+        }
+    }
+    suggestions
 }
 
 fn requested_resource_versions(input: &str, cursor: usize) -> Option<ResourceName> {
@@ -16734,7 +16770,10 @@ fn decode_verifying_key(input: &str) -> Option<VerifyingKey> {
     VerifyingKey::from_bytes(&array).ok()
 }
 
-fn should_initiate_interconnect(local_node_id: &ClusterNodeName, peer_node_id: &ClusterNodeName) -> bool {
+fn should_initiate_interconnect(
+    local_node_id: &ClusterNodeName,
+    peer_node_id: &ClusterNodeName,
+) -> bool {
     local_node_id < peer_node_id
 }
 
@@ -18716,16 +18755,17 @@ impl Application {
                             Envelope::Control(ControlEnvelope::LookupRequest(request)) => {
                                 let result =
                                     service_for_interconnect.handle_lookup_request(request.clone()).await;
+                                let result = match result {
+                                    Ok(Some(record)) => record.to_arrow_ipc_bytes().map(Some),
+                                    Ok(None) => Ok(None),
+                                    Err(error) => Err(error),
+                                };
                                 if let Err(error) = service_for_interconnect
                                     .dispatch_interconnect_control(
                                         &message.peer_node_id,
                                         ControlEnvelope::LookupResponse(RemoteLookupResponse {
                                             correlation_id: request.correlation_id,
-                                            result: result.and_then(|record| {
-                                                record
-                                                    .map(|record| record.to_arrow_ipc_bytes())
-                                                    .transpose()
-                                            }),
+                                            result,
                                         }),
                                     )
                                     .await
@@ -19105,7 +19145,10 @@ mod tests {
     #[test]
     fn snapshot_relay_header_framing_leaves_raw_snapshot_payload() {
         let header = RaftSnapshotRelayHeader {
-            vote: nervix_consensus::VoteOf::new(7, ClusterNodeName::parse("node-1").expect("valid name")),
+            vote: nervix_consensus::VoteOf::new(
+                7,
+                ClusterNodeName::parse("node-1").expect("valid name"),
+            ),
             meta: Default::default(),
         };
         let encoded = encode_cbor(&header).expect("snapshot relay header should encode");
@@ -19626,16 +19669,27 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ]);
-        let live_node_ids = BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]);
+        let live_node_ids = BTreeSet::from([
+            named::<ClusterNodeName>("node-1"),
+            named::<ClusterNodeName>("node-3"),
+        ]);
 
         assert!(
-            SessionServiceImpl::drop_node_quorum_error(&ClusterNodeName::parse("node-2").expect("valid name"), &voters, &live_node_ids).is_none()
+            SessionServiceImpl::drop_node_quorum_error(
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+                &voters,
+                &live_node_ids
+            )
+            .is_none()
         );
     }
 
     #[test]
     fn drop_node_rebuild_uses_only_schedulable_nodes_for_new_assignments() {
-        let live_voters = vec![named::<ClusterNodeName>("node-live"), named::<ClusterNodeName>("node-cordoned")];
+        let live_voters = vec![
+            named::<ClusterNodeName>("node-live"),
+            named::<ClusterNodeName>("node-cordoned"),
+        ];
         let schedulable_nodes = vec![named::<ClusterNodeName>("node-live")];
 
         let (new_assignment_candidates, preservable_nodes) =
@@ -19690,7 +19744,10 @@ mod tests {
                 named::<ClusterNodeName>("node-2"),
                 named::<ClusterNodeName>("node-3"),
             ]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert_eq!(
@@ -19701,8 +19758,14 @@ mod tests {
                 fallback_node: Some(ClusterNodeName::parse("node-3").expect("valid name")),
             })
         );
-        assert_eq!(schedule.nodes[0].assigned_nodes, vec![named::<ClusterNodeName>("node-2")]);
-        assert_eq!(schedule.nodes[1].assigned_nodes, vec![named::<ClusterNodeName>("node-3")]);
+        assert_eq!(
+            schedule.nodes[0].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-2")]
+        );
+        assert_eq!(
+            schedule.nodes[1].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-3")]
+        );
     }
 
     #[test]
@@ -19745,7 +19808,10 @@ mod tests {
             &mut schedule,
             &desired,
             &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-2")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+            ]),
             &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
         );
 
@@ -19757,8 +19823,14 @@ mod tests {
                 fallback_node: Some(ClusterNodeName::parse("node-3").expect("valid name")),
             })
         );
-        assert_eq!(schedule.nodes[0].assigned_nodes, vec![named::<ClusterNodeName>("node-2")]);
-        assert_eq!(schedule.nodes[1].assigned_nodes, vec![named::<ClusterNodeName>("node-3")]);
+        assert_eq!(
+            schedule.nodes[0].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-2")]
+        );
+        assert_eq!(
+            schedule.nodes[1].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-3")]
+        );
     }
 
     #[test]
@@ -19781,8 +19853,14 @@ mod tests {
                 },
             ],
             placement_groups: vec![
-                placement_group(zeta_members.clone(), &ClusterNodeName::parse("node-2").expect("valid name")),
-                placement_group(alpha_members.clone(), &ClusterNodeName::parse("node-2").expect("valid name")),
+                placement_group(
+                    zeta_members.clone(),
+                    &ClusterNodeName::parse("node-2").expect("valid name"),
+                ),
+                placement_group(
+                    alpha_members.clone(),
+                    &ClusterNodeName::parse("node-2").expect("valid name"),
+                ),
             ],
         };
         let desired = DomainSchedule {
@@ -19800,8 +19878,14 @@ mod tests {
                 },
             ],
             placement_groups: vec![
-                placement_group(zeta_members, &ClusterNodeName::parse("node-1").expect("valid name")),
-                placement_group(alpha_members, &ClusterNodeName::parse("node-1").expect("valid name")),
+                placement_group(
+                    zeta_members,
+                    &ClusterNodeName::parse("node-1").expect("valid name"),
+                ),
+                placement_group(
+                    alpha_members,
+                    &ClusterNodeName::parse("node-1").expect("valid name"),
+                ),
             ],
         };
 
@@ -19809,7 +19893,10 @@ mod tests {
             &mut schedule,
             &desired,
             &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-2")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+            ]),
             &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
         );
 
@@ -19821,8 +19908,14 @@ mod tests {
                 fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             })
         );
-        assert_eq!(schedule.nodes[0].primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-2")));
-        assert_eq!(schedule.nodes[1].primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-1")));
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-2"))
+        );
+        assert_eq!(
+            schedule.nodes[1].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
     }
 
     #[test]
@@ -19845,7 +19938,10 @@ mod tests {
             domain,
             nodes: vec![ScheduledNode {
                 primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
             placement_groups: Vec::new(),
@@ -19860,7 +19956,10 @@ mod tests {
                 named::<ClusterNodeName>("node-2"),
                 named::<ClusterNodeName>("node-3"),
             ]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert_eq!(
@@ -19871,7 +19970,10 @@ mod tests {
                 fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             })
         );
-        assert_eq!(schedule.nodes[0].primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-1")));
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
         assert_eq!(
             schedule.nodes[0].assigned_nodes,
             vec![
@@ -19894,32 +19996,50 @@ mod tests {
             nodes: vec![
                 ScheduledNode {
                     primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-2").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
                     primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-2").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members.clone(), &ClusterNodeName::parse("node-2").expect("valid name"))],
+            placement_groups: vec![placement_group(
+                members.clone(),
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
         };
         let desired = DomainSchedule {
             domain,
             nodes: vec![
                 ScheduledNode {
                     primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-1").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
                     primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-1").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, &ClusterNodeName::parse("node-1").expect("valid name"))],
+            placement_groups: vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+            )],
         };
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
@@ -19931,7 +20051,10 @@ mod tests {
                 named::<ClusterNodeName>("node-2"),
                 named::<ClusterNodeName>("node-3"),
             ]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert_eq!(
@@ -19942,18 +20065,18 @@ mod tests {
                 fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             })
         );
-        assert!(
-            schedule
-                .nodes
-                .iter()
-                .all(|node| node.primary_node.as_ref() == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
-        );
+        assert!(schedule.nodes.iter().all(|node| node.primary_node.as_ref()
+            == Some(&ClusterNodeName::parse("node-1").expect("valid name"))));
         assert_eq!(
             schedule.placement_groups[0].primary_node.as_ref(),
             Some(&named::<ClusterNodeName>("node-1"))
         );
         assert!(schedule.nodes.iter().all(|node| {
-            node.assigned_nodes == vec![named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-2")]
+            node.assigned_nodes
+                == vec![
+                    named::<ClusterNodeName>("node-1"),
+                    named::<ClusterNodeName>("node-2"),
+                ]
         }));
     }
 
@@ -19964,7 +20087,10 @@ mod tests {
             domain: domain.clone(),
             nodes: vec![ScheduledNode {
                 primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
             placement_groups: Vec::new(),
@@ -19983,7 +20109,10 @@ mod tests {
             &mut schedule,
             &desired,
             &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-2")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+            ]),
             &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
         );
 
@@ -19995,10 +20124,16 @@ mod tests {
                 fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             })
         );
-        assert_eq!(schedule.nodes[0].primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-1")));
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
         assert_eq!(
             schedule.nodes[0].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-2")]
+            vec![
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2")
+            ]
         );
     }
 
@@ -20009,7 +20144,10 @@ mod tests {
             domain: domain.clone(),
             nodes: vec![ScheduledNode {
                 primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
             placement_groups: Vec::new(),
@@ -20018,7 +20156,10 @@ mod tests {
             domain,
             nodes: vec![ScheduledNode {
                 primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
             placement_groups: Vec::new(),
@@ -20036,7 +20177,10 @@ mod tests {
 
         assert_eq!(
             planned.nodes[0].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-2")]
+            vec![
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2")
+            ]
         );
     }
 
@@ -20047,7 +20191,10 @@ mod tests {
             domain: domain.clone(),
             nodes: vec![ScheduledNode {
                 primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-4").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-4").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
             placement_groups: Vec::new(),
@@ -20069,11 +20216,20 @@ mod tests {
         SessionServiceImpl::merge_existing_schedule_data(
             &mut next,
             Some(&existing),
-            &[ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ],
         );
 
-        assert_eq!(next.nodes[0].primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-1")));
-        assert_eq!(next.nodes[0].assigned_nodes, vec![named::<ClusterNodeName>("node-1")]);
+        assert_eq!(
+            next.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
+        assert_eq!(
+            next.nodes[0].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-1")]
+        );
     }
 
     #[test]
@@ -20092,7 +20248,10 @@ mod tests {
             domain,
             nodes: vec![ScheduledNode {
                 primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
             placement_groups: Vec::new(),
@@ -20104,8 +20263,14 @@ mod tests {
             &[ClusterNodeName::parse("node-1").expect("valid name")],
         );
 
-        assert_eq!(next.nodes[0].primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-1")));
-        assert_eq!(next.nodes[0].assigned_nodes, vec![named::<ClusterNodeName>("node-1")]);
+        assert_eq!(
+            next.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
+        assert_eq!(
+            next.nodes[0].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-1")]
+        );
     }
 
     #[test]
@@ -20115,7 +20280,10 @@ mod tests {
         let mut next = DomainSchedule {
             domain: domain.clone(),
             nodes: vec![ScheduledNode {
-                assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
             }],
             placement_groups: Vec::new(),
@@ -20145,7 +20313,10 @@ mod tests {
             next.nodes[0].kafka_partition_schedule,
             Some(preserved_schedule)
         );
-        assert_eq!(next.nodes[0].assigned_nodes, vec![named::<ClusterNodeName>("node-1")]);
+        assert_eq!(
+            next.nodes[0].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-1")]
+        );
     }
 
     #[test]
@@ -20203,7 +20374,10 @@ mod tests {
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members.clone(), &ClusterNodeName::parse("node-1").expect("valid name"))],
+            placement_groups: vec![placement_group(
+                members.clone(),
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+            )],
         };
         let existing = DomainSchedule {
             domain,
@@ -20219,7 +20393,10 @@ mod tests {
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, &ClusterNodeName::parse("node-2").expect("valid name"))],
+            placement_groups: vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
         };
 
         SessionServiceImpl::merge_existing_schedule_data(
@@ -20232,11 +20409,8 @@ mod tests {
             ],
         );
 
-        assert!(
-            next.nodes
-                .iter()
-                .all(|node| node.primary_node.as_ref() == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
-        );
+        assert!(next.nodes.iter().all(|node| node.primary_node.as_ref()
+            == Some(&ClusterNodeName::parse("node-1").expect("valid name"))));
         assert_eq!(
             next.placement_groups[0].primary_node.as_ref(),
             Some(&named::<ClusterNodeName>("node-1"))
@@ -20264,7 +20438,10 @@ mod tests {
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members.clone(), &ClusterNodeName::parse("node-1").expect("valid name"))],
+            placement_groups: vec![placement_group(
+                members.clone(),
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+            )],
         };
         let existing = DomainSchedule {
             domain,
@@ -20280,20 +20457,23 @@ mod tests {
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, &ClusterNodeName::parse("node-2").expect("valid name"))],
+            placement_groups: vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
         };
 
         SessionServiceImpl::merge_existing_schedule_data(
             &mut next,
             Some(&existing),
-            &[ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-2").expect("valid name")],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
         );
 
-        assert!(
-            next.nodes
-                .iter()
-                .all(|node| node.primary_node.as_ref() == Some(&ClusterNodeName::parse("node-2").expect("valid name")))
-        );
+        assert!(next.nodes.iter().all(|node| node.primary_node.as_ref()
+            == Some(&ClusterNodeName::parse("node-2").expect("valid name"))));
         assert_eq!(
             next.placement_groups[0].primary_node.as_ref(),
             Some(&named::<ClusterNodeName>("node-2"))
@@ -20321,7 +20501,10 @@ mod tests {
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members.clone(), &ClusterNodeName::parse("node-2").expect("valid name"))],
+            placement_groups: vec![placement_group(
+                members.clone(),
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
         };
         let desired = DomainSchedule {
             domain,
@@ -20337,7 +20520,10 @@ mod tests {
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, &ClusterNodeName::parse("node-1").expect("valid name"))],
+            placement_groups: vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+            )],
         };
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
@@ -20349,16 +20535,15 @@ mod tests {
                 named::<ClusterNodeName>("node-2"),
                 named::<ClusterNodeName>("node-3"),
             ]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert!(moved.is_some());
-        assert!(
-            schedule
-                .nodes
-                .iter()
-                .all(|node| node.primary_node.as_ref() == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
-        );
+        assert!(schedule.nodes.iter().all(|node| node.primary_node.as_ref()
+            == Some(&ClusterNodeName::parse("node-1").expect("valid name"))));
         assert_eq!(
             schedule.placement_groups[0].primary_node.as_ref(),
             Some(&named::<ClusterNodeName>("node-1"))
@@ -20377,23 +20562,38 @@ mod tests {
             nodes: vec![
                 ScheduledNode {
                     primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-2").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
                     primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-1").expect("valid name")],
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-2").expect("valid name"),
+                        ClusterNodeName::parse("node-1").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, &ClusterNodeName::parse("node-2").expect("valid name"))],
+            placement_groups: vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
         };
 
         let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
             &mut schedule,
             None,
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert!(!moves.is_empty());
@@ -20416,7 +20616,10 @@ mod tests {
             domain,
             nodes: vec![ScheduledNode {
                 primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
             placement_groups: Vec::new(),
@@ -20425,12 +20628,18 @@ mod tests {
         let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
             &mut schedule,
             None,
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
             &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
         );
 
         assert!(!moves.is_empty());
-        assert_eq!(schedule.nodes[0].primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-1")));
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
     }
 
     #[test]
@@ -20440,7 +20649,10 @@ mod tests {
             domain: domain.clone(),
             nodes: vec![ScheduledNode {
                 primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
             placement_groups: Vec::new(),
@@ -20449,7 +20661,10 @@ mod tests {
             domain,
             nodes: vec![ScheduledNode {
                 primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name"), ClusterNodeName::parse("node-3").expect("valid name")],
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
             placement_groups: Vec::new(),
@@ -20458,8 +20673,14 @@ mod tests {
         let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
             &mut schedule,
             Some(&desired),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1"), named::<ClusterNodeName>("node-3")]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert_eq!(
@@ -20470,10 +20691,16 @@ mod tests {
                 fallback_node: None,
             }]
         );
-        assert_eq!(schedule.nodes[0].primary_node.as_ref(), Some(&named::<ClusterNodeName>("node-3")));
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-3"))
+        );
         assert_eq!(
             schedule.nodes[0].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-3"), named::<ClusterNodeName>("node-1")]
+            vec![
+                named::<ClusterNodeName>("node-3"),
+                named::<ClusterNodeName>("node-1")
+            ]
         );
     }
 
@@ -20611,9 +20838,18 @@ mod tests {
 
     #[test]
     fn interconnect_initiation_uses_strict_node_id_order() {
-        assert!(should_initiate_interconnect(&named::<ClusterNodeName>("node-1"), &named::<ClusterNodeName>("node-2")));
-        assert!(!should_initiate_interconnect(&named::<ClusterNodeName>("node-2"), &named::<ClusterNodeName>("node-1")));
-        assert!(!should_initiate_interconnect(&named::<ClusterNodeName>("node-2"), &named::<ClusterNodeName>("node-2")));
+        assert!(should_initiate_interconnect(
+            &named::<ClusterNodeName>("node-1"),
+            &named::<ClusterNodeName>("node-2")
+        ));
+        assert!(!should_initiate_interconnect(
+            &named::<ClusterNodeName>("node-2"),
+            &named::<ClusterNodeName>("node-1")
+        ));
+        assert!(!should_initiate_interconnect(
+            &named::<ClusterNodeName>("node-2"),
+            &named::<ClusterNodeName>("node-2")
+        ));
     }
 
     #[test]
@@ -21684,11 +21920,19 @@ mod tests {
 
         let domain = DomainName::parse("prod").expect("valid domain");
         let relay = registry
-            .get(&domain, ModelKind::Relay, &named::<ModelName>("notifications"))
+            .get(
+                &domain,
+                ModelKind::Relay,
+                &named::<ModelName>("notifications"),
+            )
             .expect("registry get should succeed");
         assert!(relay.is_none(), "failed model batch must not persist relay");
         let schema = registry
-            .get(&domain, ModelKind::Schema, &named::<ModelName>("notification"))
+            .get(
+                &domain,
+                ModelKind::Schema,
+                &named::<ModelName>("notification"),
+            )
             .expect("registry get should succeed");
         assert!(
             schema.is_none(),
@@ -22803,11 +23047,7 @@ mod tests {
         let resource_domain = DomainName::parse("default").expect("valid domain");
         let manifest_v1 = resource_store
             .install_from_directory(
-                nervix_models::ResourceId::new(
-                    resource_domain.clone(),
-                    named("fraud_model"),
-                    1,
-                ),
+                nervix_models::ResourceId::new(resource_domain.clone(), named("fraud_model"), 1),
                 &source_v1,
                 expected_leader.clone(),
                 Timestamp::from_unix_nanos(77),
@@ -22820,11 +23060,7 @@ mod tests {
             .expect("test resource file should write");
         let manifest_v2 = resource_store
             .install_from_directory(
-                nervix_models::ResourceId::new(
-                    resource_domain.clone(),
-                    named("fraud_model"),
-                    2,
-                ),
+                nervix_models::ResourceId::new(resource_domain.clone(), named("fraud_model"), 2),
                 &source_v2,
                 expected_leader.clone(),
                 Timestamp::from_unix_nanos(79),

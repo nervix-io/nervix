@@ -1,6 +1,6 @@
-use nervix_models::{DomainName};
 use std::future;
 
+use nervix_models::DomainName;
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -536,18 +536,20 @@ impl KafkaIngestor {
                                     // the consumer. Every other value a mode needs is read
                                     // from the borrowed message where it is used.
                                     let decode_message = |message: &rdkafka::message::BorrowedMessage<'_>| {
+                                        let key = match message.key_view::<str>() {
+                                            Some(Ok(key)) => key.to_owned(),
+                                            Some(Err(_)) | None => message
+                                                .key()
+                                                .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                                                .unwrap_or_default(),
+                                        };
                                         trace!(
                                             domain = task_domain.as_str(),
                                             ingestor = task_ingestor.as_str(),
                                             topic = message.topic(),
                                             partition = message.partition(),
                                             offset = message.offset(),
-                                            key = message
-                                                .key_view::<str>()
-                                                .and_then(Result::ok)
-                                                .map(ToOwned::to_owned)
-                                                .or_else(|| message.key().map(|bytes| String::from_utf8_lossy(bytes).to_string()))
-                                                .unwrap_or_default(),
+                                            key,
                                             payload = String::from_utf8_lossy(message.payload().unwrap_or_default()).to_string(),
                                             "received kafka message"
                                         );
@@ -725,10 +727,11 @@ impl KafkaIngestor {
                                                         &mut collector,
                                                     )
                                                     .await;
-                                                let dispatched = dispatch_result
+                                                let dispatched = match dispatch_result
                                                     .and(flush_result)
-                                                    .map(|()| true)
-                                                    .unwrap_or_else(|error| {
+                                                {
+                                                    Ok(()) => true,
+                                                    Err(error) => {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                                             "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
@@ -736,7 +739,8 @@ impl KafkaIngestor {
                                                             error
                                                         )));
                                                         false
-                                                    });
+                                                    }
+                                                };
                                                 if dispatched {
                                                     acks.ack_success();
                                                     match Runtime::await_ack_completion(
@@ -1015,9 +1019,9 @@ impl KafkaIngestor {
                                                         ingested_at,
                                                     })
                                                     .await;
-                                                let dispatched = dispatch_result
-                                                    .map(|()| true)
-                                                    .unwrap_or_else(|error| {
+                                                let dispatched = match dispatch_result {
+                                                    Ok(()) => true,
+                                                    Err(error) => {
                                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                                             "failed to dispatch message group for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
@@ -1025,7 +1029,8 @@ impl KafkaIngestor {
                                                             error
                                                         )));
                                                         false
-                                                    });
+                                                    }
+                                                };
                                                 // Dispatch has taken its own reference to every message,
                                                 // so the root each one was created with is released here.
                                                 for acks in roots {
@@ -1221,28 +1226,22 @@ impl KafkaIngestor {
         schedule: Option<&KafkaPartitionSchedule>,
         instance_idx: u64,
     ) -> Result<bool, String> {
-        let mut partitions = offsets
-            .iter()
-            .filter_map(|((entry_topic, partition), offset)| {
-                if entry_topic == topic {
-                    Some((*partition, *offset))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut partitions = Vec::new();
+        for ((entry_topic, partition), offset) in offsets {
+            if entry_topic == topic {
+                partitions.push((*partition, *offset));
+            }
+        }
         partitions.sort_by_key(|(partition, _)| *partition);
         let has_topic_partitions = schedule.is_some() && !partitions.is_empty();
-        let assigned_partitions = schedule
-            .and_then(|schedule| {
-                schedule
-                    .instance_assignments
-                    .get(usize::try_from(instance_idx).unwrap_or_default())
-            })
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<HashSet<_>>();
+        let assigned_partitions = if let Some(schedule) = schedule
+            && let Ok(instance_idx) = usize::try_from(instance_idx)
+            && let Some(assignments) = schedule.instance_assignments.get(instance_idx)
+        {
+            assignments.iter().copied().collect::<HashSet<_>>()
+        } else {
+            HashSet::default()
+        };
 
         let mut assignment = TopicPartitionList::new();
         let mut assigned_any = false;

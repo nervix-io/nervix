@@ -3,7 +3,8 @@ use std::ops::Range;
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    CanonicalNsplError, CreateSubscription, DeleteSubscription, DomainName, Statement, UploadResource,
+    CanonicalNsplError, CreateSubscription, DeleteSubscription, DomainName, Statement,
+    UploadResource,
 };
 
 use crate::{

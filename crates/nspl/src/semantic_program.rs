@@ -1,9 +1,9 @@
 use ahash_compile_time::{HashSet, HashSetExt};
-use error_stack::Report;
 use chumsky::{
     input::{Stream, ValueInput},
     prelude::*,
 };
+use error_stack::Report;
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, BuiltinFunctionName,
     CaseBranch, Expression, FieldName, FieldReference, FieldScope, Float64Literal, Inheritance,
@@ -37,10 +37,9 @@ fn name<'src, I, N: Clone + 'static>(
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    raw_identifier()
-        .try_map(move |raw: String, span| {
-            parse(&raw).map_err(|error| Rich::custom(span, error.to_string()))
-        })
+    raw_identifier().try_map(move |raw: String, span| {
+        parse(&raw).map_err(|error| Rich::custom(span, error.to_string()))
+    })
 }
 
 fn parse_scope<'src>(name: &str, span: Span) -> Result<FieldScope, Rich<'src, Token>> {
@@ -69,7 +68,11 @@ where
     let scoped = raw_identifier()
         .then_ignore(keyword(Token::Dot))
         .then(raw_identifier())
-        .then(keyword(Token::Dot).ignore_then(name(FieldName::parse)).or_not())
+        .then(
+            keyword(Token::Dot)
+                .ignore_then(name(FieldName::parse))
+                .or_not(),
+        )
         .try_map(|((scope, second), third), span| match third {
             Some(field) if scope.eq_ignore_ascii_case("relay_state") => {
                 let relay = RelayName::try_from(second.as_str())
@@ -331,7 +334,11 @@ where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     raw_identifier()
-        .then(keyword(Token::Dot).ignore_then(name(FieldName::parse)).or_not())
+        .then(
+            keyword(Token::Dot)
+                .ignore_then(name(FieldName::parse))
+                .or_not(),
+        )
         .try_map(|(first, field), span| match field {
             None => FieldName::try_from(first.as_str())
                 .map(AssignmentTarget::bare)

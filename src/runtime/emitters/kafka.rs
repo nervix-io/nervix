@@ -1,5 +1,5 @@
-use nervix_models::{TopicName};
 use futures_util::FutureExt;
+use nervix_models::TopicName;
 use rdkafka::{
     config::ClientConfig,
     error::{KafkaError, RDKafkaErrorCode},

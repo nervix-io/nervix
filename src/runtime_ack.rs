@@ -74,18 +74,24 @@ impl AckCompletion {
         tokio::select! {
             biased;
             result = &mut self.receiver => {
-                AckProgress::Complete(result.unwrap_or_else(|_| {
-                    AckOutcome::NoAck("ack completion sender dropped".to_string())
-                }))
+                let outcome = match result {
+                    Ok(outcome) => outcome,
+                    Err(_) => AckOutcome::NoAck("ack completion sender dropped".to_string()),
+                };
+                AckProgress::Complete(outcome)
             }
             changed = self.alive_rx.changed() => {
                 match changed {
                     Ok(()) => AckProgress::Alive,
                     Err(_) => {
                         let result = (&mut self.receiver).await;
-                        AckProgress::Complete(result.unwrap_or_else(|_| {
-                            AckOutcome::NoAck("ack completion sender dropped".to_string())
-                        }))
+                        let outcome = match result {
+                            Ok(outcome) => outcome,
+                            Err(_) => {
+                                AckOutcome::NoAck("ack completion sender dropped".to_string())
+                            }
+                        };
+                        AckProgress::Complete(outcome)
                     }
                 }
             }

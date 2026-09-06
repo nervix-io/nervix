@@ -1,14 +1,17 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{ClusterNodeName, ModelKind, Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection};
+use nervix_models::{
+    ClusterNodeName, ModelKind, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection,
+};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, correlator_ref, deduplicator_ref,
-        emitter_ref, generator_ref, inferencer_ref, ingestor_ref, into_parse_error, junction_ref,
-        kw, kw_phrase2, lex_input, lookup_ref, cluster_node_name, reingestor_ref, relay_ref, reorderer_ref,
-        suggest_from, tok, wasm_processor_ref, window_processor_ref,
+        ParseError, ParseFromSourceError, boxed_choice, cluster_node_name, correlator_ref,
+        deduplicator_ref, emitter_ref, generator_ref, inferencer_ref, ingestor_ref,
+        into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref, reingestor_ref,
+        relay_ref, reorderer_ref, suggest_from, tok, wasm_processor_ref, window_processor_ref,
     },
 };
 
@@ -213,8 +216,7 @@ mod tests {
     fn member(kind: ModelKind, name: &str) -> RelocationMember {
         RelocationMember::new(
             kind,
-            nervix_models::ModelName::try_from(name)
-                .expect("test name must be a valid identifier"),
+            nervix_models::ModelName::try_from(name).expect("test name must be a valid identifier"),
         )
     }
 
@@ -249,7 +251,10 @@ mod tests {
                 member(ModelKind::Relay, "normalized"),
             ]
         );
-        assert_eq!(relocation.destination, ClusterNodeName::parse("node-2").expect("valid name"));
+        assert_eq!(
+            relocation.destination,
+            ClusterNodeName::parse("node-2").expect("valid name")
+        );
         assert_eq!(relocation.strategy, RelocationPreferenceStrategy::Follow);
         assert!(relocation.overrides.is_empty());
     }
@@ -274,7 +279,10 @@ mod tests {
             ]
         );
         assert_eq!(to, &vec![member(ModelKind::Junction, "risk_scorer")]);
-        assert_eq!(relocation.destination, ClusterNodeName::parse("nervix-1.internal").expect("valid name"));
+        assert_eq!(
+            relocation.destination,
+            ClusterNodeName::parse("nervix-1.internal").expect("valid name")
+        );
         assert_eq!(relocation.strategy, RelocationPreferenceStrategy::Follow);
         assert_eq!(
             relocation.overrides,
@@ -308,7 +316,10 @@ mod tests {
              nervix-1.internal IGNORE PREFERENCES;",
         )
         .expect("describe relocation must parse");
-        assert_eq!(describe.destination, ClusterNodeName::parse("nervix-1.internal").expect("valid name"));
+        assert_eq!(
+            describe.destination,
+            ClusterNodeName::parse("nervix-1.internal").expect("valid name")
+        );
         assert_eq!(describe.strategy, RelocationPreferenceStrategy::Ignore);
     }
 

@@ -16,92 +16,23 @@ use arrow_schema::Schema as ArrowSchema;
 use fjall::Database;
 use nervix_interconnect::{EntityGatePurpose, RelayPayload, RelayPayloadKind};
 use nervix_models::{
-    AckMode,
-    Assignment,
-    AssignmentTarget,
-    AssignmentTargetScope,
-    BranchSelection,
-    ClientConfigEntry,
-    ClusterSchedule,
-    CodecWireFormat,
-    CreateBranch,
-    CreateClientHttp,
-    CreateClientMqtt,
-    CreateClientPrometheus,
-    CreateClientWebsockets,
-    CreateClientZeroMq,
-    CreateCodec,
-    CreateDeduplicator,
-    CreateEmitter,
-    CreateGenerator,
-    CreateInferencer,
-    CreateIngestor,
-    CreateJsonWireSchema,
-    CreateJunction,
-    CreateLookup,
-    CreateReingestor,
-    CreateRelay,
-    CreateSchema,
-    CreateWasmProcessor,
-    CreateWindowProcessor,
-    DomainConfig,
-    DomainName,
-    DomainPace,
-    DomainSchedule,
-    DomainState,
-    DomainStatus,
-    DomainTick,
-    EmitSink,
-    EmitterPublishingMode,
-    ErrorPolicies,
-    Expression,
-    FieldName,
-    FieldPath,
-    FieldReference,
-    FieldScope,
-    GeneralErrorPolicy,
-    InferencerTensorDeclaration,
-    InferencerTensorDimension,
-    InferencerTensorElementType,
-    InferencerTensorMapping,
-    InferencerTensorRepresentation,
-    InferencerTensorSchema,
-    IngestQuiesceMode,
-    IngestQuiesceOverflow,
-    IngestSource,
-    IngestTimestampSource,
-    IngestorName,
-    JsonType,
-    MessageErrorCode,
-    MessageErrorOperation,
-    MessageErrorPolicy,
-    ModelKind,
-    ModelName,
-    MqttIngestMode,
-    MqttQos,
-    MqttSession,
-    OutputBranch,
-    ParseAsType,
-    ProcessorInputWhere,
-    ProcessorInputs,
-    ProcessorOutput,
-    ProcessorOutputs,
-    RelayBranching,
-    RelayName,
-    RemoteAckOutcome,
-    RemoteAckRegistration,
-    RemoteAckResolution,
-    ResourceId,
-    ResourceVersion,
-    ResourceVersionStatus,
-    RetryPolicy,
-    ScheduledNode,
-    SchemaField,
-    SqsFifoGroup,
-    StructuredMessageError,
-    Timestamp,
-    WindowBound,
-    WireSchemaField,
+    AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchSelection,
+    ClientConfigEntry, ClusterSchedule, CodecWireFormat, CreateBranch, CreateClientHttp,
+    CreateClientMqtt, CreateClientPrometheus, CreateClientWebsockets, CreateClientZeroMq,
+    CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer,
+    CreateIngestor, CreateJsonWireSchema, CreateJunction, CreateLookup, CreateReingestor,
+    CreateRelay, CreateSchema, CreateWasmProcessor, CreateWindowProcessor, DomainConfig,
+    DomainName, DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink,
+    EmitterPublishingMode, ErrorPolicies, Expression, FieldName, FieldPath, FieldReference,
+    FieldScope, GeneralErrorPolicy, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, IngestorName, JsonType, MessageErrorCode, MessageErrorOperation,
+    MessageErrorPolicy, ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, OutputBranch,
+    ParseAsType, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    RelayBranching, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    ResourceId, ResourceVersion, ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField,
+    SqsFifoGroup, StructuredMessageError, Timestamp, WindowBound, WireSchemaField,
     ZeroMqIngestMode,
 };
 use nervix_nspl::window_processor::aggregate::lower_window_assignments;
@@ -119,6 +50,7 @@ fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
         dimensions: vec![InferencerTensorDimension::Fixed(size)],
     }
 }
+use nervix_models::{BranchName, ClusterNodeName, ReingestorName, SchemaName};
 use tempfile::tempdir;
 use tokio::{
     sync::{Mutex, mpsc, watch},
@@ -132,12 +64,15 @@ use super::{
     ScheduledEmitterTask, WindowAggregateFunction, WindowProcessorState, advance_window,
     evaluate_window_aggregate, message_timestamp, window_output_metadata,
 };
-use nervix_models::{BranchName, ClusterNodeName, ReingestorName, SchemaName};
-
-use crate::{metrics::RuntimeMetrics, resource::ResourceStore, runtime_ack::{AckOutcome, AckRootTracker, AckSet}, runtime_schema::{
+use crate::{
+    metrics::RuntimeMetrics,
+    resource::ResourceStore,
+    runtime_ack::{AckOutcome, AckRootTracker, AckSet},
+    runtime_schema::{
         RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue, compile_schema,
         test_runtime_row,
-    }};
+    },
+};
 
 fn named<N>(raw: &str) -> N
 where
@@ -552,10 +487,7 @@ fn branch_mappings(fields: &[&str]) -> Vec<Assignment> {
                 scope: AssignmentTargetScope::Bare,
                 field: named(field),
             },
-            value: Expression::Field(FieldReference::scoped(
-                FieldScope::Message,
-                named(field),
-            )),
+            value: Expression::Field(FieldReference::scoped(FieldScope::Message, named(field))),
         })
         .collect()
 }
@@ -1021,11 +953,7 @@ async fn relay_gate_holds_nonowner_dispatch_before_the_remote_slot() {
     let task_services = services.clone();
     let dispatch = tokio::spawn(async move {
         task_services
-            .dispatch_to_owner(
-                &domain("default"),
-                &named("orders"),
-                &quiesce_test_batch(),
-            )
+            .dispatch_to_owner(&domain("default"), &named("orders"), &quiesce_test_batch())
             .await
     });
 
@@ -3080,7 +3008,10 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
     };
 
     runtime
-        .apply_cluster_schedule(&ClusterNodeName::parse("node-1").expect("valid name"), &schedule)
+        .apply_cluster_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &schedule,
+        )
         .await
         .expect("relay schedule should build");
 
@@ -3273,7 +3204,10 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
         }],
     };
     runtime
-        .apply_cluster_schedule(&ClusterNodeName::parse("node-1").expect("valid name"), &schedule)
+        .apply_cluster_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &schedule,
+        )
         .await
         .expect("running schedule should build");
     let graph_before_pause = runtime
@@ -3287,7 +3221,10 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
     paused.status = DomainStatus::Paused;
     runtime.sync_domains(&BTreeMap::from([(domain.clone(), paused)]));
     runtime
-        .apply_cluster_schedule(&ClusterNodeName::parse("node-1").expect("valid name"), &schedule)
+        .apply_cluster_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &schedule,
+        )
         .await
         .expect("paused schedule should remain active");
 
@@ -3364,11 +3301,21 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
     };
 
     runtime
-        .apply_cluster_state(&ClusterNodeName::parse("node-1").expect("valid name"), 2, &domains, &current_schedule)
+        .apply_cluster_state(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            2,
+            &domains,
+            &current_schedule,
+        )
         .await
         .expect("current cluster state should build");
     runtime
-        .apply_cluster_state(&ClusterNodeName::parse("node-1").expect("valid name"), 1, &domains, &stale_schedule)
+        .apply_cluster_state(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            1,
+            &domains,
+            &stale_schedule,
+        )
         .await
         .expect("stale cluster state should be ignored");
 
@@ -3759,11 +3706,21 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
     };
 
     runtime
-        .rebuild_domain_from_schedule(&ClusterNodeName::parse("node-1").expect("valid name"), &domain, Some(schedule), true)
+        .rebuild_domain_from_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &domain,
+            Some(schedule),
+            true,
+        )
         .await
         .expect("standalone branch-preserving processors must build");
     runtime
-        .rebuild_domain_from_schedule(&ClusterNodeName::parse("node-1").expect("valid name"), &domain, None, true)
+        .rebuild_domain_from_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &domain,
+            None,
+            true,
+        )
         .await
         .expect("domain teardown must stop processor runtimes");
 }
@@ -3772,10 +3729,7 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
 fn emitter_entity_pause_gates_every_input_relay() {
     let emitter = CreateEmitter {
         name: named("combined_sink"),
-        from: ProcessorInputs::new(
-            vec![named("source_b"), named("source_a")],
-            Vec::new(),
-        ),
+        from: ProcessorInputs::new(vec![named("source_b"), named("source_a")], Vec::new()),
         encode_using_codec: Some(named("event_codec")),
         sink: Box::new(EmitSink::ZeroMq {
             client: named("sink"),
@@ -3835,8 +3789,10 @@ fn emitter_entity_pause_gates_every_input_relay() {
         super::Runtime::entity_pause_relays_for_schedule(&schedule, &[entity]),
         vec![named("source_a"), named("source_b")]
     );
-    let remote_consumers =
-        super::Runtime::remote_runtime_consumers_for_schedule(&schedule, &ClusterNodeName::parse("node-1").expect("valid name"));
+    let remote_consumers = super::Runtime::remote_runtime_consumers_for_schedule(
+        &schedule,
+        &ClusterNodeName::parse("node-1").expect("valid name"),
+    );
     assert_eq!(remote_consumers.len(), 2);
     for relay in [named("source_a"), named("source_b")] {
         let consumers = remote_consumers
@@ -3844,7 +3800,10 @@ fn emitter_entity_pause_gates_every_input_relay() {
             .expect("every emitter input needs a remote consumer");
         assert_eq!(consumers.len(), 1);
         assert_eq!(consumers[0].relay, relay);
-        assert_eq!(consumers[0].node_id, ClusterNodeName::parse("node-2").expect("valid name"));
+        assert_eq!(
+            consumers[0].node_id,
+            ClusterNodeName::parse("node-2").expect("valid name")
+        );
     }
 }
 
@@ -3958,7 +3917,12 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     };
 
     runtime
-        .rebuild_domain_from_schedule(&ClusterNodeName::parse("node-1").expect("valid name"), &domain, Some(schedule.clone()), true)
+        .rebuild_domain_from_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &domain,
+            Some(schedule.clone()),
+            true,
+        )
         .await
         .expect("scheduled deduplicator must build");
     let entity = crate::registry::RegistryEntity {
@@ -4071,7 +4035,12 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     };
 
     runtime
-        .rebuild_domain_from_schedule(&ClusterNodeName::parse("node-1").expect("valid name"), &domain, Some(schedule.clone()), true)
+        .rebuild_domain_from_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &domain,
+            Some(schedule.clone()),
+            true,
+        )
         .await
         .expect("scheduled deduplicator must build");
 
@@ -5372,9 +5341,12 @@ fn describe_restores_branch_aggregated_metrics_from_store_without_materialized_s
     let runtime =
         super::Runtime::with_persistence(Some(db), Duration::from_millis(100), Default::default())
             .expect("runtime should open persisted state");
-    runtime
-        .metrics
-        .register_global_node(&domain, ModelKind::Ingestor, &ModelName::from(&ingestor), Some(&ClusterNodeName::parse("node-3").expect("valid name")));
+    runtime.metrics.register_global_node(
+        &domain,
+        ModelKind::Ingestor,
+        &ModelName::from(&ingestor),
+        Some(&ClusterNodeName::parse("node-3").expect("valid name")),
+    );
 
     let rendered = runtime.describe_metrics_for(&domain, "INGESTOR", &ingestor);
     assert!(
@@ -5448,9 +5420,12 @@ fn describe_restores_branch_aggregated_metrics_when_state_lsm_is_current_but_met
     runtime
         .replicated_branch_aggregated_states
         .insert(placement, stale_state);
-    runtime
-        .metrics
-        .register_global_node(&domain, ModelKind::Ingestor, &ModelName::from(&ingestor), Some(&ClusterNodeName::parse("node-3").expect("valid name")));
+    runtime.metrics.register_global_node(
+        &domain,
+        ModelKind::Ingestor,
+        &ModelName::from(&ingestor),
+        Some(&ClusterNodeName::parse("node-3").expect("valid name")),
+    );
 
     let rendered = runtime.describe_metrics_for(&domain, "INGESTOR", &ingestor);
     assert!(
@@ -7179,13 +7154,8 @@ fn message_error_routes_preserve_branch_identity_without_reconstruction() {
     let reference = uuid::Uuid::now_v7();
 
     assert_eq!(
-        super::preserved_message_error_branch(
-            &[named("tenant")],
-            &incoming,
-            &relay,
-            reference,
-        )
-        .expect("matching branched error route should preserve its key"),
+        super::preserved_message_error_branch(&[named("tenant")], &incoming, &relay, reference,)
+            .expect("matching branched error route should preserve its key"),
         incoming
     );
     assert!(
@@ -7443,7 +7413,9 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
         super::RuntimeMaterializedRelaySpec::new(
             state_schema.arrow_schema(),
             super::VmSchemaSensitivity::default(),
-            vec![FieldName::from(FieldName::from(FieldName::from(&branch.clone().clone().clone())))],
+            vec![FieldName::from(FieldName::from(FieldName::from(
+                &branch.clone().clone().clone(),
+            )))],
         ),
     )]);
     let program = super::CorrelatorOutputCompileContext {
@@ -7462,7 +7434,9 @@ async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
         runtime: super::RuntimeVmCompileContext {
             available_materialized_streams: &materialized_specs,
             available_lookups: &HashMap::default(),
-            current_branching: std::slice::from_ref(&FieldName::from(FieldName::from(FieldName::from(&branch.clone().clone().clone())))),
+            current_branching: std::slice::from_ref(&FieldName::from(FieldName::from(
+                FieldName::from(&branch.clone().clone().clone()),
+            ))),
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
             udfs: None,
@@ -8631,10 +8605,7 @@ fn branched_node_specs_capture_reingestor_entrypoint_tree() {
     assert_eq!(spec.root_relay, named("tenant_orders"));
     assert_eq!(spec.branch.as_ref(), Some(&named("by_tenant_orders")));
     assert_eq!(specs.processors.len(), 1);
-    assert_eq!(
-        specs.processors[0].spec.processor,
-        named("dedup_orders")
-    );
+    assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(
         specs.processors[0].spec.input_relays,
         vec![named("tenant_orders")]
@@ -8972,7 +8943,10 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
         .find(|node| node.spec.processor == named("orders_filter"))
         .expect("orders filter spec must exist");
     assert_eq!(
-        orders_filter.spec.from_where.get(&RelayName::from(&named::<ModelName>("orders"))),
+        orders_filter
+            .spec
+            .from_where
+            .get(&RelayName::from(&named::<ModelName>("orders"))),
         Some(&expression("input.active"))
     );
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
@@ -8985,10 +8959,7 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
         Some(expression("input.active"))
     );
     assert_eq!(output_routes.routes.len(), 1);
-    assert_eq!(
-        output_routes.routes[0].relay,
-        named("projected_orders")
-    );
+    assert_eq!(output_routes.routes[0].relay, named("projected_orders"));
     assert!(
         specs
             .processors
@@ -9043,18 +9014,12 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
     );
 
     assert_eq!(specs.entrypoints.len(), 1);
-    assert_eq!(
-        specs.entrypoints[0].identifier,
-        named("orders_ingestor")
-    );
+    assert_eq!(specs.entrypoints[0].identifier, named("orders_ingestor"));
     assert_eq!(specs.entrypoints[0].root_relay, named("orders"));
     assert_eq!(specs.entrypoints[0].branch, None);
     assert_eq!(specs.entrypoints[0].branch_ttl, None);
     assert_eq!(specs.processors.len(), 1);
-    assert_eq!(
-        specs.processors[0].spec.processor,
-        named("dedup_orders")
-    );
+    assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(specs.processors[0].branch_ttl, None);
     assert_eq!(specs.processors[0].branch, None);
     assert_eq!(specs.processors[0].branch_max_instances, None);
@@ -9097,14 +9062,8 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
 
     assert!(specs.entrypoints.is_empty());
     assert_eq!(specs.processors.len(), 1);
-    assert_eq!(
-        specs.processors[0].spec.processor,
-        named("dedup_orders")
-    );
-    assert_eq!(
-        specs.processors[0].spec.input_relays,
-        vec![named("orders")]
-    );
+    assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
+    assert_eq!(specs.processors[0].spec.input_relays, vec![named("orders")]);
     assert_eq!(specs.processors[0].branch_ttl, None);
 }
 
@@ -9183,10 +9142,7 @@ fn branched_node_specs_include_reingestor_with_declared_branching() {
     );
 
     assert_eq!(specs.entrypoints.len(), 1);
-    assert_eq!(
-        specs.entrypoints[0].identifier,
-        named("tenant_partition")
-    );
+    assert_eq!(specs.entrypoints[0].identifier, named("tenant_partition"));
     assert_eq!(
         specs.entrypoints[0].root_relay,
         named("tenant_notifications")
@@ -9644,11 +9600,9 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             CreateReingestor {
                 name: named("tenant_partition"),
                 from: ProcessorInputs::single(named("orders")),
-                output_routes: with_inherit_all(ProcessorOutputs::single(named(
-                    "tenant_orders",
-                )))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
-                .with_branch(branched_by("tenant_orders", &["tenant"])),
+                output_routes: with_inherit_all(ProcessorOutputs::single(named("tenant_orders")))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                    .with_branch(branched_by("tenant_orders", &["tenant"])),
                 mode: AckMode::Attached,
                 filter_where: None,
                 materialized_state: Vec::new(),

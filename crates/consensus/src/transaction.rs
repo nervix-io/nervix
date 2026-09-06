@@ -192,7 +192,10 @@ impl ReplicatedTransaction {
         }
     }
 
-    pub(crate) fn ensure_domain(&self, domain: &DomainName) -> Result<(), TransactionMutationError> {
+    pub(crate) fn ensure_domain(
+        &self,
+        domain: &DomainName,
+    ) -> Result<(), TransactionMutationError> {
         if &self.domain == domain {
             Ok(())
         } else {

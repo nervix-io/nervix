@@ -1165,18 +1165,17 @@ impl ConsensusHandle {
     }
 
     async fn ping_peer(&self, target_addr: &str) -> Result<(), ConsensusError> {
-        self.cluster_api_http_client
+        let response = self
+            .cluster_api_http_client
             .get(format!("{target_addr}/raft/ping"))
             .send()
             .await
-            .map_err(|_| ConsensusError::Transport)
-            .and_then(|response| {
-                if response.status().is_success() {
-                    Ok(())
-                } else {
-                    Err(ConsensusError::Transport)
-                }
-            })
+            .map_err(|_| ConsensusError::Transport)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ConsensusError::Transport)
+        }
     }
 
     pub async fn status_lines(&self) -> Vec<String> {
@@ -2651,7 +2650,7 @@ mod tests {
 
     use fjall::Database;
     use nervix_models::{
-        DomainName, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
+        DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
         DomainStatus, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus,
         ResourceReplicaKey, ResourceVersion, ResourceVersionStatus, Statement,
     };
@@ -2669,7 +2668,10 @@ mod tests {
         UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame, io_error,
         load_value, read_key, write_key,
     };
-    use crate::{ClusterNodeName, ConsensusError, ReplicatedTransaction, TransactionQueueLimits, UserName, VoteOf};
+    use crate::{
+        ClusterNodeName, ConsensusError, ReplicatedTransaction, TransactionQueueLimits, UserName,
+        VoteOf,
+    };
 
     fn domain(raw: &str) -> DomainName {
         DomainName::try_from(raw).expect("valid domain")
@@ -3260,7 +3262,10 @@ mod tests {
         assert!(!store.has_raft_state().await);
 
         store
-            .write_vote(&VoteOf::new(7, ClusterNodeName::parse("node-1").expect("valid name")))
+            .write_vote(&VoteOf::new(
+                7,
+                ClusterNodeName::parse("node-1").expect("valid name"),
+            ))
             .await
             .expect("vote should persist");
         assert!(store.has_raft_state().await);

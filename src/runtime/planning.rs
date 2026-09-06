@@ -1,4 +1,7 @@
-use nervix_models::{BranchName, CreateBranch, ModelName, OutputBranch, ProcessorInputWhere, ProcessorInputs, ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs, SchemaName};
+use nervix_models::{
+    BranchName, CreateBranch, ModelName, OutputBranch, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs, SchemaName,
+};
 
 use super::*;
 

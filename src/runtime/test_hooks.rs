@@ -1,6 +1,5 @@
-use std::net::SocketAddr;
 use std::{
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
@@ -218,7 +217,11 @@ impl RuntimeTestHooks {
         }
     }
 
-    pub fn release_transaction_commit_pause(&self, node_id: &ClusterNodeName, completed_statements: usize) {
+    pub fn release_transaction_commit_pause(
+        &self,
+        node_id: &ClusterNodeName,
+        completed_statements: usize,
+    ) {
         let key = (node_id.clone(), completed_statements);
         let pause = self
             .transaction_commit_pauses
@@ -261,7 +264,11 @@ impl TransactionBindingDropInjector {
 
 impl TransactionCommitPauseInjector {
     #[cfg(feature = "testing")]
-    pub(crate) async fn pause_if_armed(&self, node_id: &ClusterNodeName, completed_statements: usize) {
+    pub(crate) async fn pause_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        completed_statements: usize,
+    ) {
         let key = (node_id.clone(), completed_statements);
         let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
             return;

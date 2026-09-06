@@ -1,4 +1,3 @@
-use nervix_models::{EmitterName};
 use std::{io::Write, str::FromStr};
 
 use arrow_array::{
@@ -8,6 +7,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, TimeUnit};
 use flate2::{Compression as GzipLevel, write::GzEncoder};
+use nervix_models::EmitterName;
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::{
@@ -1037,22 +1037,21 @@ impl OtelTransport {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Option<Duration> {
         let value = value?.trim();
-        value
-            .parse::<f64>()
+        if let Ok(seconds) = value.parse::<f64>()
+            && seconds.is_finite()
+            && seconds >= 0.0
+            && let Ok(delay) = Duration::try_from_secs_f64(seconds)
+        {
+            return Some(delay);
+        }
+        let Ok(deadline) = chrono::DateTime::parse_from_rfc2822(value) else {
+            return None;
+        };
+        deadline
+            .with_timezone(&chrono::Utc)
+            .signed_duration_since(now)
+            .to_std()
             .ok()
-            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-            .or_else(|| {
-                chrono::DateTime::parse_from_rfc2822(value)
-                    .ok()
-                    .and_then(|deadline| {
-                        deadline
-                            .with_timezone(&chrono::Utc)
-                            .signed_duration_since(now)
-                            .to_std()
-                            .ok()
-                    })
-            })
     }
 }
 

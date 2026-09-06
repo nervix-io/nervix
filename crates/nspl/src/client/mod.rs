@@ -54,9 +54,7 @@ fn client_mount<'src>()
 
 fn create_client_parser<'src, T>(
     client_type: Identifier,
-    build: impl Fn(ClientName, Option<ResourceName>, Vec<KafkaConfigEntry>) -> T
-    + Clone
-    + 'src,
+    build: impl Fn(ClientName, Option<ResourceName>, Vec<KafkaConfigEntry>) -> T + Clone + 'src,
 ) -> impl Parser<'src, &'src [Token], CreateStatement<T>, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
@@ -435,7 +433,10 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "kafka_tls");
         assert_eq!(
-            parsed.mount.as_ref().map(nervix_models::ResourceName::as_str),
+            parsed
+                .mount
+                .as_ref()
+                .map(nervix_models::ResourceName::as_str),
             Some("dev_tls")
         );
         assert_eq!(parsed.config[0].value, "{{dev_tls}}/ca.pem");
@@ -455,7 +456,10 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "syslog_tls");
         assert_eq!(
-            parsed.mount.as_ref().map(nervix_models::ResourceName::as_str),
+            parsed
+                .mount
+                .as_ref()
+                .map(nervix_models::ResourceName::as_str),
             Some("tls_bundle")
         );
         assert_eq!(parsed.config.len(), 3);

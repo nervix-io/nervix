@@ -1,5 +1,5 @@
-use nervix_models::{DomainName};
 use async_nats::Client as NatsClient;
+use nervix_models::DomainName;
 
 use super::super::*;
 

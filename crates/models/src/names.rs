@@ -355,7 +355,9 @@ mod tests {
     fn parse_enforces_the_length_boundary() {
         let max = "a".repeat(MAX_NAME_LEN);
         assert_eq!(
-            SchemaName::parse(&max).expect("max length is valid").as_str(),
+            SchemaName::parse(&max)
+                .expect("max length is valid")
+                .as_str(),
             max
         );
 

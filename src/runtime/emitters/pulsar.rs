@@ -1,10 +1,10 @@
-use nervix_models::{TopicName};
 use ::pulsar::{
     ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
     TlsOptions as PulsarTlsOptions, TokioExecutor,
     producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
 };
 use futures_util::FutureExt;
+use nervix_models::TopicName;
 
 use super::*;
 

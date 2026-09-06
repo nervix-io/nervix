@@ -5,12 +5,13 @@ use nervix_models::{ClusterNodeName, DropModel, DropNode, ModelKind};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref, correlator_ref,
-        deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref, ingestor_ref,
-        into_parse_error, junction_ref, kw, lex_input, cluster_node_name, placement_ref, reingestor_ref,
-        relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref,
-        wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
-    }};
+        ParseError, ParseFromSourceError, boxed_choice, client_ref, cluster_node_name, codec_ref,
+        correlator_ref, deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref, ingestor_ref,
+        into_parse_error, junction_ref, kw, lex_input, placement_ref, reingestor_ref, relay_ref,
+        reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref, wire_avro_schema_ref,
+        wire_cbor_schema_ref, wire_json_schema_ref,
+    },
+};
 
 pub fn drop_parser<'src>()
 -> impl Parser<'src, &'src [Token], DropModel, extra::Err<ParseError<'src>>> + Clone {
@@ -264,7 +265,10 @@ mod tests {
             .parse(tokens.as_slice())
             .into_result()
             .expect("parse should succeed");
-        assert_eq!(parsed.node_id, ClusterNodeName::parse("node-2").expect("valid name"));
+        assert_eq!(
+            parsed.node_id,
+            ClusterNodeName::parse("node-2").expect("valid name")
+        );
     }
 
     #[test]

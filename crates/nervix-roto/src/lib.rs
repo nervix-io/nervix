@@ -263,18 +263,21 @@ where
         .zip(right.iter())
         .enumerate()
         .map(|(row, values)| match values {
-            (Some(left), Some(right)) => calculate(left, right).or_else(|| {
-                let (code, detail) = if operation == "div" {
-                    (
-                        ErrorCode::DivisionByZero,
-                        "division by zero or signed overflow",
-                    )
-                } else {
-                    (ErrorCode::Overflow, "numeric overflow")
-                };
-                side_error(row, code, operation, detail);
-                None
-            }),
+            (Some(left), Some(right)) => match calculate(left, right) {
+                Some(value) => Some(value),
+                None => {
+                    let (code, detail) = if operation == "div" {
+                        (
+                            ErrorCode::DivisionByZero,
+                            "division by zero or signed overflow",
+                        )
+                    } else {
+                        (ErrorCode::Overflow, "numeric overflow")
+                    };
+                    side_error(row, code, operation, detail);
+                    None
+                }
+            },
             _ => None,
         })
         .collect::<arrow_array::PrimitiveArray<T>>();
@@ -297,8 +300,10 @@ where
         .iter()
         .enumerate()
         .map(|(row, value)| {
-            value.and_then(|left| {
-                calculate(left, right).or_else(|| {
+            let left = value?;
+            match calculate(left, right) {
+                Some(value) => Some(value),
+                None => {
                     let (code, detail) = if operation == "div" {
                         (
                             ErrorCode::DivisionByZero,
@@ -309,8 +314,8 @@ where
                     };
                     side_error(row, code, operation, detail);
                     None
-                })
-            })
+                }
+            }
         })
         .collect::<arrow_array::PrimitiveArray<T>>();
     Column(StdArc::new(output))
@@ -849,12 +854,24 @@ fn deterministic_runtime() -> Result<Runtime<NoCtx>, UdfError> {
     }
     runtime
         .add(float_column_library!(F32Column, Float32Type, f32))
-        .and_then(|_| runtime.add(float_column_library!(F64Column, Float64Type, f64)))
-        .and_then(|_| runtime.add(bool_library()))
-        .and_then(|_| runtime.add(string_library()))
-        .and_then(|_| runtime.add(cast_library()))
-        .and_then(|_| runtime.add(list_library()))
-        .and_then(|_| runtime.add(datetime_library()))
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(float_column_library!(F64Column, Float64Type, f64))
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(bool_library())
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(string_library())
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(cast_library())
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(list_library())
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(datetime_library())
         .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
     Ok(runtime)
 }

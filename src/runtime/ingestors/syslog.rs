@@ -1,6 +1,6 @@
-use nervix_models::{DomainName, IngestorName};
 use std::net::SocketAddr;
 
+use nervix_models::{DomainName, IngestorName};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},

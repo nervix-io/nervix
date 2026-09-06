@@ -37,125 +37,30 @@ use nervix_interconnect::{
     TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AckMode,
-    Assignment,
-    BranchName,
-    ClickHouseValueMapping,
-    ClientConfigEntry,
-    ClientName,
-    ClusterNodeName,
-    ClusterSchedule,
-    CodecName,
-    CodecWireFormat,
-    CorrelationTimeoutAction,
-    CorrelatorMatchPolicy,
-    CreateClientAzureBlob,
-    CreateClientGcs,
-    CreateClientHttp,
-    CreateClientIcebergRest,
-    CreateClientKafka,
-    CreateClientMqtt,
-    CreateClientNats,
-    CreateClientOtel,
-    CreateClientPrometheus,
-    CreateClientPulsar,
-    CreateClientRabbitMq,
-    CreateClientRedis,
-    CreateClientS3,
-    CreateClientSentry,
-    CreateClientSqs,
-    CreateClientSyslog,
-    CreateClientWebsockets,
-    CreateClientZeroMq,
-    CreateCodec,
-    CreateEmitter,
-    CreateEndpoint,
-    CreateGenerator,
-    CreateIngestor,
-    CreateLookup,
-    CreateReingestor,
-    CreateRelay,
-    CreateSignalingProtocol,
-    CreateUdf,
-    DomainConfig,
-    DomainName,
-    DomainPace,
-    DomainSchedule,
-    DomainState,
-    DomainTick,
-    EmitSink,
-    EmitterAckWindow,
-    EmitterName,
-    EmitterPublishingMode,
-    EndpointName,
-    EndpointType,
-    ErrorPolicies,
-    FieldName,
-    FieldPath,
-    GeneralErrorPolicy,
-    GeneratorName,
-    IcebergCatalog,
-    IcebergStorageBackend,
-    IcebergValueMapping,
-    InferencerExecutionMode,
-    InferencerTensorDeclaration,
-    IngestQuiesceMode,
-    IngestQuiesceOverflow,
-    IngestSource,
-    IngestTimestampSource,
-    IngestorName,
-    KafkaIngestMode,
-    KafkaOffsetMode,
-    KafkaPartitionSchedule,
-    Literal as ModelLiteral,
-    LookupName,
-    MaterializedStatePolicy,
-    MessageErrorCode,
-    MessageErrorOperation,
-    MessageErrorPolicy,
-    Model,
-    ModelKind,
-    ModelName,
-    MongoDbConflictAction,
-    MongoDbValueMapping,
-    MqttIngestMode,
-    MqttQos,
-    MqttSession,
-    MySqlConflictAction,
-    MySqlValueMapping,
-    OtelAggregationTemporality,
-    OtelMetric,
-    OtelMetricKind,
-    OtelScope,
-    OtelSignal,
-    OtelValueMapping,
-    OutputBranch,
-    PostgresConflictAction,
-    PostgresValueMapping,
-    ProcessorOutput,
-    PulsarIngestMode,
-    RabbitMqIngestMode,
-    RelayName,
-    RemoteAckOutcome,
-    RemoteAckRegistration,
-    RemoteAckResolution,
-    RemoteRuntimeField,
-    ResourceId,
-    ResourceName,
-    ResourceVersionStatus,
-    RetryPolicy,
-    RouteConstruction,
-    ScheduledNode,
-    SchemaName,
-    SignalingProtocolName,
-    SignalingWireFormat,
-    SqsFifoGroup,
-    SqsIngestMode,
-    StructuredMessageError,
-    SubscriptionName,
-    Timestamp,
-    UserName,
-    WireSchemaDefinition,
+    AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
+    ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CorrelationTimeoutAction,
+    CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
+    CreateClientOtel, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint,
+    CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
+    CreateSignalingProtocol, CreateUdf, DomainConfig, DomainName, DomainPace, DomainSchedule,
+    DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode,
+    EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath, GeneralErrorPolicy,
+    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, ModelName,
+    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, MySqlValueMapping, OtelAggregationTemporality, OtelMetric, OtelMetricKind,
+    OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
+    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
+    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode, SchemaName,
+    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp, UserName, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -955,11 +860,10 @@ impl IngestorQuiesceControl {
 }
 
 fn quiesce_max_size_bytes(value: &str) -> usize {
-    value
-        .parse::<ubyte::ByteUnit>()
-        .ok()
-        .and_then(|size| usize::try_from(size.as_u64()).ok())
-        .unwrap_or(0)
+    let Ok(size) = value.parse::<ubyte::ByteUnit>() else {
+        return 0;
+    };
+    usize::try_from(size.as_u64()).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1233,19 +1137,6 @@ impl NodeQuiesceWorkGuard {
             .fetch_add(1, Ordering::AcqRel);
         self.counters
             .mailbox_and_in_flight
-            .fetch_sub(1, Ordering::AcqRel);
-        self.required_materialized_wait = true;
-    }
-
-    fn resume_from_required_materialized_state(&mut self) {
-        if !self.required_materialized_wait {
-            return;
-        }
-        self.counters
-            .mailbox_and_in_flight
-            .fetch_add(1, Ordering::AcqRel);
-        self.counters
-            .pending_materialized
             .fetch_sub(1, Ordering::AcqRel);
         self.required_materialized_wait = true;
     }
@@ -2765,17 +2656,17 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
             });
         }
         if let FunctionName::ReadHeader = function {
-            let values = names
-                .iter()
-                .enumerate()
-                .map(|(row, name)| {
-                    name.and_then(|name| {
-                        self.metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.first_header(row, name))
-                    })
-                })
-                .collect::<Vec<_>>();
+            let mut values = Vec::with_capacity(names.len());
+            for (row, name) in names.iter().enumerate() {
+                let value = if let Some(name) = name
+                    && let Some(metadata) = self.metadata.as_ref()
+                {
+                    metadata.first_header(row, name)
+                } else {
+                    None
+                };
+                values.push(value);
+            }
             return Ok(VmTypedArray::Utf8(arrow_array::StringArray::from(values)));
         }
         if let FunctionName::ReadHeaders = function {
@@ -2799,7 +2690,8 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
     }
 }
 
-type RelayBoundaryFanoutMap = Arc<DashMap<(DomainName, RelayName), RelayBoundaryFanout, RandomState>>;
+type RelayBoundaryFanoutMap =
+    Arc<DashMap<(DomainName, RelayName), RelayBoundaryFanout, RandomState>>;
 type RelayRuntimeConsumerReceiver = RelaySubscriptionReceiver<RelayRecordBatch>;
 
 struct RelayRuntimeFanIn {
@@ -2808,7 +2700,7 @@ struct RelayRuntimeFanIn {
 
 impl RelayConsumerFanout {
     fn with_capacity(capacity: NonZeroUsize) -> Self {
-        let dispatch_capacity = NonZeroUsize::new(1).expect("one is nonzero");
+        let dispatch_capacity = NonZeroUsize::MIN;
         Self {
             dispatch_gate: Arc::new(RelayDispatchGate::new()),
             owner_buffer: RwLock::new(None),
@@ -3287,7 +3179,7 @@ impl PendingMaterializedBatch {
         let batch = self
             .batch
             .take()
-            .expect("pending materialized batch must remain present until retry");
+            .verified("the pending entry holds its batch from construction until this take");
         (self.input_relay.clone(), batch)
     }
 }
@@ -3632,7 +3524,9 @@ impl RelayRetention {
         let Some(Model::Relay(model)) = schedule
             .nodes
             .iter()
-            .find(|node| node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay))
+            .find(|node| {
+                node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
+            })
             .map(|node| node.config.as_ref())
         else {
             return Err(RuntimeError::BuildDomainExecution {
@@ -4099,8 +3993,7 @@ pub(crate) struct CompiledEmitterFilterMapProgram {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RuntimeVmCompileContext<'a> {
-    pub(crate) available_materialized_streams:
-        &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    pub(crate) available_materialized_streams: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(crate) available_lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
     pub(crate) current_branching: &'a [FieldName],
     pub(crate) current_branch_schema: Option<&'a StdArc<arrow_schema::Schema>>,
@@ -5295,7 +5188,12 @@ impl RelayProcessorNode {
             .await
     }
 
-    fn refresh(&mut self, runtime: &Runtime, domain: &DomainName, graph: Option<StdArc<ActiveGraph>>) {
+    fn refresh(
+        &mut self,
+        runtime: &Runtime,
+        domain: &DomainName,
+        graph: Option<StdArc<ActiveGraph>>,
+    ) {
         let changed = match (&self.last_graph, &graph) {
             (Some(previous), Some(current)) => !StdArc::ptr_eq(previous, current),
             (None, None) => false,
@@ -5319,32 +5217,7 @@ impl RelayProcessorNode {
         };
 
         if requires_reinitialization {
-            let result = graph
-                .as_ref()
-                .ok_or_else(|| {
-                    format!(
-                        "{} '{}' is absent from the refreshed graph",
-                        self.kind.as_str(),
-                        self.processor.as_str()
-                    )
-                })
-                .and_then(|graph| {
-                    let execution = runtime.executions.get(domain).ok_or_else(|| {
-                        format!(
-                            "domain '{}' has no execution for processor refresh",
-                            domain.as_str()
-                        )
-                    })?;
-                    processor_template_for_graph_node(
-                        graph,
-                        self.kind,
-                        &self.processor,
-                        &execution.relay_schemas,
-                        Some(&execution.udfs),
-                    )
-                })
-                .and_then(|template| self.apply_node_template(template));
-            if let Err(error) = result {
+            if let Some(error) = self.apply_refreshed_graph(runtime, domain, graph.as_ref()) {
                 warn!(
                     kind = self.kind.as_str(),
                     processor = self.processor.as_str(),
@@ -5356,6 +5229,38 @@ impl RelayProcessorNode {
             self.applied_generation = self.applied_generation.saturating_add(1);
         }
         self.last_graph = graph;
+    }
+
+    fn apply_refreshed_graph(
+        &mut self,
+        runtime: &Runtime,
+        domain: &DomainName,
+        graph: Option<&StdArc<ActiveGraph>>,
+    ) -> Option<String> {
+        let Some(graph) = graph else {
+            return Some(format!(
+                "{} '{}' is absent from the refreshed graph",
+                self.kind.as_str(),
+                self.processor.as_str()
+            ));
+        };
+        let Some(execution) = runtime.executions.get(domain) else {
+            return Some(format!(
+                "domain '{}' has no execution for processor refresh",
+                domain.as_str()
+            ));
+        };
+        let template = match processor_template_for_graph_node(
+            graph,
+            self.kind,
+            &self.processor,
+            &execution.relay_schemas,
+            Some(&execution.udfs),
+        ) {
+            Ok(template) => template,
+            Err(error) => return Some(error),
+        };
+        self.apply_node_template(template).err()
     }
 
     fn apply_node_template(&mut self, template: RelayProcessorTemplate) -> Result<(), String> {
@@ -7558,19 +7463,24 @@ fn wasm_guest_call_schemas(
 fn wasm_instance_next_deadline(
     instance: Option<&nervix_wasm::WasmBranchInstance>,
 ) -> Option<Timestamp> {
-    instance?
-        .timeout_requests()
-        .iter()
-        .filter_map(|request| {
-            let delay_nanos = i64::try_from(request.delay.as_nanos()).ok()?;
-            Some(Timestamp::from_unix_nanos(
-                request
-                    .requested_at
-                    .unix_nanos()
-                    .saturating_add(delay_nanos),
-            ))
-        })
-        .min()
+    let instance = instance?;
+    let mut next_deadline: Option<Timestamp> = None;
+    for request in instance.timeout_requests() {
+        let Ok(delay_nanos) = i64::try_from(request.delay.as_nanos()) else {
+            continue;
+        };
+        let deadline = Timestamp::from_unix_nanos(
+            request
+                .requested_at
+                .unix_nanos()
+                .saturating_add(delay_nanos),
+        );
+        next_deadline = match next_deadline {
+            Some(current) => Some(current.min(deadline)),
+            None => Some(deadline),
+        };
+    }
+    next_deadline
 }
 
 impl RelayProcessorTemplate {
@@ -7853,15 +7763,17 @@ impl BranchInstanceTemplate {
             .iter()
             .filter(|relay| !runtime.relay_is_cluster_scheduled(domain, relay))
             .map(|relay| {
-                let schema = runtime
-                    .executions
-                    .get(domain)
-                    .and_then(|execution| {
-                        execution
-                            .materialized_stream_specs
-                            .get(relay)
-                            .map(|spec| spec.schema.clone())
-                    })
+                let execution = runtime.executions.get(domain).ok_or_else(|| {
+                    format!(
+                        "materialized relay '{}' is not instantiated in domain '{}'",
+                        relay.as_str(),
+                        domain.as_str()
+                    )
+                })?;
+                let schema = execution
+                    .materialized_stream_specs
+                    .get(relay)
+                    .map(|spec| spec.schema.clone())
                     .ok_or_else(|| {
                         format!(
                             "materialized relay '{}' is not instantiated in domain '{}'",
@@ -7944,17 +7856,11 @@ impl BranchRuntime {
         self.materialized_states
             .retain(|identifier, _| desired_relays.contains(identifier));
         if desired_relays.contains(relay) && !self.materialized_states.contains_key(relay) {
-            let Some(schema) = self
-                .runtime
-                .executions
-                .get(&self.domain)
-                .and_then(|execution| {
-                    execution
-                        .materialized_stream_specs
-                        .get(relay)
-                        .map(|spec| spec.schema.clone())
-                })
-            else {
+            let schema = if let Some(execution) = self.runtime.executions.get(&self.domain)
+                && let Some(spec) = execution.materialized_stream_specs.get(relay)
+            {
+                spec.schema.clone()
+            } else {
                 warn!(
                     domain = self.domain.as_str(),
                     relay = relay.as_str(),
@@ -8404,12 +8310,10 @@ impl IngestorRouteTask {
                 .columns()
                 .iter()
                 .map(|column| {
-                    column
-                        .to_data()
-                        .get_slice_memory_size()
-                        .ok()
-                        .and_then(|bytes| u64::try_from(bytes).ok())
-                        .unwrap_or(u64::MAX)
+                    let Ok(bytes) = column.to_data().get_slice_memory_size() else {
+                        return u64::MAX;
+                    };
+                    u64::try_from(bytes).unwrap_or(u64::MAX)
                 })
                 .fold(0_u64, u64::saturating_add)
                 .checked_div(u64::try_from(row_count).unwrap_or(u64::MAX))
@@ -9260,11 +9164,13 @@ fn wall_duration_until_domain_deadline(
     if domain_state.config.pace != DomainPace::Paced {
         return wall_duration_until_timestamp(now, deadline);
     }
-    domain_state
-        .clock
-        .as_ref()
-        .and_then(|clock| wall_duration_until_logical_target(clock, now, deadline).ok())
-        .unwrap_or(Duration::from_millis(100))
+    let Some(clock) = domain_state.clock.as_ref() else {
+        return Duration::from_millis(100);
+    };
+    match wall_duration_until_logical_target(clock, now, deadline) {
+        Ok(duration) => duration,
+        Err(_) => Duration::from_millis(100),
+    }
 }
 
 const PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
@@ -9940,7 +9846,10 @@ fn spawn_processor_branch_task(
     let mut branch = template
         .instantiate(&context.runtime_handle, &context.domain, key)?
         .into_inner();
-    if let Some(processor) = branch.processors.get_mut(&ModelName::from(&template.source)) {
+    if let Some(processor) = branch
+        .processors
+        .get_mut(&ModelName::from(&template.source))
+    {
         processor.pending_materialized = pending_materialized;
     }
     let (input_tx, input_rx) = mpsc::channel(1);
@@ -11218,7 +11127,10 @@ fn compile_finalized_output_filter_program(
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     compile_scoped_filter_program(
-        RuntimeCompileTarget { domain, identifier: &identifier },
+        RuntimeCompileTarget {
+            domain,
+            identifier: &identifier,
+        },
         filter,
         RuntimeVmSchema {
             schema: output_schema,
@@ -12075,7 +11987,10 @@ pub(crate) fn compile_session_filter_map_program(
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     let identifier = identifier.into();
     compile_expression_filter_program(
-        RuntimeCompileTarget { domain, identifier: &identifier },
+        RuntimeCompileTarget {
+            domain,
+            identifier: &identifier,
+        },
         where_clause,
         RuntimeVmSchema {
             schema: input_schema,
@@ -13511,7 +13426,13 @@ async fn enqueue_correlator_output(
         }
     };
     if branch
-        .dispatch_output(graph, output, ModelKind::Correlator, &ModelName::from(&RelayName::from(processor)), &forwarded)
+        .dispatch_output(
+            graph,
+            output,
+            ModelKind::Correlator,
+            &ModelName::from(&RelayName::from(processor)),
+            &forwarded,
+        )
         .await
         .is_ok()
     {
@@ -13599,7 +13520,13 @@ async fn handle_correlator_timeout_action(
                 }
             };
             if branch
-                .dispatch_output(graph, &output, ModelKind::Correlator, &ModelName::from(&RelayName::from(processor)), &batch)
+                .dispatch_output(
+                    graph,
+                    &output,
+                    ModelKind::Correlator,
+                    &ModelName::from(&RelayName::from(processor)),
+                    &batch,
+                )
                 .await
                 .is_ok()
             {
@@ -14240,11 +14167,13 @@ fn processor_output_input_sensitivity(
     branch: &BranchRuntime,
     relays: &[RelayName],
 ) -> VmSchemaSensitivity {
-    relays
-        .first()
-        .and_then(|relay| relay_schema_for_runtime(&branch.runtime, &branch.domain, relay).ok())
-        .map(|schema| schema.vm_sensitivity())
-        .unwrap_or_default()
+    let Some(relay) = relays.first() else {
+        return VmSchemaSensitivity::default();
+    };
+    let Ok(schema) = relay_schema_for_runtime(&branch.runtime, &branch.domain, relay) else {
+        return VmSchemaSensitivity::default();
+    };
+    schema.vm_sensitivity()
 }
 
 /// Work that every output route of one dispatched batch shares.
@@ -14282,20 +14211,23 @@ fn compile_processor_output_program(
         &context.branch.domain,
         context.graph,
     );
-    let current_branching = input_relays
-        .first()
-        .and_then(|relay| {
-            context
-                .branch
-                .runtime
-                .executions
-                .get(&context.branch.domain)
-                .and_then(|execution| execution.relay_branchings.get(relay).cloned())
-        })
-        .unwrap_or_default();
-    let current_branch_schema = input_relays.first().and_then(|relay| {
+    let current_branching = if let Some(relay) = input_relays.first()
+        && let Some(execution) = context
+            .branch
+            .runtime
+            .executions
+            .get(&context.branch.domain)
+        && let Some(branching) = execution.relay_branchings.get(relay)
+    {
+        branching.clone()
+    } else {
+        Default::default()
+    };
+    let current_branch_schema = if let Some(relay) = input_relays.first() {
         relay_branch_schema_for_runtime(&context.branch.runtime, &context.branch.domain, relay)
-    });
+    } else {
+        None
+    };
     let available_lookups = context
         .branch
         .runtime
@@ -15455,20 +15387,15 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
             ));
             continue;
         }
-        groups[input_row] =
-            match vm_output_value(&result.batch, output_row, "fifo_group").and_then(|value| {
-                match value {
-                    Some(RuntimeValue::String(value)) => Ok(value),
-                    Some(value) => Err(format!(
-                        "SQS FIFO GROUP expression produced {}, expected STRING",
-                        runtime_value_type_name(&value)
-                    )),
-                    None => Err("SQS FIFO GROUP expression produced NULL".to_string()),
-                }
-            }) {
-                Ok(value) => Ok(Some(value)),
-                Err(reason) => Err(reason),
-            };
+        groups[input_row] = match vm_output_value(&result.batch, output_row, "fifo_group") {
+            Ok(Some(RuntimeValue::String(value))) => Ok(Some(value)),
+            Ok(Some(value)) => Err(format!(
+                "SQS FIFO GROUP expression produced {}, expected STRING",
+                runtime_value_type_name(&value)
+            )),
+            Ok(None) => Err("SQS FIFO GROUP expression produced NULL".to_string()),
+            Err(reason) => Err(reason),
+        };
     }
     Ok(groups)
 }
@@ -16826,12 +16753,16 @@ fn window_next_deadline(
     state: &WindowProcessorState,
     width_duration: Option<Duration>,
 ) -> Option<Timestamp> {
-    let width_deadline = width_duration.and_then(|width_duration| {
-        state
-            .entries
-            .front()
-            .map(|first| checked_add_duration_to_timestamp(first.timestamp, width_duration))
-    });
+    let width_deadline = if let Some(width_duration) = width_duration
+        && let Some(first) = state.entries.front()
+    {
+        Some(checked_add_duration_to_timestamp(
+            first.timestamp,
+            width_duration,
+        ))
+    } else {
+        None
+    };
     match (width_deadline, state.next_timeout_deadline()) {
         (Some(left), Some(right)) => Some(left.min(right)),
         (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
@@ -16917,11 +16848,13 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
                 ),
             }
         })?;
-        runtime_value_arrow_array(data_type, Some(&value), row_count)
-            .and_then(|array| {
-                VmTypedArray::try_from_array_ref(array).map_err(|error| error.to_string())
-            })
-            .map_err(|message| nervix_vm::RuntimeError::InvalidBatch { message })
+        let array = runtime_value_arrow_array(data_type, Some(&value), row_count)
+            .map_err(|message| nervix_vm::RuntimeError::InvalidBatch { message })?;
+        VmTypedArray::try_from_array_ref(array).map_err(|error| {
+            nervix_vm::RuntimeError::InvalidBatch {
+                message: error.to_string(),
+            }
+        })
     }
 }
 
@@ -17432,16 +17365,20 @@ impl<'a> VmInputProjectionSources<'a> {
         &self,
         qualified_name: &'name str,
     ) -> Option<(&'a RuntimeRecordBatch, &'name str)> {
-        self.namespace_batches
-            .iter()
-            .filter_map(|&(namespace, batch)| {
-                qualified_name
-                    .strip_prefix(namespace)
-                    .and_then(|suffix| suffix.strip_prefix('.'))
-                    .map(|field_name| (namespace.len(), batch, field_name))
-            })
-            .max_by_key(|(namespace_len, _, _)| *namespace_len)
-            .map(|(_, batch, field_name)| (batch, field_name))
+        let mut best_match = None;
+        for &(namespace, batch) in self.namespace_batches {
+            let Some(suffix) = qualified_name.strip_prefix(namespace) else {
+                continue;
+            };
+            let Some(field_name) = suffix.strip_prefix('.') else {
+                continue;
+            };
+            match best_match {
+                Some((namespace_len, _, _)) if namespace_len >= namespace.len() => {}
+                _ => best_match = Some((namespace.len(), batch, field_name)),
+            }
+        }
+        best_match.map(|(_, batch, field_name)| (batch, field_name))
     }
 
     fn has_strict_namespace(&self, qualified_name: &str) -> bool {
@@ -18314,26 +18251,27 @@ async fn flush_branch_inferencer_output(
     }
     let inferencer_tensors = InferencerFilterMapTensors { output_schema };
     let tensor_schema = inferencer_tensors.output_arrow_schema();
-    let tensor_batch = match tensor_schema
-        .fields()
-        .iter()
-        .map(|field| {
-            let column_index = tensor_schema
-                .index_of(field.name())
-                .map_err(|error| error.to_string())?;
-            runtime_values_input_column(
-                output_columns[column_index].iter().map(Some),
-                messages.len(),
-                field,
-            )
-            .map(|column| column.to_array_ref())
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .and_then(|columns| {
-            RecordBatch::try_new(tensor_schema.clone(), columns).map_err(|error| error.to_string())
-        })
-        .and_then(|batch| RuntimeRecordBatch::from_record_batch(tensor_schema, batch))
-    {
+    let tensor_batch_result = (|| {
+        let columns = tensor_schema
+            .fields()
+            .iter()
+            .map(|field| {
+                let column_index = tensor_schema
+                    .index_of(field.name())
+                    .map_err(|error| error.to_string())?;
+                runtime_values_input_column(
+                    output_columns[column_index].iter().map(Some),
+                    messages.len(),
+                    field,
+                )
+                .map(|column| column.to_array_ref())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let batch = RecordBatch::try_new(tensor_schema.clone(), columns)
+            .map_err(|error| error.to_string())?;
+        RuntimeRecordBatch::from_record_batch(tensor_schema, batch)
+    })();
+    let tensor_batch = match tensor_batch_result {
         Ok(batch) => batch,
         Err(error) => {
             branch.runtime.handle_internal_processor_error_for_acks(
@@ -20638,31 +20576,26 @@ fn vm_partial_output_row_to_runtime_batch(
             batch.row_count()
         ));
     }
-    let fields_and_columns = batch
-        .schema()
-        .fields()
-        .iter()
-        .zip(batch.columns())
-        .filter_map(|(field, column)| {
-            let array = match column {
-                VmTypedArray::Uninitialized { .. } => return None,
-                column => column.to_array_ref().slice(row, 1),
-            };
-            let field_name = field
-                .name()
-                .strip_prefix("output.")
-                .unwrap_or(field.name())
-                .to_string();
-            Some((
-                StdArc::new(arrow_schema::Field::new(
-                    field_name,
-                    field.data_type().clone(),
-                    true,
-                )),
-                array,
-            ))
-        })
-        .collect::<Vec<_>>();
+    let mut fields_and_columns = Vec::new();
+    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+        let array = match column {
+            VmTypedArray::Uninitialized { .. } => continue,
+            column => column.to_array_ref().slice(row, 1),
+        };
+        let field_name = field
+            .name()
+            .strip_prefix("output.")
+            .unwrap_or(field.name())
+            .to_string();
+        fields_and_columns.push((
+            StdArc::new(arrow_schema::Field::new(
+                field_name,
+                field.data_type().clone(),
+                true,
+            )),
+            array,
+        ));
+    }
     let (fields, columns): (Vec<_>, Vec<_>) = fields_and_columns.into_iter().unzip();
     let schema = StdArc::new(arrow_schema::Schema::new(fields));
     let record_batch = if columns.is_empty() {
@@ -20679,37 +20612,33 @@ fn vm_partial_output_row_to_runtime_batch(
 }
 
 fn invalid_output_fields(batch: &VmTypedBatch, row: usize) -> Vec<FieldPath> {
-    batch
-        .schema()
-        .fields()
-        .iter()
-        .zip(batch.columns())
-        .filter_map(|(field, column)| {
-            let invalid = match column {
-                VmTypedArray::Uninitialized { .. } => true,
-                VmTypedArray::UInt8(array) => array.is_null(row),
-                VmTypedArray::Int8(array) => array.is_null(row),
-                VmTypedArray::UInt16(array) => array.is_null(row),
-                VmTypedArray::Int16(array) => array.is_null(row),
-                VmTypedArray::UInt32(array) => array.is_null(row),
-                VmTypedArray::Int32(array) => array.is_null(row),
-                VmTypedArray::UInt64(array) => array.is_null(row),
-                VmTypedArray::Int64(array) => array.is_null(row),
-                VmTypedArray::Float32(array) => array.is_null(row),
-                VmTypedArray::Float64(array) => array.is_null(row),
-                VmTypedArray::Boolean(array) => array.is_null(row),
-                VmTypedArray::Utf8(array) => array.is_null(row),
-                VmTypedArray::Datetime(array) => array.is_null(row),
-                VmTypedArray::Generic(array) => array.is_null(row),
-            };
-            (invalid && !field.is_nullable()).then(|| {
-                FieldPath::new(format!(
-                    "output.{}",
-                    field.name().strip_prefix("output.").unwrap_or(field.name())
-                ))
-            })
-        })
-        .collect()
+    let mut invalid_fields = Vec::new();
+    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+        let invalid = match column {
+            VmTypedArray::Uninitialized { .. } => true,
+            VmTypedArray::UInt8(array) => array.is_null(row),
+            VmTypedArray::Int8(array) => array.is_null(row),
+            VmTypedArray::UInt16(array) => array.is_null(row),
+            VmTypedArray::Int16(array) => array.is_null(row),
+            VmTypedArray::UInt32(array) => array.is_null(row),
+            VmTypedArray::Int32(array) => array.is_null(row),
+            VmTypedArray::UInt64(array) => array.is_null(row),
+            VmTypedArray::Int64(array) => array.is_null(row),
+            VmTypedArray::Float32(array) => array.is_null(row),
+            VmTypedArray::Float64(array) => array.is_null(row),
+            VmTypedArray::Boolean(array) => array.is_null(row),
+            VmTypedArray::Utf8(array) => array.is_null(row),
+            VmTypedArray::Datetime(array) => array.is_null(row),
+            VmTypedArray::Generic(array) => array.is_null(row),
+        };
+        if invalid && !field.is_nullable() {
+            invalid_fields.push(FieldPath::new(format!(
+                "output.{}",
+                field.name().strip_prefix("output.").unwrap_or(field.name())
+            )));
+        }
+    }
+    invalid_fields
 }
 
 fn domain_clock_window_matches(

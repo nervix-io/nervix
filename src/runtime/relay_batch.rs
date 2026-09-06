@@ -627,17 +627,11 @@ mod tests {
     use std::{cell::Cell, sync::Arc as StdArc};
 
     use nervix_models::{
-    CreateSchema,
-    ModelName,
-    ParseAsType,
-    SchemaField,
-    Timestamp,
-};
+        CreateSchema, FieldName, ModelName, ParseAsType, SchemaField, SchemaName, Timestamp,
+    };
     use triomphe::Arc;
 
     use super::{RelayMessage, RelayRecordBatch, delivery_observation_from_timestamps};
-    use nervix_models::{FieldName, SchemaName};
-
     use crate::{
         runtime_ack::AckSet,
         runtime_schema::{
@@ -647,9 +641,17 @@ mod tests {
 
     fn test_schema() -> Arc<CompiledSchema> {
         Arc::new(compile_schema(&CreateSchema {
-            name: SchemaName::from(&ModelName::parse("relay_batch_test").expect("valid schema name")),
+            name: SchemaName::from(
+                &ModelName::parse("relay_batch_test").expect("valid schema name"),
+            ),
             fields: vec![SchemaField {
-                name: FieldName::from(FieldName::from(FieldName::from(&ModelName::parse("value").expect("valid field name").clone().clone().clone()))),
+                name: FieldName::from(FieldName::from(FieldName::from(
+                    &ModelName::parse("value")
+                        .expect("valid field name")
+                        .clone()
+                        .clone()
+                        .clone(),
+                ))),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
