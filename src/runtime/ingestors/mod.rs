@@ -1,3 +1,5 @@
+use std::num::{NonZeroU64, NonZeroUsize};
+
 use nervix_models::DomainName;
 
 use super::*;
@@ -33,6 +35,24 @@ use zeromq::ZeroMqIngestor;
 pub(in crate::runtime) struct IngestorStarter;
 
 impl IngestorStarter {
+    /// The number of per-instance task handles to reserve for `INSTANCES <n>`.
+    ///
+    /// The loop that fills the vector counts in the configured `u64`, so this is only the
+    /// allocation hint. A count this node cannot index reserves nothing and lets the vector grow,
+    /// rather than turning a hint into a failed start.
+    pub(in crate::runtime) fn instance_task_capacity(instances: NonZeroU64) -> usize {
+        usize::try_from(instances.get()).unwrap_or(0)
+    }
+
+    /// The batch bound `MODE ACK PARALLEL MAX <n>` sets, narrowed to what this node can index.
+    ///
+    /// Saturating is the meaning of the narrowing: a window wider than `usize` asks for more
+    /// outstanding acknowledgments than the node can address, and the largest addressable batch
+    /// is the closest this node can come to it.
+    pub(in crate::runtime) fn ack_parallel_limit(max: NonZeroU64) -> NonZeroUsize {
+        NonZeroUsize::try_from(max).unwrap_or(NonZeroUsize::MAX)
+    }
+
     pub(in crate::runtime) async fn start_scheduled(
         runtime: &Runtime,
         domain: &DomainName,

@@ -141,6 +141,8 @@ impl ScheduleDelta {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use nervix_models::{
         AckMode, BranchSelection, ClusterNodeName, CreateEmitter, CreateIngestor, CreateJunction,
         CreatePlacement, CreateRelay, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
@@ -149,6 +151,7 @@ mod tests {
         PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
         RetryPolicy, RouteConstruction, ScheduledNode,
     };
+    use nonzero_ext::nonzero;
 
     use super::ScheduleDelta;
 
@@ -172,7 +175,7 @@ mod tests {
             .expect("fixture schedule must contain a node")
     }
 
-    fn schedule(capacity: usize) -> DomainSchedule {
+    fn schedule(capacity: NonZeroUsize) -> DomainSchedule {
         DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
             vec![ScheduledNode {
@@ -239,7 +242,7 @@ mod tests {
 
     #[test]
     fn unchanged_schedule_has_no_apply_work() {
-        let existing = schedule(1);
+        let existing = schedule(nonzero!(1usize));
         assert_eq!(
             ScheduleDelta::classify(&existing, &existing),
             ScheduleDelta::Unchanged
@@ -248,21 +251,21 @@ mod tests {
 
     #[test]
     fn relay_capacity_is_a_dynamic_delta() {
-        let existing = schedule(1);
-        let desired = schedule(5);
+        let existing = schedule(nonzero!(1usize));
+        let desired = schedule(nonzero!(5usize));
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::Dynamic(vec![DynamicModelUpdate::RelayCapacity {
                 relay: named("events"),
-                capacity: 5,
+                capacity: nonzero!(5usize),
             }])
         );
     }
 
     #[test]
     fn schema_and_schedule_residue_changes_rebuild() {
-        let existing = schedule(1);
-        let mut schema_change = schedule(1);
+        let existing = schedule(nonzero!(1usize));
+        let mut schema_change = schedule(nonzero!(1usize));
         let Model::Relay(relay) = schema_change.nodes[0].config.as_mut() else {
             panic!("test node should contain a relay");
         };
@@ -272,7 +275,7 @@ mod tests {
             ScheduleDelta::Rebuild
         );
 
-        let mut fingerprint_change = schedule(1);
+        let mut fingerprint_change = schedule(nonzero!(1usize));
         fingerprint_change.nodes[0].schema_fingerprint = [2; 32];
         assert_eq!(
             ScheduleDelta::classify(&existing, &fingerprint_change),
@@ -489,7 +492,7 @@ mod tests {
                     vec![named("event_source")],
                     vec![named("events")],
                     policy,
-                    Some(1),
+                    Some(nonzero!(1u64)),
                 )
                 .expect("valid placement"),
             )),
@@ -529,12 +532,12 @@ mod tests {
 
     #[test]
     fn a_model_change_and_an_unrelated_move_apply_together() {
-        let mut existing = schedule(1);
+        let mut existing = schedule(nonzero!(1usize));
         push_scheduled(
             &mut existing,
             first_scheduled(ingestor_schedule("ingress_a")),
         );
-        let mut desired = schedule(5);
+        let mut desired = schedule(nonzero!(5usize));
         let mut moved_ingestor = first_scheduled(ingestor_schedule("ingress_a"));
         moved_ingestor.primary_node = Some(ClusterNodeName::parse("node-3").expect("valid name"));
         moved_ingestor.assigned_nodes = vec![ClusterNodeName::parse("node-3").expect("valid name")];
@@ -550,7 +553,7 @@ mod tests {
                 }],
                 dynamic_updates: vec![DynamicModelUpdate::RelayCapacity {
                     relay: named("events"),
-                    capacity: 5,
+                    capacity: nonzero!(5usize),
                 }],
             }
         );

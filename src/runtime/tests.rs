@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    num::NonZeroUsize,
+    num::{NonZeroU32, NonZeroUsize},
     path::PathBuf,
     sync::{
         Arc as StdArc,
@@ -40,10 +40,11 @@ use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmEnvelope, WasmOutputColumnRef,
     WasmOutputRow, WasmRoutedOutput,
 };
+use nonzero_ext::nonzero;
 use ordered_float::OrderedFloat;
 use sorted_vec::{SortedSet, SortedVec};
 
-fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
+fn inferencer_tensor_schema(size: NonZeroU32) -> InferencerTensorSchema {
     InferencerTensorSchema {
         representation: InferencerTensorRepresentation::Dense,
         element_type: InferencerTensorElementType::F32,
@@ -512,9 +513,7 @@ fn branch_model(schema: &str, relay: &str, _fields: &[&str]) -> PlannedModel {
 
 fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices> {
     Arc::new(super::RelayBoundaryServices::new(
-        super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(
-            STUPID_CHANNEL_CAPACITY_REMOVE_ME,
-        )),
+        super::RelayBoundaryFanout::direct_with_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME),
         0,
         0,
         Vec::new(),
@@ -1034,7 +1033,7 @@ async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array(
                 name: named("latencies"),
                 ty: ParseAsType::Array {
                     element: Box::new(ParseAsType::F64),
-                    len: 2,
+                    len: nonzero!(2u32),
                 },
                 optional: false,
                 sensitive: false,
@@ -2074,7 +2073,7 @@ fn wasm_identity_references_support_every_internal_arrow_field_kind() {
             "array",
             ParseAsType::Array {
                 element: Box::new(ParseAsType::I32),
-                len: 2,
+                len: nonzero!(2u32),
             },
         ),
         (
@@ -3017,7 +3016,7 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
                 nervix_models::Model::Relay(CreateRelay {
                     name: relay.clone(),
                     schema,
-                    buffer: 2,
+                    buffer: nonzero!(2usize),
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
@@ -3214,7 +3213,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
                 nervix_models::Model::Relay(CreateRelay {
                     name: relay.clone(),
                     schema,
-                    buffer: 2,
+                    buffer: nonzero!(2usize),
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
@@ -3306,7 +3305,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
                 nervix_models::Model::Relay(CreateRelay {
                     name: relay.clone(),
                     schema,
-                    buffer: 2,
+                    buffer: nonzero!(2usize),
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
@@ -3421,7 +3420,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                         nervix_models::Model::Relay(CreateRelay {
                             name: relay.clone(),
                             schema: schema.clone(),
-                            buffer: 2,
+                            buffer: nonzero!(2usize),
                             branching: RelayBranching::unbranched(),
                             materialized_state: None,
                         }),
@@ -3459,7 +3458,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                             source: IngestSource::Mqtt {
                                 client,
                                 topic: "notifications".to_string(),
-                                instances: 2,
+                                instances: nonzero!(2u64),
                                 mode: MqttIngestMode::NoAckSequential {
                                     session: MqttSession::Clean,
                                     qos: MqttQos::AtMostOnce,
@@ -3567,7 +3566,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                         nervix_models::Model::Relay(CreateRelay {
                             name: relay.clone(),
                             schema: schema.clone(),
-                            buffer: 2,
+                            buffer: nonzero!(2usize),
                             branching: RelayBranching::unbranched(),
                             materialized_state: None,
                         }),
@@ -3599,7 +3598,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                             source: IngestSource::Mqtt {
                                 client,
                                 topic: "notifications".to_string(),
-                                instances: 1,
+                                instances: nonzero!(1u64),
                                 mode: MqttIngestMode::AckSequential {
                                     timeout: "oops".to_string(),
                                     retry_policy: RetryPolicy {
@@ -3655,7 +3654,7 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
             nervix_models::Model::Relay(CreateRelay {
                 name: named(name),
                 schema: order_schema.clone(),
-                buffer: 2,
+                buffer: nonzero!(2usize),
                 branching: RelayBranching::unbranched(),
                 materialized_state: None,
             }),
@@ -3768,7 +3767,7 @@ fn emitter_entity_pause_gates_every_input_relay() {
             nervix_models::Model::Relay(CreateRelay {
                 name: named(name),
                 schema: named("event"),
-                buffer: 2,
+                buffer: nonzero!(2usize),
                 branching: RelayBranching::unbranched(),
                 materialized_state: None,
             }),
@@ -3892,7 +3891,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
                 nervix_models::Model::Relay(CreateRelay {
                     name: named("events"),
                     schema: event_schema.clone(),
-                    buffer: 2,
+                    buffer: nonzero!(2usize),
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
@@ -3903,7 +3902,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
                 nervix_models::Model::Relay(CreateRelay {
                     name: named("unique_events"),
                     schema: event_schema,
-                    buffer: 2,
+                    buffer: nonzero!(2usize),
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
@@ -4010,7 +4009,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
                 nervix_models::Model::Relay(CreateRelay {
                     name: named("events"),
                     schema: event_schema.clone(),
-                    buffer: 2,
+                    buffer: nonzero!(2usize),
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
@@ -4021,7 +4020,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
                 nervix_models::Model::Relay(CreateRelay {
                     name: named("unique_events"),
                     schema: event_schema,
-                    buffer: 2,
+                    buffer: nonzero!(2usize),
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
@@ -5226,7 +5225,7 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         .persist_latest_snapshot(&placement, offset_lsm, &offset_payload)
         .expect("offset snapshot should persist");
     let (schedule_lsm, schedule_payload) = state
-        .update_partition_schedule("notifications", 2, vec![0, 1])
+        .update_partition_schedule("notifications", nonzero!(2u64), vec![0, 1])
         .expect("schedule should update")
         .expect("schedule snapshot should be produced");
     store
@@ -5908,9 +5907,9 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = super::RelayRegistry::new();
-    let branch_collapse = Arc::new(super::BranchCollapseNode::with_capacity(nonzero_capacity(
+    let branch_collapse = Arc::new(super::BranchCollapseNode::with_capacity(
         STUPID_CHANNEL_CAPACITY_REMOVE_ME,
-    )));
+    ));
     let mut first_fan_in = super::RelayRuntimeFanIn::new(
         branch_collapse.runtime_consumer_receiver_for_mode(AckMode::Attached),
     );
@@ -5996,7 +5995,7 @@ async fn unbranched_relay_uses_direct_fanout_without_branch_collapse() {
             &domain,
             &relay,
             false,
-            nonzero_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME),
+            STUPID_CHANNEL_CAPACITY_REMOVE_ME,
         )
         .await;
 
@@ -6419,7 +6418,7 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
         services.clone(),
         super::RelayRetention {
             branch_ttl: None,
-            branch_capacity: Some(2),
+            branch_capacity: Some(nonzero!(2usize)),
         },
     );
     let schema = test_schema(&[]);
@@ -8547,12 +8546,12 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                     file: "models/fraud.onnx".to_string(),
                     inputs: vec![InferencerTensorMapping {
                         tensor: "features".to_string(),
-                        schema: inferencer_tensor_schema(2),
+                        schema: inferencer_tensor_schema(nonzero!(2u32)),
                         expression: expression("input.vector"),
                     }],
                     output_schema: vec![InferencerTensorDeclaration {
                         tensor: "score".to_string(),
-                        schema: inferencer_tensor_schema(1),
+                        schema: inferencer_tensor_schema(nonzero!(1u32)),
                     }],
                     mode: AckMode::Attached,
                     filter_where: Some(expression("input.active")),
@@ -9102,7 +9101,7 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
                 model: nervix_models::Model::Relay(CreateRelay {
                     name: named("orders"),
                     schema: named("order_event"),
-                    buffer: 1,
+                    buffer: nonzero!(1usize),
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
@@ -9144,7 +9143,7 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                 model: nervix_models::Model::Relay(CreateRelay {
                     name: named("orders"),
                     schema: named("order_event"),
-                    buffer: 1,
+                    buffer: nonzero!(1usize),
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
@@ -9161,8 +9160,8 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                     resource_version: None,
                     file: "filter.wasm".to_string(),
                     limits: nervix_models::WasmProcessorLimits {
-                        max_fuel: 1_000_000_000,
-                        max_memory_bytes: 64 * 1024 * 1024,
+                        max_fuel: nonzero!(1_000_000_000u64),
+                        max_memory_bytes: nonzero!(67_108_864u64),
                     },
                     global_error_policy: GeneralErrorPolicy::Ignore,
                     mode: AckMode::Attached,
@@ -9647,11 +9646,10 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     );
     assert_eq!(
         branched_runtime.sender().max_capacity(),
-        super::STUPID_CHANNEL_CAPACITY_REMOVE_ME
+        super::STUPID_CHANNEL_CAPACITY_REMOVE_ME.get()
     );
     let (shutdown_tx, _) = watch::channel(false);
-    let broadcast =
-        super::RelayBroadcast::with_capacity(nonzero_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME));
+    let broadcast = super::RelayBroadcast::with_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME);
     let fan_in = super::RelayRuntimeFanIn::new(broadcast.new_receiver());
     let mut branched_entrypoint_senders = HashMap::default();
     branched_entrypoint_senders.insert(relay, branched_runtime.sender());
@@ -10624,7 +10622,7 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
         "vector",
         ParseAsType::Array {
             element: Box::new(ParseAsType::F32),
-            len: 2,
+            len: nonzero!(2u32),
         },
     )]);
     let program = super::compile_processor_output_filter_map_program(
@@ -11595,7 +11593,7 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
             client: named("logic_kafka"),
             topic: named("logic_notifications"),
             offset_mode: nervix_models::KafkaOffsetMode::Domain,
-            instances: 1,
+            instances: nonzero!(1u64),
             mode: nervix_models::KafkaIngestMode::AckSequential {
                 timeout: "5s".to_string(),
                 retry_policy: nervix_models::RetryPolicy {
@@ -11774,7 +11772,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
         client: named("logic_kafka"),
         topic: named("logic_notifications"),
         offset_mode: nervix_models::KafkaOffsetMode::Domain,
-        instances: 1,
+        instances: nonzero!(1u64),
         mode: nervix_models::KafkaIngestMode::AckSequential {
             timeout: "5s".to_string(),
             retry_policy: RetryPolicy {
@@ -12038,7 +12036,7 @@ async fn generator_set_program_projects_columnar_state_and_branch_context() {
             "samples",
             ParseAsType::Array {
                 element: Box::new(ParseAsType::F32),
-                len: 2,
+                len: nonzero!(2u32),
             },
         ),
         (
@@ -12055,7 +12053,7 @@ async fn generator_set_program_projects_columnar_state_and_branch_context() {
             "samples",
             ParseAsType::Array {
                 element: Box::new(ParseAsType::F32),
-                len: 2,
+                len: nonzero!(2u32),
             },
         ),
         (

@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use ahash::{HashMap, RandomState};
 use dashmap::DashMap;
@@ -33,7 +36,7 @@ struct KafkaPartitionAssignmentSnapshot {
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct KafkaTopicSchedulingSnapshot {
     topic: String,
-    instances: u64,
+    instances: NonZeroU64,
     rebalance_epoch: u64,
     observed_partitions: Vec<i32>,
     assignments: Vec<KafkaPartitionAssignmentSnapshot>,
@@ -61,7 +64,7 @@ struct KafkaOffsetSnapshotState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KafkaTopicSchedulingState {
-    instances: u64,
+    instances: NonZeroU64,
     rebalance_epoch: u64,
     observed_partitions: Vec<i32>,
     assignments: HashMap<i32, u64>,
@@ -170,7 +173,7 @@ impl ReplicatedKafkaOffsetState {
     pub(super) fn update_partition_schedule(
         &self,
         topic: &str,
-        instances: u64,
+        instances: NonZeroU64,
         observed_partitions: Vec<i32>,
     ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
         let next_schedule = {

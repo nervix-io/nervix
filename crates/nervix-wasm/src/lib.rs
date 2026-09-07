@@ -1,5 +1,6 @@
 use std::{
     convert::Infallible,
+    num::NonZeroU64,
     ops::{Deref, DerefMut},
     sync::{
         Arc as StdArc,
@@ -46,19 +47,20 @@ pub enum WasmProcessorError {
     Link(#[source] wasmtime::Error),
     #[error("failed to instantiate wasm module: {0}")]
     Instantiate(#[source] wasmtime::Error),
-    #[error("MAX FUEL must be greater than zero")]
-    InvalidMaxFuel,
     #[error("MAX MEMORY {limit} bytes is not supported on this host")]
-    InvalidMaxMemory { limit: u64 },
+    InvalidMaxMemory { limit: NonZeroU64 },
     #[error("failed to reset MAX FUEL {limit} before {operation}: {source}")]
     ResetFuel {
-        limit: u64,
+        limit: NonZeroU64,
         operation: &'static str,
         #[source]
         source: wasmtime::Error,
     },
     #[error("wasm guest exhausted MAX FUEL {limit} during {operation}")]
-    FuelExhausted { limit: u64, operation: &'static str },
+    FuelExhausted {
+        limit: NonZeroU64,
+        operation: &'static str,
+    },
     #[error(
         "wasm guest exceeded MAX MEMORY {limit} bytes during {operation} (growing linear memory \
          by {growth} bytes past the {allocated} bytes already allocated)"
@@ -485,7 +487,7 @@ impl From<&ParseAsType> for WasmProcessorType {
             ParseAsType::F64 => Self::F64,
             ParseAsType::Array { element, len } => Self::Array {
                 element: Box::new(Self::from(element.as_ref())),
-                len: *len,
+                len: len.get(),
             },
             ParseAsType::Vec { element } => Self::Vec {
                 element: Box::new(Self::from(element.as_ref())),
@@ -1211,26 +1213,18 @@ impl CompiledWasmProcessor {
         restored_state: Option<&[u8]>,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Result<WasmBranchInstance, WasmProcessorError> {
-        if limits.max_fuel == 0 {
-            return Err(WasmProcessorError::InvalidMaxFuel);
-        }
-        let max_memory_bytes = usize::try_from(limits.max_memory_bytes).map_err(|_| {
+        let max_memory_bytes = usize::try_from(limits.max_memory_bytes.get()).map_err(|_| {
             WasmProcessorError::InvalidMaxMemory {
                 limit: limits.max_memory_bytes,
             }
         })?;
-        if max_memory_bytes == 0 {
-            return Err(WasmProcessorError::InvalidMaxMemory {
-                limit: limits.max_memory_bytes,
-            });
-        }
         let mut store = Store::new(
             &self.engine,
             BranchStore::new(clock, max_memory_bytes, emitted_batch_sender),
         );
         store.limiter(|state| &mut state.memory_limiter);
         store
-            .set_fuel(limits.max_fuel)
+            .set_fuel(limits.max_fuel.get())
             .map_err(|source| WasmProcessorError::ResetFuel {
                 limit: limits.max_fuel,
                 operation: "module instantiation",
@@ -1322,7 +1316,7 @@ impl WasmBranchInstance {
 
     fn begin_operation(&mut self, operation: &'static str) -> Result<(), WasmProcessorError> {
         self.store
-            .set_fuel(self.limits.max_fuel)
+            .set_fuel(self.limits.max_fuel.get())
             .map_err(|source| WasmProcessorError::ResetFuel {
                 limit: self.limits.max_fuel,
                 operation,
@@ -1826,6 +1820,7 @@ mod tests {
     use arrow_ipc::writer::StreamWriter;
     use arrow_schema::{DataType, Field, Schema};
     use nervix_models::{CreateSchema, FieldName, ParseAsType, SchemaField, SchemaName};
+    use nonzero_ext::nonzero;
 
     use super::*;
 
@@ -2430,8 +2425,8 @@ mod tests {
 
     fn limits() -> WasmProcessorLimits {
         WasmProcessorLimits {
-            max_fuel: 1_000_000_000,
-            max_memory_bytes: 64 * 1024 * 1024,
+            max_fuel: nonzero!(1_000_000_000u64),
+            max_memory_bytes: nonzero!(67_108_864u64),
         }
     }
 
@@ -3654,8 +3649,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 1_000,
-            max_memory_bytes: 64 * 1024 * 1024,
+            max_fuel: nonzero!(1_000u64),
+            max_memory_bytes: nonzero!(67_108_864u64),
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -3675,9 +3670,9 @@ mod tests {
         assert!(matches!(
             error,
             WasmProcessorError::FuelExhausted {
-                limit: 1_000,
+                limit,
                 operation: "nervix_process_batch"
-            }
+            } if limit == nonzero!(1_000u64)
         ));
     }
 
@@ -3689,8 +3684,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 10_000,
-            max_memory_bytes: 64 * 1024 * 1024,
+            max_fuel: nonzero!(10_000u64),
+            max_memory_bytes: nonzero!(67_108_864u64),
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -3713,7 +3708,7 @@ mod tests {
             .expect("second operation must receive a fresh fuel budget");
         let second_remaining = branch.store.get_fuel().expect("fuel must be enabled");
 
-        assert!(first_remaining < configured_limits.max_fuel);
+        assert!(first_remaining < configured_limits.max_fuel.get());
         assert_eq!(second_remaining, first_remaining);
     }
 
@@ -3725,8 +3720,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 100_000,
-            max_memory_bytes: 128 * 1024,
+            max_fuel: nonzero!(100_000u64),
+            max_memory_bytes: nonzero!(131_072u64),
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -3765,8 +3760,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 100_000,
-            max_memory_bytes: 64 * 1024,
+            max_fuel: nonzero!(100_000u64),
+            max_memory_bytes: nonzero!(65_536u64),
         };
 
         let error = compiled

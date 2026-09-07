@@ -1,4 +1,4 @@
-use std::future;
+use std::{future, num::NonZeroU64};
 
 use nervix_models::DomainName;
 use rdkafka::{
@@ -54,7 +54,7 @@ impl KafkaIngestor {
         struct KafkaSource {
             topic: nervix_models::TopicName,
             offset_mode: KafkaOffsetMode,
-            instances: u64,
+            instances: NonZeroU64,
             ack_mode: KafkaIngestMode,
         }
 
@@ -137,7 +137,8 @@ impl KafkaIngestor {
         } else {
             None
         };
-        let mut tasks = Vec::with_capacity(instances as usize);
+        let mut tasks =
+            Vec::with_capacity(super::IngestorStarter::instance_task_capacity(instances));
 
         if let Some(rebalance_tx) = rebalance_tx.as_ref() {
             let mut watcher_config = ClientConfig::new();
@@ -236,7 +237,7 @@ impl KafkaIngestor {
             tasks.push(watcher);
         }
 
-        for instance_idx in 0..instances {
+        for instance_idx in 0..instances.get() {
             let mut client_config = ClientConfig::new();
             for entry in &resolved_client.entries {
                 client_config.set(&entry.key, &entry.value);
@@ -348,8 +349,10 @@ impl KafkaIngestor {
                 );
 
                 let ack_parallel_limit = match &task_ack_mode {
-                    KafkaIngestMode::AckParallel { max, .. } => (*max).max(1) as usize,
-                    _ => 1,
+                    KafkaIngestMode::AckParallel { max, .. } => {
+                        super::IngestorStarter::ack_parallel_limit(*max)
+                    }
+                    _ => NonZeroUsize::MIN,
                 };
                 let ack_timeout = task_ack_timeout;
                 let retry_policy = task_retry_policy;
@@ -863,7 +866,7 @@ impl KafkaIngestor {
                                             }
                                         }
                                         KafkaIngestMode::AckParallel { .. } => {
-                                            let mut batch = Vec::with_capacity(ack_parallel_limit);
+                                            let mut batch = Vec::with_capacity(ack_parallel_limit.get());
                                             let first = match decode_message(&message).await {
                                                 Ok(record) => KafkaBatchEntry { message, record },
                                                 Err(error) => {
@@ -890,7 +893,7 @@ impl KafkaIngestor {
                                             let batch_deadline =
                                                 Instant::now() + batch_timeout.verified("this branch runs only for the parallel ACK mode, which parses a batch timeout above");
 
-                                            while batch.len() < ack_parallel_limit {
+                                            while batch.len() < ack_parallel_limit.get() {
                                                 tokio::task::consume_budget().await;
                                                 tokio::select! {
                                                     _ = task_quiesce.wait_for_change() => {

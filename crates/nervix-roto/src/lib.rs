@@ -1390,7 +1390,7 @@ pub fn arrow_data_type(ty: &ParseAsType) -> DataType {
         ParseAsType::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
         ParseAsType::Array { element, len } => DataType::FixedSizeList(
             StdArc::new(Field::new("item", arrow_data_type(element), false)),
-            i32::try_from(*len).verified(
+            i32::try_from(len.get()).verified(
                 "the schema parser rejects an array length that does not fit an Arrow fixed-size \
                  list",
             ),

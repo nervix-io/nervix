@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use async_nats::Client as NatsClient;
 use nervix_models::DomainName;
 
@@ -41,7 +43,7 @@ impl NatsIngestor {
         struct NatsSource {
             subject: nervix_models::SubjectName,
             queue_group: nervix_models::QueueGroupName,
-            instances: u64,
+            instances: NonZeroU64,
         }
 
         let NatsSource {
@@ -92,8 +94,9 @@ impl NatsIngestor {
             );
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances as usize);
-        for instance_idx in 0..instances {
+        let mut tasks =
+            Vec::with_capacity(super::IngestorStarter::instance_task_capacity(instances));
+        for instance_idx in 0..instances.get() {
             let mut shutdown_rx = shutdown_tx.subscribe();
             let task_runtime = runtime.clone();
             let task_domain = domain.clone();

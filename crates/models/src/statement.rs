@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::{Deref, DerefMut},
 };
 
@@ -729,7 +730,7 @@ pub struct CreatePlacement {
     pub from: Vec<ModelName>,
     pub to: Vec<ModelName>,
     pub policy: PlacementPolicy,
-    pub rank: Option<u64>,
+    pub rank: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -744,7 +745,7 @@ pub enum AlterPlacementOperation {
         policy: PlacementPolicy,
     },
     SetRank {
-        rank: u64,
+        rank: NonZeroU64,
     },
     DropRank,
     SetMembers {
@@ -767,8 +768,6 @@ pub enum AlterPlacementError {
     EmptyFrom,
     #[error("a placement must declare at least one TO member")]
     EmptyTo,
-    #[error("placement RANK 0 is invalid; RANK must be greater than zero")]
-    RankZero,
 }
 
 impl CreatePlacement {
@@ -777,7 +776,7 @@ impl CreatePlacement {
         from: Vec<ModelName>,
         to: Vec<ModelName>,
         policy: PlacementPolicy,
-        rank: Option<u64>,
+        rank: Option<NonZeroU64>,
     ) -> Result<Self, AlterPlacementError> {
         let mut placement = Self {
             name,
@@ -824,9 +823,6 @@ impl CreatePlacement {
         }
         if self.to.is_empty() {
             return Err(AlterPlacementError::EmptyTo);
-        }
-        if self.rank == Some(0) {
-            return Err(AlterPlacementError::RankZero);
         }
         Ok(())
     }
@@ -1668,7 +1664,7 @@ pub enum EmitSink {
         client: ClientName,
         table: TableName,
         values: Vec<ClickHouseValueMapping>,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     Postgres {
@@ -1676,7 +1672,7 @@ pub enum EmitSink {
         table: TableName,
         values: Vec<PostgresValueMapping>,
         conflict_action: PostgresConflictAction,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     #[strum(serialize = "MYSQL")]
@@ -1685,7 +1681,7 @@ pub enum EmitSink {
         table: TableName,
         values: Vec<MySqlValueMapping>,
         conflict_action: MySqlConflictAction,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     #[strum(serialize = "MONGODB")]
@@ -1694,7 +1690,7 @@ pub enum EmitSink {
         collection: CollectionName,
         values: Vec<MongoDbValueMapping>,
         conflict_action: MongoDbConflictAction,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     Iceberg {
@@ -2269,11 +2265,11 @@ pub struct CreateBranch {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BranchEviction {
-    Lru { max_instances: u64 },
+    Lru { max_instances: NonZeroU64 },
 }
 
 impl BranchEviction {
-    pub const fn max_instances(&self) -> u64 {
+    pub const fn max_instances(&self) -> NonZeroU64 {
         match self {
             Self::Lru { max_instances } => *max_instances,
         }
@@ -2772,8 +2768,8 @@ pub struct CreateWasmProcessor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WasmProcessorLimits {
-    pub max_fuel: u64,
-    pub max_memory_bytes: u64,
+    pub max_fuel: NonZeroU64,
+    pub max_memory_bytes: NonZeroU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2814,7 +2810,7 @@ impl InferencerTensorSchema {
         self.dimensions
             .iter()
             .filter_map(|dimension| match dimension {
-                InferencerTensorDimension::Fixed(size) => Some(*size as usize),
+                InferencerTensorDimension::Fixed(size) => Some(size.get() as usize),
                 InferencerTensorDimension::Dynamic | InferencerTensorDimension::Batch => None,
             })
             .try_fold(1_usize, usize::checked_mul)
@@ -2876,7 +2872,7 @@ pub enum InferencerTensorElementType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InferencerTensorDimension {
-    Fixed(u32),
+    Fixed(NonZeroU32),
     Dynamic,
     Batch,
 }
@@ -3030,7 +3026,7 @@ pub enum IngestSource {
         client: ClientName,
         topic: TopicName,
         offset_mode: KafkaOffsetMode,
-        instances: u64,
+        instances: NonZeroU64,
         mode: KafkaIngestMode,
         quiesce: IngestQuiesceMode,
     },
@@ -3038,14 +3034,14 @@ pub enum IngestSource {
         client: ClientName,
         topic: TopicName,
         subscription: PulsarSubscriptionName,
-        instances: u64,
+        instances: NonZeroU64,
         mode: PulsarIngestMode,
         quiesce: IngestQuiesceMode,
     },
     Mqtt {
         client: ClientName,
         topic: String,
-        instances: u64,
+        instances: NonZeroU64,
         mode: MqttIngestMode,
         quiesce: IngestQuiesceMode,
     },
@@ -3053,7 +3049,7 @@ pub enum IngestSource {
         client: ClientName,
         subject: SubjectName,
         queue_group: QueueGroupName,
-        instances: u64,
+        instances: NonZeroU64,
         mode: NatsIngestMode,
         quiesce: IngestQuiesceMode,
     },
@@ -3061,7 +3057,7 @@ pub enum IngestSource {
     RabbitMq {
         client: ClientName,
         queue: QueueName,
-        instances: u64,
+        instances: NonZeroU64,
         mode: RabbitMqIngestMode,
         quiesce: IngestQuiesceMode,
     },
@@ -3087,7 +3083,7 @@ pub enum IngestSource {
     Sqs {
         client: ClientName,
         queue: QueueName,
-        instances: u64,
+        instances: NonZeroU64,
         mode: SqsIngestMode,
         quiesce: IngestQuiesceMode,
     },
@@ -3309,16 +3305,7 @@ pub struct RetryPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EmitterAckWindow {
     Sequential,
-    Parallel { max: u64 },
-}
-
-impl EmitterAckWindow {
-    pub fn max_in_flight(&self) -> u64 {
-        match self {
-            Self::Sequential => 1,
-            Self::Parallel { max } => *max,
-        }
-    }
+    Parallel { max: NonZeroU64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3375,20 +3362,6 @@ impl EmitterPublishingMode {
         }
     }
 
-    pub fn ack_window(&self) -> Option<&EmitterAckWindow> {
-        match self {
-            Self::BrokerAck { window, .. }
-            | Self::MqttQos1 { window, .. }
-            | Self::MqttQos2 { window, .. }
-            | Self::NatsJetStream { window, .. } => Some(window),
-            Self::NoAck { .. }
-            | Self::MqttQos0 { .. }
-            | Self::SqsSingle { .. }
-            | Self::SqsBatch { .. }
-            | Self::RequestAck { .. } => None,
-        }
-    }
-
     pub fn ack_timeout(&self) -> Option<&str> {
         match self {
             Self::BrokerAck { ack_timeout, .. }
@@ -3421,7 +3394,7 @@ impl EmitterPublishingMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KafkaIngestMode {
     AckParallel {
-        max: u64,
+        max: NonZeroU64,
         batch_timeout: String,
         timeout: String,
         retry_policy: RetryPolicy,
@@ -3472,7 +3445,7 @@ pub enum MqttIngestMode {
         retry_policy: RetryPolicy,
     },
     AckParallel {
-        max: u64,
+        max: NonZeroU64,
         batch_timeout: String,
         timeout: String,
         retry_policy: RetryPolicy,
@@ -3548,7 +3521,7 @@ pub struct CreateRelay {
     pub name: RelayName,
     pub schema: SchemaName,
     #[serde(default = "default_relay_buffer")]
-    pub buffer: usize,
+    pub buffer: NonZeroUsize,
     pub branching: RelayBranching,
     #[serde(default)]
     pub materialized_state: Option<MaterializedRelayState>,
@@ -3577,9 +3550,6 @@ impl CreateRelay {
     ) -> Result<(), AlterRelayError> {
         match operation {
             AlterRelayOperation::SetCapacity { capacity } => {
-                if *capacity == 0 {
-                    return Err(AlterRelayError::InvalidCapacity);
-                }
                 self.buffer = *capacity;
             }
             AlterRelayOperation::SetSchema { schema } => {
@@ -3609,7 +3579,7 @@ pub struct AlterRelay {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterRelayOperation {
-    SetCapacity { capacity: usize },
+    SetCapacity { capacity: NonZeroUsize },
     SetSchema { schema: SchemaName },
     SetBranching { branching: RelayBranching },
     SetMaterializedState,
@@ -3623,14 +3593,12 @@ pub enum AlterRelayError {
         stored: RelayName,
         requested: RelayName,
     },
-    #[error("relay capacity must be greater than 0")]
-    InvalidCapacity,
     #[error("relay materialized state is not configured")]
     MaterializedStateNotConfigured,
 }
 
-pub const fn default_relay_buffer() -> usize {
-    1
+pub const fn default_relay_buffer() -> NonZeroUsize {
+    NonZeroUsize::MIN
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3746,8 +3714,8 @@ pub struct KafkaPartitionSchedule {
 }
 
 impl KafkaPartitionSchedule {
-    pub fn new(instances: u64, observed_partitions: Vec<i32>, rebalance_epoch: u64) -> Self {
-        let shard_count = usize::try_from(instances.max(1)).unwrap_or(usize::MAX);
+    pub fn new(instances: NonZeroU64, observed_partitions: Vec<i32>, rebalance_epoch: u64) -> Self {
+        let shard_count = usize::try_from(instances.get()).unwrap_or(usize::MAX);
         let mut observed_partitions = observed_partitions;
         observed_partitions.sort_unstable();
         let mut instance_assignments = vec![Vec::new(); shard_count];
@@ -4447,6 +4415,8 @@ pub enum AckMode {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::{
         AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation,
         AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator,
@@ -4533,22 +4503,22 @@ mod tests {
             representation: InferencerTensorRepresentation::Dense,
             element_type: InferencerTensorElementType::F32,
             dimensions: vec![
-                InferencerTensorDimension::Fixed(2),
+                InferencerTensorDimension::Fixed(nonzero!(2u32)),
                 InferencerTensorDimension::Dynamic,
-                InferencerTensorDimension::Fixed(3),
+                InferencerTensorDimension::Fixed(nonzero!(3u32)),
             ],
         };
         let exact = ParseAsType::Array {
-            len: 2,
+            len: nonzero!(2u32),
             element: Box::new(ParseAsType::Vec {
                 element: Box::new(ParseAsType::Array {
-                    len: 3,
+                    len: nonzero!(3u32),
                     element: Box::new(ParseAsType::F32),
                 }),
             }),
         };
         let flattened = ParseAsType::Array {
-            len: 6,
+            len: nonzero!(6u32),
             element: Box::new(ParseAsType::F32),
         };
 
@@ -4793,7 +4763,7 @@ mod tests {
 
     #[test]
     fn kafka_partition_schedule_assigns_partitions_round_robin_by_instance() {
-        let schedule = KafkaPartitionSchedule::new(2, vec![3, 1, 2, 0], 7);
+        let schedule = KafkaPartitionSchedule::new(nonzero!(2u64), vec![3, 1, 2, 0], 7);
 
         assert_eq!(schedule.observed_partitions, vec![0, 1, 2, 3]);
         assert_eq!(schedule.rebalance_epoch, 7);
@@ -4805,7 +4775,7 @@ mod tests {
         let mut relay = CreateRelay {
             name: named("events"),
             schema: named("event_v1"),
-            buffer: 1,
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         };
@@ -4813,16 +4783,20 @@ mod tests {
             .apply_alter(&AlterRelay {
                 relay: named("events"),
                 operations: vec![
-                    AlterRelayOperation::SetCapacity { capacity: 8 },
+                    AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(8usize),
+                    },
                     AlterRelayOperation::SetSchema {
                         schema: named("event_v2"),
                     },
-                    AlterRelayOperation::SetCapacity { capacity: 16 },
+                    AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(16usize),
+                    },
                     AlterRelayOperation::SetMaterializedState,
                 ],
             })
             .expect("relay alter should apply");
-        assert_eq!(relay.buffer, 16);
+        assert_eq!(relay.buffer, nonzero!(16usize));
         assert_eq!(relay.schema, named("event_v2"));
         assert_eq!(
             relay.materialized_state,
@@ -4834,7 +4808,9 @@ mod tests {
             .apply_alter(&AlterRelay {
                 relay: named("events"),
                 operations: vec![
-                    AlterRelayOperation::SetCapacity { capacity: 32 },
+                    AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(32usize),
+                    },
                     AlterRelayOperation::DropMaterializedState,
                     AlterRelayOperation::DropMaterializedState,
                 ],
@@ -5001,7 +4977,7 @@ mod tests {
         let relay = CreateRelay {
             name: named("events"),
             schema: named("event"),
-            buffer: 1,
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         };
@@ -5009,19 +4985,14 @@ mod tests {
             (
                 AlterRelay {
                     relay: named("other"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 2 }],
+                    operations: vec![AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(2usize),
+                    }],
                 },
                 AlterRelayError::RelayNameMismatch {
                     stored: named("events"),
                     requested: named("other"),
                 },
-            ),
-            (
-                AlterRelay {
-                    relay: named("events"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 0 }],
-                },
-                AlterRelayError::InvalidCapacity,
             ),
             (
                 AlterRelay {
@@ -5824,8 +5795,12 @@ mod tests {
             .apply_alter(&AlterPlacement {
                 placement: named("corridor"),
                 operations: vec![
-                    AlterPlacementOperation::SetRank { rank: 3 },
-                    AlterPlacementOperation::SetRank { rank: 1 },
+                    AlterPlacementOperation::SetRank {
+                        rank: nonzero!(3u64),
+                    },
+                    AlterPlacementOperation::SetRank {
+                        rank: nonzero!(1u64),
+                    },
                     AlterPlacementOperation::SetPolicy {
                         policy: PlacementPolicy::RequireColocation,
                     },
@@ -5841,7 +5816,7 @@ mod tests {
             .expect("placement alter should apply");
 
         assert_eq!(placement.name, named("critical"));
-        assert_eq!(placement.rank, Some(1));
+        assert_eq!(placement.rank, Some(nonzero!(1u64)));
         assert_eq!(placement.policy, PlacementPolicy::RequireColocation);
         assert_eq!(placement.from, vec![named("source")]);
         assert_eq!(placement.to, vec![named("sink")]);
@@ -5849,15 +5824,15 @@ mod tests {
         let before = placement.clone();
         assert_eq!(
             placement.apply_alter(&AlterPlacement {
-                placement: named("critical"),
-                operations: vec![
-                    AlterPlacementOperation::SetPolicy {
-                        policy: PlacementPolicy::Neutral,
-                    },
-                    AlterPlacementOperation::SetRank { rank: 0 },
-                ],
+                placement: named("other"),
+                operations: vec![AlterPlacementOperation::SetPolicy {
+                    policy: PlacementPolicy::Neutral,
+                }],
             }),
-            Err(AlterPlacementError::RankZero)
+            Err(AlterPlacementError::PlacementNameMismatch {
+                stored: named("critical"),
+                requested: named("other"),
+            })
         );
         assert_eq!(placement, before, "failed ALTER must not partially apply");
     }

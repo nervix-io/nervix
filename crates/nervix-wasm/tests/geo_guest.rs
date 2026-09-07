@@ -20,14 +20,15 @@ use nervix_wasm::{
     WasmOutputRow, WasmProcessorField, WasmProcessorSchema, WasmProcessorType, WasmRuntime,
     WasmRuntimeConfig,
 };
+use nonzero_ext::nonzero;
 
 const GUEST: &str = "../../examples/datalake/geo-wasm-guest/target/wasm32-unknown-unknown/release/\
                      nervix_datalake_geo_wasm_guest.wasm";
 
 fn limits() -> WasmProcessorLimits {
     WasmProcessorLimits {
-        max_fuel: 1_000_000_000,
-        max_memory_bytes: 128 * 1024 * 1024,
+        max_fuel: nonzero!(1_000_000_000u64),
+        max_memory_bytes: nonzero!(134_217_728u64),
     }
 }
 

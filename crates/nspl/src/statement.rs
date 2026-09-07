@@ -270,7 +270,10 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::{NonZeroU64, NonZeroUsize};
+
     use bolero::check;
+    use meticulous::ResultExt as _;
     use nervix_models::{
         AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchName, BranchSelection,
         ClientConfigEntry, ClusterNodeName, CodecWireFormat, CordonNode, CorrelatorName,
@@ -292,6 +295,7 @@ mod tests {
         SubscriptionLiteral, UncordonNode, WasmProcessorName, WindowProcessorName, WireSchemaField,
         ZeroMqIngestMode,
     };
+    use nonzero_ext::nonzero;
     use rstest::rstest;
 
     use super::*;
@@ -371,6 +375,18 @@ mod tests {
         fn bounded_u64(&mut self, min: u64, max: u64) -> u64 {
             let span = max - min + 1;
             min + (self.next_u8() as u64 % span)
+        }
+
+        /// A bound whose floor is itself non-zero, so the generated value is too.
+        fn bounded_nonzero_u64(&mut self, min: NonZeroU64, max: NonZeroU64) -> NonZeroU64 {
+            let span = max.get() - min.get() + 1;
+            min.saturating_add(self.next_u8() as u64 % span)
+        }
+
+        fn bounded_nonzero_usize(&mut self, min: NonZeroU64, max: NonZeroU64) -> NonZeroUsize {
+            let generated = self.bounded_nonzero_u64(min, max);
+            NonZeroUsize::try_from(generated)
+                .assured("the generated bound stays inside this generator's u8-derived span")
         }
 
         /// A generated name of whatever kind the position needs.
@@ -643,7 +659,7 @@ mod tests {
                 if g.bool() {
                     let mode = match g.next_u8() % 3 {
                         0 => KafkaIngestMode::AckParallel {
-                            max: g.bounded_u64(1, 1024),
+                            max: g.bounded_nonzero_u64(nonzero!(1u64), nonzero!(1024u64)),
                             batch_timeout: format!("{}ms", g.bounded_u64(1, 1_000)),
                             timeout: format!("{}s", g.bounded_u64(1, 300)),
                             retry_policy: RetryPolicy {
@@ -671,7 +687,7 @@ mod tests {
                                 client: g.name(),
                                 topic: g.name(),
                                 offset_mode: KafkaOffsetMode::ConsumerGroup(g.name()),
-                                instances: 1,
+                                instances: nonzero!(1u64),
                                 mode,
                                 quiesce: IngestQuiesceMode::Suspend,
                             },
@@ -688,7 +704,7 @@ mod tests {
                                 client: g.name(),
                                 topic: g.name(),
                                 subscription: g.name(),
-                                instances: 1,
+                                instances: nonzero!(1u64),
                                 mode: match mode {
                                     KafkaIngestMode::AckParallel {
                                         max,
@@ -727,7 +743,7 @@ mod tests {
                         source: IngestSource::RabbitMq {
                             client: g.name(),
                             queue: g.name(),
-                            instances: 1,
+                            instances: nonzero!(1u64),
                             mode: RabbitMqIngestMode::AckSequential {
                                 timeout: format!("{}s", g.bounded_u64(1, 300)),
                                 retry_policy: RetryPolicy {
@@ -761,7 +777,7 @@ mod tests {
             7 => Model::Relay(CreateRelay {
                 name: g.name(),
                 schema: g.name(),
-                buffer: g.bounded_u64(1, 1024) as usize,
+                buffer: g.bounded_nonzero_usize(nonzero!(1u64), nonzero!(1024u64)),
                 branching: nervix_models::RelayBranching::unbranched(),
                 materialized_state: None,
             }),
@@ -835,7 +851,7 @@ mod tests {
                         source: IngestSource::Mqtt {
                             client: g.name(),
                             topic: g.ident().as_str().to_string(),
-                            instances: 1,
+                            instances: nonzero!(1u64),
                             mode: MqttIngestMode::NoAckSequential {
                                 session: MqttSession::Clean,
                                 qos: MqttQos::AtMostOnce,
@@ -1009,7 +1025,7 @@ mod tests {
                     client: g.name(),
                     subject: g.name(),
                     queue_group: g.name(),
-                    instances: g.bounded_u64(1, 10),
+                    instances: g.bounded_nonzero_u64(nonzero!(1u64), nonzero!(10u64)),
                     mode: NatsIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::Drop,
                 },
@@ -1189,7 +1205,7 @@ mod tests {
                     IngestSource::Sqs {
                         client: g.name(),
                         queue: g.name(),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: SqsIngestMode::AckSequential {
                             timeout: format!("{}s", g.bounded_u64(1, 300)),
                             retry_policy: RetryPolicy {
@@ -1259,7 +1275,19 @@ mod tests {
             ("CREATE INGESTOR i FROM MQTT c TOPIC t QOS ", "mqtt_qos"),
             (
                 "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES ",
-                "integer_literal",
+                "max_instances",
+            ),
+            (
+                "CREATE RELAY r SCHEMA s UNBRANCHED CAPACITY ",
+                "relay_capacity",
+            ),
+            (
+                "CREATE PLACEMENT p FROM a TO b REQUIRE COLOCATION RANK ",
+                "placement_rank",
+            ),
+            (
+                "CREATE WASM PROCESSOR w FROM r USING RESOURCE res FILE 'g.wasm' MAX FUEL ",
+                "max_fuel",
             ),
         ] {
             let suggestions = suggest_statement(input, input.len());
@@ -1635,7 +1663,9 @@ mod tests {
             parsed,
             Statement::AlterRelay(AlterRelay {
                 relay: RelayName::try_from("notifications").expect("valid relay name"),
-                operations: vec![AlterRelayOperation::SetCapacity { capacity: 32 }],
+                operations: vec![AlterRelayOperation::SetCapacity {
+                    capacity: nonzero!(32usize)
+                }],
             })
         );
     }

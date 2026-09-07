@@ -4,6 +4,7 @@ mod stored;
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeSet, VecDeque},
+    num::NonZeroU64,
     path::Path,
     str::FromStr,
     sync::Arc as StdArc,
@@ -33,11 +34,11 @@ use nervix_models::{
     CreateWireSchema, DomainName, DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType,
     Expression, FieldName, IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
     MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-    ModelChangeAspect, ModelKind, ModelName, MqttIngestMode, OtelAggregationTemporality,
-    OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType,
-    PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode, ProcessorOutput,
-    ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, ScheduledNodes,
-    SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaDefinition,
+    ModelChangeAspect, ModelKind, ModelName, OtelAggregationTemporality, OtelMetricKind,
+    OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementName,
+    PlacementPolicy, PlacementRuntimeNode, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
+    RelayName, RouteConstruction, ScheduledNode, ScheduledNodes, SchemaField, SchemaName,
+    SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -2090,16 +2091,7 @@ impl DomainState {
                     )?;
                 }
                 Model::WasmProcessor(processor) => {
-                    if processor.limits.max_fuel == 0 {
-                        return Err(Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: "WASM processor MAX FUEL must be greater than zero".to_string(),
-                        }));
-                    }
-                    if processor.limits.max_memory_bytes == 0
-                        || usize::try_from(processor.limits.max_memory_bytes).is_err()
-                    {
+                    if usize::try_from(processor.limits.max_memory_bytes.get()).is_err() {
                         return Err(Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
                             identifier: identifier.as_str().to_string(),
@@ -3227,7 +3219,7 @@ pub struct PlacementRulePlan {
     pub from: Vec<ModelName>,
     pub to: Vec<ModelName>,
     pub policy: PlacementPolicy,
-    pub rank: Option<u64>,
+    pub rank: Option<NonZeroU64>,
     pub endpoint_pairs: Vec<PlacementEndpointPairPlan>,
     pub claims: Vec<PlacementRuleClaimPlan>,
 }
@@ -3319,7 +3311,7 @@ struct PlacementEndpointAnalysis {
 struct PlacementClaim {
     rule: PlacementName,
     policy: PlacementPolicy,
-    rank: Option<u64>,
+    rank: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -3984,8 +3976,8 @@ fn placement_materialized_relays(model: &Model) -> Vec<&RelayName> {
     relays
 }
 
-fn placement_rank_key(rank: Option<u64>) -> (u8, u64) {
-    rank.map_or((1, 0), |rank| (0, rank))
+fn placement_rank_key(rank: Option<NonZeroU64>) -> (u8, u64) {
+    rank.map_or((1, 0), |rank| (0, rank.get()))
 }
 
 fn registry_key_cmp(left: &RegistryKey, right: &RegistryKey) -> Ordering {
@@ -5024,36 +5016,14 @@ fn validate_ingestor_source(
         }
         nervix_models::IngestQuiesceMode::Suspend | nervix_models::IngestQuiesceMode::Drop => {}
     }
-    if let IngestSource::Mqtt {
-        topic,
-        instances,
-        mode,
-        ..
-    } = &ingestor.source
+    if let IngestSource::Mqtt { topic, .. } = &ingestor.source
+        && topic.is_empty()
     {
-        if topic.is_empty() {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "MQTT topic filter must not be empty".to_string(),
-            }));
-        }
-        if *instances == 0 {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "MQTT instances must be greater than 0".to_string(),
-            }));
-        }
-        if let MqttIngestMode::AckParallel { max, .. } = mode
-            && *max == 0
-        {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "MQTT mode MAX must be greater than 0".to_string(),
-            }));
-        }
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "MQTT topic filter must not be empty".to_string(),
+        }));
     }
     Ok(())
 }
@@ -5122,13 +5092,6 @@ fn validate_emitter_publishing_contract(
         )));
     }
 
-    if let Some(window) = emitter.publishing_mode.ack_window()
-        && window.max_in_flight() == 0
-    {
-        return Err(invalid(
-            "MODE ACK PARALLEL MAX must be greater than zero".to_string(),
-        ));
-    }
     if let Some(timeout) = emitter.publishing_mode.ack_timeout() {
         let timeout = humantime::parse_duration(timeout)
             .map_err(|error| invalid(format!("invalid MODE ACK TIMEOUT '{timeout}': {error}")))?;
@@ -5140,17 +5103,6 @@ fn validate_emitter_publishing_contract(
     }
 
     match emitter.sink.as_ref() {
-        EmitSink::ClickHouse { max_batch, .. }
-        | EmitSink::Postgres { max_batch, .. }
-        | EmitSink::MySql { max_batch, .. }
-        | EmitSink::MongoDb { max_batch, .. }
-            if *max_batch == 0 =>
-        {
-            return Err(invalid(format!(
-                "{} WITH MAX BATCH must be greater than zero",
-                emitter.sink.transport_label()
-            )));
-        }
         EmitSink::Sqs {
             queue, fifo_group, ..
         } => {
@@ -5559,15 +5511,6 @@ fn validate_branch_model(
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
     parse_branch_ttl(domain, identifier, &branch.ttl)?;
-    if let Some(eviction) = &branch.eviction
-        && eviction.max_instances() == 0
-    {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "branch MAX INSTANCES must be greater than zero".to_string(),
-        }));
-    }
     ensure_branch_schema_exists(domain, identifier, models, branch)
 }
 
@@ -9313,7 +9256,7 @@ fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> ArrowDataType {
                 arrow_data_type_for_parse_as(element),
                 false,
             )),
-            i32::try_from(*len).verified(
+            i32::try_from(len.get()).verified(
                 "the schema parser rejects an array length that does not fit an Arrow fixed-size \
                  list",
             ),
@@ -11798,6 +11741,7 @@ fn ensure_drop_targets_are_not_in_use(
 mod tests {
     use std::{
         fs,
+        num::NonZeroU64,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -11832,6 +11776,7 @@ mod tests {
         SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName,
         WireSchemaField, WireSchemaName,
     };
+    use nonzero_ext::nonzero;
     use rstest::rstest;
 
     #[cfg(feature = "testing")]
@@ -12298,7 +12243,7 @@ mod tests {
                 offset_mode: KafkaOffsetMode::ConsumerGroup(
                     ConsumerGroupName::parse("cg").expect("valid consumer group"),
                 ),
-                instances: 1,
+                instances: nonzero!(1u64),
                 mode: KafkaIngestMode::AckSequential {
                     timeout: "30s".to_string(),
                     retry_policy: nervix_models::RetryPolicy {
@@ -12318,7 +12263,7 @@ mod tests {
         Model::Relay(CreateRelay {
             name: RelayName::parse(name).expect("valid identifier"),
             schema: SchemaName::parse(schema).expect("valid identifier"),
-            buffer: 1,
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         })
@@ -12352,7 +12297,7 @@ mod tests {
         Model::Relay(CreateRelay {
             name: RelayName::parse(name).expect("valid identifier"),
             schema: SchemaName::parse(schema).expect("valid identifier"),
-            buffer: 1,
+            buffer: nonzero!(1usize),
             branching: RelayBranching::branched_by(branch_name_for_relay(name)),
             materialized_state: Some(MaterializedRelayState::LastByTimestamp),
         })
@@ -12392,8 +12337,8 @@ mod tests {
             resource_version: Some(1),
             file: "processors/filter_even.wasm".to_string(),
             limits: nervix_models::WasmProcessorLimits {
-                max_fuel: 1_000_000_000,
-                max_memory_bytes: 64 * 1024 * 1024,
+                max_fuel: nonzero!(1_000_000_000u64),
+                max_memory_bytes: nonzero!(67_108_864u64),
             },
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
@@ -12735,23 +12680,6 @@ mod tests {
         .expect_err("zero confirmation timeout must be rejected");
         assert!(format!("{error:#}").contains("ACK TIMEOUT must be greater than zero"));
 
-        emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
-            window: EmitterAckWindow::Parallel { max: 0 },
-            ack_timeout: "1s".to_string(),
-            retry_policy: RetryPolicy {
-                backoff: "10ms".to_string(),
-                max_backoff: "1s".to_string(),
-            },
-        };
-        let error = validate_emitter_publishing_contract(
-            &domain,
-            &ModelName::from(&emitter.name),
-            &models,
-            &emitter,
-        )
-        .expect_err("zero confirmation windows must be rejected");
-        assert!(format!("{error:#}").contains("PARALLEL MAX must be greater than zero"));
-
         emitter.publishing_mode = EmitterPublishingMode::MqttQos0 {
             retry_policy: RetryPolicy {
                 backoff: "10ms".to_string(),
@@ -12800,32 +12728,6 @@ mod tests {
         )
         .expect_err("FIFO GROUP on a standard queue must be rejected");
         assert!(format!("{error:#}").contains("requires a queue name ending in .fifo"));
-
-        *emitter.sink = EmitSink::ClickHouse {
-            client: named("clickhouse_main"),
-            table: named("events"),
-            values: Vec::new(),
-            max_batch: 0,
-            flush_each: "IMMEDIATE".to_string(),
-        };
-        emitter.encode_using_codec = None;
-        emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-            retry_policy: RetryPolicy {
-                backoff: "10ms".to_string(),
-                max_backoff: "1s".to_string(),
-            },
-        };
-        let error = validate_emitter_publishing_contract(
-            &domain,
-            &ModelName::from(&emitter.name),
-            &models,
-            &emitter,
-        )
-        .expect_err("zero database batch limits must be rejected");
-        assert!(
-            format!("{error:#}").contains("CLICKHOUSE WITH MAX BATCH must be greater than zero"),
-            "unexpected validation error: {error:#}"
-        );
     }
 
     fn otel_mapping(key: &str) -> OtelValueMapping {
@@ -13170,7 +13072,7 @@ mod tests {
         from: &[&str],
         to: &[&str],
         policy: PlacementPolicy,
-        rank: Option<u64>,
+        rank: Option<NonZeroU64>,
     ) -> Model {
         Model::Placement(
             CreatePlacement::new(
@@ -13520,7 +13422,9 @@ mod tests {
                 &domain,
                 AlterRelay {
                     relay: named("notifications"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                    operations: vec![AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(5usize),
+                    }],
                 },
             )
             .expect("alter should succeed");
@@ -13541,7 +13445,7 @@ mod tests {
         let Model::Relay(stored_relay) = stored else {
             panic!("stored model should be a relay");
         };
-        assert_eq!(stored_relay.buffer, 5);
+        assert_eq!(stored_relay.buffer, nonzero!(5usize));
 
         let graph = registry
             .active_graph(&domain)
@@ -13552,7 +13456,7 @@ mod tests {
         let Model::Relay(graph_relay) = node.config.as_ref() else {
             panic!("graph node should contain relay config");
         };
-        assert_eq!(graph_relay.buffer, 5);
+        assert_eq!(graph_relay.buffer, nonzero!(5usize));
 
         let _ = fs::remove_dir_all(path);
     }
@@ -13577,7 +13481,9 @@ mod tests {
                 &domain,
                 &[RegistryMutation::AlterRelay(AlterRelay {
                     relay: named("notifications"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 1 }],
+                    operations: vec![AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(1usize),
+                    }],
                 })],
             )
             .expect("no-op alter should plan");
@@ -13590,7 +13496,9 @@ mod tests {
                 &domain,
                 &[RegistryMutation::AlterRelay(AlterRelay {
                     relay: named("notifications"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                    operations: vec![AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(5usize),
+                    }],
                 })],
             )
             .expect("capacity alter should plan");
@@ -13639,7 +13547,9 @@ mod tests {
                     }),
                     RegistryMutation::AlterRelay(AlterRelay {
                         relay: named("notifications"),
-                        operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                        operations: vec![AlterRelayOperation::SetCapacity {
+                            capacity: nonzero!(5usize),
+                        }],
                     }),
                 ],
             )
@@ -13875,7 +13785,9 @@ mod tests {
             &domain,
             AlterRelay {
                 relay: named("notifications"),
-                operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                operations: vec![AlterRelayOperation::SetCapacity {
+                    capacity: nonzero!(5usize),
+                }],
             },
         );
         assert!(matches!(
@@ -14560,7 +14472,7 @@ mod tests {
             &["ing"],
             &["emit"],
             PlacementPolicy::RequireColocation,
-            Some(1),
+            Some(nonzero!(1u64)),
         ));
 
         registry
@@ -14624,7 +14536,7 @@ mod tests {
                 &["emit"],
                 &["other_ing"],
                 PlacementPolicy::RequireColocation,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
         ]);
 
@@ -14656,14 +14568,14 @@ mod tests {
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::RequireColocation,
-                Some(2),
+                Some(nonzero!(2u64)),
             ),
             placement(
                 "strong_cut",
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::SuggestSeparation,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
         ]);
 
@@ -14710,14 +14622,14 @@ mod tests {
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::RequireColocation,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
             placement(
                 "cut",
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::Neutral,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
         ]);
 
@@ -14781,7 +14693,7 @@ mod tests {
             &["profiles"],
             &["p99_proc"],
             PlacementPolicy::RequireColocation,
-            Some(1),
+            Some(nonzero!(1u64)),
         ));
 
         registry
@@ -15022,7 +14934,7 @@ mod tests {
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::RequireColocation,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
         ]);
         registry
@@ -15125,7 +15037,7 @@ mod tests {
             &["ing"],
             &["emit"],
             PlacementPolicy::RequireColocation,
-            Some(1),
+            Some(nonzero!(1u64)),
         ));
         registry
             .apply_batch(&domain, models)
@@ -15185,7 +15097,7 @@ mod tests {
             &["ing"],
             &["p99_proc"],
             PlacementPolicy::SuggestSeparation,
-            Some(1),
+            Some(nonzero!(1u64)),
         ));
         registry
             .apply_batch(&domain, models)
@@ -15250,7 +15162,7 @@ mod tests {
                         &["ing_b"],
                         &["join"],
                         PlacementPolicy::PreferColocation,
-                        Some(1),
+                        Some(nonzero!(1u64)),
                     ),
                 ],
             )
@@ -15775,7 +15687,7 @@ mod tests {
                     source: IngestSource::Mqtt {
                         client: ClientName::parse("mqtt_main").expect("valid identifier"),
                         topic: "notifications".to_string(),
-                        instances: 2,
+                        instances: nonzero!(2u64),
                         mode: MqttIngestMode::NoAckSequential {
                             session: MqttSession::Clean,
                             qos: MqttQos::AtMostOnce,
@@ -15851,7 +15763,7 @@ mod tests {
                         offset_mode: KafkaOffsetMode::ConsumerGroup(
                             ConsumerGroupName::parse("cg").expect("valid consumer group"),
                         ),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: KafkaIngestMode::NoAckParallel,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -15969,7 +15881,7 @@ mod tests {
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
                                 ConsumerGroupName::parse("cg").expect("valid consumer group"),
                             ),
-                            instances: 1,
+                            instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAckParallel,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         },
@@ -16043,7 +15955,7 @@ mod tests {
                         offset_mode: KafkaOffsetMode::ConsumerGroup(
                             ConsumerGroupName::parse("cg").expect("valid consumer group"),
                         ),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: KafkaIngestMode::NoAckParallel,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -16129,7 +16041,7 @@ mod tests {
                         offset_mode: KafkaOffsetMode::ConsumerGroup(
                             ConsumerGroupName::parse("cg").expect("valid consumer group"),
                         ),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: KafkaIngestMode::NoAckParallel,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -17245,7 +17157,7 @@ mod tests {
                             name: FieldName::parse("window").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::Array {
                                 element: Box::new(nervix_models::ParseAsType::F32),
-                                len: 2,
+                                len: nonzero!(2u32),
                             },
                             optional: false,
                             sensitive: false,
@@ -17257,7 +17169,7 @@ mod tests {
                             name: FieldName::parse("window").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::Array {
                                 element: Box::new(nervix_models::ParseAsType::F32),
-                                len: 3,
+                                len: nonzero!(3u32),
                             },
                             optional: false,
                             sensitive: false,
@@ -17802,7 +17714,7 @@ mod tests {
                             client: named("broker_in_2"),
                             topic: named("notifications"),
                             offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
-                            instances: 1,
+                            instances: nonzero!(1u64),
                             mode: KafkaIngestMode::AckSequential {
                                 timeout: "30s".to_string(),
                                 retry_policy: nervix_models::RetryPolicy {
