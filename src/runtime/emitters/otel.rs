@@ -285,7 +285,7 @@ impl OtelEmitter {
         let client = match Self::transport_from_config(config) {
             Ok(transport) => Some(OtelClient {
                 transport,
-                fault_injector: context.runtime.otel_client_faults.clone(),
+                fault_injector: context.runtime.inner.otel_client_faults.clone(),
                 emitter: context.emitter.clone(),
             }),
             Err(error) => {

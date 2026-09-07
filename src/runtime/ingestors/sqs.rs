@@ -37,7 +37,7 @@ impl SqsIngestor {
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
         let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -129,7 +129,7 @@ impl SqsIngestor {
                 internal_processor_error_policies(ingestor.general_error_policy.clone());
             let task_timestamp_source = ingestor.timestamp_source.clone();
             let task_queue = queue.clone();
-            let task_events = runtime.events.clone();
+            let task_events = runtime.events().clone();
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
@@ -158,7 +158,7 @@ impl SqsIngestor {
                     {
                         break;
                     }
-                    if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                    if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                         continue;
                     }
                     if task_quiesce.should_suspend_intake() {
@@ -363,7 +363,7 @@ impl SqsIngestor {
             tasks.push(task);
         }
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,

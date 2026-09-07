@@ -42,7 +42,7 @@ impl KafkaIngestor {
         kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
     ) -> Result<(), RuntimeError> {
         let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -165,7 +165,7 @@ impl KafkaIngestor {
             let task_domain = domain.clone();
             let task_ingestor = ingestor.name.clone();
             let task_topic = topic.clone();
-            let task_events = runtime.events.clone();
+            let task_events = runtime.events().clone();
             let mut shutdown_rx = shutdown_tx.subscribe();
             let rebalance_tx = rebalance_tx.clone();
             let watcher = tokio::spawn(async move {
@@ -311,7 +311,7 @@ impl KafkaIngestor {
             let task_ingestor = ingestor.name.clone();
             let task_timestamp_source = ingestor.timestamp_source.clone();
             let task_topic = topic.clone();
-            let task_events = runtime.events.clone();
+            let task_events = runtime.events().clone();
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
@@ -373,7 +373,7 @@ impl KafkaIngestor {
                     {
                         break;
                     }
-                    if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                    if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                         continue;
                     }
                     if task_quiesce.should_suspend_intake() {
@@ -424,6 +424,7 @@ impl KafkaIngestor {
                     }
                     if let Some(state) = task_kafka_offset_state.as_ref() {
                         let current_start_version = task_runtime
+                            .inner
                             .domains
                             .get(&task_domain)
                             .map(|domain_state| domain_state.start_version)
@@ -1214,7 +1215,7 @@ impl KafkaIngestor {
             tasks.push(task);
         }
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
