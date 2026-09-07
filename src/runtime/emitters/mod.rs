@@ -2721,7 +2721,7 @@ impl SinkEmitter {
                 Err((reason, acks)) => {
                     context.runtime.handle_general_error_for_acks(
                         &context.domain,
-                        "emitter",
+                        ModelKind::Emitter,
                         &context.emitter,
                         &context.error_policies,
                         std::iter::once(&acks),
@@ -2741,7 +2741,7 @@ impl SinkEmitter {
                     .runtime
                     .handle_structured_message_error(MessageErrorHandling {
                         domain: &context.domain,
-                        node_kind: "emitter",
+                        node_kind: ModelKind::Emitter,
                         node: &ModelName::from(&context.emitter),
                         source_route: None,
                         policy: &context.error_policies.message,
@@ -3027,7 +3027,7 @@ async fn finish_rejected_records(
                     .runtime
                     .handle_structured_message_error(MessageErrorHandling {
                         domain: &context.domain,
-                        node_kind: "emitter",
+                        node_kind: ModelKind::Emitter,
                         node: &ModelName::from(&context.emitter),
                         source_route: None,
                         policy: &context.error_policies.message,
@@ -3234,12 +3234,17 @@ impl EmitterTask {
         let mut domain_work_cancel_rx = shutdown_tx.subscribe();
         let (work_cancel, mut work_cancel_rx) = watch::channel(false);
         let task_work_cancel = work_cancel.clone();
-        let quiesce_counters = runtime.node_quiesce_counters(domain, &emitter.name);
+        let quiesce_counters =
+            runtime.node_quiesce_counters(domain, NodeRef::new(ModelKind::Emitter, &emitter.name));
         let force_flush = runtime.force_flush_participant(domain, quiesce_counters.clone());
         let emitter_buffer_count = runtime
             .inner
             .emitter_buffers
-            .entry(RuntimeKey::new(domain.clone(), emitter.name.clone()))
+            .entry(DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Emitter,
+                emitter.name.clone(),
+            ))
             .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
             .clone();
         let buffered_messages =
@@ -3361,7 +3366,7 @@ impl EmitterTask {
                         context.report_flush_error(task_sink.label(), &reason);
                         runtime.handle_internal_processor_error_for_acks(
                             &task_domain,
-                            "emitter",
+                            ModelKind::Emitter,
                             &task_emitter,
                             &task_error_policies,
                             error.acks(),
@@ -4152,7 +4157,7 @@ impl EmitterBatchContext<'_> {
                 let (message, batch) = *error;
                 self.runtime.handle_general_error_for_acks(
                     self.domain,
-                    "emitter",
+                    ModelKind::Emitter,
                     self.emitter,
                     self.error_policies,
                     batch.acks.iter(),
@@ -4168,7 +4173,7 @@ impl EmitterBatchContext<'_> {
             self.runtime
                 .handle_structured_message_error(MessageErrorHandling {
                     domain: self.domain,
-                    node_kind: "emitter",
+                    node_kind: ModelKind::Emitter,
                     node: &ModelName::from(self.emitter),
                     source_route: None,
                     policy: &self.error_policies.message,
@@ -4217,7 +4222,7 @@ impl EmitterBatchContext<'_> {
             Err(error) => {
                 self.runtime.handle_internal_processor_error_for_acks(
                     self.domain,
-                    "emitter",
+                    ModelKind::Emitter,
                     self.emitter,
                     self.error_policies,
                     dependency_error_acks.iter(),
@@ -4268,7 +4273,7 @@ impl EmitterBatchContext<'_> {
                     Err(error) => {
                         self.runtime.handle_general_error_for_acks(
                             self.domain,
-                            "emitter",
+                            ModelKind::Emitter,
                             self.emitter,
                             self.error_policies,
                             error.acks.iter(),
@@ -4287,7 +4292,7 @@ impl EmitterBatchContext<'_> {
                 Err(error) => {
                     self.runtime.handle_general_error_for_acks(
                         self.domain,
-                        "emitter",
+                        ModelKind::Emitter,
                         self.emitter,
                         self.error_policies,
                         std::iter::empty::<&AckSet>(),
@@ -4323,7 +4328,7 @@ impl EmitterBatchContext<'_> {
                 self.runtime
                     .handle_planned_message_errors(
                         self.domain,
-                        "emitter",
+                        ModelKind::Emitter,
                         self.emitter,
                         self.error_policies,
                         plan.message_errors,
@@ -4337,7 +4342,7 @@ impl EmitterBatchContext<'_> {
                     Err(error) => {
                         self.runtime.handle_general_error_for_acks(
                             self.domain,
-                            "emitter",
+                            ModelKind::Emitter,
                             self.emitter,
                             self.error_policies,
                             std::iter::empty::<&AckSet>(),
@@ -4354,7 +4359,7 @@ impl EmitterBatchContext<'_> {
             Err(error) => {
                 self.runtime.handle_general_error_for_acks(
                     self.domain,
-                    "emitter",
+                    ModelKind::Emitter,
                     self.emitter,
                     self.error_policies,
                     error.acks.iter(),
@@ -4393,7 +4398,7 @@ impl EmitterBatchContext<'_> {
             Err(error) => {
                 self.runtime.handle_general_error_for_acks(
                     self.domain,
-                    "emitter",
+                    ModelKind::Emitter,
                     self.emitter,
                     self.error_policies,
                     error.acks.iter(),
@@ -4405,7 +4410,7 @@ impl EmitterBatchContext<'_> {
         self.runtime
             .handle_planned_message_errors(
                 self.domain,
-                "emitter",
+                ModelKind::Emitter,
                 self.emitter,
                 self.error_policies,
                 plan.message_errors,

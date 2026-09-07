@@ -37,7 +37,7 @@ use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalog, RestCatalogBuilder,
 };
 use iceberg_storage_opendal::OpenDalStorageFactory;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use mongodb::{
     Client as MongoDbClient,
     bson::{Bson as MongoDbBson, Document as MongoDbDocument, doc as mongodb_doc},
@@ -3020,15 +3020,52 @@ async fn given_entity_gate_pause(world: &mut ScenarioWorld, domain: String) {
     world.runtime_test_hooks.pause_entity_gate(domain);
 }
 
+/// How long a gated cluster operation is given to engage its entity gates.
+///
+/// The wait also ends the moment the command it gates finishes, so a command that failed before
+/// engaging reports its own error rather than this deadline. Only genuine slowness can reach the
+/// deadline, which is why it is generous: engaging a gate on a three-node cluster runs a schedule
+/// through consensus while the rest of the suite competes for the machine.
+const ENTITY_GATE_PAUSE_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[then(expr = "the entity gate pause for domain {string} is reached")]
 async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        world.runtime_test_hooks.wait_for_entity_gate_pause(&domain),
-    )
-    .await
-    .expect("entity gate did not reach the armed pause");
+    let hooks = world.runtime_test_hooks.clone();
+    let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
+    loop {
+        tokio::task::consume_budget().await;
+        if tokio::time::timeout(
+            Duration::from_millis(50),
+            hooks.wait_for_entity_gate_pause(&domain),
+        )
+        .await
+        .is_ok()
+        {
+            return;
+        }
+        // A gated command that already returned will never engage a gate, so report what it did
+        // instead of waiting out a deadline it can no longer meet.
+        if let Some(background) = world.background_nspl.as_ref()
+            && background.is_finished()
+        {
+            let outcome = world
+                .background_nspl
+                .take()
+                .verified("the branch above already observed the background execution")
+                .await
+                .expect("background NSPL task must not panic");
+            panic!(
+                "entity gate did not reach the armed pause for domain '{domain}': the gated \
+                 command finished first with {outcome:?}"
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "entity gate did not reach the armed pause for domain '{domain}' within \
+             {ENTITY_GATE_PAUSE_TIMEOUT:?}; the gated command is still running"
+        );
+    }
 }
 
 #[when(expr = "the entity gate pause for domain {string} is released")]

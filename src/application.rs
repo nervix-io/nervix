@@ -85,10 +85,10 @@ use nervix_interconnect::{
     EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
     EntityGateReleaseResponse as RemoteEntityGateReleaseResponse,
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
-    EntityReference as RemoteEntityReference, Envelope, IngestorDescribeEnvelope, LocalIdentity,
-    LookupDescribeEnvelope, LookupRequest as RemoteLookupRequest,
-    LookupResponse as RemoteLookupResponse, PeerVerifier, RelayPayload,
-    RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncResponse as RemoteStateSyncResponse,
+    Envelope, IngestorDescribeEnvelope, LocalIdentity, LookupDescribeEnvelope,
+    LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse, PeerVerifier,
+    RelayPayload, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
+    StateSyncResponse as RemoteStateSyncResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
     TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
@@ -104,10 +104,10 @@ use nervix_models::{
     DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
     FieldName, IcebergCatalog, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
     IngestTimestampSource, IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName,
-    LookupQuery, Model, ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction,
-    ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode,
-    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId,
-    ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
+    LookupQuery, Model, ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, NodeRef,
+    ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy, PostgresConflictAction,
+    ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId, ResourceName,
+    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
     ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
     SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp, UploadResource,
     UserName, VhostTlsResource, expression_to_nspl, ingest_quiesce_to_nspl,
@@ -418,7 +418,7 @@ struct EntityGateEngagement<'a> {
     operation_id: u64,
     domain: &'a DomainName,
     relays: &'a [RelayName],
-    affected_entities: &'a [crate::registry::RegistryEntity],
+    affected_entities: &'a [NodeRef],
     purpose: EntityGatePurpose,
     deadline: tokio::time::Instant,
     reason: &'a str,
@@ -3202,7 +3202,7 @@ impl AssignmentRelocation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlannedOwnershipMove {
-    entity: crate::registry::RegistryEntity,
+    entity: NodeRef,
     former_owner: ClusterNodeName,
     destination: ClusterNodeName,
     replicas: Vec<ClusterNodeName>,
@@ -5360,7 +5360,7 @@ impl SessionServiceImpl {
 
         let schedule = self.inner.consensus.current_schedule().await;
         let scheduled_relay = if let Some(domain_schedule) = schedule.domain(domain) {
-            domain_schedule.nodes.get(&PlacementRuntimeNode::new(
+            domain_schedule.nodes.get(&NodeRef::new(
                 ModelKind::Relay,
                 ModelName::from(&describe.relay),
             ))
@@ -6207,7 +6207,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[crate::registry::RegistryEntity],
+        affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
     ) -> EntityDrainStatusEnvelope {
         let status =
@@ -6270,13 +6270,7 @@ impl SessionServiceImpl {
                     operation_id,
                     domain: domain.clone(),
                     relays: relays.to_vec(),
-                    affected_entities: affected_entities
-                        .iter()
-                        .map(|entity| RemoteEntityReference {
-                            kind: entity.kind,
-                            identifier: entity.identifier.clone(),
-                        })
-                        .collect(),
+                    affected_entities: affected_entities.to_vec(),
                     purpose,
                     deadline_millis,
                     reason: reason.to_string(),
@@ -6302,7 +6296,7 @@ impl SessionServiceImpl {
         node_id: &ClusterNodeName,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[crate::registry::RegistryEntity],
+        affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
         deadline: tokio::time::Instant,
     ) -> Result<EntityDrainStatusEnvelope, String> {
@@ -6328,13 +6322,7 @@ impl SessionServiceImpl {
                     correlation_id,
                     domain: domain.clone(),
                     relays: relays.to_vec(),
-                    affected_entities: affected_entities
-                        .iter()
-                        .map(|entity| RemoteEntityReference {
-                            kind: entity.kind,
-                            identifier: entity.identifier.clone(),
-                        })
-                        .collect(),
+                    affected_entities: affected_entities.to_vec(),
                     purpose,
                 }),
             )
@@ -6500,7 +6488,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[crate::registry::RegistryEntity],
+        affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
@@ -6683,7 +6671,7 @@ impl SessionServiceImpl {
         &self,
         gate: &ClusterEntityGate,
         relays: &[RelayName],
-        affected_entities: &[crate::registry::RegistryEntity],
+        affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
         required_live_nodes: &[ClusterNodeName],
         deadline: tokio::time::Instant,
@@ -7764,7 +7752,7 @@ impl SessionServiceImpl {
         let domain_schedule = schedule.domain(domain)?;
         domain_schedule
             .nodes
-            .get(&PlacementRuntimeNode::new(kind, identifier))
+            .get(&NodeRef::new(kind, identifier))
             .cloned()
     }
 
@@ -11678,7 +11666,7 @@ impl SessionServiceImpl {
         };
         let Some(relay_node) = domain_schedule
             .nodes
-            .get(&PlacementRuntimeNode::new(
+            .get(&NodeRef::new(
                 ModelKind::Relay,
                 ModelName::from(&show.relay),
             ))
@@ -13411,10 +13399,10 @@ impl SessionServiceImpl {
                 else {
                     continue;
                 };
-                let Some(client_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
-                    ModelKind::Client,
-                    ModelName::from(client),
-                )) else {
+                let Some(client_node) = domain_schedule
+                    .nodes
+                    .get(&NodeRef::new(ModelKind::Client, ModelName::from(client)))
+                else {
                     continue;
                 };
                 let Model::ClientKafka(client_model) = client_node.config.as_ref() else {
@@ -13455,13 +13443,10 @@ impl SessionServiceImpl {
             return Ok(());
         };
         let mut next_domain_schedule = existing_domain_schedule.clone();
-        let Some(ingestor_node) = next_domain_schedule
-            .nodes
-            .get_mut(&PlacementRuntimeNode::new(
-                ModelKind::Ingestor,
-                ModelName::from(ingestor),
-            ))
-        else {
+        let Some(ingestor_node) = next_domain_schedule.nodes.get_mut(&NodeRef::new(
+            ModelKind::Ingestor,
+            ModelName::from(ingestor),
+        )) else {
             return Ok(());
         };
         let Model::Ingestor(ingestor_model) = ingestor_node.config.as_ref() else {
@@ -13666,16 +13651,16 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
-        let Some(relay_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
-            ModelKind::Relay,
-            ModelName::from(relay),
-        )) else {
+        let Some(relay_node) = domain_schedule
+            .nodes
+            .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
+        else {
             return Ok(None);
         };
         let Model::Relay(ack_model) = relay_node.config.as_ref() else {
             return Err("scheduled relay node has invalid model kind".to_string());
         };
-        let Some(schema_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
+        let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
             ModelKind::Schema,
             ModelName::from(&ack_model.schema),
         )) else {
@@ -13821,17 +13806,17 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
-        let Some(relay_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
-            ModelKind::Relay,
-            ModelName::from(relay),
-        )) else {
+        let Some(relay_node) = domain_schedule
+            .nodes
+            .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
+        else {
             return Ok(None);
         };
         let Model::Relay(relay_model) = relay_node.config.as_ref() else {
             return Err("scheduled relay node has invalid model kind".to_string());
         };
         if let Some(branch_ref) = relay_model.branching.branch() {
-            let Some(branch_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
+            let Some(branch_node) = domain_schedule.nodes.get(&NodeRef::new(
                 ModelKind::Branch,
                 ModelName::from(branch_ref),
             )) else {
@@ -13844,7 +13829,7 @@ impl SessionServiceImpl {
             let Model::Branch(branch) = branch_node.config.as_ref() else {
                 return Err("scheduled branch node has invalid model kind".to_string());
             };
-            let Some(schema_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
+            let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
                 ModelKind::Schema,
                 ModelName::from(&branch.schema),
             )) else {
@@ -13867,7 +13852,7 @@ impl SessionServiceImpl {
         if branching.is_empty() {
             return Ok(None);
         }
-        let Some(schema_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
+        let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
             ModelKind::Schema,
             ModelName::from(&relay_model.schema),
         )) else {
@@ -13934,7 +13919,7 @@ impl SessionServiceImpl {
             if ack_model.materialized_state.is_none() {
                 continue;
             }
-            let Some(schema_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
+            let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
                 ModelKind::Schema,
                 ModelName::from(&ack_model.schema),
             )) else {
@@ -13974,14 +13959,14 @@ impl SessionServiceImpl {
         };
         let Some(lookup_node) = domain_schedule
             .nodes
-            .get(&PlacementRuntimeNode::new(ModelKind::Lookup, name.clone()))
+            .get(&NodeRef::new(ModelKind::Lookup, name.clone()))
         else {
             return Ok(None);
         };
         let Model::Lookup(lookup) = lookup_node.config.as_ref() else {
             return Err("scheduled lookup node has invalid model kind".to_string());
         };
-        let Some(codec_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
+        let Some(codec_node) = domain_schedule.nodes.get(&NodeRef::new(
             ModelKind::Codec,
             ModelName::from(&lookup.decode_using_codec),
         )) else {
@@ -13994,7 +13979,7 @@ impl SessionServiceImpl {
         let Model::Codec(codec) = codec_node.config.as_ref() else {
             return Err("scheduled codec node has invalid model kind".to_string());
         };
-        let Some(schema_node) = domain_schedule.nodes.get(&PlacementRuntimeNode::new(
+        let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
             ModelKind::Schema,
             ModelName::from(&codec.schema),
         )) else {
@@ -14038,7 +14023,7 @@ impl SessionServiceImpl {
         };
         let Some(ingestor_node) = domain_schedule
             .nodes
-            .get(&PlacementRuntimeNode::new(ModelKind::Ingestor, name))
+            .get(&NodeRef::new(ModelKind::Ingestor, name))
         else {
             return Ok(None);
         };
@@ -15498,14 +15483,11 @@ fn format_f64_for_describe(value: f64) -> String {
     }
 }
 
-fn format_placement_runtime_nodes(nodes: &[PlacementRuntimeNode]) -> String {
+fn format_placement_runtime_nodes(nodes: &[NodeRef]) -> String {
     format_placement_runtime_nodes_in_context(nodes, nodes)
 }
 
-fn format_placement_runtime_nodes_in_context(
-    nodes: &[PlacementRuntimeNode],
-    context: &[PlacementRuntimeNode],
-) -> String {
+fn format_placement_runtime_nodes_in_context(nodes: &[NodeRef], context: &[NodeRef]) -> String {
     nodes
         .iter()
         .map(|node| format_placement_runtime_node(node, context))
@@ -15513,10 +15495,7 @@ fn format_placement_runtime_nodes_in_context(
         .join(", ")
 }
 
-fn format_placement_runtime_node(
-    node: &PlacementRuntimeNode,
-    context: &[PlacementRuntimeNode],
-) -> String {
+fn format_placement_runtime_node(node: &NodeRef, context: &[NodeRef]) -> String {
     let kind_collision = context
         .iter()
         .any(|candidate| candidate.identifier == node.identifier && candidate.kind != node.kind);
@@ -15527,7 +15506,7 @@ fn format_placement_runtime_node(
     }
 }
 
-fn placement_rule_runtime_nodes(rule: &PlacementRulePlan) -> Vec<PlacementRuntimeNode> {
+fn placement_rule_runtime_nodes(rule: &PlacementRulePlan) -> Vec<NodeRef> {
     let mut nodes = Vec::new();
     for endpoint in &rule.endpoint_pairs {
         for node in std::iter::once(&endpoint.source)
@@ -15542,10 +15521,7 @@ fn placement_rule_runtime_nodes(rule: &PlacementRulePlan) -> Vec<PlacementRuntim
     nodes
 }
 
-fn placement_rule_endpoint_nodes(
-    rule: &PlacementRulePlan,
-    sources: bool,
-) -> Vec<PlacementRuntimeNode> {
+fn placement_rule_endpoint_nodes(rule: &PlacementRulePlan, sources: bool) -> Vec<NodeRef> {
     let mut nodes = Vec::new();
     for endpoint in &rule.endpoint_pairs {
         let node = if sources {
@@ -15652,7 +15628,7 @@ fn placement_member_model_is_eligible(model: &Model) -> bool {
     }
 }
 
-fn ordered_placement_corridor(endpoint: &PlacementEndpointPairPlan) -> Vec<PlacementRuntimeNode> {
+fn ordered_placement_corridor(endpoint: &PlacementEndpointPairPlan) -> Vec<NodeRef> {
     let longest_witness = endpoint
         .witnesses
         .iter()
@@ -15686,17 +15662,14 @@ fn placement_claim_owner(rules: &[PlacementName]) -> String {
     }
 }
 
-fn placement_group_members_equal(
-    left: &[PlacementRuntimeNode],
-    right: &[PlacementRuntimeNode],
-) -> bool {
+fn placement_group_members_equal(left: &[NodeRef], right: &[NodeRef]) -> bool {
     let right = right.iter().collect::<HashSet<_>>();
     left.len() == right.len() && left.iter().all(|member| right.contains(member))
 }
 
 fn placement_group_host<'a>(
     schedule: Option<&'a nervix_models::DomainSchedule>,
-    members: &[PlacementRuntimeNode],
+    members: &[NodeRef],
 ) -> Option<&'a ClusterNodeName> {
     let schedule = schedule?;
     let group = schedule
@@ -15790,7 +15763,7 @@ fn planned_ownership_moves(
             continue;
         }
         moves.push(PlannedOwnershipMove {
-            entity: crate::registry::RegistryEntity {
+            entity: NodeRef {
                 kind: planned_node.kind,
                 identifier: planned_node.identifier.clone(),
             },
@@ -19096,21 +19069,13 @@ impl Application {
                                 service_for_interconnect.handle_domain_drain_status_response(response);
                             }
                             Envelope::Control(ControlEnvelope::EntityGateRequest(request)) => {
-                                let affected_entities = request
-                                    .affected_entities
-                                    .iter()
-                                    .map(|entity| crate::registry::RegistryEntity {
-                                        kind: entity.kind,
-                                        identifier: entity.identifier.clone(),
-                                    })
-                                    .collect::<Vec<_>>();
                                 let result = service_for_interconnect
                                     .inner.runtime
                                     .engage_entity_gate_operation(
                                         request.operation_id,
                                         &request.domain,
                                         &request.relays,
-                                        &affected_entities,
+                                        &request.affected_entities,
                                         request.purpose,
                                         EntityGateLease {
                                             deadline: tokio::time::Instant::now()
@@ -19138,18 +19103,10 @@ impl Application {
                                 service_for_interconnect.handle_entity_gate_response(response);
                             }
                             Envelope::Control(ControlEnvelope::EntityDrainStatusRequest(request)) => {
-                                let affected_entities = request
-                                    .affected_entities
-                                    .iter()
-                                    .map(|entity| crate::registry::RegistryEntity {
-                                        kind: entity.kind,
-                                        identifier: entity.identifier.clone(),
-                                    })
-                                    .collect::<Vec<_>>();
                                 let status = service_for_interconnect.local_entity_drain_status(
                                         &request.domain,
                                         &request.relays,
-                                        &affected_entities,
+                                        &request.affected_entities,
                                         request.purpose,
                                     );
                                 if status.buffered_relay_batches != 0
@@ -19589,9 +19546,8 @@ mod tests {
     use nervix_models::{
         AckMode, CreateDomain, CreateResource, CreateSchema, CreateStatement, DomainConfig,
         DomainPace, DomainSchedule, DomainState, DomainStatus, KafkaPartitionSchedule, Model,
-        ModelKind, PlacementGroupSchedule, PlacementRuntimeNode, ResourceVersion,
-        ResourceVersionCounter, ResourceVersionStatus, ScheduledNode, SchemaField,
-        SubscriptionLiteral,
+        ModelKind, NodeRef, PlacementGroupSchedule, ResourceVersion, ResourceVersionCounter,
+        ResourceVersionStatus, ScheduledNode, SchemaField, SubscriptionLiteral,
     };
     use nonzero_ext::nonzero;
     use sorted_vec::SortedVec;
@@ -19963,12 +19919,12 @@ mod tests {
         }
     }
 
-    fn placement_member(identifier_raw: &str, kind: ModelKind) -> PlacementRuntimeNode {
-        PlacementRuntimeNode::new(kind, named(identifier_raw))
+    fn placement_member(identifier_raw: &str, kind: ModelKind) -> NodeRef {
+        NodeRef::new(kind, named::<ModelName>(identifier_raw))
     }
 
     fn placement_group(
-        members: Vec<PlacementRuntimeNode>,
+        members: Vec<NodeRef>,
         primary_node: &ClusterNodeName,
     ) -> PlacementGroupSchedule {
         PlacementGroupSchedule {
