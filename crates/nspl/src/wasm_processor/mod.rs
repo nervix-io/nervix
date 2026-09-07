@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use chumsky::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -10,23 +12,18 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection, byte_size_lit,
         filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, lex_input, materialized_state_dependencies, message_error_policy, relay_ref,
-        resource_ref, set_or_where_route_construction, string_lit, suggest_from, tok, u64_value,
-        wasm_processor_name,
+        kw_phrase2, lex_input, materialized_state_dependencies, message_error_policy,
+        nonzero_u64_value, relay_ref, resource_ref, set_or_where_route_construction, string_lit,
+        suggest_from, tok, u64_value, wasm_processor_name,
     },
 };
 
 fn wasm_processor_limits<'src>()
 -> impl Parser<'src, &'src [Token], WasmProcessorLimits, extra::Err<ParseError<'src>>> + Clone {
-    let max_fuel = kw_phrase2(Identifier::Max, Identifier::Fuel)
-        .ignore_then(u64_value())
-        .try_map(|value, span| {
-            if value == 0 {
-                Err(Rich::custom(span, "MAX FUEL must be greater than zero"))
-            } else {
-                Ok(value)
-            }
-        });
+    let max_fuel = kw_phrase2(Identifier::Max, Identifier::Fuel).ignore_then(nonzero_u64_value(
+        "max_fuel",
+        "MAX FUEL must be greater than zero",
+    ));
     let max_memory_bytes = kw_phrase2(Identifier::Max, Identifier::Memory)
         .ignore_then(byte_size_lit())
         .try_map(|value, span| {
@@ -34,11 +31,8 @@ fn wasm_processor_limits<'src>()
                 .parse::<ubyte::ByteUnit>()
                 .verified("byte_size_lit only yields text the ByteUnit parser accepts")
                 .as_u64();
-            if bytes == 0 {
-                Err(Rich::custom(span, "MAX MEMORY must be greater than zero"))
-            } else {
-                Ok(bytes)
-            }
+            NonZeroU64::new(bytes)
+                .ok_or_else(|| Rich::custom(span, "MAX MEMORY must be greater than zero"))
         });
 
     max_fuel
@@ -210,6 +204,8 @@ pub fn suggest_create_wasm_processor(input: &str, cursor: usize) -> Vec<String> 
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -239,8 +235,8 @@ mod tests {
         assert_eq!(parsed.resource.as_str(), "wasm_filters");
         assert_eq!(parsed.resource_version, Some(2));
         assert_eq!(parsed.file, "processors/filter_even.wasm");
-        assert_eq!(parsed.limits.max_fuel, 1_000_000);
-        assert_eq!(parsed.limits.max_memory_bytes, 64 * 1024 * 1024);
+        assert_eq!(parsed.limits.max_fuel, nonzero!(1_000_000u64));
+        assert_eq!(parsed.limits.max_memory_bytes, nonzero!(67_108_864u64));
         assert_eq!(parsed.from.from[0].as_str(), "raw_orders");
         assert_eq!(
             parsed

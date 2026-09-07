@@ -156,6 +156,7 @@ pub fn suggest_create_udf(input: &str, cursor: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use nervix_models::{Model, ParseAsType, Statement};
+    use nonzero_ext::nonzero;
 
     use super::*;
     use crate::statement::{parse_statement, suggest_statement};
@@ -186,7 +187,7 @@ $roto$;";
             udf.arguments[1].ty,
             ParseAsType::Array {
                 element: Box::new(ParseAsType::F64),
-                len: 3,
+                len: nonzero!(3u32),
             }
         );
         assert!(udf.returns.optional);

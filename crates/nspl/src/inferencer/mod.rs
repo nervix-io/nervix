@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -100,18 +102,12 @@ fn tensor_schema<'src>()
         kw(Identifier::Batch).to(InferencerTensorDimension::Batch),
         kw(Identifier::Dynamic).to(InferencerTensorDimension::Dynamic),
         select! { Token::NumberLiteral(raw) => raw }.try_map(|raw, span| {
-            let size = raw.parse::<u32>().map_err(|_| {
+            let size = raw.parse::<NonZeroU32>().map_err(|_| {
                 Rich::custom(
                     span,
                     "tensor dimension must be a positive integer, DYNAMIC, or BATCH",
                 )
             })?;
-            if size == 0 {
-                return Err(Rich::custom(
-                    span,
-                    "tensor dimension must be greater than zero",
-                ));
-            }
             Ok(InferencerTensorDimension::Fixed(size))
         }),
     ));
@@ -265,6 +261,8 @@ pub fn suggest_create_inferencer(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -374,16 +372,16 @@ mod tests {
         assert_eq!(
             parsed.inputs[1].schema.dimensions,
             vec![
-                nervix_models::InferencerTensorDimension::Fixed(3),
-                nervix_models::InferencerTensorDimension::Fixed(224),
-                nervix_models::InferencerTensorDimension::Fixed(224),
+                nervix_models::InferencerTensorDimension::Fixed(nonzero!(3u32)),
+                nervix_models::InferencerTensorDimension::Fixed(nonzero!(224u32)),
+                nervix_models::InferencerTensorDimension::Fixed(nonzero!(224u32)),
             ]
         );
         assert_eq!(
             parsed.inputs[2].schema.dimensions,
             vec![
                 nervix_models::InferencerTensorDimension::Dynamic,
-                nervix_models::InferencerTensorDimension::Fixed(64),
+                nervix_models::InferencerTensorDimension::Fixed(nonzero!(64u32)),
             ]
         );
         assert_eq!(parsed.inputs[3].schema.batch_axis(), Some(1));

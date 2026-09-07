@@ -137,32 +137,31 @@ fn emitter_stop_deadline_elapsed() -> Report<EmitterRuntimeError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrokerPublishingMode {
     NoAck,
-    Ack {
-        max_in_flight: usize,
-        timeout: Duration,
-    },
+    Ack(AckConfirmation),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MqttPublishingMode {
     Qos0,
-    Qos1 {
-        max_in_flight: usize,
-        timeout: Duration,
-    },
-    Qos2 {
-        max_in_flight: usize,
-        timeout: Duration,
-    },
+    Qos1(AckConfirmation),
+    Qos2(AckConfirmation),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NatsPublishingMode {
     Core,
-    JetStream {
-        max_in_flight: usize,
-        timeout: Duration,
-    },
+    JetStream(AckConfirmation),
+}
+
+/// How many publishes may await confirmation at once, and how long each one may take.
+///
+/// `MODE ACK SEQUENTIAL` and `MODE ACK PARALLEL MAX <n>` both name a window of at least one, so
+/// the window is non-zero by construction and no publishing path has to decide what a window of
+/// zero would mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AckConfirmation {
+    max_in_flight: NonZeroUsize,
+    timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -171,13 +170,27 @@ enum CompiledSqsFifoGroup {
     Expression(CompiledProgramWithMaterializedInterest),
 }
 
+/// The publishing behavior of the one transport family a sink belongs to.
+///
+/// `MODE` is checked against the sink before anything else, so the family and the settings it
+/// carries are decided together and travel as one value. Holding them apart, as one option per
+/// family, made "MQTT settings on a Kafka sink" and "no settings at all" representable, and every
+/// sink had to reject both again while starting up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmitterTransportMode {
+    Broker(BrokerPublishingMode),
+    Mqtt(MqttPublishingMode),
+    Nats(NatsPublishingMode),
+    Sqs(SqsPublishingMode),
+    /// `MODE ACK` on an HTTP endpoint sink, where the response is the acknowledgment and there is
+    /// no transport-level publishing mode to carry.
+    Request,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct EmitterPublishingSettings {
     retry_policy: ParsedRetryPolicy,
-    broker_mode: Option<BrokerPublishingMode>,
-    mqtt_mode: Option<MqttPublishingMode>,
-    nats_mode: Option<NatsPublishingMode>,
-    sqs_mode: Option<SqsPublishingMode>,
+    transport: EmitterTransportMode,
 }
 
 impl EmitterPublishingSettings {
@@ -230,100 +243,59 @@ impl EmitterPublishingSettings {
             ));
         }
 
-        let broker_mode = match mode {
-            EmitterPublishingMode::NoAck { .. } => Some(BrokerPublishingMode::NoAck),
-            EmitterPublishingMode::BrokerAck {
-                window,
-                ack_timeout,
-                ..
-            } => {
-                let (max_in_flight, timeout) =
-                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
-                Some(BrokerPublishingMode::Ack {
-                    max_in_flight,
-                    timeout,
-                })
-            }
-            EmitterPublishingMode::MqttQos0 { .. }
-            | EmitterPublishingMode::SqsSingle { .. }
-            | EmitterPublishingMode::SqsBatch { .. }
-            | EmitterPublishingMode::RequestAck { .. } => None,
-            EmitterPublishingMode::MqttQos1 {
-                window,
-                ack_timeout,
-                ..
-            }
-            | EmitterPublishingMode::MqttQos2 {
-                window,
-                ack_timeout,
-                ..
-            }
-            | EmitterPublishingMode::NatsJetStream {
-                window,
-                ack_timeout,
-                ..
-            } => {
-                Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
-                None
-            }
-        };
-        let mqtt_mode = match mode {
-            EmitterPublishingMode::MqttQos0 { .. } => Some(MqttPublishingMode::Qos0),
-            EmitterPublishingMode::MqttQos1 {
-                window,
-                ack_timeout,
-                ..
-            } => {
-                let (max_in_flight, timeout) =
-                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
-                Some(MqttPublishingMode::Qos1 {
-                    max_in_flight,
-                    timeout,
-                })
-            }
-            EmitterPublishingMode::MqttQos2 {
-                window,
-                ack_timeout,
-                ..
-            } => {
-                let (max_in_flight, timeout) =
-                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
-                Some(MqttPublishingMode::Qos2 {
-                    max_in_flight,
-                    timeout,
-                })
-            }
-            _ => None,
-        };
-        let nats_mode = match mode {
-            EmitterPublishingMode::NoAck { .. } if matches!(sink, EmitSink::Nats { .. }) => {
-                Some(NatsPublishingMode::Core)
-            }
-            EmitterPublishingMode::NatsJetStream {
-                window,
-                ack_timeout,
-                ..
-            } => {
-                let (max_in_flight, timeout) =
-                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?;
-                Some(NatsPublishingMode::JetStream {
-                    max_in_flight,
-                    timeout,
-                })
-            }
-            _ => None,
-        };
-        let sqs_mode = match mode {
-            EmitterPublishingMode::SqsSingle { .. } => Some(SqsPublishingMode::Single),
-            EmitterPublishingMode::SqsBatch { .. } => Some(SqsPublishingMode::Batch),
-            _ => None,
-        };
+        let transport =
+            match mode {
+                // A NATS sink publishes through its own core client even without an
+                // acknowledgment, so the shared `NO_ACK` still resolves to the NATS family
+                // rather than the broker one.
+                EmitterPublishingMode::NoAck { .. } if matches!(sink, EmitSink::Nats { .. }) => {
+                    EmitterTransportMode::Nats(NatsPublishingMode::Core)
+                }
+                EmitterPublishingMode::NoAck { .. } => {
+                    EmitterTransportMode::Broker(BrokerPublishingMode::NoAck)
+                }
+                EmitterPublishingMode::BrokerAck {
+                    window,
+                    ack_timeout,
+                    ..
+                } => EmitterTransportMode::Broker(BrokerPublishingMode::Ack(
+                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?,
+                )),
+                EmitterPublishingMode::MqttQos0 { .. } => {
+                    EmitterTransportMode::Mqtt(MqttPublishingMode::Qos0)
+                }
+                EmitterPublishingMode::MqttQos1 {
+                    window,
+                    ack_timeout,
+                    ..
+                } => EmitterTransportMode::Mqtt(MqttPublishingMode::Qos1(
+                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?,
+                )),
+                EmitterPublishingMode::MqttQos2 {
+                    window,
+                    ack_timeout,
+                    ..
+                } => EmitterTransportMode::Mqtt(MqttPublishingMode::Qos2(
+                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?,
+                )),
+                EmitterPublishingMode::NatsJetStream {
+                    window,
+                    ack_timeout,
+                    ..
+                } => EmitterTransportMode::Nats(NatsPublishingMode::JetStream(
+                    Self::parse_confirmation(domain, emitter, window, ack_timeout)?,
+                )),
+                EmitterPublishingMode::SqsSingle { .. } => {
+                    EmitterTransportMode::Sqs(SqsPublishingMode::Single)
+                }
+                EmitterPublishingMode::SqsBatch { .. } => {
+                    EmitterTransportMode::Sqs(SqsPublishingMode::Batch)
+                }
+                EmitterPublishingMode::RequestAck { .. } => EmitterTransportMode::Request,
+            };
         Ok(Self {
             retry_policy,
-            broker_mode,
-            mqtt_mode,
-            nats_mode,
-            sqs_mode,
+            transport,
         })
     }
 
@@ -347,7 +319,7 @@ impl EmitterPublishingSettings {
         emitter: &EmitterName,
         window: &EmitterAckWindow,
         ack_timeout: &str,
-    ) -> Result<(usize, Duration), RuntimeError> {
+    ) -> Result<AckConfirmation, RuntimeError> {
         let timeout = Runtime::parse_runtime_node_duration_setting(
             domain,
             "emitter",
@@ -363,37 +335,49 @@ impl EmitterPublishingSettings {
             ));
         }
         let max_in_flight = match window {
-            EmitterAckWindow::Sequential => 1,
-            EmitterAckWindow::Parallel { max } => (*max).arch_into(),
+            EmitterAckWindow::Sequential => NonZeroUsize::MIN,
+            EmitterAckWindow::Parallel { max } => addressable_count(*max),
         };
-        if max_in_flight == 0 {
-            return Err(Self::invalid_setting(
-                domain,
-                emitter,
-                "parallel acknowledgment window must be at least one",
-            ));
-        }
-        Ok((max_in_flight, timeout))
+        Ok(AckConfirmation {
+            max_in_flight,
+            timeout,
+        })
     }
 
     fn broker_mode(self) -> EmitterRuntimeResult<BrokerPublishingMode> {
-        self.broker_mode
-            .ok_or_else(|| emitter_config_error("emitter sink requires a broker publishing mode"))
+        match self.transport {
+            EmitterTransportMode::Broker(mode) => Ok(mode),
+            _ => Err(emitter_config_error(
+                "emitter sink requires a broker publishing mode",
+            )),
+        }
     }
 
     fn mqtt_mode(self) -> EmitterRuntimeResult<MqttPublishingMode> {
-        self.mqtt_mode
-            .ok_or_else(|| emitter_config_error("MQTT sink requires an MQTT publishing mode"))
+        match self.transport {
+            EmitterTransportMode::Mqtt(mode) => Ok(mode),
+            _ => Err(emitter_config_error(
+                "MQTT sink requires an MQTT publishing mode",
+            )),
+        }
     }
 
     fn nats_mode(self) -> EmitterRuntimeResult<NatsPublishingMode> {
-        self.nats_mode
-            .ok_or_else(|| emitter_config_error("NATS sink requires a NATS publishing mode"))
+        match self.transport {
+            EmitterTransportMode::Nats(mode) => Ok(mode),
+            _ => Err(emitter_config_error(
+                "NATS sink requires a NATS publishing mode",
+            )),
+        }
     }
 
     fn sqs_mode(self) -> EmitterRuntimeResult<SqsPublishingMode> {
-        self.sqs_mode
-            .ok_or_else(|| emitter_config_error("SQS sink requires an SQS publishing mode"))
+        match self.transport {
+            EmitterTransportMode::Sqs(mode) => Ok(mode),
+            _ => Err(emitter_config_error(
+                "SQS sink requires an SQS publishing mode",
+            )),
+        }
     }
 }
 
@@ -565,15 +549,11 @@ impl EmitterPublishBatch {
         })
     }
 
-    fn pending_record_chunks(&self, max_batch: u64) -> EmitterRuntimeResult<Vec<Vec<usize>>> {
-        let max_batch = max_batch.arch_into();
-        if max_batch == 0 {
-            return Err(emitter_config_error(
-                "emitter maximum record batch must be at least one",
-            ));
-        }
-        let pending = self.pending_record_rows();
-        Ok(pending.chunks(max_batch).map(<[usize]>::to_vec).collect())
+    fn pending_record_chunks(&self, max_batch: NonZeroU64) -> Vec<Vec<usize>> {
+        self.pending_record_rows()
+            .chunks(addressable_count(max_batch).get())
+            .map(<[usize]>::to_vec)
+            .collect()
     }
 
     fn pending_record_rows(&self) -> Vec<usize> {
@@ -2549,7 +2529,7 @@ impl SinkEmitter {
                     tokio::task::consume_budget().await;
                     let outcome = {
                         let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
                                 batch_index,
@@ -2578,7 +2558,7 @@ impl SinkEmitter {
                     tokio::task::consume_budget().await;
                     let outcome = {
                         let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
                                 batch_index,
@@ -2608,7 +2588,7 @@ impl SinkEmitter {
                     tokio::task::consume_budget().await;
                     let outcome = {
                         let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
                                 batch_index,
@@ -2638,7 +2618,7 @@ impl SinkEmitter {
                     tokio::task::consume_budget().await;
                     let outcome = {
                         let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
                                 batch_index,
@@ -4418,6 +4398,8 @@ impl EmitterBatchContext<'_> {
 
 #[cfg(test)]
 mod publishing_mode_tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
 
     fn named<N>(raw: &str) -> N
@@ -4451,7 +4433,9 @@ mod publishing_mode_tests {
             &emitter,
             &kafka_sink(),
             &EmitterPublishingMode::BrokerAck {
-                window: EmitterAckWindow::Parallel { max: 17 },
+                window: EmitterAckWindow::Parallel {
+                    max: nonzero!(17u64),
+                },
                 ack_timeout: "3s".to_string(),
                 retry_policy: retry("25ms", "2s"),
             },
@@ -4461,11 +4445,11 @@ mod publishing_mode_tests {
         assert_eq!(settings.retry_policy.backoff, Duration::from_millis(25));
         assert_eq!(settings.retry_policy.max_backoff, Duration::from_secs(2));
         assert_eq!(
-            settings.broker_mode,
-            Some(BrokerPublishingMode::Ack {
-                max_in_flight: 17,
+            settings.transport,
+            EmitterTransportMode::Broker(BrokerPublishingMode::Ack(AckConfirmation {
+                max_in_flight: nonzero!(17usize),
                 timeout: Duration::from_secs(3),
-            })
+            }))
         );
     }
 
@@ -4488,11 +4472,11 @@ mod publishing_mode_tests {
         )
         .expect("valid MQTT mode");
         assert_eq!(
-            mqtt.mqtt_mode,
-            Some(MqttPublishingMode::Qos2 {
-                max_in_flight: 1,
+            mqtt.transport,
+            EmitterTransportMode::Mqtt(MqttPublishingMode::Qos2(AckConfirmation {
+                max_in_flight: nonzero!(1usize),
                 timeout: Duration::from_secs(7),
-            })
+            }))
         );
 
         let nats = EmitterPublishingSettings::parse(
@@ -4503,38 +4487,27 @@ mod publishing_mode_tests {
                 subject: named("events"),
             },
             &EmitterPublishingMode::NatsJetStream {
-                window: EmitterAckWindow::Parallel { max: 23 },
+                window: EmitterAckWindow::Parallel {
+                    max: nonzero!(23u64),
+                },
                 ack_timeout: "11s".to_string(),
                 retry_policy: retry("10ms", "1s"),
             },
         )
         .expect("valid JetStream mode");
         assert_eq!(
-            nats.nats_mode,
-            Some(NatsPublishingMode::JetStream {
-                max_in_flight: 23,
+            nats.transport,
+            EmitterTransportMode::Nats(NatsPublishingMode::JetStream(AckConfirmation {
+                max_in_flight: nonzero!(23usize),
                 timeout: Duration::from_secs(11),
-            })
+            }))
         );
     }
 
     #[test]
-    fn rejects_zero_window_foreign_mode_and_inverted_retry_bounds() {
+    fn rejects_foreign_mode_and_inverted_retry_bounds() {
         let domain = DomainName::try_from("test").expect("valid domain");
         let emitter = named("out");
-        let zero_window = EmitterPublishingSettings::parse(
-            &domain,
-            &emitter,
-            &kafka_sink(),
-            &EmitterPublishingMode::BrokerAck {
-                window: EmitterAckWindow::Parallel { max: 0 },
-                ack_timeout: "3s".to_string(),
-                retry_policy: retry("25ms", "2s"),
-            },
-        )
-        .expect_err("zero window must fail");
-        assert!(zero_window.to_string().contains("must be at least one"));
-
         let foreign = EmitterPublishingSettings::parse(
             &domain,
             &emitter,
@@ -4756,6 +4729,7 @@ mod tests {
         ChannelName, ClientName, CollectionName, CreateSchema, DomainName, EmitterName, ModelName,
         ParseAsType, QueueName, RelayName, SchemaName, SubjectName, TableName, TopicName,
     };
+    use nonzero_ext::nonzero;
 
     use super::*;
 
@@ -5678,7 +5652,7 @@ mod tests {
                     client: ClientName::parse("target").expect("valid name"),
                     table: TableName::parse("target").expect("valid name"),
                     values: Vec::new(),
-                    max_batch: 1,
+                    max_batch: nonzero!(1u64),
                     flush_each: "1s".to_string(),
                 },
                 "clickhouse",
@@ -5689,7 +5663,7 @@ mod tests {
                     table: TableName::parse("target").expect("valid name"),
                     values: Vec::new(),
                     conflict_action: PostgresConflictAction::None,
-                    max_batch: 1,
+                    max_batch: nonzero!(1u64),
                     flush_each: "1s".to_string(),
                 },
                 "postgres",
@@ -5700,7 +5674,7 @@ mod tests {
                     table: TableName::parse("target").expect("valid name"),
                     values: Vec::new(),
                     conflict_action: MySqlConflictAction::None,
-                    max_batch: 1,
+                    max_batch: nonzero!(1u64),
                     flush_each: "1s".to_string(),
                 },
                 "mysql",
@@ -5711,7 +5685,7 @@ mod tests {
                     collection: CollectionName::parse("target").expect("valid name"),
                     values: Vec::new(),
                     conflict_action: MongoDbConflictAction::None,
-                    max_batch: 1,
+                    max_batch: nonzero!(1u64),
                     flush_each: "1s".to_string(),
                 },
                 "mongodb",

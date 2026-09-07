@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -14,20 +16,20 @@ use crate::{
     },
 };
 
-fn positive_usize<'src>()
--> impl Parser<'src, &'src [Token], usize, extra::Err<ParseError<'src>>> + Clone {
+/// The count after `CAPACITY`, parsed straight into `NonZeroUsize` so a relay buffer that could
+/// never hold a message is rejected here rather than by the registry or the runtime.
+fn relay_capacity<'src>()
+-> impl Parser<'src, &'src [Token], NonZeroUsize, extra::Err<ParseError<'src>>> + Clone {
     choice((select! { Token::NumberLiteral(v) => v }, word_raw()))
-        .try_map(|raw, span| {
-            let value = raw
-                .parse::<usize>()
-                .map_err(|_| Rich::custom(span, format!("invalid usize literal '{raw}'")))?;
-            if value == 0 {
-                Err(Rich::custom(span, "capacity must be greater than 0"))
-            } else {
-                Ok(value)
-            }
-        })
         .labelled("relay_capacity")
+        .try_map(|raw: String, span| {
+            raw.parse::<NonZeroUsize>().map_err(|_| {
+                Rich::custom(
+                    span,
+                    format!("invalid relay capacity '{raw}'; expected a positive integer"),
+                )
+            })
+        })
 }
 
 pub fn create_relay_parser<'src>()
@@ -41,7 +43,7 @@ pub fn create_relay_parser<'src>()
         .ignore_then(kw(Identifier::Timestamp))
         .to(MaterializedRelayState::LastByTimestamp);
 
-    let capacity = kw(Identifier::Capacity).ignore_then(positive_usize());
+    let capacity = kw(Identifier::Capacity).ignore_then(relay_capacity());
 
     let branched_tail = kw_phrase2(Identifier::Branched, Identifier::By)
         .ignore_then(branch_ref())
@@ -84,7 +86,7 @@ pub fn alter_relay_parser<'src>()
     let operation = choice((
         kw(Identifier::Set)
             .ignore_then(kw(Identifier::Capacity))
-            .ignore_then(positive_usize())
+            .ignore_then(relay_capacity())
             .map(|capacity| AlterRelayOperation::SetCapacity { capacity }),
         kw(Identifier::Set)
             .ignore_then(kw(Identifier::Schema))
@@ -184,6 +186,8 @@ pub fn suggest_alter_relay(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -202,7 +206,7 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "notifications");
         assert_eq!(parsed.schema.as_str(), "event_schema");
-        assert_eq!(parsed.buffer, 1);
+        assert_eq!(parsed.buffer, nonzero!(1usize));
         assert_eq!(parsed.branching, RelayBranching::unbranched());
         assert_eq!(parsed.materialized_state, None);
     }
@@ -250,7 +254,7 @@ mod tests {
             to_tokens("CREATE RELAY notifications SCHEMA event_schema UNBRANCHED CAPACITY 32;");
         let parsed = parse_create_stream_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.buffer, 32);
+        assert_eq!(parsed.buffer, nonzero!(32usize));
     }
 
     #[test]
@@ -261,7 +265,9 @@ mod tests {
         assert_eq!(parsed.relay.as_str(), "notifications");
         assert_eq!(
             parsed.operations,
-            vec![AlterRelayOperation::SetCapacity { capacity: 32 }]
+            vec![AlterRelayOperation::SetCapacity {
+                capacity: nonzero!(32usize)
+            }]
         );
     }
 
@@ -277,7 +283,9 @@ mod tests {
         assert_eq!(
             parsed.operations,
             vec![
-                AlterRelayOperation::SetCapacity { capacity: 8 },
+                AlterRelayOperation::SetCapacity {
+                    capacity: nonzero!(8usize)
+                },
                 AlterRelayOperation::SetSchema {
                     schema: nervix_models::SchemaName::try_from("event_v2")
                         .expect("valid identifier"),

@@ -1,4 +1,4 @@
-use std::{hash::Hash, time::Duration};
+use std::{hash::Hash, num::NonZeroUsize, time::Duration};
 
 use indexmap::IndexMap;
 use meticulous::OptionExt as _;
@@ -172,9 +172,9 @@ where
         expired
     }
 
-    pub(super) fn evict_lru_to_capacity(&mut self, max_entries: usize) -> Vec<(K, Arc<V>)> {
+    pub(super) fn evict_lru_to_capacity(&mut self, max_entries: NonZeroUsize) -> Vec<(K, Arc<V>)> {
         let mut evicted = Vec::new();
-        while self.entries.len() > max_entries {
+        while self.entries.len() > max_entries.get() {
             let (key, entry) = self
                 .entries
                 .shift_remove_index(0)
@@ -226,6 +226,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
+        num::NonZeroUsize,
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
@@ -312,7 +313,7 @@ mod tests {
         registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
         registry.get_or_create_with("initech".to_string(), timestamp(3, 0), |_| 3);
 
-        let evicted = registry.evict_lru_to_capacity(1);
+        let evicted = registry.evict_lru_to_capacity(NonZeroUsize::MIN);
 
         assert_eq!(
             evicted
@@ -332,7 +333,7 @@ mod tests {
         registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
         registry.get_or_create_with("acme".to_string(), timestamp(3, 0), |_| 1);
 
-        let evicted = registry.evict_lru_to_capacity(1);
+        let evicted = registry.evict_lru_to_capacity(NonZeroUsize::MIN);
 
         assert_eq!(
             evicted

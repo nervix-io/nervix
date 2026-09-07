@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     path::PathBuf,
     sync::{
         Arc as StdArc,
@@ -248,7 +248,7 @@ use window_state::{
 };
 
 #[cfg(test)]
-const STUPID_CHANNEL_CAPACITY_REMOVE_ME: usize = 1;
+const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 /// Chosen operational bound for how many decoded source rows accumulate before an
 /// ingest group executes and becomes one Arrow batch per (relay, branch key). This is
 /// intentionally independent of an NSPL route's flush policy.
@@ -1018,19 +1018,28 @@ fn branch_key_display(key: &Option<BranchKey>) -> &str {
     key.as_ref().map(BranchKey::as_str).unwrap_or("none")
 }
 
+/// A count NSPL configures, narrowed to the width this node addresses memory with.
+///
+/// Both halves of the narrowing hold before it runs: the Models keep these counts non-zero, and
+/// the supported targets address memory at least as wide as the `u64` they are written as.
+fn addressable_count(configured: NonZeroU64) -> NonZeroUsize {
+    NonZeroUsize::new(configured.get().arch_into())
+        .assured("a non-zero configured count is still non-zero at this target's pointer width")
+}
+
 fn kafka_domain_offset_describe_from_schedule(
     topic: &str,
-    instances: u64,
+    instances: NonZeroU64,
     schedule: &KafkaPartitionSchedule,
 ) -> KafkaDomainOffsetDescribe {
     let mut instance_assignments = schedule.instance_assignments.clone();
-    let expected_instances = instances.arch_into();
+    let expected_instances = instances.get().arch_into();
     if instance_assignments.len() < expected_instances {
         instance_assignments.resize(expected_instances, Vec::new());
     }
     KafkaDomainOffsetDescribe {
         topic: topic.to_string(),
-        instances,
+        instances: instances.get(),
         observed_partitions: schedule.observed_partitions.clone(),
         rebalance_epoch: schedule.rebalance_epoch,
         instance_assignments,
@@ -1615,7 +1624,7 @@ struct RelayOwnerTask {
 struct RelayOwnerBranchState {
     registry: RelayRegistry,
     instances: BranchInstanceRegistry<Option<BranchKey>, ()>,
-    capacity: Option<usize>,
+    capacity: Option<NonZeroUsize>,
 }
 
 struct RelayStateTask {
@@ -3255,12 +3264,12 @@ struct RuntimeDomainState {
 
 #[derive(Debug)]
 struct IngestorReadiness {
-    expected_instances: u64,
+    expected_instances: NonZeroU64,
     ready_instances: BTreeSet<u64>,
 }
 
 impl IngestorReadiness {
-    fn new(expected_instances: u64) -> Self {
+    fn new(expected_instances: NonZeroU64) -> Self {
         Self {
             expected_instances,
             ready_instances: BTreeSet::new(),
@@ -3269,7 +3278,7 @@ impl IngestorReadiness {
 
     fn is_ready(&self) -> bool {
         let ready_instances: u64 = self.ready_instances.len().arch_into();
-        self.expected_instances > 0 && ready_instances >= self.expected_instances
+        ready_instances >= self.expected_instances.get()
     }
 }
 
@@ -3650,7 +3659,7 @@ struct ScheduledNodePlacement {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RelayRetention {
     branch_ttl: Option<Duration>,
-    branch_capacity: Option<usize>,
+    branch_capacity: Option<NonZeroUsize>,
 }
 
 impl RelayRetention {
@@ -3705,7 +3714,7 @@ impl RelayRetention {
         let branch_capacity = branch_model
             .eviction
             .as_ref()
-            .map(|eviction| eviction.max_instances().arch_into());
+            .map(|eviction| addressable_count(eviction.max_instances()));
         Ok(Self {
             branch_ttl: Some(branch_ttl),
             branch_capacity,
@@ -9172,7 +9181,7 @@ async fn evict_branch_instance_instances_to_capacity(
     domain: &DomainName,
     ingestor: &IngestorName,
     branch: Option<&BranchName>,
-    max_instances: usize,
+    max_instances: NonZeroUsize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
     for (key, state) in instances.evict_lru_to_capacity(max_instances) {
@@ -10341,7 +10350,7 @@ async fn evict_processor_branch_instances_to_capacity(
     domain: &DomainName,
     processor: impl Into<ModelName>,
     branch: Option<&BranchName>,
-    max_instances: usize,
+    max_instances: NonZeroUsize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
     let processor = processor.into();
@@ -16221,11 +16230,11 @@ impl WindowAggregateAccumulator {
                      histogram config",
                 );
                 Self::LinearHistogram {
-                    buckets: vec![0; config.buckets],
+                    buckets: vec![0; config.buckets.get()],
                     total: 0,
                     min: config.min,
                     max: config.max,
-                    width: (config.max - config.min) / config.buckets as f64,
+                    width: (config.max - config.min) / config.buckets.get() as f64,
                     delay: config.delay,
                     delayed_removals: VecDeque::new(),
                 }

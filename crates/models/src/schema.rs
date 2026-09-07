@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
@@ -384,7 +386,7 @@ pub enum ParseAsType {
     Array {
         #[rkyv(omit_bounds)]
         element: Box<ParseAsType>,
-        len: u32,
+        len: NonZeroU32,
     },
     Vec {
         #[rkyv(omit_bounds)]

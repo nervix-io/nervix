@@ -88,11 +88,14 @@ enum SyslogFrameError {
         source: std::num::ParseIntError,
     },
     #[error("Syslog octet count {length} exceeds max_message_size {maximum}")]
-    OversizedOctetCount { length: usize, maximum: usize },
+    OversizedOctetCount {
+        length: usize,
+        maximum: NonZeroUsize,
+    },
     #[error("Syslog non-transparent frame exceeds max_message_size {maximum}")]
-    OversizedNonTransparentFrame { maximum: usize },
+    OversizedNonTransparentFrame { maximum: NonZeroUsize },
     #[error("Syslog stream frame exceeds max_message_size {maximum}")]
-    OversizedBufferedFrame { maximum: usize },
+    OversizedBufferedFrame { maximum: NonZeroUsize },
     #[error("Syslog TLS requires octet-counting framing")]
     NonOctetTlsFrame,
 }
@@ -319,7 +322,7 @@ impl SyslogIngestor {
                 received = socket.recv_from(&mut datagram) => {
                     let (size, peer_addr) = received
                         .map_err(|source| SyslogListenerError::UdpReceive { source })?;
-                    if size > config.max_message_size {
+                    if size > config.max_message_size.get() {
                         debug!(
                             domain = context.domain.as_str(),
                             ingestor = context.ingestor.as_str(),
@@ -494,7 +497,7 @@ impl SyslogIngestor {
     async fn read_stream_connection(
         mut stream: impl AsyncRead + Unpin,
         peer_addr: SocketAddr,
-        max_message_size: usize,
+        max_message_size: NonZeroUsize,
         allow_non_transparent: bool,
         tx: mpsc::Sender<ReceivedSyslogFrame>,
         quiesce: Arc<IngestorQuiesceControl>,
@@ -620,12 +623,12 @@ impl SyslogIngestor {
 
 struct StreamFrameDecoder {
     bytes: Vec<u8>,
-    max_message_size: usize,
+    max_message_size: NonZeroUsize,
     allow_non_transparent: bool,
 }
 
 impl StreamFrameDecoder {
-    fn new(max_message_size: usize, allow_non_transparent: bool) -> Self {
+    fn new(max_message_size: NonZeroUsize, allow_non_transparent: bool) -> Self {
         Self {
             bytes: Vec::new(),
             max_message_size,
@@ -644,6 +647,7 @@ impl StreamFrameDecoder {
     fn read_capacity(&self) -> Result<usize, SyslogFrameError> {
         let cap = self
             .max_message_size
+            .get()
             .checked_add(MAX_OCTET_COUNT_DIGITS + 1)
             .ok_or(SyslogFrameError::OversizedBufferedFrame {
                 maximum: self.max_message_size,
@@ -694,7 +698,7 @@ impl StreamFrameDecoder {
         let length = prefix
             .parse::<usize>()
             .map_err(|source| SyslogFrameError::InvalidOctetCount { source })?;
-        if length > self.max_message_size {
+        if length > self.max_message_size.get() {
             return Err(SyslogFrameError::OversizedOctetCount {
                 length,
                 maximum: self.max_message_size,
@@ -721,7 +725,7 @@ impl StreamFrameDecoder {
                 .len()
                 .checked_sub(usize::from(self.bytes.last() == Some(&b'\r')))
                 .verified("a trailing carriage return means the buffer holds at least one byte");
-            if pending_payload_size > self.max_message_size {
+            if pending_payload_size > self.max_message_size.get() {
                 return Err(SyslogFrameError::OversizedNonTransparentFrame {
                     maximum: self.max_message_size,
                 });
@@ -733,7 +737,7 @@ impl StreamFrameDecoder {
         } else {
             delimiter
         };
-        if payload_end > self.max_message_size {
+        if payload_end > self.max_message_size.get() {
             return Err(SyslogFrameError::OversizedNonTransparentFrame {
                 maximum: self.max_message_size,
             });
@@ -746,11 +750,13 @@ impl StreamFrameDecoder {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
 
     #[test]
     fn stream_decoder_interleaves_both_rfc6587_framings() {
-        let mut decoder = StreamFrameDecoder::new(128, true);
+        let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
         decoder.extend(b"5 helloalpha\r\n4 test");
         assert_eq!(
             decoder.next_frame().expect("valid frame"),
@@ -769,22 +775,22 @@ mod tests {
 
     #[test]
     fn stream_decoder_rejects_malformed_and_oversized_frames() {
-        let mut malformed = StreamFrameDecoder::new(128, true);
+        let mut malformed = StreamFrameDecoder::new(nonzero!(128usize), true);
         malformed.extend(b"12x payload");
         assert!(malformed.next_frame().is_err());
 
-        let mut oversized_count = StreamFrameDecoder::new(4, true);
+        let mut oversized_count = StreamFrameDecoder::new(nonzero!(4usize), true);
         oversized_count.extend(b"5 hello");
         assert!(oversized_count.next_frame().is_err());
 
-        let mut oversized_line = StreamFrameDecoder::new(4, true);
+        let mut oversized_line = StreamFrameDecoder::new(nonzero!(4usize), true);
         oversized_line.extend(b"hello\n");
         assert!(oversized_line.next_frame().is_err());
     }
 
     #[test]
     fn stream_decoder_limits_octet_count_prefix_to_ten_digits() {
-        let mut decoder = StreamFrameDecoder::new(128, true);
+        let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
         decoder.extend(b"12345678901");
         assert!(decoder.next_frame().is_err());
     }
@@ -792,7 +798,7 @@ mod tests {
     #[test]
     fn stream_decoder_rejects_zero_and_leading_zero_octet_counts() {
         for frame in [b"0 ".as_slice(), b"05 hello".as_slice()] {
-            let mut decoder = StreamFrameDecoder::new(128, true);
+            let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
             decoder.extend(frame);
             assert!(decoder.next_frame().is_err());
         }
@@ -800,7 +806,7 @@ mod tests {
 
     #[test]
     fn stream_decoder_accepts_a_maximum_size_frame_with_split_crlf() {
-        let mut decoder = StreamFrameDecoder::new(5, true);
+        let mut decoder = StreamFrameDecoder::new(nonzero!(5usize), true);
         decoder.extend(b"hello\r");
         assert_eq!(
             decoder.next_frame().expect("trailing CR may await LF"),
@@ -817,7 +823,7 @@ mod tests {
 
     #[test]
     fn stream_decoder_rejects_non_transparent_tls_framing() {
-        let mut decoder = StreamFrameDecoder::new(128, false);
+        let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), false);
         decoder.extend(b"<13>line framed\n");
         assert!(matches!(
             decoder.next_frame(),

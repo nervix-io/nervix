@@ -5,7 +5,7 @@ use std::{
     future::Future,
     io,
     net::SocketAddr,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroU64},
     path::{Component, Path, PathBuf},
     sync::{
         Arc as StdArc,
@@ -536,7 +536,7 @@ impl OnnxTensorMetadata {
                 .zip(&schema.dimensions)
                 .any(|(actual, declared)| match declared {
                     InferencerTensorDimension::Fixed(declared) => {
-                        *actual >= 0 && *actual != i64::from(*declared)
+                        *actual >= 0 && *actual != i64::from(declared.get())
                     }
                     InferencerTensorDimension::Dynamic => *actual >= 0,
                     InferencerTensorDimension::Batch => *actual >= 0,
@@ -3166,7 +3166,7 @@ struct KafkaPartitionWatcherSpec {
     domain: DomainName,
     ingestor: IngestorName,
     topic: String,
-    instances: u64,
+    instances: NonZeroU64,
     client: nervix_models::CreateClientKafka,
 }
 
@@ -13217,7 +13217,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         ingestor: &IngestorName,
         topic: &str,
-        instances: u64,
+        instances: NonZeroU64,
         observed_partitions: Vec<i32>,
     ) -> Result<(), String> {
         let leader = self.consensus.current_leader().await;
@@ -14461,7 +14461,7 @@ fn format_ingestor_describe_output(
         } else if let KafkaOffsetMode::Domain = offset_mode {
             lines.push("kafka observed partitions: -".to_string());
             lines.push("kafka rebalance epoch: 0".to_string());
-            for instance_idx in 0..*instances {
+            for instance_idx in 0..instances.get() {
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
@@ -19329,6 +19329,7 @@ mod tests {
         ResourceVersionCounter, ResourceVersionStatus, ScheduledNode, SchemaField,
         SubscriptionLiteral,
     };
+    use nonzero_ext::nonzero;
     use sorted_vec::SortedVec;
 
     use super::*;
@@ -20556,7 +20557,7 @@ mod tests {
     #[test]
     fn merge_existing_schedule_data_preserves_matching_ingestor_schedule_and_assignment() {
         let domain = DomainName::parse("payments").expect("valid domain");
-        let preserved_schedule = KafkaPartitionSchedule::new(2, vec![0, 1], 7);
+        let preserved_schedule = KafkaPartitionSchedule::new(nonzero!(2u64), vec![0, 1], 7);
         let mut next = DomainSchedule::new(
             domain.clone(),
             vec![ScheduledNode {
@@ -20615,12 +20616,20 @@ mod tests {
             vec![
                 ScheduledNode {
                     effective_branching_schema: None,
-                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(2, vec![0, 1], 3)),
+                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(
+                        nonzero!(2u64),
+                        vec![0, 1],
+                        3,
+                    )),
                     ..scheduled_node("other_ingestor", ModelKind::Ingestor)
                 },
                 ScheduledNode {
                     effective_branching_schema: None,
-                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(1, vec![0], 2)),
+                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(
+                        nonzero!(1u64),
+                        vec![0],
+                        2,
+                    )),
                     ..scheduled_node("ingest_notifications", ModelKind::Client)
                 },
             ],

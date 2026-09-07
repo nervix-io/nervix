@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, IntoStaticStr};
 
@@ -50,7 +52,7 @@ impl QuiesceLevel {
 pub enum DynamicModelUpdate {
     RelayCapacity {
         relay: RelayName,
-        capacity: usize,
+        capacity: NonZeroUsize,
     },
     Processor {
         kind: ModelKind,
@@ -1643,6 +1645,8 @@ fn wire_schema_change_aspects<T>(
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
@@ -1665,7 +1669,7 @@ mod tests {
         CreateRelay {
             name: named("events"),
             schema: named("event"),
-            buffer: 1,
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         }
@@ -1821,7 +1825,7 @@ mod tests {
         let base = relay();
 
         let mut capacity = base.clone();
-        capacity.buffer = 5;
+        capacity.buffer = nonzero!(5usize);
         assert_single_aspect(
             Model::Relay(base.clone()),
             Model::Relay(capacity),
@@ -2391,6 +2395,8 @@ mod tests {
 
 #[cfg(test)]
 mod catch_all_kind_tests {
+    use nonzero_ext::nonzero;
+
     use crate::{
         AckMode, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
         CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateCodec,
@@ -2536,8 +2542,8 @@ mod catch_all_kind_tests {
             resource_version: Some(1),
             file: "processors/guest.wasm".to_string(),
             limits: WasmProcessorLimits {
-                max_fuel: 1_000_000,
-                max_memory_bytes: 64 * 1024 * 1024,
+                max_fuel: nonzero!(1_000_000u64),
+                max_memory_bytes: nonzero!(67_108_864u64),
             },
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
@@ -2565,8 +2571,8 @@ mod catch_all_kind_tests {
             resource_version: Some(1),
             file: "processors/guest.wasm".to_string(),
             limits: WasmProcessorLimits {
-                max_fuel: 1_000_000,
-                max_memory_bytes: 64 * 1024 * 1024,
+                max_fuel: nonzero!(1_000_000u64),
+                max_memory_bytes: nonzero!(67_108_864u64),
             },
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
@@ -2574,7 +2580,7 @@ mod catch_all_kind_tests {
             materialized_state: Vec::new(),
         };
         let mut tightened = base.clone();
-        tightened.limits.max_fuel = 500_000;
+        tightened.limits.max_fuel = nonzero!(500_000u64);
         assert_single_aspect(
             Model::WasmProcessor(base),
             Model::WasmProcessor(tightened),

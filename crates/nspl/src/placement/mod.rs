@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -9,8 +11,8 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, alter_op_separator, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, placement_name, placement_ref,
-        runtime_node_ref, suggest_from, tok, u64_value,
+        into_parse_error, kw, kw_phrase2, lex_input, nonzero_u64_value, placement_name,
+        placement_ref, runtime_node_ref, suggest_from, tok,
     },
 };
 
@@ -55,19 +57,12 @@ fn alter_placement_members<'src>()
 }
 
 fn placement_rank<'src>()
--> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Rank)
-        .ignore_then(u64_value())
-        .try_map(|rank, span| {
-            if rank == 0 {
-                Err(Rich::custom(
-                    span,
-                    "placement RANK 0 is invalid; RANK must be greater than zero",
-                ))
-            } else {
-                Ok(rank)
-            }
-        })
+        .ignore_then(nonzero_u64_value(
+            "placement_rank",
+            "placement RANK 0 is invalid; RANK must be greater than zero",
+        ))
         .boxed()
 }
 
@@ -214,6 +209,7 @@ pub fn suggest_alter_placement(input: &str, cursor: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use nervix_models::{Model, Statement};
+    use nonzero_ext::nonzero;
 
     use super::*;
     use crate::statement::{parse_statement, suggest_statement};
@@ -237,7 +233,7 @@ mod tests {
             vec!["ingest", "enrich"]
         );
         assert_eq!(parsed.policy, PlacementPolicy::RequireColocation);
-        assert_eq!(parsed.rank, Some(1));
+        assert_eq!(parsed.rank, Some(nonzero!(1u64)));
     }
 
     #[test]
@@ -301,10 +297,12 @@ mod tests {
                 policy: PlacementPolicy::PreferColocation
             }
         ));
-        assert!(matches!(
+        assert_eq!(
             alter.operations[1],
-            AlterPlacementOperation::SetRank { rank: 2 }
-        ));
+            AlterPlacementOperation::SetRank {
+                rank: nonzero!(2u64)
+            }
+        );
         assert!(matches!(
             alter.operations[2],
             AlterPlacementOperation::DropRank
