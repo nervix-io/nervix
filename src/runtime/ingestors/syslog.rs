@@ -29,7 +29,6 @@ struct SyslogIngestContext {
     branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     codec: Arc<CompiledCodec>,
     quiesce: Arc<IngestorQuiesceControl>,
-    events: broadcast::Sender<RuntimeEvent>,
 }
 
 struct ReceivedSyslogFrame {
@@ -109,7 +108,7 @@ impl SyslogIngestor {
     ) -> Result<(), RuntimeError> {
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -170,7 +169,6 @@ impl SyslogIngestor {
                     "the runtime registers quiesce control for an ingestor before it starts the \
                      task",
                 ),
-            events: runtime.events.clone(),
         };
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_context = context.clone();
@@ -197,6 +195,7 @@ impl SyslogIngestor {
                 }
                 if task_context
                     .runtime
+                    .inner
                     .ingestor_faults
                     .is_failed(&task_context.ingestor)
                 {
@@ -256,7 +255,7 @@ impl SyslogIngestor {
             );
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -613,7 +612,7 @@ impl SyslogIngestor {
             )
             .await
         {
-            let _ = context.events.send(RuntimeEvent::Error(format!(
+            let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                 "failed to flush Syslog messages for ingestor '{}' in domain '{}': {error}",
                 context.ingestor.as_str(),
                 context.domain.as_str()

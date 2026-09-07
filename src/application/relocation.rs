@@ -131,7 +131,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relocation: Relocation,
     ) -> CommandResult {
-        let Some(_alter_guard) = self.runtime.try_begin_domain_alter(domain) else {
+        let Some(_alter_guard) = self.inner.runtime.try_begin_domain_alter(domain) else {
             return command_error(
                 DomainAlterError::ConcurrentAlter {
                     domain: domain.clone(),
@@ -154,7 +154,7 @@ impl SessionServiceImpl {
             ));
         };
 
-        let current_schedule = self.consensus.current_schedule().await;
+        let current_schedule = self.inner.consensus.current_schedule().await;
         let current_domain_schedule = current_schedule.domain(domain);
         let mut handoff = if let QuiesceLevel::EntityPause = plan.level {
             match self
@@ -172,6 +172,7 @@ impl SessionServiceImpl {
             None
         };
         if let Err(error) = self
+            .inner
             .consensus
             .replace_domain_schedule(domain.clone(), Some(planned_schedule))
             .await
@@ -228,7 +229,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relocation: &Relocation,
     ) -> Result<RelocationPlan, String> {
-        let Some(domain_state) = self.consensus.current_domain(domain).await else {
+        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
             return Err(format!("domain '{}' does not exist", domain.as_str()));
         };
         if let DomainStatus::Paused = domain_state.status {
@@ -237,13 +238,13 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         }
-        let Some(graph) = self.registry.active_graph(domain) else {
+        let Some(graph) = self.inner.registry.active_graph(domain) else {
             return Err(format!(
                 "domain '{}' has no active schedule",
                 domain.as_str()
             ));
         };
-        let cluster_schedule = self.consensus.current_schedule().await;
+        let cluster_schedule = self.inner.consensus.current_schedule().await;
         let Some(current) = cluster_schedule.domain(domain) else {
             return Err(format!(
                 "domain '{}' has no active schedule",
@@ -269,6 +270,7 @@ impl SessionServiceImpl {
             .into_iter()
             .collect::<BTreeSet<_>>();
         let schedulable_nodes = self
+            .inner
             .consensus
             .schedulable_live_voter_ids(live_nodes.iter().cloned())
             .await
@@ -306,7 +308,7 @@ impl SessionServiceImpl {
                 &desired,
                 &relocation.destination,
                 &moved,
-                self.replica_count,
+                self.inner.replica_count,
                 &schedulable_nodes,
                 &live_nodes,
             )
@@ -380,11 +382,12 @@ impl SessionServiceImpl {
         destination: &ClusterNodeName,
         live_nodes: &BTreeSet<ClusterNodeName>,
     ) -> Result<(), String> {
-        let membership = self.consensus.membership_nodes().await;
+        let membership = self.inner.consensus.membership_nodes().await;
         if !membership.contains_key(destination) {
             return Err(format!("node '{destination}' is not a raft member"));
         }
         let live_voters = self
+            .inner
             .consensus
             .live_voter_ids(live_nodes.iter().cloned())
             .await;
@@ -392,6 +395,7 @@ impl SessionServiceImpl {
             return Err(format!("node '{destination}' is not a live raft voter"));
         }
         if self
+            .inner
             .consensus
             .cordoned_node_ids()
             .await
@@ -417,14 +421,14 @@ impl SessionServiceImpl {
             graph.schedule_for_domain_with_mode(
                 domain,
                 &cluster_nodes,
-                self.replica_count,
+                self.inner.replica_count,
                 placement,
-                self.scheduler_mode,
+                self.inner.scheduler_mode,
             )
         }
         #[cfg(not(feature = "testing"))]
         {
-            graph.schedule_for_domain(domain, &cluster_nodes, self.replica_count, placement)
+            graph.schedule_for_domain(domain, &cluster_nodes, self.inner.replica_count, placement)
         }
     }
 }

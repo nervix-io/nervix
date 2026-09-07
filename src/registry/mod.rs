@@ -34,11 +34,11 @@ use nervix_models::{
     CreateWireSchema, DomainName, DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType,
     Expression, FieldName, IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
     MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-    ModelChangeAspect, ModelKind, ModelName, NodeRef, OtelAggregationTemporality,
-    OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType,
-    PlacementGroupSchedule, PlacementName, PlacementPolicy, ProcessorOutput, ProcessorOutputs,
-    QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, ScheduledNodes, SchemaField,
-    SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaDefinition,
+    ModelChangeAspect, ModelKind, ModelName, NodeRef, OtelAggregationTemporality, OtelMetricKind,
+    OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementName,
+    PlacementPolicy, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction,
+    ScheduledNode, ScheduledNodes, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup,
+    VhostName, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{

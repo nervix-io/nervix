@@ -414,7 +414,7 @@ impl Runtime {
         config: &[ClientConfigEntry],
     ) -> Result<ProtobufDescriptorPool, String> {
         let store =
-            self.resource_store.read().clone().ok_or_else(|| {
+            self.inner.resource_store.read().clone().ok_or_else(|| {
                 "protobuf descriptors require an attached resource store".to_string()
             })?;
         let id = self.resolve_resource_id(domain, resource, resource_version, resource.as_str())?;
@@ -501,96 +501,109 @@ impl Runtime {
             .transpose()?
             .map(Arc::new);
         Ok(Self {
-            ingestors: Arc::new(DashMap::default()),
-            ingestor_quiescence: Arc::new(DashMap::default()),
-            ingestors_paused_for_memory_pressure: Arc::new(AtomicBool::new(false)),
-            ingestor_transient_errors: Arc::new(DashMap::default()),
-            ingestor_reconnect_backoffs: Arc::new(DashMap::default()),
-            ingestor_readiness: Arc::new(DashMap::default()),
-            emitter_transient_errors: Arc::new(DashMap::default()),
-            emitter_retry_statuses: Arc::new(DashMap::default()),
-            emitter_confirmation_waits: Arc::new(DashMap::default()),
-            executions: Arc::new(DashMap::default()),
-            message_error_routes: Arc::new(DashMap::default()),
-            compiled_domain_udfs: Arc::new(DashMap::default()),
-            schedule_apply_lock: Arc::new(Mutex::new(())),
-            applied_cluster_revision: Arc::new(AtomicU64::new(u64::MAX)),
-            domain_instantiation_errors: Arc::new(DashMap::default()),
-            domains: Arc::new(DashMap::default()),
-            domain_status_changed,
-            in_flight_by_domain: Arc::new(DashMap::default()),
-            in_flight_by_ingestor: Arc::new(DashMap::default()),
-            generator_activity_by_domain: Arc::new(DashMap::default()),
-            emitter_buffers: Arc::new(DashMap::default()),
-            force_flush_by_domain: Arc::new(DashMap::default()),
-            node_quiesce_counters: Arc::new(DashMap::default()),
-            entity_gate_holds: Arc::new(DashMap::default()),
-            active_domain_alters: Arc::new(DashMap::default()),
-            state_schema_fingerprints: Arc::new(DashMap::default()),
-            domain_graphs: Arc::new(DashMap::default()),
-            endpoint_bindings: Arc::new(DashMap::default()),
-            routed_endpoints: Arc::new(DashMap::default()),
-            relay_boundary_fanouts: Arc::new(DashMap::default()),
-            events,
-            emitter_faults: hooks.emitter_faults,
-            ingestor_faults: hooks.ingestor_faults,
-            otel_client_faults: hooks.otel_client_faults,
-            #[cfg(feature = "testing")]
-            schedule_publication_faults: hooks.schedule_publication_faults,
-            #[cfg(feature = "testing")]
-            transaction_binding_drops: hooks.transaction_binding_drops,
-            #[cfg(feature = "testing")]
-            transaction_commit_pauses: hooks.transaction_commit_pauses,
-            #[cfg(feature = "testing")]
-            entity_gate_pauses: hooks.entity_gate_pauses,
-            #[cfg(feature = "testing")]
-            syslog_ingestor_bind_address_overrides: hooks.syslog_ingestor_bind_address_overrides,
-            resource_store: Arc::new(RwLock::new(None)),
-            resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
-            remote_dispatcher: Arc::new(RwLock::new(None)),
-            local_node_id: Arc::new(RwLock::new(None)),
-            next_remote_ack_id: Arc::new(AtomicU64::new(1)),
-            pending_remote_acks: Arc::new(DashMap::default()),
-            pending_relay_admissions: Arc::new(DashMap::default()),
-            next_state_sync_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_state_syncs: Arc::new(DashMap::default()),
-            expiring_stream_states: Arc::new(DashMap::default()),
-            latest_resource_versions: Arc::new(DashMap::default()),
-            replicated_deduplicator_states: Arc::new(DashMap::default()),
-            replicated_kafka_offset_states: Arc::new(DashMap::default()),
-            replicated_materialized_stream_states: Arc::new(DashMap::default()),
-            relay_state_epochs: Arc::new(DashMap::default()),
-            materialized_state_changed: Arc::new(Notify::new()),
-            replicated_window_processor_states: Arc::new(DashMap::default()),
-            replicated_wasm_processor_states: Arc::new(DashMap::default()),
-            replicated_branch_aggregated_states: Arc::new(DashMap::default()),
-            wasm_runtime: Arc::new(
-                WasmRuntime::new(WasmRuntimeConfig::default())
+            inner: Arc::new(RuntimeInner {
+                ingestors: Arc::new(DashMap::default()),
+                ingestor_quiescence: Arc::new(DashMap::default()),
+                ingestors_paused_for_memory_pressure: AtomicBool::new(false),
+                ingestor_transient_errors: DashMap::default(),
+                ingestor_reconnect_backoffs: DashMap::default(),
+                ingestor_readiness: DashMap::default(),
+                emitter_transient_errors: DashMap::default(),
+                emitter_retry_statuses: DashMap::default(),
+                emitter_confirmation_waits: DashMap::default(),
+                executions: DashMap::default(),
+                message_error_routes: DashMap::default(),
+                compiled_domain_udfs: DashMap::default(),
+                schedule_apply_lock: Mutex::new(()),
+                applied_cluster_revision: AtomicU64::new(u64::MAX),
+                domain_instantiation_errors: DashMap::default(),
+                domains: DashMap::default(),
+                domain_status_changed,
+                in_flight_by_domain: DashMap::default(),
+                in_flight_by_ingestor: DashMap::default(),
+                generator_activity_by_domain: DashMap::default(),
+                emitter_buffers: DashMap::default(),
+                force_flush_by_domain: DashMap::default(),
+                node_quiesce_counters: DashMap::default(),
+                entity_gate_holds: Arc::new(DashMap::default()),
+                active_domain_alters: Arc::new(DashMap::default()),
+                state_schema_fingerprints: DashMap::default(),
+                domain_graphs: DashMap::default(),
+                endpoint_bindings: DashMap::default(),
+                routed_endpoints: DashMap::default(),
+                relay_boundary_fanouts: DashMap::default(),
+                events,
+                emitter_faults: hooks.emitter_faults,
+                ingestor_faults: hooks.ingestor_faults,
+                otel_client_faults: hooks.otel_client_faults,
+                #[cfg(feature = "testing")]
+                schedule_publication_faults: hooks.schedule_publication_faults,
+                #[cfg(feature = "testing")]
+                transaction_binding_drops: hooks.transaction_binding_drops,
+                #[cfg(feature = "testing")]
+                transaction_commit_pauses: hooks.transaction_commit_pauses,
+                #[cfg(feature = "testing")]
+                entity_gate_pauses: hooks.entity_gate_pauses,
+                #[cfg(feature = "testing")]
+                syslog_ingestor_bind_address_overrides: hooks
+                    .syslog_ingestor_bind_address_overrides,
+                resource_store: RwLock::new(None),
+                resource_versions: RwLock::new(ResourceVersionStatus::default()),
+                remote_dispatcher: RwLock::new(None),
+                remote_dispatch: Arc::new(RemoteDispatchRegistry {
+                    local_node_id: RwLock::new(None),
+                    next_ack_id: AtomicU64::new(1),
+                    pending_acks: DashMap::default(),
+                    pending_relay_admissions: DashMap::default(),
+                }),
+                next_state_sync_correlation_id: AtomicU64::new(1),
+                pending_state_syncs: DashMap::default(),
+                expiring_stream_states: DashMap::default(),
+                latest_resource_versions: DashMap::default(),
+                replicated_deduplicator_states: DashMap::default(),
+                replicated_kafka_offset_states: DashMap::default(),
+                replicated_materialized_stream_states: DashMap::default(),
+                relay_state_epochs: DashMap::default(),
+                materialized_state_changed: Notify::new(),
+                replicated_window_processor_states: DashMap::default(),
+                replicated_wasm_processor_states: DashMap::default(),
+                replicated_branch_aggregated_states: DashMap::default(),
+                wasm_runtime: WasmRuntime::new(WasmRuntimeConfig::default())
                     .assured("wasmtime accepts its own default configuration"),
-            ),
-            branch_instance_expiration_scan_interval: hooks
-                .branch_instance_expiration_scan_interval
-                .unwrap_or(BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL),
-            state_store,
-            state_snapshot_interval,
-            state_replication_poll_interval: DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-            domain_drain_timeout: hooks
-                .domain_drain_timeout
-                .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT),
-            entity_gate_deadline: hooks
-                .entity_gate_deadline
-                .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT),
-            temp_dir: Arc::new(temp_dir),
-            metrics: RuntimeMetrics::default(),
+                branch_instance_expiration_scan_interval: hooks
+                    .branch_instance_expiration_scan_interval
+                    .unwrap_or(BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL),
+                state_store,
+                state_snapshot_interval,
+                state_replication_poll_interval: DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
+                domain_drain_timeout: hooks
+                    .domain_drain_timeout
+                    .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT),
+                entity_gate_deadline: hooks
+                    .entity_gate_deadline
+                    .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT),
+                temp_dir,
+                metrics: RuntimeMetrics::default(),
+            }),
         })
     }
 
     pub fn metrics(&self) -> RuntimeMetrics {
-        self.metrics.clone()
+        self.inner.metrics.clone()
+    }
+
+    /// The directory connectors stage local files in before they publish them.
+    pub(in crate::runtime) fn temp_dir(&self) -> &Path {
+        self.inner.temp_dir.as_path()
+    }
+
+    /// The node's runtime event bus. Connectors report transient failures here.
+    pub(in crate::runtime) fn events(&self) -> &broadcast::Sender<RuntimeEvent> {
+        &self.inner.events
     }
 
     pub fn domain_drain_timeout(&self) -> Duration {
-        self.domain_drain_timeout
+        self.inner.domain_drain_timeout
     }
 
     /// How long a branch task is given to stop: the configured drain timeout plus the grace it
@@ -598,12 +611,13 @@ impl Runtime {
     fn branch_task_stop_timeout(&self) -> Duration {
         // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks
         // to wait for as long as the process runs, and no grace can extend that further.
-        self.domain_drain_timeout
+        self.inner
+            .domain_drain_timeout
             .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
     }
 
     pub fn entity_gate_deadline(&self) -> Duration {
-        self.entity_gate_deadline
+        self.inner.entity_gate_deadline
     }
 
     pub fn entity_pause_relays(
@@ -611,7 +625,7 @@ impl Runtime {
         domain: &DomainName,
         affected_entities: &[NodeRef],
     ) -> Vec<RelayName> {
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
         Self::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
@@ -699,7 +713,7 @@ impl Runtime {
         let mut gates = Vec::with_capacity(relays.len());
         for relay in relays {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
-            let Some(fanout) = self.relay_boundary_fanouts.get(&key) else {
+            let Some(fanout) = self.inner.relay_boundary_fanouts.get(&key) else {
                 continue;
             };
             let gate = fanout.dispatch_gate();
@@ -722,7 +736,7 @@ impl Runtime {
             domain: domain.clone(),
             operation_id,
         };
-        if self.entity_gate_holds.contains_key(&hold_key) {
+        if self.inner.entity_gate_holds.contains_key(&hold_key) {
             return Ok(());
         }
         let mut gates = self.engage_entity_gates(domain, relays, deadline, reason);
@@ -733,11 +747,11 @@ impl Runtime {
                 domain.as_str()
             ));
         }
-        if self.entity_gate_holds.contains_key(&hold_key) {
+        if self.inner.entity_gate_holds.contains_key(&hold_key) {
             gates.release();
             return Ok(());
         }
-        self.entity_gate_holds.insert(
+        self.inner.entity_gate_holds.insert(
             hold_key.clone(),
             EntityAlterHold {
                 gates,
@@ -756,13 +770,13 @@ impl Runtime {
         for ingestor in &ingestors {
             tokio::task::consume_budget().await;
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-            if !self.ingestors.contains_key(&key) {
+            if !self.inner.ingestors.contains_key(&key) {
                 continue;
             }
             if let Some(control) =
                 self.engage_ingestor_quiesce(domain, &IngestorName::from(ingestor), quiesce_cause)
             {
-                match self.entity_gate_holds.get_mut(&hold_key) {
+                match self.inner.entity_gate_holds.get_mut(&hold_key) {
                     Some(mut hold) => hold.quiesced_ingestors.push(QuiescedIngestorHold {
                         ingestor: IngestorName::from(ingestor),
                         cause: quiesce_cause,
@@ -783,9 +797,9 @@ impl Runtime {
                 domain.as_str()
             ));
         }
-        let entity_gate_holds = self.entity_gate_holds.clone();
-        let ingestors = self.ingestors.clone();
-        let ingestor_quiescence = self.ingestor_quiescence.clone();
+        let entity_gate_holds = self.inner.entity_gate_holds.clone();
+        let ingestors = self.inner.ingestors.clone();
+        let ingestor_quiescence = self.inner.ingestor_quiescence.clone();
         let domain = domain.clone();
         drop(tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
@@ -822,9 +836,9 @@ impl Runtime {
         domain: &DomainName,
     ) -> Result<(), String> {
         Self::release_entity_gate_operation_from_state(
-            &self.entity_gate_holds,
-            &self.ingestors,
-            &self.ingestor_quiescence,
+            &self.inner.entity_gate_holds,
+            &self.inner.ingestors,
+            &self.inner.ingestor_quiescence,
             operation_id,
             domain,
         )
@@ -878,10 +892,12 @@ impl Runtime {
         operation_id: u64,
         domain: &DomainName,
     ) -> bool {
-        self.entity_gate_holds.contains_key(&EntityGateHoldKey {
-            domain: domain.clone(),
-            operation_id,
-        })
+        self.inner
+            .entity_gate_holds
+            .contains_key(&EntityGateHoldKey {
+                domain: domain.clone(),
+                operation_id,
+            })
     }
 
     pub fn entity_drain_status(
@@ -894,7 +910,8 @@ impl Runtime {
         let buffered_relay_batches = relays
             .iter()
             .filter_map(|relay| {
-                self.relay_boundary_fanouts
+                self.inner
+                    .relay_boundary_fanouts
                     .get(&DomainNodeRef::node_in(
                         domain.clone(),
                         ModelKind::Relay,
@@ -907,12 +924,14 @@ impl Runtime {
             .iter()
             .map(|entity| {
                 let quiesce_work = self
+                    .inner
                     .node_quiesce_counters
                     .get(&entity.in_domain(domain))
                     .map(|counters| counters.outstanding_work_for(purpose))
                     .unwrap_or(0);
                 let emitter_work = if entity.kind == ModelKind::Emitter {
-                    self.emitter_buffers
+                    self.inner
+                        .emitter_buffers
                         .get(&entity.in_domain(domain))
                         .map(|buffered| buffered.load(Ordering::Acquire))
                         .unwrap_or(0)
@@ -929,7 +948,11 @@ impl Runtime {
             if entity.kind != ModelKind::Ingestor {
                 continue;
             }
-            let Some(tracker) = self.in_flight_by_ingestor.get(&entity.in_domain(domain)) else {
+            let Some(tracker) = self
+                .inner
+                .in_flight_by_ingestor
+                .get(&entity.in_domain(domain))
+            else {
                 continue;
             };
             outstanding_acks += if purpose == EntityGatePurpose::OwnershipHandoff {
@@ -957,11 +980,13 @@ impl Runtime {
         key: &DomainNodeRef,
     ) -> Option<EmitterPublishingDrainStatus> {
         let pending_messages = self
+            .inner
             .emitter_buffers
             .get(key)
             .map(|buffered| buffered.load(Ordering::Acquire))
             .unwrap_or(0);
         let awaiting_confirmation = self
+            .inner
             .emitter_confirmation_waits
             .get(key)
             .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
@@ -974,7 +999,7 @@ impl Runtime {
                 retry_wait: None,
             });
         }
-        let retry = self.emitter_retry_statuses.get(key)?;
+        let retry = self.inner.emitter_retry_statuses.get(key)?;
         let state = match retry.kind {
             EmitterRetryKind::Infrastructure => EmitterPublishingDrainState::RetryingInfrastructure,
             EmitterRetryKind::IcebergCommit => EmitterPublishingDrainState::RetryingIcebergCommit,
@@ -998,14 +1023,16 @@ impl Runtime {
         domain: &DomainName,
         node: NodeRef,
     ) -> Arc<NodeQuiesceCounters> {
-        self.node_quiesce_counters
+        self.inner
+            .node_quiesce_counters
             .entry(DomainNodeRef::new(domain.clone(), node))
             .or_insert_with(|| Arc::new(NodeQuiesceCounters::default()))
             .clone()
     }
 
     pub(super) fn relay_state_epoch(&self, domain: &DomainName) -> Arc<AtomicU64> {
-        self.relay_state_epochs
+        self.inner
+            .relay_state_epochs
             .entry(domain.clone())
             .or_insert_with(|| Arc::new(AtomicU64::new(0)))
             .clone()
@@ -1022,6 +1049,7 @@ impl Runtime {
         relay: &RelayName,
     ) -> Result<(), RuntimeError> {
         let placements = self
+            .inner
             .replicated_materialized_stream_states
             .iter()
             .filter(|entry| {
@@ -1032,10 +1060,11 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for placement in placements {
-            self.replicated_materialized_stream_states
+            self.inner
+                .replicated_materialized_stream_states
                 .remove(&placement);
         }
-        if let Some(store) = &self.state_store {
+        if let Some(store) = &self.inner.state_store {
             store
                 .purge_entity(
                     domain,
@@ -1060,6 +1089,7 @@ impl Runtime {
         deduplicator: &DeduplicatorName,
     ) -> Result<(), RuntimeError> {
         let placements = self
+            .inner
             .replicated_deduplicator_states
             .iter()
             .filter(|entry| {
@@ -1070,9 +1100,9 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for placement in placements {
-            self.replicated_deduplicator_states.remove(&placement);
+            self.inner.replicated_deduplicator_states.remove(&placement);
         }
-        if let Some(store) = &self.state_store {
+        if let Some(store) = &self.inner.state_store {
             store
                 .purge_entity(
                     domain,
@@ -1092,30 +1122,32 @@ impl Runtime {
     }
 
     pub(crate) fn try_begin_domain_alter(&self, domain: &DomainName) -> Option<DomainAlterGuard> {
-        match self.active_domain_alters.entry(domain.clone()) {
+        match self.inner.active_domain_alters.entry(domain.clone()) {
             dashmap::mapref::entry::Entry::Occupied(_) => None,
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 entry.insert(ActiveDomainAlter);
                 Some(DomainAlterGuard {
                     domain: domain.clone(),
-                    active_domain_alters: self.active_domain_alters.clone(),
+                    active_domain_alters: self.inner.active_domain_alters.clone(),
                 })
             }
         }
     }
 
     pub fn domain_alter_is_active(&self, domain: &DomainName) -> bool {
-        self.active_domain_alters.contains_key(domain)
+        self.inner.active_domain_alters.contains_key(domain)
     }
 
     #[cfg(feature = "testing")]
     pub fn take_armed_schedule_publication_fault(&self, domain: &DomainName) -> bool {
-        self.schedule_publication_faults.take_armed_fault(domain)
+        self.inner
+            .schedule_publication_faults
+            .take_armed_fault(domain)
     }
 
     #[cfg(feature = "testing")]
     pub fn take_armed_transaction_binding_drop(&self, node_id: &ClusterNodeName) -> bool {
-        self.transaction_binding_drops.take(node_id)
+        self.inner.transaction_binding_drops.take(node_id)
     }
 
     #[cfg(feature = "testing")]
@@ -1124,14 +1156,15 @@ impl Runtime {
         node_id: &ClusterNodeName,
         completed_statements: usize,
     ) {
-        self.transaction_commit_pauses
+        self.inner
+            .transaction_commit_pauses
             .pause_if_armed(node_id, completed_statements)
             .await;
     }
 
     #[cfg(feature = "testing")]
     pub async fn pause_entity_gate_if_armed(&self, domain: &DomainName) {
-        self.entity_gate_pauses.pause_if_armed(domain).await;
+        self.inner.entity_gate_pauses.pause_if_armed(domain).await;
     }
 
     pub(in crate::runtime) fn record_ingestor_transient_error(
@@ -1140,7 +1173,7 @@ impl Runtime {
         ingestor: &IngestorName,
         error: impl Into<String>,
     ) {
-        self.ingestor_transient_errors.insert(
+        self.inner.ingestor_transient_errors.insert(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
             error.into(),
         );
@@ -1154,9 +1187,10 @@ impl Runtime {
         backoff: Duration,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        self.ingestor_transient_errors
+        self.inner
+            .ingestor_transient_errors
             .insert(key.clone(), error.into());
-        self.ingestor_reconnect_backoffs.insert(
+        self.inner.ingestor_reconnect_backoffs.insert(
             key,
             RuntimeReconnectStatus {
                 backoff,
@@ -1170,13 +1204,15 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) {
-        self.ingestor_transient_errors
+        self.inner
+            .ingestor_transient_errors
             .remove(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Ingestor,
                 ingestor.clone(),
             ));
-        self.ingestor_reconnect_backoffs
+        self.inner
+            .ingestor_reconnect_backoffs
             .remove(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Ingestor,
@@ -1190,7 +1226,7 @@ impl Runtime {
         ingestor: &IngestorName,
         expected_instances: NonZeroU64,
     ) {
-        self.ingestor_readiness.insert(
+        self.inner.ingestor_readiness.insert(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
             IngestorReadiness::new(expected_instances),
         );
@@ -1203,24 +1239,24 @@ impl Runtime {
     ) -> Arc<IngestorQuiesceControl> {
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
-        if let Some(control) = self.ingestor_quiescence.get(&key) {
+        if let Some(control) = self.inner.ingestor_quiescence.get(&key) {
             control.update_declared_source(&ingestor.source);
             return control.clone();
         }
-        let metric_labels = self.metrics.register_ingestor_quiesce(
+        let metric_labels = self.inner.metrics.register_ingestor_quiesce(
             domain,
             &ingestor.name,
-            self.local_node_id.read().as_ref(),
+            self.inner.remote_dispatch.local_node_id.read().as_ref(),
         );
         let control = Arc::new(IngestorQuiesceControl::new(
             ingestor.source.quiesce().clone(),
-            self.metrics.clone(),
+            self.inner.metrics.clone(),
             metric_labels,
         ));
         if self.ingestors_paused_for_memory_pressure() {
             control.engage(IngestorQuiesceCause::MemoryPressure);
         }
-        self.ingestor_quiescence.insert(key, control.clone());
+        self.inner.ingestor_quiescence.insert(key, control.clone());
         control
     }
 
@@ -1229,7 +1265,8 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> Option<Arc<IngestorQuiesceControl>> {
-        self.ingestor_quiescence
+        self.inner
+            .ingestor_quiescence
             .get(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Ingestor,
@@ -1278,6 +1315,7 @@ impl Runtime {
 
     fn engage_domain_ingestor_quiesce(&self, domain: &DomainName) {
         let ingestors = self
+            .inner
             .ingestors
             .iter()
             .filter(|entry| &entry.key().domain == domain)
@@ -1294,6 +1332,7 @@ impl Runtime {
 
     fn release_domain_ingestor_quiesce(&self, domain: &DomainName) {
         let ingestors = self
+            .inner
             .ingestor_quiescence
             .iter()
             .filter(|entry| &entry.key().domain == domain)
@@ -1310,13 +1349,14 @@ impl Runtime {
 
     fn remove_ingestor_quiescence(&self, domain: &DomainName, ingestor: &IngestorName) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if let Some((_, control)) = self.ingestor_quiescence.remove(&key) {
+        if let Some((_, control)) = self.inner.ingestor_quiescence.remove(&key) {
             control.terminate();
         }
     }
 
     fn clear_domain_ingestor_quiescence(&self, domain: &DomainName) {
         let ingestors = self
+            .inner
             .ingestor_quiescence
             .iter()
             .filter(|entry| &entry.key().domain == domain)
@@ -1334,7 +1374,7 @@ impl Runtime {
         instance_idx: u64,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if let Some(mut readiness) = self.ingestor_readiness.get_mut(&key) {
+        if let Some(mut readiness) = self.inner.ingestor_readiness.get_mut(&key) {
             readiness.ready_instances.insert(instance_idx);
         }
     }
@@ -1346,7 +1386,7 @@ impl Runtime {
         instance_idx: u64,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if let Some(mut readiness) = self.ingestor_readiness.get_mut(&key) {
+        if let Some(mut readiness) = self.inner.ingestor_readiness.get_mut(&key) {
             readiness.ready_instances.remove(&instance_idx);
         }
     }
@@ -1356,15 +1396,18 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) {
-        self.ingestor_readiness.remove(&DomainNodeRef::node_in(
-            domain.clone(),
-            ModelKind::Ingestor,
-            ingestor.clone(),
-        ));
+        self.inner
+            .ingestor_readiness
+            .remove(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ));
     }
 
     fn ingestor_ready(&self, domain: &DomainName, ingestor: &IngestorName) -> bool {
-        self.ingestor_readiness
+        self.inner
+            .ingestor_readiness
             .get(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Ingestor,
@@ -1378,7 +1421,8 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> Option<String> {
-        self.ingestor_transient_errors
+        self.inner
+            .ingestor_transient_errors
             .get(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Ingestor,
@@ -1392,7 +1436,8 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> Option<String> {
-        self.ingestor_reconnect_backoffs
+        self.inner
+            .ingestor_reconnect_backoffs
             .get(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Ingestor,
@@ -1406,7 +1451,8 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> Option<u64> {
-        self.ingestor_reconnect_backoffs
+        self.inner
+            .ingestor_reconnect_backoffs
             .get(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Ingestor,
@@ -1430,7 +1476,7 @@ impl Runtime {
         emitter: &EmitterName,
         error: impl Into<String>,
     ) {
-        self.emitter_transient_errors.insert(
+        self.inner.emitter_transient_errors.insert(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone()),
             error.into(),
         );
@@ -1477,9 +1523,10 @@ impl Runtime {
         kind: EmitterRetryKind,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
-        self.emitter_transient_errors
+        self.inner
+            .emitter_transient_errors
             .insert(key.clone(), error.into());
-        self.emitter_retry_statuses.insert(
+        self.inner.emitter_retry_statuses.insert(
             key,
             EmitterRetryStatus {
                 kind,
@@ -1497,6 +1544,7 @@ impl Runtime {
         emitter: &EmitterName,
     ) -> EmitterConfirmationWaitGuard {
         let active_waits = self
+            .inner
             .emitter_confirmation_waits
             .entry(DomainNodeRef::node_in(
                 domain.clone(),
@@ -1514,17 +1562,20 @@ impl Runtime {
         domain: &DomainName,
         emitter: &EmitterName,
     ) {
-        self.emitter_transient_errors
+        self.inner
+            .emitter_transient_errors
             .remove(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Emitter,
                 emitter.clone(),
             ));
-        self.emitter_retry_statuses.remove(&DomainNodeRef::node_in(
-            domain.clone(),
-            ModelKind::Emitter,
-            emitter.clone(),
-        ));
+        self.inner
+            .emitter_retry_statuses
+            .remove(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Emitter,
+                emitter.clone(),
+            ));
     }
 
     fn emitter_transient_error(
@@ -1532,7 +1583,8 @@ impl Runtime {
         domain: &DomainName,
         emitter: &EmitterName,
     ) -> Option<String> {
-        self.emitter_transient_errors
+        self.inner
+            .emitter_transient_errors
             .get(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Emitter,
@@ -1546,7 +1598,8 @@ impl Runtime {
         domain: &DomainName,
         emitter: &EmitterName,
     ) -> Option<String> {
-        self.emitter_retry_statuses
+        self.inner
+            .emitter_retry_statuses
             .get(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Emitter,
@@ -1560,7 +1613,8 @@ impl Runtime {
         domain: &DomainName,
         emitter: &EmitterName,
     ) -> Option<u64> {
-        self.emitter_retry_statuses
+        self.inner
+            .emitter_retry_statuses
             .get(&DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Emitter,
@@ -1585,7 +1639,7 @@ impl Runtime {
         ingestor: &IngestorName,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> bool {
-        if !self.ingestor_faults.is_failed(ingestor) {
+        if !self.inner.ingestor_faults.is_failed(ingestor) {
             return false;
         }
         self.record_ingestor_transient_error_with_backoff(
@@ -1617,28 +1671,33 @@ impl Runtime {
             identifier,
             None,
         );
-        if let Some(state) = self.replicated_branch_aggregated_states.get(&placement) {
+        if let Some(state) = self
+            .inner
+            .replicated_branch_aggregated_states
+            .get(&placement)
+        {
             state.mark_metrics_updated();
         }
     }
 
     pub fn attach_resource_store(&self, resource_store: Arc<ResourceStore>) {
-        *self.resource_store.write() = Some(resource_store);
+        *self.inner.resource_store.write() = Some(resource_store);
     }
 
     pub fn sync_resource_versions(&self, resources: &nervix_models::ResourceVersionStatus) {
-        self.latest_resource_versions.clear();
+        self.inner.latest_resource_versions.clear();
         for resource in &resources.versions {
             let key = DomainResourceKey {
                 domain: resource.id.domain.clone(),
                 resource: resource.id.identifier.clone(),
             };
-            if let Some(mut existing) = self.latest_resource_versions.get_mut(&key) {
+            if let Some(mut existing) = self.inner.latest_resource_versions.get_mut(&key) {
                 if resource.id.version > *existing {
                     *existing = resource.id.version;
                 }
             } else {
-                self.latest_resource_versions
+                self.inner
+                    .latest_resource_versions
                     .insert(key, resource.id.version);
             }
         }
@@ -1648,23 +1707,21 @@ impl Runtime {
         &self,
         local_node_id: ClusterNodeName,
         cluster: Arc<cluster::ClusterHandle>,
-        interconnect: Arc<Transport>,
+        interconnect: Transport,
     ) {
-        *self.local_node_id.write() = Some(local_node_id);
-        *self.remote_dispatcher.write() = Some(Arc::new(RemoteDispatcher {
+        *self.inner.remote_dispatch.local_node_id.write() = Some(local_node_id);
+        *self.inner.remote_dispatcher.write() = Some(Arc::new(RemoteDispatcher {
             cluster,
             interconnect,
-            local_node_id: self.local_node_id.clone(),
-            next_remote_ack_id: self.next_remote_ack_id.clone(),
-            pending_remote_acks: self.pending_remote_acks.clone(),
-            pending_relay_admissions: self.pending_relay_admissions.clone(),
+            registry: self.inner.remote_dispatch.clone(),
         }));
     }
 
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(&self, configured: &str) -> String {
         #[cfg(feature = "testing")]
-        if let Some(node_id) = self.local_node_id.read().as_ref() {
+        if let Some(node_id) = self.inner.remote_dispatch.local_node_id.read().as_ref() {
             return self
+                .inner
                 .syslog_ingestor_bind_address_overrides
                 .resolve(node_id, configured);
         }
@@ -1677,14 +1734,14 @@ impl Runtime {
         resource_store: Arc<ResourceStore>,
         resource_versions: ResourceVersionStatus,
     ) {
-        *self.resource_store.write() = Some(resource_store);
+        *self.inner.resource_store.write() = Some(resource_store);
         self.sync_resource_versions(&resource_versions);
-        *self.resource_versions.write() = resource_versions;
+        *self.inner.resource_versions.write() = resource_versions;
     }
 
     pub fn update_resource_versions(&self, resource_versions: ResourceVersionStatus) {
         self.sync_resource_versions(&resource_versions);
-        *self.resource_versions.write() = resource_versions;
+        *self.inner.resource_versions.write() = resource_versions;
     }
 
     /// Resolves a resource reference to the concrete version installed in `domain`. Resources are
@@ -1715,7 +1772,7 @@ impl Runtime {
             return Ok(ResourceId::new(domain.clone(), identifier.clone(), version));
         }
 
-        let resources = self.resource_versions.read();
+        let resources = self.inner.resource_versions.read();
         resources
             .latest_version(domain, identifier)
             .map(|version| ResourceId::new(domain.clone(), identifier.clone(), version))
@@ -1781,6 +1838,7 @@ impl Runtime {
         };
 
         let resource_store = self
+            .inner
             .resource_store
             .read()
             .clone()
@@ -1837,11 +1895,11 @@ impl Runtime {
     }
 
     pub fn has_state_store(&self) -> bool {
-        self.state_store.is_some()
+        self.inner.state_store.is_some()
     }
 
     pub fn state_snapshot_interval(&self) -> Duration {
-        self.state_snapshot_interval
+        self.inner.state_snapshot_interval
     }
 
     pub(crate) async fn handle_state_sync_request(
@@ -1853,7 +1911,7 @@ impl Runtime {
             let mut entries = Vec::new();
             let mut latest_lsm = 0;
             let mut found = false;
-            for state in self.replicated_materialized_stream_states.iter() {
+            for state in self.inner.replicated_materialized_stream_states.iter() {
                 let concrete = state.key();
                 if concrete.domain != placement.domain
                     || concrete.state != placement.state
@@ -1900,20 +1958,24 @@ impl Runtime {
                 }));
             }
         }
-        if let Some(state) = self.replicated_deduplicator_states.get(placement) {
+        if let Some(state) = self.inner.replicated_deduplicator_states.get(placement) {
             let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
             if snapshot.lsm > after_lsm {
                 return Ok(Some(snapshot));
             }
             return Ok(None);
         }
-        if let Some(state) = self.replicated_kafka_offset_states.get(placement) {
+        if let Some(state) = self.inner.replicated_kafka_offset_states.get(placement) {
             let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
             if snapshot.lsm > after_lsm {
                 return Ok(Some(snapshot));
             }
         }
-        if let Some(state) = self.replicated_materialized_stream_states.get(placement) {
+        if let Some(state) = self
+            .inner
+            .replicated_materialized_stream_states
+            .get(placement)
+        {
             let entries = self.visible_materialized_stream_remote_entries(placement, &state)?;
             let snapshot = PersistedRuntimeStateEntry {
                 lsm: state.current_lsm.current(),
@@ -1925,21 +1987,25 @@ impl Runtime {
                 return Ok(Some(snapshot));
             }
         }
-        if let Some(state) = self.replicated_window_processor_states.get(placement) {
+        if let Some(state) = self.inner.replicated_window_processor_states.get(placement) {
             let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
             if snapshot.lsm > after_lsm {
                 return Ok(Some(snapshot));
             }
         }
-        if let Some(state) = self.replicated_wasm_processor_states.get(placement) {
+        if let Some(state) = self.inner.replicated_wasm_processor_states.get(placement) {
             let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
             if snapshot.lsm > after_lsm {
                 return Ok(Some(snapshot));
             }
         }
-        if let Some(state) = self.replicated_branch_aggregated_states.get(placement) {
+        if let Some(state) = self
+            .inner
+            .replicated_branch_aggregated_states
+            .get(placement)
+        {
             let snapshot = state
-                .latest_snapshot(&self.metrics)
+                .latest_snapshot(&self.inner.metrics)
                 .map_err(|error| error.to_string())?;
             if snapshot.lsm > after_lsm {
                 return Ok(Some(snapshot));
@@ -1953,7 +2019,7 @@ impl Runtime {
         correlation_id: u64,
         result: Result<Option<PersistedRuntimeStateEntry>, String>,
     ) {
-        let Some((_, tx)) = self.pending_state_syncs.remove(&correlation_id) else {
+        let Some((_, tx)) = self.inner.pending_state_syncs.remove(&correlation_id) else {
             return;
         };
         let _ = tx.send(result);
@@ -1964,13 +2030,25 @@ impl Runtime {
         node_id: &ClusterNodeName,
         ack: StateSyncAck,
     ) {
-        if let Some(state) = self.replicated_kafka_offset_states.get(&ack.placement) {
+        if let Some(state) = self
+            .inner
+            .replicated_kafka_offset_states
+            .get(&ack.placement)
+        {
             state.mark_replica_progress(node_id, ack.lsm);
         }
-        if let Some(state) = self.replicated_wasm_processor_states.get(&ack.placement) {
+        if let Some(state) = self
+            .inner
+            .replicated_wasm_processor_states
+            .get(&ack.placement)
+        {
             state.mark_replica_progress(node_id, ack.lsm);
         }
-        if let Some(state) = self.replicated_branch_aggregated_states.get(&ack.placement) {
+        if let Some(state) = self
+            .inner
+            .replicated_branch_aggregated_states
+            .get(&ack.placement)
+        {
             state.mark_replica_progress(node_id, ack.lsm);
         }
     }
@@ -1997,14 +2075,15 @@ impl Runtime {
         after_lsm: u64,
         response_timeout: Duration,
     ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
-        let Some(dispatcher) = self.remote_dispatcher.read().clone() else {
+        let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
             return Err("remote dispatcher unavailable".to_string());
         };
         let correlation_id = self
+            .inner
             .next_state_sync_correlation_id
             .fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending_state_syncs.insert(correlation_id, tx);
+        self.inner.pending_state_syncs.insert(correlation_id, tx);
         let result = dispatcher
             .dispatch(
                 target_node_id,
@@ -2018,17 +2097,17 @@ impl Runtime {
             )
             .await;
         if let Err(error) = result {
-            self.pending_state_syncs.remove(&correlation_id);
+            self.inner.pending_state_syncs.remove(&correlation_id);
             return Err(error);
         }
         match tokio::time::timeout(response_timeout, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
-                self.pending_state_syncs.remove(&correlation_id);
+                self.inner.pending_state_syncs.remove(&correlation_id);
                 Err("state sync response channel closed".to_string())
             }
             Err(_) => {
-                self.pending_state_syncs.remove(&correlation_id);
+                self.inner.pending_state_syncs.remove(&correlation_id);
                 Err("timed out waiting for state sync response".to_string())
             }
         }
@@ -2100,7 +2179,7 @@ impl Runtime {
         lsm: u64,
         payload: &[u8],
     ) -> Result<(), String> {
-        if let Some(store) = &self.state_store {
+        if let Some(store) = &self.inner.state_store {
             store
                 .persist_latest_snapshot(&state.placement, lsm, payload)
                 .map_err(|error| error.to_string())?;
@@ -2142,7 +2221,7 @@ impl Runtime {
         lsm: u64,
         payload: &[u8],
     ) -> Result<(), String> {
-        if let Some(store) = &self.state_store {
+        if let Some(store) = &self.inner.state_store {
             store
                 .persist_latest_snapshot(&state.placement, lsm, payload)
                 .map_err(|error| error.to_string())?;
@@ -2160,7 +2239,7 @@ impl Runtime {
         record: &RuntimeRow,
     ) {
         if state.update_last_by_timestamp(key, record).is_some() {
-            self.materialized_state_changed.notify_waiters();
+            self.inner.materialized_state_changed.notify_waiters();
         }
     }
 
@@ -2170,7 +2249,7 @@ impl Runtime {
         key: &Option<BranchKey>,
     ) {
         if state.remove_key(key).is_some() {
-            self.materialized_state_changed.notify_waiters();
+            self.inner.materialized_state_changed.notify_waiters();
         }
     }
 
@@ -2178,10 +2257,11 @@ impl Runtime {
         &self,
         placement: RuntimeStatePlacement,
     ) -> Result<Arc<ReplicatedDeduplicatorState>, RuntimePersistenceError> {
-        if let Some(existing) = self.replicated_deduplicator_states.get(&placement) {
+        if let Some(existing) = self.inner.replicated_deduplicator_states.get(&placement) {
             return Ok(existing.clone());
         }
         let initial = self
+            .inner
             .state_store
             .as_ref()
             .map(|store| store.latest_snapshot(&placement))
@@ -2191,7 +2271,8 @@ impl Runtime {
             placement.clone(),
             initial,
         )?);
-        self.replicated_deduplicator_states
+        self.inner
+            .replicated_deduplicator_states
             .insert(placement, state.clone());
         Ok(state)
     }
@@ -2203,7 +2284,7 @@ impl Runtime {
         replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
     ) -> Result<Arc<ReplicatedKafkaOffsetState>, RuntimePersistenceError> {
-        if let Some(existing) = self.replicated_kafka_offset_states.get(&placement) {
+        if let Some(existing) = self.inner.replicated_kafka_offset_states.get(&placement) {
             existing.rebind_roles(StateReplicationRoles::new(
                 primary_node,
                 replica_nodes,
@@ -2212,6 +2293,7 @@ impl Runtime {
             return Ok(existing.clone());
         }
         let initial = self
+            .inner
             .state_store
             .as_ref()
             .map(|store| store.latest_snapshot(&placement))
@@ -2224,7 +2306,8 @@ impl Runtime {
             required_replica_acks,
             initial,
         )?);
-        self.replicated_kafka_offset_states
+        self.inner
+            .replicated_kafka_offset_states
             .insert(placement, state.clone());
         Ok(state)
     }
@@ -2235,11 +2318,16 @@ impl Runtime {
         schema: StdArc<arrow_schema::Schema>,
         primary_node: Option<ClusterNodeName>,
     ) -> Result<Arc<ReplicatedMaterializedRelayState>, RuntimePersistenceError> {
-        if let Some(existing) = self.replicated_materialized_stream_states.get(&placement) {
+        if let Some(existing) = self
+            .inner
+            .replicated_materialized_stream_states
+            .get(&placement)
+        {
             existing.rebind_roles(StateReplicationRoles::owned_by(primary_node));
             return Ok(existing.clone());
         }
         let initial = self
+            .inner
             .state_store
             .as_ref()
             .map(|store| store.latest_snapshot(&placement))
@@ -2251,7 +2339,8 @@ impl Runtime {
             primary_node,
             initial,
         )?);
-        self.replicated_materialized_stream_states
+        self.inner
+            .replicated_materialized_stream_states
             .insert(placement, state.clone());
         Ok(state)
     }
@@ -2260,10 +2349,15 @@ impl Runtime {
         &self,
         placement: RuntimeStatePlacement,
     ) -> Result<Arc<ReplicatedWindowProcessorState>, RuntimePersistenceError> {
-        if let Some(existing) = self.replicated_window_processor_states.get(&placement) {
+        if let Some(existing) = self
+            .inner
+            .replicated_window_processor_states
+            .get(&placement)
+        {
             return Ok(existing.clone());
         }
         let initial = self
+            .inner
             .state_store
             .as_ref()
             .map(|store| store.latest_snapshot(&placement))
@@ -2273,7 +2367,8 @@ impl Runtime {
             placement.clone(),
             initial,
         )?);
-        self.replicated_window_processor_states
+        self.inner
+            .replicated_window_processor_states
             .insert(placement, state.clone());
         Ok(state)
     }
@@ -2284,10 +2379,11 @@ impl Runtime {
         replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
     ) -> Result<Arc<ReplicatedWasmProcessorState>, RuntimePersistenceError> {
-        if let Some(existing) = self.replicated_wasm_processor_states.get(&placement) {
+        if let Some(existing) = self.inner.replicated_wasm_processor_states.get(&placement) {
             return Ok(existing.clone());
         }
         let initial = self
+            .inner
             .state_store
             .as_ref()
             .map(|store| store.latest_snapshot(&placement))
@@ -2299,7 +2395,8 @@ impl Runtime {
             required_replica_acks,
             initial,
         )?);
-        self.replicated_wasm_processor_states
+        self.inner
+            .replicated_wasm_processor_states
             .insert(placement, state.clone());
         Ok(state)
     }
@@ -2312,20 +2409,26 @@ impl Runtime {
         replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
     ) -> Result<Arc<ReplicatedBranchAggregatedState>, RuntimePersistenceError> {
-        if let Some(existing) = self.replicated_branch_aggregated_states.get(&placement) {
+        if let Some(existing) = self
+            .inner
+            .replicated_branch_aggregated_states
+            .get(&placement)
+        {
             existing.rebind_roles(StateReplicationRoles::owned_by(primary_node.clone()));
             if let Some(snapshot) = self
+                .inner
                 .state_store
                 .as_ref()
                 .map(|store| store.latest_snapshot(&placement))
                 .transpose()?
                 .flatten()
             {
-                existing.restore_persisted_snapshot(&self.metrics, snapshot)?;
+                existing.restore_persisted_snapshot(&self.inner.metrics, snapshot)?;
             }
             return Ok(existing.clone());
         }
         let initial = self
+            .inner
             .state_store
             .as_ref()
             .map(|store| store.latest_snapshot(&placement))
@@ -2337,10 +2440,11 @@ impl Runtime {
             physical_node_id,
             replica_nodes,
             required_replica_acks,
-            &self.metrics,
+            &self.inner.metrics,
             initial,
         )?);
-        self.replicated_branch_aggregated_states
+        self.inner
+            .replicated_branch_aggregated_states
             .insert(placement, state.clone());
         Ok(state)
     }
@@ -2350,8 +2454,8 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         state: Arc<ReplicatedKafkaOffsetState>,
     ) -> Option<JoinHandle<()>> {
-        let store = self.state_store.as_ref()?.clone();
-        let snapshot_interval = self.state_snapshot_interval;
+        let store = self.inner.state_store.as_ref()?.clone();
+        let snapshot_interval = self.inner.state_snapshot_interval;
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             let flush_latest_snapshot =
@@ -2400,8 +2504,8 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         state: Arc<ReplicatedDeduplicatorState>,
     ) -> Option<JoinHandle<()>> {
-        let store = self.state_store.as_ref()?.clone();
-        let snapshot_interval = self.state_snapshot_interval;
+        let store = self.inner.state_store.as_ref()?.clone();
+        let snapshot_interval = self.inner.state_snapshot_interval;
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             let flush_latest_snapshot =
@@ -2440,8 +2544,8 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         state: Arc<ReplicatedMaterializedRelayState>,
     ) -> Option<JoinHandle<()>> {
-        let store = self.state_store.as_ref()?.clone();
-        let snapshot_interval = self.state_snapshot_interval;
+        let store = self.inner.state_store.as_ref()?.clone();
+        let snapshot_interval = self.inner.state_snapshot_interval;
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             let flush_latest_snapshot =
@@ -2481,8 +2585,8 @@ impl Runtime {
         state: Arc<ReplicatedWindowProcessorState>,
         snapshot_requests: mpsc::Sender<WindowProcessorSnapshotRequest>,
     ) -> Option<JoinHandle<()>> {
-        let store = self.state_store.as_ref()?.clone();
-        let snapshot_interval = self.state_snapshot_interval;
+        let store = self.inner.state_store.as_ref()?.clone();
+        let snapshot_interval = self.inner.state_snapshot_interval;
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             loop {
@@ -2519,9 +2623,9 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         state: Arc<ReplicatedBranchAggregatedState>,
     ) -> Option<JoinHandle<()>> {
-        let store = self.state_store.as_ref()?.clone();
-        let metrics = self.metrics.clone();
-        let snapshot_interval = self.state_snapshot_interval;
+        let store = self.inner.state_store.as_ref()?.clone();
+        let metrics = self.inner.metrics.clone();
+        let snapshot_interval = self.inner.state_snapshot_interval;
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             let flush_latest_snapshot =
@@ -2573,7 +2677,7 @@ impl Runtime {
         state: Arc<ReplicatedKafkaOffsetState>,
     ) -> Option<JoinHandle<()>> {
         let primary_node = state.primary_node()?;
-        let poll_interval = self.state_replication_poll_interval;
+        let poll_interval = self.inner.state_replication_poll_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
@@ -2607,9 +2711,10 @@ impl Runtime {
                             warn!(error = %error, "failed to apply replicated kafka offset snapshot");
                             continue;
                         }
-                        let dispatcher = runtime.remote_dispatcher.read().clone();
+                        let dispatcher = runtime.inner.remote_dispatcher.read().clone();
                         if let Some(dispatcher) = dispatcher {
-                            let local_node_id = runtime.local_node_id.read().clone();
+                            let local_node_id =
+                                runtime.inner.remote_dispatch.local_node_id.read().clone();
                             let Some(local_node_id) = local_node_id else {
                                 continue;
                             };
@@ -2646,7 +2751,7 @@ impl Runtime {
         state: Arc<ReplicatedMaterializedRelayState>,
     ) -> Option<JoinHandle<()>> {
         let primary_node = state.primary_node()?;
-        let poll_interval = self.state_replication_poll_interval;
+        let poll_interval = self.inner.state_replication_poll_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
@@ -2680,10 +2785,11 @@ impl Runtime {
                             warn!(error = %error, "failed to apply replicated materialized relay snapshot");
                             continue;
                         }
-                        runtime.materialized_state_changed.notify_waiters();
-                        let dispatcher = runtime.remote_dispatcher.read().clone();
+                        runtime.inner.materialized_state_changed.notify_waiters();
+                        let dispatcher = runtime.inner.remote_dispatcher.read().clone();
                         if let Some(dispatcher) = dispatcher {
-                            let local_node_id = runtime.local_node_id.read().clone();
+                            let local_node_id =
+                                runtime.inner.remote_dispatch.local_node_id.read().clone();
                             let Some(local_node_id) = local_node_id else {
                                 continue;
                             };
@@ -2720,7 +2826,7 @@ impl Runtime {
         state: Arc<ReplicatedBranchAggregatedState>,
     ) -> Option<JoinHandle<()>> {
         let primary_node = state.primary_node()?;
-        let poll_interval = self.state_replication_poll_interval;
+        let poll_interval = self.inner.state_replication_poll_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
@@ -2750,15 +2856,18 @@ impl Runtime {
                     .await
                 {
                     Ok(Some(snapshot)) => {
-                        if let Err(error) =
-                            state.apply_snapshot(&runtime.metrics, snapshot.lsm, &snapshot.payload)
-                        {
+                        if let Err(error) = state.apply_snapshot(
+                            &runtime.inner.metrics,
+                            snapshot.lsm,
+                            &snapshot.payload,
+                        ) {
                             warn!(error = %error, "failed to apply replicated branch-aggregated state snapshot");
                             continue;
                         }
-                        let dispatcher = runtime.remote_dispatcher.read().clone();
+                        let dispatcher = runtime.inner.remote_dispatcher.read().clone();
                         if let Some(dispatcher) = dispatcher {
-                            let local_node_id = runtime.local_node_id.read().clone();
+                            let local_node_id =
+                                runtime.inner.remote_dispatch.local_node_id.read().clone();
                             let Some(local_node_id) = local_node_id else {
                                 continue;
                             };
@@ -2791,19 +2900,21 @@ impl Runtime {
 
     pub fn sync_domains(&self, domains: &BTreeMap<DomainName, DomainState>) {
         for domain in self
+            .inner
             .domains
             .iter()
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>()
         {
             if !domains.contains_key(&domain) {
-                self.domains.remove(&domain);
-                self.domain_instantiation_errors.remove(&domain);
-                self.in_flight_by_domain.remove(&domain);
-                self.in_flight_by_ingestor
+                self.inner.domains.remove(&domain);
+                self.inner.domain_instantiation_errors.remove(&domain);
+                self.inner.in_flight_by_domain.remove(&domain);
+                self.inner
+                    .in_flight_by_ingestor
                     .retain(|key, _| key.domain != domain);
-                self.generator_activity_by_domain.remove(&domain);
-                if let Some((_, force_flush)) = self.force_flush_by_domain.remove(&domain) {
+                self.inner.generator_activity_by_domain.remove(&domain);
+                if let Some((_, force_flush)) = self.inner.force_flush_by_domain.remove(&domain) {
                     force_flush.close();
                 }
             }
@@ -2811,7 +2922,8 @@ impl Runtime {
 
         for (domain, state) in domains {
             let mut entry =
-                self.domains
+                self.inner
+                    .domains
                     .entry(domain.clone())
                     .or_insert_with(|| RuntimeDomainState {
                         config: state.config.clone(),
@@ -2830,7 +2942,7 @@ impl Runtime {
                 entry.ticks.lock().clear();
             }
         }
-        self.domain_status_changed.send_modify(|version| {
+        self.inner.domain_status_changed.send_modify(|version| {
             *version = version
                 .checked_add(1)
                 .assured("a node cannot apply 2^64 domain status changes");
@@ -2842,6 +2954,7 @@ impl Runtime {
         domain: &DomainName,
     ) -> (AckSet, AckCompletion) {
         let tracker = self
+            .inner
             .in_flight_by_domain
             .entry(domain.clone())
             .or_insert_with(|| Arc::new(AckRootTracker::default()))
@@ -2855,11 +2968,13 @@ impl Runtime {
         ingestor: &IngestorName,
     ) -> (AckSet, AckCompletion) {
         let domain_tracker = self
+            .inner
             .in_flight_by_domain
             .entry(domain.clone())
             .or_insert_with(|| Arc::new(AckRootTracker::default()))
             .clone();
         let ingestor_tracker = self
+            .inner
             .in_flight_by_ingestor
             .entry(DomainNodeRef::node_in(
                 domain.clone(),
@@ -2872,13 +2987,15 @@ impl Runtime {
     }
 
     pub fn domain_outstanding_work(&self, domain: &DomainName) -> usize {
-        self.in_flight_by_domain
+        self.inner
+            .in_flight_by_domain
             .get(domain)
             .map_or(0, |tracker| tracker.outstanding())
     }
 
     fn generator_activity_tracker(&self, domain: &DomainName) -> Arc<AtomicUsize> {
-        self.generator_activity_by_domain
+        self.inner
+            .generator_activity_by_domain
             .entry(domain.clone())
             .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
             .clone()
@@ -2890,6 +3007,7 @@ impl Runtime {
         counters: Arc<NodeQuiesceCounters>,
     ) -> DomainForceFlushParticipant {
         let coordinator = self
+            .inner
             .force_flush_by_domain
             .entry(domain.clone())
             .or_insert_with(DomainForceFlush::new)
@@ -2898,14 +3016,16 @@ impl Runtime {
     }
 
     pub fn force_flush_domain(&self, domain: &DomainName) -> u64 {
-        self.force_flush_by_domain
+        self.inner
+            .force_flush_by_domain
             .entry(domain.clone())
             .or_insert_with(DomainForceFlush::new)
             .request()
     }
 
     pub fn force_flush_domain_if_idle(&self, domain: &DomainName) -> u64 {
-        self.force_flush_by_domain
+        self.inner
+            .force_flush_by_domain
             .entry(domain.clone())
             .or_insert_with(DomainForceFlush::new)
             .request_if_idle()
@@ -2913,27 +3033,32 @@ impl Runtime {
 
     pub fn domain_drain_status(&self, domain: &DomainName) -> DomainDrainStatus {
         let active_ingestors = self
+            .inner
             .ingestors
             .iter()
             .filter(|entry| {
                 &entry.key().domain == domain
                     && self
+                        .inner
                         .ingestor_quiescence
                         .get(entry.key())
                         .is_none_or(|control| !control.is_quiesced())
             })
             .count();
         let active_generators = self
+            .inner
             .generator_activity_by_domain
             .get(domain)
             .map_or(0, |counter| counter.load(Ordering::Acquire));
         let buffered_emitter_messages = self
+            .inner
             .emitter_buffers
             .iter()
             .filter(|entry| &entry.key().domain == domain)
             .map(|entry| entry.value().load(Ordering::Acquire))
             .sum();
         let mut publishing_keys = self
+            .inner
             .emitter_confirmation_waits
             .iter()
             .filter(|entry| {
@@ -2942,7 +3067,8 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<HashSet<_>>();
         publishing_keys.extend(
-            self.emitter_retry_statuses
+            self.inner
+                .emitter_retry_statuses
                 .iter()
                 .filter(|entry| &entry.key().domain == domain)
                 .map(|entry| entry.key().clone()),
@@ -2950,11 +3076,13 @@ impl Runtime {
         let mut emitter_publishing = Vec::new();
         for key in publishing_keys {
             let pending_messages = self
+                .inner
                 .emitter_buffers
                 .get(&key)
                 .map(|buffered| buffered.load(Ordering::Acquire))
                 .unwrap_or(0);
             let awaiting_confirmation = self
+                .inner
                 .emitter_confirmation_waits
                 .get(&key)
                 .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
@@ -2968,7 +3096,7 @@ impl Runtime {
                 });
                 continue;
             }
-            let Some(retry) = self.emitter_retry_statuses.get(&key) else {
+            let Some(retry) = self.inner.emitter_retry_statuses.get(&key) else {
                 continue;
             };
             let state = match retry.kind {
@@ -3007,7 +3135,7 @@ impl Runtime {
         domain: &DomainName,
     ) -> Result<Option<Timestamp>, String> {
         let wall_now = current_timestamp();
-        let Some(state) = self.domains.get(domain) else {
+        let Some(state) = self.inner.domains.get(domain) else {
             return Ok(Some(wall_now));
         };
         match state.config.pace {
@@ -3037,7 +3165,7 @@ impl Runtime {
             relay,
             None,
         );
-        if let Some(state) = self.expiring_stream_states.get(&placement) {
+        if let Some(state) = self.inner.expiring_stream_states.get(&placement) {
             state.touch(key, now);
         }
     }
@@ -3055,7 +3183,7 @@ impl Runtime {
             relay,
             None,
         );
-        if let Some(state) = self.expiring_stream_states.get(&placement) {
+        if let Some(state) = self.inner.expiring_stream_states.get(&placement) {
             state.remove(key);
         }
     }
@@ -3068,13 +3196,13 @@ impl Runtime {
         services: &RelayBoundaryServices,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        let physical_node_id = self.local_node_id.read().clone();
+        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         if !services.is_owned_by(physical_node_id.as_ref()) {
             return services.dispatch_to_owner(domain, relay, batch).await;
         }
         services
             .enqueue_owner_batch(
-                &self.metrics,
+                &self.inner.metrics,
                 domain,
                 relay,
                 physical_node_id.as_ref(),
@@ -3091,7 +3219,7 @@ impl Runtime {
         branches: &mut RelayOwnerBranchState,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        let physical_node_id = self.local_node_id.read().clone();
+        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         let now = self
             .current_stream_expiration_time(domain)
             .ok()
@@ -3111,20 +3239,20 @@ impl Runtime {
                 self.remove_stream_key_presence(domain, relay, &evicted_key);
             }
         }
-        self.metrics.observe_global_stream_received(
+        self.inner.metrics.observe_global_stream_received(
             domain,
             relay,
-            self.local_node_id.read().as_ref(),
+            self.inner.remote_dispatch.local_node_id.read().as_ref(),
             batch.message_count(),
             batch.estimated_bytes(),
             batch.domain_timestamp(),
         );
-        self.metrics.observe_branch_stream_received(
+        self.inner.metrics.observe_branch_stream_received(
             branch_key_display(&batch.key),
             RelayBatchObservation {
                 domain,
                 relay,
-                physical_node_id: self.local_node_id.read().as_ref(),
+                physical_node_id: self.inner.remote_dispatch.local_node_id.read().as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
@@ -3133,7 +3261,7 @@ impl Runtime {
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Relay, relay);
         let result = services
             .fanout_owner_batch(
-                &self.metrics,
+                &self.inner.metrics,
                 domain,
                 relay,
                 physical_node_id.as_ref(),
@@ -3164,23 +3292,26 @@ impl Runtime {
             relay,
             None,
         );
-        if let Some(existing) = self.expiring_stream_states.get(&placement) {
+        if let Some(existing) = self.inner.expiring_stream_states.get(&placement) {
             return existing.clone();
         }
         let state = Arc::new(ExpiringRelayState::new());
-        self.expiring_stream_states.insert(placement, state.clone());
+        self.inner
+            .expiring_stream_states
+            .insert(placement, state.clone());
         state
     }
 
     pub(in crate::runtime) fn clear_expiring_stream_states_for_domain(&self, domain: &DomainName) {
         let relays = self
+            .inner
             .expiring_stream_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
         for placement in relays {
-            self.expiring_stream_states.remove(&placement);
+            self.inner.expiring_stream_states.remove(&placement);
         }
     }
 
@@ -3191,22 +3322,23 @@ impl Runtime {
         wall_started_at: Timestamp,
         time_rate: &str,
     ) {
-        let mut entry = self
-            .domains
-            .entry(domain.clone())
-            .or_insert_with(|| RuntimeDomainState {
-                config: DomainConfig {
-                    pace: DomainPace::Paced,
-                    period: "1s".to_string(),
-                    skew: "0ms".to_string(),
-                    placement: nervix_models::PlacementPolicy::Neutral,
-                },
-                status: nervix_models::DomainStatus::Running,
-                start_version: 0,
-                last_start: nervix_models::DomainStartPoint::Resume,
-                clock: None,
-                ticks: parking_lot::Mutex::new(VecDeque::new()),
-            });
+        let mut entry =
+            self.inner
+                .domains
+                .entry(domain.clone())
+                .or_insert_with(|| RuntimeDomainState {
+                    config: DomainConfig {
+                        pace: DomainPace::Paced,
+                        period: "1s".to_string(),
+                        skew: "0ms".to_string(),
+                        placement: nervix_models::PlacementPolicy::Neutral,
+                    },
+                    status: nervix_models::DomainStatus::Running,
+                    start_version: 0,
+                    last_start: nervix_models::DomainStartPoint::Resume,
+                    clock: None,
+                    ticks: parking_lot::Mutex::new(VecDeque::new()),
+                });
         entry.clock = Some(RuntimeDomainClockState {
             logical_started_at,
             wall_started_at,
@@ -3215,29 +3347,30 @@ impl Runtime {
     }
 
     pub fn handle_domain_clock_stop(&self, domain: &DomainName) {
-        if let Some(mut entry) = self.domains.get_mut(domain) {
+        if let Some(mut entry) = self.inner.domains.get_mut(domain) {
             entry.clock = None;
             entry.ticks.lock().clear();
         }
     }
 
     pub fn handle_domain_tick(&self, domain: &DomainName, tick: &DomainTick) {
-        let entry = self
-            .domains
-            .entry(domain.clone())
-            .or_insert_with(|| RuntimeDomainState {
-                config: DomainConfig {
-                    pace: DomainPace::Unpaced,
-                    period: tick.duration_ms.to_string(),
-                    skew: "0ms".to_string(),
-                    placement: nervix_models::PlacementPolicy::Neutral,
-                },
-                status: nervix_models::DomainStatus::Running,
-                start_version: 0,
-                last_start: nervix_models::DomainStartPoint::Resume,
-                clock: None,
-                ticks: parking_lot::Mutex::new(VecDeque::new()),
-            });
+        let entry =
+            self.inner
+                .domains
+                .entry(domain.clone())
+                .or_insert_with(|| RuntimeDomainState {
+                    config: DomainConfig {
+                        pace: DomainPace::Unpaced,
+                        period: tick.duration_ms.to_string(),
+                        skew: "0ms".to_string(),
+                        placement: nervix_models::PlacementPolicy::Neutral,
+                    },
+                    status: nervix_models::DomainStatus::Running,
+                    start_version: 0,
+                    last_start: nervix_models::DomainStartPoint::Resume,
+                    clock: None,
+                    ticks: parking_lot::Mutex::new(VecDeque::new()),
+                });
         let mut ticks = entry.ticks.lock();
         if ticks
             .back()
@@ -3315,7 +3448,7 @@ impl Runtime {
         admission: &RemoteAckRegistration,
         outcome: RemoteAckOutcome,
     ) {
-        let Some(dispatcher) = self.remote_dispatcher.read().clone() else {
+        let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
             return;
         };
         if let Err(error) = dispatcher
@@ -3342,7 +3475,7 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<RemoteRelayTarget, RuntimeError> {
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: relay.as_str().to_string(),
@@ -3419,7 +3552,9 @@ impl Runtime {
         } = self
             .wait_for_remote_stream_target(&remote.domain, &remote.relay)
             .await?;
-        if owner_ingress && !services.is_owned_by(self.local_node_id.read().as_ref()) {
+        if owner_ingress
+            && !services.is_owned_by(self.inner.remote_dispatch.local_node_id.read().as_ref())
+        {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: remote.domain.as_str().to_string(),
                 relay: remote.relay.as_str().to_string(),
@@ -3523,7 +3658,7 @@ impl Runtime {
         &self,
         remote: RelayPayload,
     ) -> Result<(), RuntimeError> {
-        let Some(execution) = self.executions.get(&remote.domain) else {
+        let Some(execution) = self.inner.executions.get(&remote.domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: remote.domain.as_str().to_string(),
                 relay: remote.relay.as_str().to_string(),
@@ -3608,14 +3743,22 @@ impl Runtime {
 
     pub(crate) fn handle_remote_ack_resolution(&self, ack: RemoteAckResolution) {
         if let RemoteAckOutcome::Alive = &ack.outcome {
-            if let Some(admission) = self.pending_relay_admissions.get(&ack.ack_id) {
+            if let Some(admission) = self
+                .inner
+                .remote_dispatch
+                .pending_relay_admissions
+                .get(&ack.ack_id)
+            {
                 if admission.send(RemoteAckOutcome::Alive).is_err() {
                     drop(admission);
-                    self.pending_relay_admissions.remove(&ack.ack_id);
+                    self.inner
+                        .remote_dispatch
+                        .pending_relay_admissions
+                        .remove(&ack.ack_id);
                 }
                 return;
             }
-            let Some(pending) = self.pending_remote_acks.get(&ack.ack_id) else {
+            let Some(pending) = self.inner.remote_dispatch.pending_acks.get(&ack.ack_id) else {
                 warn!(
                     ack_id = ack.ack_id,
                     "received remote ack alive for unknown ack id"
@@ -3627,12 +3770,17 @@ impl Runtime {
             return;
         }
 
-        if let Some((_, admission)) = self.pending_relay_admissions.remove(&ack.ack_id) {
+        if let Some((_, admission)) = self
+            .inner
+            .remote_dispatch
+            .pending_relay_admissions
+            .remove(&ack.ack_id)
+        {
             let _ = admission.send(ack.outcome);
             return;
         }
 
-        let Some((_, pending)) = self.pending_remote_acks.remove(&ack.ack_id) else {
+        let Some((_, pending)) = self.inner.remote_dispatch.pending_acks.remove(&ack.ack_id) else {
             warn!(
                 ack_id = ack.ack_id,
                 "received remote ack resolution for unknown ack id"
@@ -3656,7 +3804,7 @@ impl Runtime {
         let Some(ack) = ack else {
             return;
         };
-        let Some(dispatcher) = self.remote_dispatcher.read().clone() else {
+        let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
             return;
         };
         tokio::spawn(async move {
@@ -3846,7 +3994,7 @@ impl Runtime {
                 message.acks.ack_success();
             }
             MessageErrorPolicy::Log => {
-                let _ = self.events.send(RuntimeEvent::Error(format!(
+                let _ = self.inner.events.send(RuntimeEvent::Error(format!(
                     "{} '{}' message error in domain '{}': {}",
                     node_kind.as_str(),
                     node.as_str(),
@@ -3881,7 +4029,7 @@ impl Runtime {
                     .dispatch_message_error_to_dlq(context, relay, assignments)
                     .await
                 {
-                    let _ = self.events.send(RuntimeEvent::Error(format!(
+                    let _ = self.inner.events.send(RuntimeEvent::Error(format!(
                         "{} '{}' failed to dispatch message error {} to DLQ '{}' in domain '{}': \
                          {}",
                         node_kind.as_str(),
@@ -3921,7 +4069,7 @@ impl Runtime {
                 }
             }
             GeneralErrorPolicy::Log => {
-                let _ = self.events.send(RuntimeEvent::Error(format!(
+                let _ = self.inner.events.send(RuntimeEvent::Error(format!(
                     "{} '{}' general error in domain '{}': {}",
                     node_kind.as_str(),
                     node.as_str(),
@@ -3952,7 +4100,7 @@ impl Runtime {
         reason: String,
     ) {
         let node = node.into();
-        let _ = self.events.send(RuntimeEvent::Error(format!(
+        let _ = self.inner.events.send(RuntimeEvent::Error(format!(
             "{} '{}' internal error in domain '{}': {}",
             node_kind.as_str(),
             node.as_str(),
@@ -4057,7 +4205,7 @@ impl Runtime {
             program,
             flush_policy,
         } = {
-            let Some(execution) = self.executions.get(domain) else {
+            let Some(execution) = self.inner.executions.get(domain) else {
                 return Err(format!("domain '{}' is not instantiated", domain.as_str()));
             };
             let schema = execution.relay_schemas.get(relay).cloned().ok_or_else(|| {
@@ -4584,7 +4732,7 @@ impl Runtime {
             return Ok(());
         }
         let groups = collector.drain_groups();
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             let error = format!("domain '{}' is not running", domain.as_str());
             for group in &groups {
                 self.handle_general_error_for_acks(
@@ -4755,6 +4903,7 @@ impl Runtime {
                     &None,
                     &filter_where.materialized_interest,
                     &self
+                        .inner
                         .executions
                         .get(domain)
                         .map(|execution| execution.materialized_stream_owner_nodes.clone())
@@ -4821,7 +4970,7 @@ impl Runtime {
             return Ok(());
         }
 
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Err(format!("domain '{}' is not instantiated", domain.as_str()));
         };
         let owner_nodes = execution.materialized_stream_owner_nodes.clone();
@@ -4852,14 +5001,15 @@ impl Runtime {
                 )
             })
             .collect();
-        let physical_node_id = self.local_node_id.read().clone();
+        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         let estimated_bytes = rows.batch.estimated_bytes();
         let row_count: u64 = rows.len().arch_into();
         let bytes_per_row = estimated_bytes.checked_div(row_count).unwrap_or_default();
         let extra_bytes = estimated_bytes.checked_rem(row_count).unwrap_or_default();
         for (row, event_timestamp) in event_timestamps.iter().enumerate() {
             let row: u64 = row.arch_into();
-            self.metrics
+            self.inner
+                .metrics
                 .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
                     domain,
                     kind: ModelKind::Ingestor,
@@ -5209,6 +5359,7 @@ impl Runtime {
             }
             None => {
                 let pace = self
+                    .inner
                     .domains
                     .get(domain)
                     .map(|state| state.config.pace)
@@ -5233,7 +5384,7 @@ impl Runtime {
         ingestor: &IngestorName,
         event_timestamp: Timestamp,
     ) -> Result<(), String> {
-        let Some(domain_state) = self.domains.get(domain) else {
+        let Some(domain_state) = self.inner.domains.get(domain) else {
             return Ok(());
         };
         match domain_state.status {
@@ -5306,12 +5457,14 @@ impl Runtime {
         state: &ReplicatedKafkaOffsetState,
         instance_idx: u64,
     ) -> Result<(u64, bool), String> {
-        let (start_version, last_start) = if let Some(domain_state) = self.domains.get(domain) {
+        let (start_version, last_start) = if let Some(domain_state) = self.inner.domains.get(domain)
+        {
             (domain_state.start_version, domain_state.last_start.clone())
         } else {
             (0, nervix_models::DomainStartPoint::Resume)
         };
-        let scheduled_partition_schedule = if let Some(execution) = self.executions.get(domain)
+        let scheduled_partition_schedule = if let Some(execution) =
+            self.inner.executions.get(domain)
             && let Some(node) = execution.schedule.nodes.get(&NodeRef::new(
                 ModelKind::Ingestor,
                 ModelName::from(ingestor),
@@ -5366,7 +5519,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
     ) -> Result<Option<Timestamp>, String> {
-        let Some(domain_state) = self.domains.get(domain) else {
+        let Some(domain_state) = self.inner.domains.get(domain) else {
             return Ok(None);
         };
         if let DomainPace::Unpaced = domain_state.config.pace {
@@ -5382,7 +5535,7 @@ impl Runtime {
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEvent> {
-        self.events.subscribe()
+        self.inner.events.subscribe()
     }
 
     pub(in crate::runtime) async fn relay_boundary_fanout_with_capacity(
@@ -5393,7 +5546,7 @@ impl Runtime {
         capacity: NonZeroUsize,
     ) -> RelayBoundaryFanout {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
-        if let Some(fanout) = self.relay_boundary_fanouts.get(&key)
+        if let Some(fanout) = self.inner.relay_boundary_fanouts.get(&key)
             && fanout.uses_branch_collapse() == use_branch_collapse
         {
             fanout.set_capacity(capacity);
@@ -5405,7 +5558,9 @@ impl Runtime {
         } else {
             RelayBoundaryFanout::direct_with_capacity(capacity)
         };
-        self.relay_boundary_fanouts.insert(key, fanout.clone());
+        self.inner
+            .relay_boundary_fanouts
+            .insert(key, fanout.clone());
         fanout
     }
 
@@ -5413,14 +5568,19 @@ impl Runtime {
         &self,
         domain: &DomainName,
     ) -> SharedActiveGraph {
-        self.domain_graphs
+        self.inner
+            .domain_graphs
             .entry(domain.clone())
             .or_insert_with(|| StdArc::new(ArcSwapOption::from(None)))
             .clone()
     }
 
     pub(in crate::runtime) async fn clear_domain_graph_handle(&self, domain: &DomainName) {
-        let handle = self.domain_graphs.get(domain).map(|entry| entry.clone());
+        let handle = self
+            .inner
+            .domain_graphs
+            .get(domain)
+            .map(|entry| entry.clone());
         if let Some(handle) = handle {
             handle.store(None);
         }
@@ -5440,7 +5600,7 @@ impl Runtime {
                 IngestorName::from(&identifier),
                 graph,
                 template,
-                self.branch_instance_expiration_scan_interval,
+                self.inner.branch_instance_expiration_scan_interval,
             )
         })
     }
@@ -5485,7 +5645,7 @@ impl Runtime {
         local_node_id: &ClusterNodeName,
         schedule: &ClusterSchedule,
     ) -> Result<(), RuntimeError> {
-        let _lock = self.schedule_apply_lock.lock().await;
+        let _lock = self.inner.schedule_apply_lock.lock().await;
         self.apply_cluster_schedule_locked(local_node_id, schedule, true)
             .await
     }
@@ -5497,8 +5657,8 @@ impl Runtime {
         domains: &BTreeMap<DomainName, DomainState>,
         schedule: &ClusterSchedule,
     ) -> Result<(), RuntimeError> {
-        let _lock = self.schedule_apply_lock.lock().await;
-        let applied_revision = self.applied_cluster_revision.load(Ordering::Acquire);
+        let _lock = self.inner.schedule_apply_lock.lock().await;
+        let applied_revision = self.inner.applied_cluster_revision.load(Ordering::Acquire);
         if applied_revision != u64::MAX && revision <= applied_revision {
             return Ok(());
         }
@@ -5506,7 +5666,8 @@ impl Runtime {
         self.sync_domains(domains);
         self.apply_cluster_schedule_locked(local_node_id, schedule, false)
             .await?;
-        self.applied_cluster_revision
+        self.inner
+            .applied_cluster_revision
             .store(revision, Ordering::Release);
         Ok(())
     }
@@ -5523,25 +5684,29 @@ impl Runtime {
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
         let existing_domains = {
-            self.executions
+            self.inner
+                .executions
                 .iter()
                 .map(|entry| entry.key().clone())
                 .collect::<std::collections::BTreeSet<_>>()
         };
         let existing_schedules = {
-            self.executions
+            self.inner
+                .executions
                 .iter()
                 .map(|entry| (entry.key().clone(), entry.value().schedule.clone()))
                 .collect::<HashMap<_, _>>()
         };
         let existing_passive_only = {
-            self.executions
+            self.inner
+                .executions
                 .iter()
                 .map(|entry| (entry.key().clone(), entry.value().passive_only))
                 .collect::<HashMap<_, _>>()
         };
         let existing_start_versions = {
-            self.executions
+            self.inner
+                .executions
                 .iter()
                 .map(|entry| (entry.key().clone(), entry.value().start_version))
                 .collect::<HashMap<_, _>>()
@@ -5553,10 +5718,11 @@ impl Runtime {
                 .await
             {
                 Ok(()) => {
-                    self.domain_instantiation_errors.remove(domain);
+                    self.inner.domain_instantiation_errors.remove(domain);
                 }
                 Err(error) => {
-                    self.domain_instantiation_errors
+                    self.inner
+                        .domain_instantiation_errors
                         .insert(domain.clone(), error.to_string());
                     return Err(error);
                 }
@@ -5564,7 +5730,7 @@ impl Runtime {
         }
 
         for (domain_id, domain) in &schedule.domains {
-            let Some(domain_state) = self.domains.get(domain_id) else {
+            let Some(domain_state) = self.inner.domains.get(domain_id) else {
                 continue;
             };
             let domain_status = domain_state.status.clone();
@@ -5606,10 +5772,13 @@ impl Runtime {
                         .await
                     {
                         Ok(()) => {
-                            self.domain_instantiation_errors.remove(&domain.domain);
+                            self.inner
+                                .domain_instantiation_errors
+                                .remove(&domain.domain);
                         }
                         Err(error) => {
-                            self.domain_instantiation_errors
+                            self.inner
+                                .domain_instantiation_errors
                                 .insert(domain.domain.clone(), error.to_string());
                             return Err(error);
                         }
@@ -5694,10 +5863,10 @@ impl Runtime {
         desired: &DomainSchedule,
         reassignments: &[NodeRef],
     ) -> Vec<NodeRef> {
-        let Some(local_node_id) = self.local_node_id.read().clone() else {
+        let Some(local_node_id) = self.inner.remote_dispatch.local_node_id.read().clone() else {
             return Vec::new();
         };
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
         reassignments
@@ -5743,6 +5912,7 @@ impl Runtime {
             return Ok(());
         }
         let shutdown = self
+            .inner
             .executions
             .get(domain)
             .map(|execution| execution.shutdown.clone())
@@ -5763,13 +5933,13 @@ impl Runtime {
                     ),
                 }
             })?;
-            let was_local = self.executions.get(domain).is_some_and(|execution| {
+            let was_local = self.inner.executions.get(domain).is_some_and(|execution| {
                 Self::scheduled_node(&execution.schedule, entity)
                     .is_some_and(|existing| existing.executes_on(local_node_id))
             });
             let executes_locally = desired_node.executes_on(local_node_id);
             let relay_runtime = if entity.kind == ModelKind::Relay
-                && let Some(execution) = self.executions.get(domain)
+                && let Some(execution) = self.inner.executions.get(domain)
                 && let Some(registry) = execution
                     .relay_registries
                     .get(&RelayName::from(&entity.identifier))
@@ -5783,7 +5953,7 @@ impl Runtime {
             };
 
             if entity.kind == ModelKind::Relay && was_local && !executes_locally {
-                let previous = if let Some(mut execution) = self.executions.get_mut(domain) {
+                let previous = if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                     execution
                         .relay_owner_tasks
                         .remove(&RelayName::from(&entity.identifier))
@@ -5802,7 +5972,8 @@ impl Runtime {
                         })?;
                 }
             }
-            let previous_tasks = if let Some(mut execution) = self.executions.get_mut(domain) {
+            let previous_tasks = if let Some(mut execution) = self.inner.executions.get_mut(domain)
+            {
                 execution.placement_tasks.remove(entity)
             } else {
                 None
@@ -5820,7 +5991,7 @@ impl Runtime {
                 _ => None,
             };
             let materialized_schema = if let Some(relay) = materialized_relay.as_ref()
-                && let Some(execution) = self.executions.get(domain)
+                && let Some(execution) = self.inner.executions.get(domain)
                 && let Some(schema) = execution.relay_schemas.get(relay)
             {
                 Some(schema.arrow_schema())
@@ -5839,11 +6010,13 @@ impl Runtime {
             if let Some(relay) = materialized_relay {
                 relay_states_moved = true;
                 let services = self
+                    .inner
                     .executions
                     .get(domain)
                     .and_then(|execution| execution.relay_services.get(&relay).cloned());
                 if was_local && !executes_locally {
                     let previous = self
+                        .inner
                         .executions
                         .get_mut(domain)
                         .and_then(|mut execution| execution.relay_state_tasks.remove(&relay));
@@ -5885,11 +6058,11 @@ impl Runtime {
                             receiver: services.add_local_runtime_consumer(AckMode::Detached),
                         },
                     );
-                    if let Some(mut execution) = self.executions.get_mut(domain) {
+                    if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                         execution.relay_state_tasks.insert(relay.clone(), task);
                     }
                 }
-                if let Some(mut execution) = self.executions.get_mut(domain) {
+                if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                     execution
                         .materialized_stream_owner_nodes
                         .insert(relay, desired_node.execution_node().cloned());
@@ -5916,7 +6089,7 @@ impl Runtime {
                         &RelayName::from(&entity.identifier),
                     )?,
                 );
-                if let Some(mut execution) = self.executions.get_mut(domain) {
+                if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                     execution
                         .relay_owner_tasks
                         .insert(RelayName::from(&entity.identifier), task);
@@ -5924,7 +6097,7 @@ impl Runtime {
             }
 
             if !tasks.is_empty()
-                && let Some(mut execution) = self.executions.get_mut(domain)
+                && let Some(mut execution) = self.inner.executions.get_mut(domain)
             {
                 execution.placement_tasks.insert(entity.clone(), tasks);
             }
@@ -5943,7 +6116,7 @@ impl Runtime {
         reassignments: &[NodeRef],
         dynamic_updates: &[nervix_models::DynamicModelUpdate],
     ) -> Result<(), RuntimeError> {
-        let local_node_id = self.local_node_id.read().clone();
+        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         // A reassignment only replaces this cluster node's runtime when the node stopped or
         // started executing here. A node that keeps executing here, such as a server-side ingestor
         // that merely lost one of its other placements, is left running.
@@ -5976,7 +6149,7 @@ impl Runtime {
         let mut local_gate_hold = self.engage_entity_gates(
             domain,
             &relays,
-            Instant::now() + self.entity_gate_deadline,
+            Instant::now() + self.inner.entity_gate_deadline,
             "local scheduled node swap",
         );
         if !local_gate_hold.wait_quiescent().await {
@@ -6040,7 +6213,7 @@ impl Runtime {
                     previous_state_task,
                     previous_placement_tasks,
                 ) = {
-                    let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                    let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: "domain execution is unavailable for relay transition"
@@ -6165,7 +6338,7 @@ impl Runtime {
                     } else {
                         None
                     };
-                    if let Some(mut execution) = self.executions.get_mut(domain) {
+                    if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                         if !placement.tasks.is_empty() {
                             execution
                                 .placement_tasks
@@ -6212,7 +6385,7 @@ impl Runtime {
                 };
 
                 let key = entity.in_domain(domain);
-                if self.ingestors.contains_key(&key) {
+                if self.inner.ingestors.contains_key(&key) {
                     self.stop_ingestor(domain, &IngestorName::from(&entity.identifier))
                         .await?;
                 }
@@ -6228,7 +6401,7 @@ impl Runtime {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                if let Some(mut execution) = self.executions.get_mut(domain) {
+                if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                     if desired_entrypoint_specs.is_empty() {
                         execution.branched_ingestors.remove(&entity.identifier);
                     } else {
@@ -6284,7 +6457,7 @@ impl Runtime {
                 };
                 let desired_emitter = desired_emitter.clone();
                 let (old_emitter, old_task) = {
-                    let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                    let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: "domain execution is unavailable for emitter swap".to_string(),
@@ -6320,7 +6493,7 @@ impl Runtime {
                 {
                     let reason = error.reason().to_string();
                     if let Some(old_task) = error.into_task()
-                        && let Some(mut execution) = self.executions.get_mut(domain)
+                        && let Some(mut execution) = self.inner.executions.get_mut(domain)
                     {
                         execution.emitter_tasks.insert(entity.clone(), old_task);
                     }
@@ -6345,7 +6518,7 @@ impl Runtime {
                 }
 
                 let spawn = {
-                    let execution = self.executions.get_mut(domain).ok_or_else(|| {
+                    let execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: "domain execution disappeared during emitter swap".to_string(),
@@ -6416,7 +6589,8 @@ impl Runtime {
                         desired_emitter,
                         spawn.inputs,
                     )?;
-                    self.executions
+                    self.inner
+                        .executions
                         .get_mut(domain)
                         .ok_or_else(|| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -6464,7 +6638,7 @@ impl Runtime {
                     entrypoints: old_entrypoints,
                     shutdown,
                 } = {
-                    let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                    let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: "domain execution is unavailable for reingestor swap"
@@ -6538,7 +6712,7 @@ impl Runtime {
                         .cloned()
                         .collect::<Vec<_>>();
                     let templates = {
-                        let execution = self.executions.get(domain).ok_or_else(|| {
+                        let execution = self.inner.executions.get(domain).ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: "domain execution disappeared during reingestor swap"
@@ -6580,7 +6754,7 @@ impl Runtime {
                     }
 
                     let receivers = {
-                        let execution = self.executions.get(domain).ok_or_else(|| {
+                        let execution = self.inner.executions.get(domain).ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: "domain execution disappeared before reingestor spawn"
@@ -6625,7 +6799,7 @@ impl Runtime {
                             receiver,
                         )?);
                     }
-                    let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                    let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: "domain execution disappeared after reingestor spawn"
@@ -6669,6 +6843,7 @@ impl Runtime {
                 };
                 let desired_generator = desired_generator.clone();
                 let old_task = self
+                    .inner
                     .executions
                     .get_mut(domain)
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
@@ -6684,7 +6859,7 @@ impl Runtime {
 
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_ref()) {
                     let (shutdown, spec) = {
-                        let execution = self.executions.get(domain).ok_or_else(|| {
+                        let execution = self.inner.executions.get(domain).ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: "domain execution disappeared during generator swap"
@@ -6780,7 +6955,8 @@ impl Runtime {
                         )
                     };
                     let task = self.spawn_generator_task(domain, &shutdown, spec)?;
-                    self.executions
+                    self.inner
+                        .executions
                         .get_mut(domain)
                         .ok_or_else(|| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -6815,7 +6991,7 @@ impl Runtime {
                     ),
                 })?;
             let old_spec = {
-                let execution = self.executions.get(domain).ok_or_else(|| {
+                let execution = self.inner.executions.get(domain).ok_or_else(|| {
                     RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: "domain execution is unavailable for entity swap".to_string(),
@@ -6835,7 +7011,7 @@ impl Runtime {
             };
             // The change aspects own which node-local state a swap invalidates, so the runtime
             // applies that contract rather than re-deriving it per processor kind.
-            let state_purges = if let Some(execution) = self.executions.get(domain)
+            let state_purges = if let Some(execution) = self.inner.executions.get(domain)
                 && let Some(old_node) = execution
                     .schedule
                     .nodes
@@ -6869,7 +7045,7 @@ impl Runtime {
             }
 
             let (old_task, mut template) = {
-                let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                     RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: "domain execution is unavailable for entity swap".to_string(),
@@ -6911,7 +7087,7 @@ impl Runtime {
                 Vec::new()
             };
 
-            let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+            let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                 RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: "domain execution disappeared during entity swap".to_string(),
@@ -6955,7 +7131,7 @@ impl Runtime {
                     template,
                     inputs,
                     handoffs,
-                    self.branch_instance_expiration_scan_interval,
+                    self.inner.branch_instance_expiration_scan_interval,
                 );
                 execution.node_tasks.insert(entity.clone(), task);
             }
@@ -6963,7 +7139,7 @@ impl Runtime {
 
         self.apply_dynamic_model_updates(domain, dynamic_updates)
             .await?;
-        if let Some(mut execution) = self.executions.get_mut(domain) {
+        if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id.as_ref() {
                 let remote_consumers =
                     Self::remote_runtime_consumers_for_schedule(&schedule, local_node_id);
@@ -7076,7 +7252,7 @@ impl Runtime {
         self.apply_dynamic_model_updates(domain, updates).await?;
         let graph_handle = self.domain_graph_handle(domain).await;
         graph_handle.store(Some(StdArc::new(graph)));
-        if let Some(mut execution) = self.executions.get_mut(domain) {
+        if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             execution.schedule = schedule;
         }
         self.force_flush_domain(domain);
@@ -7096,7 +7272,7 @@ impl Runtime {
                 }
                 nervix_models::DynamicModelUpdate::Processor { .. } => {}
                 nervix_models::DynamicModelUpdate::Emitter { emitter, config } => {
-                    let commands = if let Some(execution) = self.executions.get(domain)
+                    let commands = if let Some(execution) = self.inner.executions.get(domain)
                         && let Some(task) = execution.emitter_tasks.get(&NodeRef {
                             kind: ModelKind::Emitter,
                             identifier: ModelName::from(emitter),
@@ -7121,10 +7297,10 @@ impl Runtime {
 
     fn set_relay_capacity(&self, domain: &DomainName, relay: &RelayName, capacity: NonZeroUsize) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
-        if let Some(fanout) = self.relay_boundary_fanouts.get(&key) {
+        if let Some(fanout) = self.inner.relay_boundary_fanouts.get(&key) {
             fanout.set_capacity(capacity);
         }
-        if let Some(execution) = self.executions.get(domain)
+        if let Some(execution) = self.inner.executions.get(domain)
             && let Some(services) = execution.relay_services.get(relay)
         {
             services.fanout.set_capacity(capacity);
@@ -7135,14 +7311,15 @@ impl Runtime {
     /// index can never drift from the executions it describes.
     fn install_domain_execution(&self, domain: &DomainName, execution: DomainExecution) {
         self.publish_routed_endpoints(domain, &execution);
-        self.executions.insert(domain.clone(), execution);
+        self.inner.executions.insert(domain.clone(), execution);
     }
 
     /// Publishes an execution's endpoint routes into the routing index. Called with the execution
     /// that is about to become live so inbound requests resolve it by host and path.
     fn publish_routed_endpoints(&self, domain: &DomainName, execution: &DomainExecution) {
         for (key, endpoint) in execution.routed_endpoints() {
-            self.routed_endpoints
+            self.inner
+                .routed_endpoints
                 .entry(key)
                 .or_default()
                 .insert(domain.clone(), endpoint);
@@ -7153,14 +7330,15 @@ impl Runtime {
     /// that has just been removed, so only the routes that domain published are dropped.
     fn withdraw_routed_endpoints(&self, domain: &DomainName, execution: &DomainExecution) {
         for (key, _) in execution.routed_endpoints() {
-            let Some(mut domains) = self.routed_endpoints.get_mut(&key) else {
+            let Some(mut domains) = self.inner.routed_endpoints.get_mut(&key) else {
                 continue;
             };
             domains.remove(domain);
             let emptied = domains.is_empty();
             drop(domains);
             if emptied {
-                self.routed_endpoints
+                self.inner
+                    .routed_endpoints
                     .remove_if(&key, |_, domains| domains.is_empty());
             }
         }
@@ -7180,7 +7358,7 @@ impl Runtime {
             host: normalize_http_host(host),
             path: path.to_string(),
         };
-        let domains = self.routed_endpoints.get(&key)?;
+        let domains = self.inner.routed_endpoints.get(&key)?;
         domains
             .values()
             .find(|endpoint| endpoint.endpoint_type == EndpointType::Websockets)
@@ -7192,7 +7370,7 @@ impl Runtime {
         domain: &DomainName,
         signaling_protocol: &SignalingProtocolName,
     ) -> Option<Arc<CompiledSignalingProtocol>> {
-        let execution = self.executions.get(domain)?;
+        let execution = self.inner.executions.get(domain)?;
         execution
             .signaling_protocols
             .get(signaling_protocol)
@@ -7213,11 +7391,14 @@ impl Runtime {
             host: normalize_http_host(host),
             path: path.to_string(),
         };
-        self.routed_endpoints.get(&key).is_some_and(|domains| {
-            domains
-                .values()
-                .any(|endpoint| endpoint.endpoint_type == endpoint_type)
-        })
+        self.inner
+            .routed_endpoints
+            .get(&key)
+            .is_some_and(|domains| {
+                domains
+                    .values()
+                    .any(|endpoint| endpoint.endpoint_type == endpoint_type)
+            })
     }
 
     /// Builds every part of a scheduled node's runtime that follows only from its assignment: the
@@ -7359,7 +7540,7 @@ impl Runtime {
             }
         }
         if node.kind != ModelKind::Relay || executes_locally {
-            self.metrics.register_global_node(
+            self.inner.metrics.register_global_node(
                 domain,
                 node.kind,
                 &node.identifier,
@@ -7380,10 +7561,11 @@ impl Runtime {
         self.stop_domain_ingestors(domain).await;
 
         let desired_start_version = self
+            .inner
             .domains
             .get(domain)
             .map_or(0, |state| state.start_version);
-        let reset_for_start = if let Some((_, existing)) = self.executions.remove(domain) {
+        let reset_for_start = if let Some((_, existing)) = self.inner.executions.remove(domain) {
             let reset_for_start =
                 existing.passive_only || existing.start_version != desired_start_version;
             self.stop_domain_execution(domain, existing).await;
@@ -7394,7 +7576,7 @@ impl Runtime {
 
         let Some(schedule) = schedule else {
             self.clear_domain_ingestor_quiescence(domain);
-            self.compiled_domain_udfs.remove(domain);
+            self.inner.compiled_domain_udfs.remove(domain);
             self.clear_state_schema_fingerprints(domain);
             self.clear_domain_graph_handle(domain).await;
             self.clear_expiring_stream_states_for_domain(domain);
@@ -7402,6 +7584,7 @@ impl Runtime {
         };
         self.install_state_schema_fingerprints(&schedule);
         if self
+            .inner
             .domains
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped))
@@ -7447,7 +7630,7 @@ impl Runtime {
         let mut emitter_tasks = HashMap::new();
         let mut generator_tasks = HashMap::new();
         let mut reingestor_tasks = HashMap::new();
-        let remote_dispatcher = self.remote_dispatcher.read().clone();
+        let remote_dispatcher = self.inner.remote_dispatcher.read().clone();
         let model_index = schedule
             .nodes
             .iter()
@@ -7980,7 +8163,8 @@ impl Runtime {
             {
                 continue;
             }
-            self.metrics
+            self.inner
+                .metrics
                 .register_global_stream(domain, relay, Some(local_node_id));
         }
         let relay_services = relay_builders
@@ -8108,7 +8292,7 @@ impl Runtime {
                     &shutdown_tx,
                     template,
                     inputs,
-                    self.branch_instance_expiration_scan_interval,
+                    self.inner.branch_instance_expiration_scan_interval,
                 ),
             );
         }
@@ -8263,6 +8447,7 @@ impl Runtime {
         );
 
         if self
+            .inner
             .domains
             .get(domain)
             .is_some_and(|state| !matches!(state.status, nervix_models::DomainStatus::Running))
@@ -8298,6 +8483,7 @@ impl Runtime {
     pub(in crate::runtime) fn install_state_schema_fingerprints(&self, schedule: &DomainSchedule) {
         self.clear_state_schema_fingerprints(&schedule.domain);
         let start_version = self
+            .inner
             .domains
             .get(&schedule.domain)
             .map_or(0, |state| state.start_version);
@@ -8314,7 +8500,7 @@ impl Runtime {
             } else {
                 node.schema_fingerprint
             };
-            self.state_schema_fingerprints.insert(
+            self.inner.state_schema_fingerprints.insert(
                 DomainNodeRef::node_in(schedule.domain.clone(), node.kind, node.identifier.clone()),
                 schema_fingerprint,
             );
@@ -8328,7 +8514,7 @@ impl Runtime {
     ) {
         self.clear_state_schema_fingerprints(domain);
         for node in graph.nodes() {
-            self.state_schema_fingerprints.insert(
+            self.inner.state_schema_fingerprints.insert(
                 DomainNodeRef::node_in(domain.clone(), node.kind, node.identifier.clone()),
                 graph
                     .schema_fingerprint(node.kind, &node.identifier)
@@ -8339,12 +8525,13 @@ impl Runtime {
 
     fn clear_state_schema_fingerprints(&self, domain: &DomainName) {
         let keys = self
+            .inner
             .state_schema_fingerprints
             .iter()
             .filter_map(|entry| (&entry.key().domain == domain).then(|| entry.key().clone()))
             .collect::<Vec<_>>();
         for key in keys {
-            self.state_schema_fingerprints.remove(&key);
+            self.inner.state_schema_fingerprints.remove(&key);
         }
     }
 
@@ -8361,7 +8548,8 @@ impl Runtime {
             if let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset = state {
                 [0; 32]
             } else {
-                self.state_schema_fingerprints
+                self.inner
+                    .state_schema_fingerprints
                     .get(&DomainNodeRef::node_in(
                         domain.clone(),
                         kind,
@@ -8382,6 +8570,7 @@ impl Runtime {
 
     fn runtime_state_placement_is_current(&self, placement: &RuntimeStatePlacement) -> bool {
         let Some(current) = self
+            .inner
             .state_schema_fingerprints
             .get(&DomainNodeRef::node_in(
                 placement.domain.clone(),
@@ -8407,6 +8596,7 @@ impl Runtime {
         domain: &DomainName,
     ) -> Result<(), error_stack::Report<RuntimePersistenceError>> {
         let stale_deduplicators = self
+            .inner
             .replicated_deduplicator_states
             .iter()
             .filter_map(|entry| {
@@ -8416,9 +8606,10 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for placement in stale_deduplicators {
-            self.replicated_deduplicator_states.remove(&placement);
+            self.inner.replicated_deduplicator_states.remove(&placement);
         }
         let stale_materialized = self
+            .inner
             .replicated_materialized_stream_states
             .iter()
             .filter_map(|entry| {
@@ -8428,10 +8619,12 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for placement in stale_materialized {
-            self.replicated_materialized_stream_states
+            self.inner
+                .replicated_materialized_stream_states
                 .remove(&placement);
         }
         let stale_windows = self
+            .inner
             .replicated_window_processor_states
             .iter()
             .filter_map(|entry| {
@@ -8441,9 +8634,12 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for placement in stale_windows {
-            self.replicated_window_processor_states.remove(&placement);
+            self.inner
+                .replicated_window_processor_states
+                .remove(&placement);
         }
         let stale_wasm = self
+            .inner
             .replicated_wasm_processor_states
             .iter()
             .filter_map(|entry| {
@@ -8453,9 +8649,12 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for placement in stale_wasm {
-            self.replicated_wasm_processor_states.remove(&placement);
+            self.inner
+                .replicated_wasm_processor_states
+                .remove(&placement);
         }
         let stale_offsets = self
+            .inner
             .replicated_kafka_offset_states
             .iter()
             .filter_map(|entry| {
@@ -8465,9 +8664,10 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for placement in stale_offsets {
-            self.replicated_kafka_offset_states.remove(&placement);
+            self.inner.replicated_kafka_offset_states.remove(&placement);
         }
         let stale_aggregates = self
+            .inner
             .replicated_branch_aggregated_states
             .iter()
             .filter_map(|entry| {
@@ -8477,9 +8677,12 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for placement in stale_aggregates {
-            self.replicated_branch_aggregated_states.remove(&placement);
+            self.inner
+                .replicated_branch_aggregated_states
+                .remove(&placement);
         }
         let stale_expiring = self
+            .inner
             .expiring_stream_states
             .iter()
             .filter_map(|entry| {
@@ -8489,11 +8692,12 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for placement in stale_expiring {
-            self.expiring_stream_states.remove(&placement);
+            self.inner.expiring_stream_states.remove(&placement);
         }
 
-        if let Some(store) = self.state_store.as_ref() {
+        if let Some(store) = self.inner.state_store.as_ref() {
             let current = self
+                .inner
                 .state_schema_fingerprints
                 .iter()
                 .filter_map(|entry| {
@@ -8527,6 +8731,7 @@ impl Runtime {
             path: path.to_string(),
         };
         let bindings = self
+            .inner
             .endpoint_bindings
             .get(&route_key)
             .map(|bindings| bindings.clone())
@@ -8583,7 +8788,8 @@ impl Runtime {
             path: path.to_string(),
         };
         let bindings = {
-            self.endpoint_bindings
+            self.inner
+                .endpoint_bindings
                 .get(&route_key)
                 .map(|bindings| bindings.clone())
                 .unwrap_or_default()
@@ -8675,7 +8881,7 @@ impl Runtime {
                     )
                     .await;
                 if let Err(error) = dispatch_result.and(flush_result) {
-                    let _ = self.events.send(RuntimeEvent::Error(format!(
+                    let _ = self.inner.events.send(RuntimeEvent::Error(format!(
                         "failed to dispatch {protocol} message for ingestor '{}' in domain '{}': \
                          {}",
                         binding.ingestor.as_str(),
@@ -8692,7 +8898,7 @@ impl Runtime {
                 }
             }
             Err(error) => {
-                let _ = self.events.send(RuntimeEvent::Error(format!(
+                let _ = self.inner.events.send(RuntimeEvent::Error(format!(
                     "failed to decode {protocol} message for ingestor '{}' in domain '{}': {}",
                     binding.ingestor.as_str(),
                     binding.domain.as_str(),
@@ -8763,7 +8969,7 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<RelaySubscriptionReceiver<RelayRecordBatch>, RuntimeError> {
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: relay.as_str().to_string(),
@@ -8790,7 +8996,7 @@ impl Runtime {
         relay: &RelayName,
         key: &Option<BranchKey>,
     ) -> Result<bool, RuntimeError> {
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: relay.as_str().to_string(),
@@ -8827,7 +9033,8 @@ impl Runtime {
                 "failed to refresh branch-aggregated metrics before describe"
             );
         }
-        self.metrics
+        self.inner
+            .metrics
             .describe_global_target(domain, kind, identifier)
     }
 
@@ -8840,7 +9047,7 @@ impl Runtime {
         let mut branch_count = 0_usize;
         let mut dirty_count = 0_usize;
         let mut pending_replica_count = 0_usize;
-        for state in self.replicated_wasm_processor_states.iter() {
+        for state in self.inner.replicated_wasm_processor_states.iter() {
             let placement = &state.placement;
             if &placement.domain != domain
                 || placement.kind != ModelKind::WasmProcessor
@@ -8865,14 +9072,14 @@ impl Runtime {
     }
 
     pub fn describe_domain_statistics(&self, domain: &DomainName) -> Vec<String> {
-        self.metrics.describe_domain_statistics(domain)
+        self.inner.metrics.describe_domain_statistics(domain)
     }
 
     pub fn dataflow_domain_statistics(
         &self,
         domain: &DomainName,
     ) -> nervix_dataflow_graph::DataflowStatistics {
-        self.metrics.dataflow_domain_statistics(domain)
+        self.inner.metrics.dataflow_domain_statistics(domain)
     }
 
     pub fn dataflow_node_statistics(
@@ -8881,7 +9088,8 @@ impl Runtime {
         kind: &str,
         identifier: &ModelName,
     ) -> nervix_dataflow_graph::DataflowStatistics {
-        self.metrics
+        self.inner
+            .metrics
             .dataflow_node_statistics(domain, kind, identifier)
     }
 
@@ -8890,7 +9098,7 @@ impl Runtime {
         domain: &DomainName,
         metric: &nervix_dataflow_graph::DataflowMetricRef,
     ) -> nervix_dataflow_graph::DataflowStatistics {
-        self.metrics.dataflow_edge_statistics(domain, metric)
+        self.inner.metrics.dataflow_edge_statistics(domain, metric)
     }
 
     pub fn dataflow_relay_buffer_statistics(
@@ -8898,7 +9106,9 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> nervix_dataflow_graph::DataflowStatistics {
-        self.metrics.dataflow_relay_buffer_statistics(domain, relay)
+        self.inner
+            .metrics
+            .dataflow_relay_buffer_statistics(domain, relay)
     }
 
     pub fn dataflow_branch_statistics(
@@ -8907,7 +9117,8 @@ impl Runtime {
         kind: &str,
         identifier: &ModelName,
     ) -> Vec<nervix_dataflow_graph::DataflowBranchStatistics> {
-        self.metrics
+        self.inner
+            .metrics
             .dataflow_branch_statistics(domain, kind, identifier)
     }
 
@@ -8916,7 +9127,9 @@ impl Runtime {
         domain: &DomainName,
         metric: &nervix_dataflow_graph::DataflowMetricRef,
     ) -> Vec<nervix_dataflow_graph::DataflowBranchStatistics> {
-        self.metrics.dataflow_edge_branch_statistics(domain, metric)
+        self.inner
+            .metrics
+            .dataflow_edge_branch_statistics(domain, metric)
     }
 
     pub fn dataflow_relay_branch_statistics(
@@ -8924,7 +9137,7 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Vec<nervix_dataflow_graph::DataflowBranchStatistics> {
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
         let Some(registry) = execution.relay_registries.get(relay) else {
@@ -8966,6 +9179,7 @@ impl Runtime {
                     Some(error)
                 }
             } else if self
+                .inner
                 .ingestor_faults
                 .is_failed(&IngestorName::from(&identifier))
             {
@@ -8985,6 +9199,7 @@ impl Runtime {
                     Some(error)
                 }
             } else if self
+                .inner
                 .emitter_faults
                 .fault_mode(&EmitterName::from(&identifier))
                 .is_some()
@@ -9051,11 +9266,11 @@ impl Runtime {
         if kind == ModelKind::Relay {
             return Ok(());
         }
-        let Some(store) = &self.state_store else {
+        let Some(store) = &self.inner.state_store else {
             return Ok(());
         };
         let mut placements = Vec::new();
-        for entry in self.replicated_branch_aggregated_states.iter() {
+        for entry in self.inner.replicated_branch_aggregated_states.iter() {
             let placement = entry.key();
             if &placement.domain == domain
                 && placement.kind == kind
@@ -9065,11 +9280,15 @@ impl Runtime {
             }
         }
         for placement in placements {
-            let Some(state) = self.replicated_branch_aggregated_states.get(&placement) else {
+            let Some(state) = self
+                .inner
+                .replicated_branch_aggregated_states
+                .get(&placement)
+            else {
                 continue;
             };
             if let Some(snapshot) = store.latest_snapshot(&placement)? {
-                state.restore_persisted_snapshot(&self.metrics, snapshot)?;
+                state.restore_persisted_snapshot(&self.inner.metrics, snapshot)?;
             }
         }
         let placement = self.state_placement(
@@ -9080,12 +9299,13 @@ impl Runtime {
             None,
         );
         if !self
+            .inner
             .metrics
             .has_global_target_measurements(domain, kind, identifier)
             && let Some(snapshot) = store.latest_snapshot(&placement)?
         {
             let decoded = decode_branch_aggregated_snapshot(&snapshot.payload)?;
-            self.metrics.apply_global_snapshot(decoded.metrics);
+            self.inner.metrics.apply_global_snapshot(decoded.metrics);
         }
         Ok(())
     }
@@ -9105,8 +9325,8 @@ impl Runtime {
             .as_ref()
             .map(|control| control.counters())
             .unwrap_or_default();
-        if !self.executions.contains_key(domain) {
-            if let Some(error) = self.domain_instantiation_errors.get(domain) {
+        if !self.inner.executions.contains_key(domain) {
+            if let Some(error) = self.inner.domain_instantiation_errors.get(domain) {
                 return Err(error.value().clone());
             }
             return Ok(IngestorDescribe {
@@ -9123,12 +9343,13 @@ impl Runtime {
         }
 
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        let Some(runtime) = self.ingestors.get(&key) else {
+        let Some(runtime) = self.inner.ingestors.get(&key) else {
             let transient_error =
                 if let Some(error) = self.ingestor_transient_error(domain, ingestor) {
                     Some(error)
                 } else {
-                    self.domain_instantiation_errors
+                    self.inner
+                        .domain_instantiation_errors
                         .get(domain)
                         .map(|error| error.value().clone())
                 };
@@ -9144,7 +9365,7 @@ impl Runtime {
                 kafka_domain_offsets: None,
             });
         };
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Ok(IngestorDescribe {
                 running: true,
                 ready: self.ingestor_ready(domain, ingestor),
@@ -9209,7 +9430,7 @@ impl Runtime {
         relay: &RelayName,
     ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
         let mut entries = Vec::new();
-        for state in self.replicated_materialized_stream_states.iter() {
+        for state in self.inner.replicated_materialized_stream_states.iter() {
             let placement = state.key();
             if placement.domain == *domain
                 && placement.kind == ModelKind::Relay
@@ -9234,7 +9455,7 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> bool {
-        self.executions.get(domain).is_some_and(|execution| {
+        self.inner.executions.get(domain).is_some_and(|execution| {
             execution
                 .schedule
                 .nodes
@@ -9260,7 +9481,11 @@ impl Runtime {
             relay,
             branch_key.clone(),
         );
-        if let Some(state) = self.replicated_materialized_stream_states.get(&placement) {
+        if let Some(state) = self
+            .inner
+            .replicated_materialized_stream_states
+            .get(&placement)
+        {
             let entries = self
                 .visible_materialized_stream_remote_entries(&placement, &state)?
                 .into_iter()
@@ -9276,6 +9501,7 @@ impl Runtime {
                 ..placement.clone()
             };
             if let Some(state) = self
+                .inner
                 .replicated_materialized_stream_states
                 .get(&aggregate_placement)
             {
@@ -9287,7 +9513,7 @@ impl Runtime {
                     .collect());
             }
         }
-        if let Some(store) = &self.state_store
+        if let Some(store) = &self.inner.state_store
             && let Some(snapshot) = store
                 .latest_snapshot(&placement)
                 .map_err(|error| error.to_string())?
@@ -9308,7 +9534,7 @@ impl Runtime {
                 branch_key: None,
                 ..placement
             };
-            if let Some(store) = &self.state_store
+            if let Some(store) = &self.inner.state_store
                 && let Some(snapshot) = store
                     .latest_snapshot(&aggregate_placement)
                     .map_err(|error| error.to_string())?
@@ -9366,7 +9592,11 @@ impl Runtime {
             relay,
             branch_key.clone(),
         );
-        if let Some(state) = self.replicated_materialized_stream_states.get(&placement) {
+        if let Some(state) = self
+            .inner
+            .replicated_materialized_stream_states
+            .get(&placement)
+        {
             let values = if self.materialized_stream_key_is_visible(&placement, branch_key) {
                 state.values_at(branch_key, fields.iter().map(|field| field.column_index))?
             } else {
@@ -9382,6 +9612,7 @@ impl Runtime {
                 ..placement.clone()
             };
             if let Some(state) = self
+                .inner
                 .replicated_materialized_stream_states
                 .get(&aggregate_placement)
                 && self.materialized_stream_key_is_visible(&aggregate_placement, branch_key)
@@ -9391,7 +9622,7 @@ impl Runtime {
                 return Ok(Some(values));
             }
         }
-        if let Some(store) = &self.state_store
+        if let Some(store) = &self.inner.state_store
             && let Some(snapshot) = store
                 .latest_snapshot(&placement)
                 .map_err(|error| error.to_string())?
@@ -9408,7 +9639,7 @@ impl Runtime {
                 branch_key: None,
                 ..placement
             };
-            if let Some(store) = &self.state_store
+            if let Some(store) = &self.inner.state_store
                 && let Some(snapshot) = store
                     .latest_snapshot(&aggregate_placement)
                     .map_err(|error| error.to_string())?
@@ -9478,7 +9709,7 @@ impl Runtime {
             .get(relay)
             .and_then(|node| node.as_ref())
             .cloned();
-        let local_node_id = self.local_node_id.read().clone();
+        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         if let Some(owner) = owner
             && local_node_id.as_ref() != Some(&owner)
         {
@@ -9507,7 +9738,7 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         key: &Option<BranchKey>,
     ) -> bool {
-        let scheduled = if let Some(execution) = self.executions.get(&placement.domain)
+        let scheduled = if let Some(execution) = self.inner.executions.get(&placement.domain)
             && let Some(owner) = execution
                 .materialized_stream_owner_nodes
                 .get(&RelayName::from(&placement.identifier))
@@ -9526,7 +9757,8 @@ impl Runtime {
             &placement.identifier,
             None,
         );
-        self.expiring_stream_states
+        self.inner
+            .expiring_stream_states
             .get(&expiring_placement)
             .is_none_or(|state| state.contains_key(key))
     }
@@ -9583,14 +9815,14 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
-        let owner = if let Some(execution) = self.executions.get(domain)
+        let owner = if let Some(execution) = self.inner.executions.get(domain)
             && let Some(owner) = execution.materialized_stream_owner_nodes.get(relay)
         {
             owner.clone()
         } else {
             None
         };
-        let local_node_id = self.local_node_id.read().clone();
+        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         if let Some(owner) = owner
             && local_node_id.as_ref() != Some(&owner)
         {
@@ -9688,7 +9920,7 @@ impl Runtime {
         relay: &RelayName,
         owner_nodes: &HashMap<RelayName, Option<ClusterNodeName>>,
     ) -> Result<Option<HashMap<String, RuntimeValue>>, String> {
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Err(format!("domain '{}' is not instantiated", domain));
         };
         let Some(spec) = execution.materialized_stream_specs.get(relay).cloned() else {
@@ -9746,6 +9978,7 @@ impl Runtime {
             return Ok(MaterializedDependencyResolution::Ready(HashMap::default()));
         }
         let owner_nodes = self
+            .inner
             .executions
             .get(domain)
             .map(|execution| execution.materialized_stream_owner_nodes.clone())
@@ -9814,7 +10047,7 @@ impl Runtime {
         let mut required_wait = None;
         loop {
             tokio::task::consume_budget().await;
-            let changed = self.materialized_state_changed.notified();
+            let changed = self.inner.materialized_state_changed.notified();
             match self
                 .resolve_materialized_dependencies(domain, &batch.key, dependencies)
                 .await?
@@ -9855,7 +10088,7 @@ impl Runtime {
                     }
                     tokio::select! {
                         _ = changed => {}
-                        _ = sleep(self.state_replication_poll_interval) => {}
+                        _ = sleep(self.inner.state_replication_poll_interval) => {}
                         result = shutdown_rx.changed() => {
                             if result.is_err() || *shutdown_rx.borrow() {
                                 for ack in batch.acks.iter() {
@@ -9879,8 +10112,8 @@ impl Runtime {
         domain: &DomainName,
         name: &LookupName,
     ) -> Result<LocalLookupDescription, String> {
-        let Some(execution) = self.executions.get(domain) else {
-            if let Some(error) = self.domain_instantiation_errors.get(domain) {
+        let Some(execution) = self.inner.executions.get(domain) else {
+            if let Some(error) = self.inner.domain_instantiation_errors.get(domain) {
                 return Err(error.value().clone());
             }
             return Err(format!("domain '{}' is not instantiated", domain.as_str()));
@@ -9900,7 +10133,8 @@ impl Runtime {
     }
 
     pub(crate) fn udf_executor(&self, domain: &DomainName) -> Option<UdfExecutor> {
-        self.executions
+        self.inner
+            .executions
             .get(domain)
             .map(|execution| execution.udfs.clone())
     }
@@ -9919,7 +10153,9 @@ impl Runtime {
         domain: &DomainName,
         prepared: CompiledDomainUdfs,
     ) {
-        self.compiled_domain_udfs.insert(domain.clone(), prepared);
+        self.inner
+            .compiled_domain_udfs
+            .insert(domain.clone(), prepared);
     }
 
     async fn compile_domain_udfs(
@@ -9929,7 +10165,7 @@ impl Runtime {
     ) -> Result<UdfExecutor, nervix_roto::UdfError> {
         let mut sorted_models = models;
         sorted_models.sort_by(|left, right| left.name.cmp(&right.name));
-        if let Some(cached) = self.compiled_domain_udfs.get(domain)
+        if let Some(cached) = self.inner.compiled_domain_udfs.get(domain)
             && cached.models == sorted_models
         {
             return Ok(cached.executor.clone());
@@ -9946,8 +10182,8 @@ impl Runtime {
         name: &LookupName,
         key: &str,
     ) -> Result<Option<RuntimeRecordBatch>, String> {
-        let Some(execution) = self.executions.get(domain) else {
-            if let Some(error) = self.domain_instantiation_errors.get(domain) {
+        let Some(execution) = self.inner.executions.get(domain) else {
+            if let Some(error) = self.inner.domain_instantiation_errors.get(domain) {
                 return Err(error.value().clone());
             }
             return Err(format!("domain '{}' is not instantiated", domain.as_str()));
@@ -9959,12 +10195,13 @@ impl Runtime {
                 domain.as_str()
             ));
         };
-        self.metrics
+        self.inner
+            .metrics
             .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
                 domain,
                 kind: ModelKind::Lookup,
                 node: &ModelName::from(name),
-                physical_node_id: self.local_node_id.read().as_ref(),
+                physical_node_id: self.inner.remote_dispatch.local_node_id.read().as_ref(),
                 messages: 1,
                 bytes: key.len().arch_into(),
                 domain_timestamp: Some(current_timestamp()),
@@ -10022,7 +10259,7 @@ impl Runtime {
         domain: &DomainName,
         graph: Option<ActiveGraph>,
     ) -> Result<(), RuntimeError> {
-        if let Some((_, existing)) = self.executions.remove(domain) {
+        if let Some((_, existing)) = self.inner.executions.remove(domain) {
             self.stop_domain_execution(domain, existing).await;
         }
 
@@ -10032,10 +10269,11 @@ impl Runtime {
             return Ok(());
         };
         let stopped = self
+            .inner
             .domains
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped));
-        if stopped || !self.domains.contains_key(domain) {
+        if stopped || !self.inner.domains.contains_key(domain) {
             if stopped {
                 self.purge_stopped_domain_runtime_state(domain)?;
             }
@@ -10549,7 +10787,7 @@ impl Runtime {
                     &shutdown_tx,
                     template,
                     inputs,
-                    self.branch_instance_expiration_scan_interval,
+                    self.inner.branch_instance_expiration_scan_interval,
                 ),
             );
         }
@@ -10688,6 +10926,7 @@ impl Runtime {
                 ),
                 passive_only: false,
                 start_version: self
+                    .inner
                     .domains
                     .get(domain)
                     .map_or(0, |state| state.start_version),
@@ -10915,6 +11154,7 @@ impl Runtime {
             schedule: schedule.clone(),
             passive_only: true,
             start_version: self
+                .inner
                 .domains
                 .get(domain)
                 .map_or(0, |state| state.start_version),
@@ -10992,6 +11232,7 @@ impl Runtime {
         let task_domain = domain.clone();
         let task_generator = generator.name.clone();
         let source_gate = self
+            .inner
             .relay_boundary_fanouts
             .get(&DomainNodeRef::node_in(
                 domain.clone(),
@@ -11009,10 +11250,10 @@ impl Runtime {
         let quiesce_counters =
             self.node_quiesce_counters(domain, NodeRef::new(ModelKind::Generator, &generator.name));
         let mut shutdown_rx = shutdown_tx.subscribe();
-        let mut domain_status_rx = self.domain_status_changed.subscribe();
+        let mut domain_status_rx = self.inner.domain_status_changed.subscribe();
         let generator_activity = self.generator_activity_tracker(domain);
         let runtime = self.clone();
-        let task_events = self.events.clone();
+        let task_events = self.inner.events.clone();
 
         Ok(tokio::spawn(async move {
             let mut activity = DomainActivityGuard::new(generator_activity);
@@ -11070,9 +11311,14 @@ impl Runtime {
                     }
                     continue;
                 }
-                if runtime.domains.get(&task_domain).is_some_and(|state| {
-                    matches!(state.status, nervix_models::DomainStatus::Paused)
-                }) {
+                if runtime
+                    .inner
+                    .domains
+                    .get(&task_domain)
+                    .is_some_and(|state| {
+                        matches!(state.status, nervix_models::DomainStatus::Paused)
+                    })
+                {
                     for (route_index, (route, _)) in routes.iter().enumerate() {
                         tokio::task::consume_budget().await;
                         let mut pending_groups = Vec::new();
@@ -11132,6 +11378,7 @@ impl Runtime {
 
                 let paced_state =
                     runtime
+                        .inner
                         .domains
                         .get(&task_domain)
                         .map(|domain_state| PacedDomainState {
@@ -11624,7 +11871,7 @@ impl Runtime {
                 current_branch_schema,
                 target_branch_schema,
             ) = {
-                let Some(execution) = self.executions.get(domain) else {
+                let Some(execution) = self.inner.executions.get(domain) else {
                     return Err(PlannedGeneralError {
                         acks: batch.acks.clone(),
                         reason: format!("domain '{}' is not instantiated", domain.as_str()),
@@ -11741,6 +11988,7 @@ impl Runtime {
 
         let Some(program) = output.compiled_program.as_ref() else {
             let output_schema = self
+                .inner
                 .executions
                 .get(domain)
                 .and_then(|execution| execution.relay_schemas.get(&output.relay).cloned())
@@ -12347,7 +12595,7 @@ impl Runtime {
                 current_branching,
                 current_branch_schema,
             ) = {
-                let Some(execution) = self.executions.get(domain) else {
+                let Some(execution) = self.inner.executions.get(domain) else {
                     self.handle_internal_processor_error_for_acks(
                         domain,
                         ModelKind::Reingestor,
@@ -12679,8 +12927,10 @@ impl Runtime {
                     } => {
                         debug_assert_eq!(input_relay, task_from_relay);
                         let delivery_observation = batch.delivery_observation(current_timestamp());
-                        let physical_node_id = runtime.local_node_id.read().clone();
+                        let physical_node_id =
+                            runtime.inner.remote_dispatch.local_node_id.read().clone();
                         runtime
+                            .inner
                             .metrics
                             .observe_global_node_received(NodeBatchObservation {
                                 domain: &task_domain,
@@ -12699,6 +12949,7 @@ impl Runtime {
                         );
                         for seconds in delivery_observation.latency_seconds {
                             runtime
+                                .inner
                                 .metrics
                                 .observe_global_delivery_latency_at_domain_time(
                                     NodeLatencyObservation {
@@ -12797,7 +13048,7 @@ impl Runtime {
             branch_ttl,
             branch_capacity,
         } = retention;
-        let expiration_scan_interval = self.branch_instance_expiration_scan_interval;
+        let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
         let task = tokio::spawn(async move {
             let mut branches = RelayOwnerBranchState {
                 registry,
@@ -12873,15 +13124,15 @@ impl Runtime {
                     .await;
             }
             services.observe_owner_buffer_length(
-                &runtime.metrics,
+                &runtime.inner.metrics,
                 &domain,
                 &relay,
-                runtime.local_node_id.read().as_ref(),
+                runtime.inner.remote_dispatch.local_node_id.read().as_ref(),
                 None,
             );
             services.deactivate_owner_buffer();
             branches.registry.clear();
-            runtime.metrics.remove_relay(&domain, &relay);
+            runtime.inner.metrics.remove_relay(&domain, &relay);
         });
         RelayOwnerTask { shutdown, task }
     }
@@ -12903,7 +13154,7 @@ impl Runtime {
         } = spec;
         let runtime = self.clone();
         let domain = domain.clone();
-        let expiration_scan_interval = self.branch_instance_expiration_scan_interval;
+        let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
         let (shutdown, shutdown_rx) = watch::channel(false);
         let quiesce_counters =
             self.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay));
@@ -13065,9 +13316,11 @@ impl Runtime {
     }
 
     pub async fn pause_ingestors_for_memory_pressure(&self) -> usize {
-        self.ingestors_paused_for_memory_pressure
+        self.inner
+            .ingestors_paused_for_memory_pressure
             .store(true, Ordering::SeqCst);
         let ingestors = self
+            .inner
             .ingestors
             .iter()
             .map(|entry| entry.key().clone())
@@ -13092,6 +13345,7 @@ impl Runtime {
 
     pub async fn resume_one_ingestor_after_memory_pressure(&self) -> Result<bool, RuntimeError> {
         let mut keys = self
+            .inner
             .ingestor_quiescence
             .iter()
             .filter_map(|entry| {
@@ -13101,7 +13355,8 @@ impl Runtime {
             .collect::<Vec<_>>();
         keys.sort();
         let Some(key) = keys.first() else {
-            self.ingestors_paused_for_memory_pressure
+            self.inner
+                .ingestors_paused_for_memory_pressure
                 .store(false, Ordering::SeqCst);
             return Ok(false);
         };
@@ -13119,7 +13374,8 @@ impl Runtime {
     }
 
     pub fn ingestors_paused_for_memory_pressure(&self) -> bool {
-        self.ingestors_paused_for_memory_pressure
+        self.inner
+            .ingestors_paused_for_memory_pressure
             .load(Ordering::SeqCst)
     }
 
@@ -13141,7 +13397,7 @@ impl Runtime {
     }
 
     pub async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
-        let _lock = self.schedule_apply_lock.lock().await;
+        let _lock = self.inner.schedule_apply_lock.lock().await;
         while let Some(spec) = self.next_scheduled_ingestor_start_spec(None) {
             tokio::task::consume_budget().await;
             self.start_scheduled_ingestor(
@@ -13159,8 +13415,9 @@ impl Runtime {
         &self,
         requested_domain: Option<&DomainName>,
     ) -> Option<ScheduledIngestorStartSpec> {
-        let local_node_id = self.local_node_id.read().clone();
+        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         let mut domains = self
+            .inner
             .executions
             .iter()
             .map(|entry| entry.key().clone())
@@ -13170,13 +13427,14 @@ impl Runtime {
 
         for domain in domains {
             if self
+                .inner
                 .domains
                 .get(&domain)
                 .is_some_and(|state| !matches!(state.status, nervix_models::DomainStatus::Running))
             {
                 continue;
             }
-            let Some(execution) = self.executions.get(&domain) else {
+            let Some(execution) = self.inner.executions.get(&domain) else {
                 continue;
             };
             let passive_only = execution.passive_only;
@@ -13195,7 +13453,7 @@ impl Runtime {
                 }
 
                 let key = node.identity().in_domain(&domain);
-                if self.ingestors.contains_key(&key) {
+                if self.inner.ingestors.contains_key(&key) {
                     continue;
                 }
 
@@ -13281,7 +13539,8 @@ impl Runtime {
             &node.identifier,
             None,
         );
-        self.replicated_kafka_offset_states
+        self.inner
+            .replicated_kafka_offset_states
             .get(&placement)
             .map(|state| state.value().clone())
     }
@@ -13369,13 +13628,14 @@ impl Runtime {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;
         }
         let quiesce_keys = self
+            .inner
             .node_quiesce_counters
             .iter()
             .filter(|entry| &entry.key().domain == domain)
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in quiesce_keys {
-            self.node_quiesce_counters.remove(&key);
+            self.inner.node_quiesce_counters.remove(&key);
         }
         for (identifier, runtimes) in execution.branched_entrypoints {
             for runtime in runtimes {
@@ -13389,6 +13649,7 @@ impl Runtime {
         }
         self.stop_message_error_routes_for_domain(domain).await;
         if !self
+            .inner
             .domains
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Paused))
@@ -13399,64 +13660,77 @@ impl Runtime {
 
     fn clear_runtime_state_for_domain(&self, domain: &DomainName) {
         let placements = self
+            .inner
             .replicated_deduplicator_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
         for placement in placements {
-            self.replicated_deduplicator_states.remove(&placement);
+            self.inner.replicated_deduplicator_states.remove(&placement);
         }
         let placements = self
+            .inner
             .replicated_kafka_offset_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
         for placement in placements {
-            self.replicated_kafka_offset_states.remove(&placement);
+            self.inner.replicated_kafka_offset_states.remove(&placement);
         }
         let placements = self
+            .inner
             .replicated_materialized_stream_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
         for placement in placements {
-            self.replicated_materialized_stream_states
+            self.inner
+                .replicated_materialized_stream_states
                 .remove(&placement);
         }
         let placements = self
+            .inner
             .replicated_window_processor_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
         for placement in placements {
-            self.replicated_window_processor_states.remove(&placement);
+            self.inner
+                .replicated_window_processor_states
+                .remove(&placement);
         }
         let placements = self
+            .inner
             .replicated_wasm_processor_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
         for placement in placements {
-            self.replicated_wasm_processor_states.remove(&placement);
+            self.inner
+                .replicated_wasm_processor_states
+                .remove(&placement);
         }
         let placements = self
+            .inner
             .replicated_branch_aggregated_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
         for placement in placements {
-            self.replicated_branch_aggregated_states.remove(&placement);
+            self.inner
+                .replicated_branch_aggregated_states
+                .remove(&placement);
         }
     }
 
     fn purge_stopped_domain_runtime_state(&self, domain: &DomainName) -> Result<(), RuntimeError> {
-        let Some(store) = self.state_store.as_ref() else {
+        let Some(store) = self.inner.state_store.as_ref() else {
             return Ok(());
         };
         store
@@ -13469,7 +13743,7 @@ impl Runtime {
 
     async fn abort_domain_execution_start(&self, domain: &DomainName) {
         self.stop_domain_ingestors(domain).await;
-        if let Some((_, execution)) = self.executions.remove(domain) {
+        if let Some((_, execution)) = self.inner.executions.remove(domain) {
             self.stop_domain_execution(domain, execution).await;
         }
         self.clear_domain_graph_handle(domain).await;
@@ -13477,6 +13751,7 @@ impl Runtime {
 
     pub(in crate::runtime) async fn stop_domain_ingestors(&self, domain: &DomainName) {
         let ingestors = self
+            .inner
             .ingestors
             .iter()
             .map(|entry| entry.key().clone())
@@ -13500,6 +13775,7 @@ impl Runtime {
 
     pub async fn shutdown(&self) {
         let domains = self
+            .inner
             .executions
             .iter()
             .map(|entry| entry.key().clone())
@@ -13508,20 +13784,20 @@ impl Runtime {
             self.stop_domain_ingestors(domain).await;
         }
         for domain in &domains {
-            if let Some((_, execution)) = self.executions.remove(domain) {
+            if let Some((_, execution)) = self.inner.executions.remove(domain) {
                 self.stop_domain_execution(domain, execution).await;
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
-        self.endpoint_bindings.clear();
-        self.compiled_domain_udfs.clear();
-        self.ingestor_readiness.clear();
-        self.expiring_stream_states.clear();
-        self.replicated_deduplicator_states.clear();
-        self.replicated_kafka_offset_states.clear();
-        self.replicated_materialized_stream_states.clear();
-        self.replicated_window_processor_states.clear();
-        self.replicated_branch_aggregated_states.clear();
+        self.inner.endpoint_bindings.clear();
+        self.inner.compiled_domain_udfs.clear();
+        self.inner.ingestor_readiness.clear();
+        self.inner.expiring_stream_states.clear();
+        self.inner.replicated_deduplicator_states.clear();
+        self.inner.replicated_kafka_offset_states.clear();
+        self.inner.replicated_materialized_stream_states.clear();
+        self.inner.replicated_window_processor_states.clear();
+        self.inner.replicated_branch_aggregated_states.clear();
     }
 
     pub(in crate::runtime) async fn await_ack_completion(
@@ -13786,7 +14062,7 @@ impl Runtime {
         ingestor: &IngestorName,
     ) -> Result<(), RuntimeError> {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        let Some((_, runtime)) = self.ingestors.remove(&key) else {
+        let Some((_, runtime)) = self.inner.ingestors.remove(&key) else {
             return Err(RuntimeError::IngestorNotRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.as_str().to_string(),
@@ -13831,15 +14107,16 @@ impl Runtime {
                         .await;
                 }
                 for route_key in route_keys {
-                    let remove_route =
-                        if let Some(mut bindings) = self.endpoint_bindings.get_mut(&route_key) {
-                            bindings.retain(|binding| binding.runtime_key != key);
-                            bindings.is_empty()
-                        } else {
-                            false
-                        };
+                    let remove_route = if let Some(mut bindings) =
+                        self.inner.endpoint_bindings.get_mut(&route_key)
+                    {
+                        bindings.retain(|binding| binding.runtime_key != key);
+                        bindings.is_empty()
+                    } else {
+                        false
+                    };
                     if remove_route {
-                        self.endpoint_bindings.remove(&route_key);
+                        self.inner.endpoint_bindings.remove(&route_key);
                     }
                 }
                 for branched in branched {
@@ -13856,11 +14133,12 @@ impl Runtime {
             self.remove_ingestor_quiescence(domain, ingestor);
         }
         if self
+            .inner
             .in_flight_by_ingestor
             .get(&key)
             .is_some_and(|tracker| tracker.outstanding() == 0)
         {
-            self.in_flight_by_ingestor.remove(&key);
+            self.inner.in_flight_by_ingestor.remove(&key);
         }
         Ok(())
     }
@@ -13939,7 +14217,7 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &CreateIngestor,
     ) -> Result<IngestorDependencies, RuntimeError> {
-        let Some(execution) = self.executions.get(domain) else {
+        let Some(execution) = self.inner.executions.get(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: ingestor
@@ -14123,10 +14401,11 @@ impl Runtime {
         lookup: CreateLookup,
         codec: Arc<CompiledCodec>,
     ) -> Result<LookupRuntime, String> {
-        let Some(resource_store) = self.resource_store.read().clone() else {
+        let Some(resource_store) = self.inner.resource_store.read().clone() else {
             return Err("resource store is not attached".to_string());
         };
         let Some(resource_version) = self
+            .inner
             .latest_resource_versions
             .get(&DomainResourceKey {
                 domain: domain.clone(),

@@ -32,7 +32,7 @@ impl NatsIngestor {
     ) -> Result<(), RuntimeError> {
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -104,7 +104,7 @@ impl NatsIngestor {
             let task_timestamp_source = ingestor.timestamp_source.clone();
             let task_subject = subject.clone();
             let task_queue_group = queue_group.clone();
-            let task_events = runtime.events.clone();
+            let task_events = runtime.events().clone();
             let task_config = resolved_client.entries.clone();
             let task_client_mounts = resolved_client.mounts.clone();
             let task_output_routes = output_routes.clone();
@@ -135,7 +135,7 @@ impl NatsIngestor {
                     {
                         break;
                     }
-                    if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                    if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                         continue;
                     }
                     if task_quiesce.should_suspend_intake() {
@@ -414,7 +414,7 @@ impl NatsIngestor {
             tasks.push(task);
         }
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,

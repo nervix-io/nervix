@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc as StdArc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -2800,7 +2800,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
     }
 }
 
-type RelayBoundaryFanoutMap = Arc<DashMap<DomainNodeRef, RelayBoundaryFanout, RandomState>>;
+type RelayBoundaryFanoutMap = DashMap<DomainNodeRef, RelayBoundaryFanout, RandomState>;
 type RelayRuntimeConsumerReceiver = RelaySubscriptionReceiver<RelayRecordBatch>;
 
 struct RelayRuntimeFanIn {
@@ -4207,42 +4207,58 @@ impl Drop for DomainAlterGuard {
     }
 }
 
+/// The handle every task, ingestor, emitter, and connector carries. It is one `Arc` over the
+/// node's state, so passing the runtime into a spawned task costs a single refcount rather than
+/// one per piece of state the node owns.
 #[derive(Clone)]
 pub struct Runtime {
+    inner: Arc<RuntimeInner>,
+}
+
+/// Everything one Nervix node owns for as long as it runs. These fields are reached only through
+/// a `Runtime` handle and therefore hold their values directly. The few that keep an `Arc` of
+/// their own have a second owner that outlives the handle's borrow, and each names that owner.
+struct RuntimeInner {
+    /// Also held by the entity gate's deadline task, which releases an expired lease long after
+    /// the call that engaged it returned.
     ingestors: Arc<DashMap<DomainNodeRef, IngestorRuntime, RandomState>>,
+    /// Also held by the entity gate's deadline task, alongside `ingestors`.
     ingestor_quiescence: Arc<DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>>,
-    ingestors_paused_for_memory_pressure: Arc<AtomicBool>,
-    ingestor_transient_errors: Arc<DashMap<DomainNodeRef, String, RandomState>>,
-    ingestor_reconnect_backoffs: Arc<DashMap<DomainNodeRef, RuntimeReconnectStatus, RandomState>>,
-    ingestor_readiness: Arc<DashMap<DomainNodeRef, IngestorReadiness, RandomState>>,
-    emitter_transient_errors: Arc<DashMap<DomainNodeRef, String, RandomState>>,
-    emitter_retry_statuses: Arc<DashMap<DomainNodeRef, EmitterRetryStatus, RandomState>>,
-    emitter_confirmation_waits: Arc<DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>>,
-    executions: Arc<DashMap<DomainName, DomainExecution, RandomState>>,
-    message_error_routes:
-        Arc<DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>>,
-    compiled_domain_udfs: Arc<DashMap<DomainName, CompiledDomainUdfs, RandomState>>,
-    schedule_apply_lock: Arc<Mutex<()>>,
-    applied_cluster_revision: Arc<AtomicU64>,
-    domain_instantiation_errors: Arc<DashMap<DomainName, String, RandomState>>,
-    domains: Arc<DashMap<DomainName, RuntimeDomainState, RandomState>>,
+    ingestors_paused_for_memory_pressure: AtomicBool,
+    ingestor_transient_errors: DashMap<DomainNodeRef, String, RandomState>,
+    ingestor_reconnect_backoffs: DashMap<DomainNodeRef, RuntimeReconnectStatus, RandomState>,
+    ingestor_readiness: DashMap<DomainNodeRef, IngestorReadiness, RandomState>,
+    emitter_transient_errors: DashMap<DomainNodeRef, String, RandomState>,
+    emitter_retry_statuses: DashMap<DomainNodeRef, EmitterRetryStatus, RandomState>,
+    emitter_confirmation_waits: DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
+    executions: DashMap<DomainName, DomainExecution, RandomState>,
+    message_error_routes: DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>,
+    compiled_domain_udfs: DashMap<DomainName, CompiledDomainUdfs, RandomState>,
+    schedule_apply_lock: Mutex<()>,
+    applied_cluster_revision: AtomicU64,
+    domain_instantiation_errors: DashMap<DomainName, String, RandomState>,
+    domains: DashMap<DomainName, RuntimeDomainState, RandomState>,
     domain_status_changed: watch::Sender<u64>,
-    in_flight_by_domain: Arc<DashMap<DomainName, Arc<AckRootTracker>, RandomState>>,
-    in_flight_by_ingestor: Arc<DashMap<DomainNodeRef, Arc<AckRootTracker>, RandomState>>,
-    generator_activity_by_domain: Arc<DashMap<DomainName, Arc<AtomicUsize>, RandomState>>,
-    emitter_buffers: Arc<DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>>,
-    force_flush_by_domain: Arc<DashMap<DomainName, Arc<DomainForceFlush>, RandomState>>,
-    node_quiesce_counters: Arc<DashMap<DomainNodeRef, Arc<NodeQuiesceCounters>, RandomState>>,
+    in_flight_by_domain: DashMap<DomainName, Arc<AckRootTracker>, RandomState>,
+    in_flight_by_ingestor: DashMap<DomainNodeRef, Arc<AckRootTracker>, RandomState>,
+    generator_activity_by_domain: DashMap<DomainName, Arc<AtomicUsize>, RandomState>,
+    emitter_buffers: DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
+    force_flush_by_domain: DashMap<DomainName, Arc<DomainForceFlush>, RandomState>,
+    node_quiesce_counters: DashMap<DomainNodeRef, Arc<NodeQuiesceCounters>, RandomState>,
+    /// Also held by the entity gate's deadline task, alongside `ingestors`.
     entity_gate_holds: Arc<DashMap<EntityGateHoldKey, EntityAlterHold, RandomState>>,
+    /// Also held by every outstanding `DomainAlterGuard`, which clears its entry on drop.
     active_domain_alters: Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
-    state_schema_fingerprints: Arc<DashMap<DomainNodeRef, [u8; 32], RandomState>>,
-    domain_graphs: Arc<DashMap<DomainName, SharedActiveGraph, RandomState>>,
-    endpoint_bindings: Arc<DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>>,
+    state_schema_fingerprints: DashMap<DomainNodeRef, [u8; 32], RandomState>,
+    domain_graphs: DashMap<DomainName, SharedActiveGraph, RandomState>,
+    endpoint_bindings: DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>,
     /// Instantiated endpoint routes keyed by the host and path an inbound request carries, so
     /// request routing never scans domain executions or their configured routes.
-    routed_endpoints: Arc<DashMap<HttpRouteKey, RoutedEndpointsByDomain, RandomState>>,
+    routed_endpoints: DashMap<HttpRouteKey, RoutedEndpointsByDomain, RandomState>,
     relay_boundary_fanouts: RelayBoundaryFanoutMap,
     events: broadcast::Sender<RuntimeEvent>,
+    /// The fault injectors are handed to the runtime by `RuntimeTestHooks`, and the test that
+    /// built those hooks keeps arming them while the node runs.
     emitter_faults: Arc<EmitterFaultInjector>,
     ingestor_faults: Arc<IngestorFaultInjector>,
     otel_client_faults: Arc<OtelClientFaultInjector>,
@@ -4256,53 +4272,58 @@ pub struct Runtime {
     entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
     #[cfg(feature = "testing")]
     syslog_ingestor_bind_address_overrides: Arc<test_hooks::SyslogIngestorBindAddressOverrides>,
-    resource_store: Arc<RwLock<Option<Arc<ResourceStore>>>>,
-    resource_versions: Arc<RwLock<ResourceVersionStatus>>,
-    remote_dispatcher: Arc<RwLock<Option<Arc<RemoteDispatcher>>>>,
-    local_node_id: Arc<RwLock<Option<ClusterNodeName>>>,
-    next_remote_ack_id: Arc<AtomicU64>,
-    pending_remote_acks: Arc<DashMap<u64, AckSet, RandomState>>,
-    pending_relay_admissions:
-        Arc<DashMap<u64, mpsc::UnboundedSender<RemoteAckOutcome>, RandomState>>,
-    next_state_sync_correlation_id: Arc<AtomicU64>,
-    pending_state_syncs: Arc<DashMap<u64, PendingStateSyncSender, RandomState>>,
-    expiring_stream_states:
-        Arc<DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>>,
-    latest_resource_versions: Arc<DashMap<DomainResourceKey, u64, RandomState>>,
+    resource_store: RwLock<Option<Arc<ResourceStore>>>,
+    resource_versions: RwLock<ResourceVersionStatus>,
+    remote_dispatcher: RwLock<Option<Arc<RemoteDispatcher>>>,
+    /// Also held by the attached `RemoteDispatcher`, which must allocate correlation ids from the
+    /// same registry the runtime resolves incoming acknowledgements against.
+    remote_dispatch: Arc<RemoteDispatchRegistry>,
+    next_state_sync_correlation_id: AtomicU64,
+    pending_state_syncs: DashMap<u64, PendingStateSyncSender, RandomState>,
+    expiring_stream_states: DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>,
+    latest_resource_versions: DashMap<DomainResourceKey, u64, RandomState>,
     replicated_deduplicator_states:
-        Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>>,
+        DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>,
     replicated_kafka_offset_states:
-        Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedKafkaOffsetState>, RandomState>>,
+        DashMap<RuntimeStatePlacement, Arc<ReplicatedKafkaOffsetState>, RandomState>,
     replicated_materialized_stream_states:
-        Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedMaterializedRelayState>, RandomState>>,
-    relay_state_epochs: Arc<DashMap<DomainName, Arc<AtomicU64>, RandomState>>,
-    materialized_state_changed: Arc<Notify>,
+        DashMap<RuntimeStatePlacement, Arc<ReplicatedMaterializedRelayState>, RandomState>,
+    relay_state_epochs: DashMap<DomainName, Arc<AtomicU64>, RandomState>,
+    materialized_state_changed: Notify,
     replicated_window_processor_states:
-        Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedWindowProcessorState>, RandomState>>,
+        DashMap<RuntimeStatePlacement, Arc<ReplicatedWindowProcessorState>, RandomState>,
     replicated_wasm_processor_states:
-        Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedWasmProcessorState>, RandomState>>,
+        DashMap<RuntimeStatePlacement, Arc<ReplicatedWasmProcessorState>, RandomState>,
     replicated_branch_aggregated_states:
-        Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>>,
-    wasm_runtime: Arc<WasmRuntime>,
+        DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>,
+    wasm_runtime: WasmRuntime,
     branch_instance_expiration_scan_interval: Duration,
     state_store: Option<Arc<RuntimeStateStore>>,
     state_snapshot_interval: Duration,
     state_replication_poll_interval: Duration,
     domain_drain_timeout: Duration,
     entity_gate_deadline: Duration,
-    temp_dir: Arc<PathBuf>,
+    temp_dir: PathBuf,
     metrics: RuntimeMetrics,
 }
 
-#[derive(Clone)]
+/// Node identity and the remote acknowledgement correlation registry. The runtime and the
+/// `RemoteDispatcher` it attaches must observe one instance of this: the dispatcher allocates the
+/// correlation ids that the runtime resolves when acknowledgements come back over the
+/// interconnect, and both answer questions about which node they are running on.
+struct RemoteDispatchRegistry {
+    local_node_id: RwLock<Option<ClusterNodeName>>,
+    next_ack_id: AtomicU64,
+    pending_acks: DashMap<u64, AckSet, RandomState>,
+    pending_relay_admissions: DashMap<u64, mpsc::UnboundedSender<RemoteAckOutcome>, RandomState>,
+}
+
 struct RemoteDispatcher {
     cluster: Arc<cluster::ClusterHandle>,
-    interconnect: Arc<Transport>,
-    local_node_id: Arc<RwLock<Option<ClusterNodeName>>>,
-    next_remote_ack_id: Arc<AtomicU64>,
-    pending_remote_acks: Arc<DashMap<u64, AckSet, RandomState>>,
-    pending_relay_admissions:
-        Arc<DashMap<u64, mpsc::UnboundedSender<RemoteAckOutcome>, RandomState>>,
+    interconnect: Transport,
+    /// The same registry the attaching runtime holds, so an acknowledgement this dispatcher sent
+    /// a correlation id for resolves against the entry the runtime is waiting on.
+    registry: Arc<RemoteDispatchRegistry>,
 }
 
 impl std::fmt::Debug for RemoteDispatcher {
@@ -4763,15 +4784,15 @@ impl RemoteDispatcher {
     const DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
 
     fn local_node_id(&self) -> Option<ClusterNodeName> {
-        self.local_node_id.read().clone()
+        self.registry.local_node_id.read().clone()
     }
 
     fn next_ack_id(&self) -> u64 {
-        self.next_remote_ack_id.fetch_add(1, Ordering::Relaxed)
+        self.registry.next_ack_id.fetch_add(1, Ordering::Relaxed)
     }
 
     fn register_pending_ack(&self, ack_id: u64, acks: AckSet) {
-        self.pending_remote_acks.insert(ack_id, acks);
+        self.registry.pending_acks.insert(ack_id, acks);
     }
 
     fn forwarded_ack(acks: &AckSet) -> AckSet {
@@ -4779,7 +4800,7 @@ impl RemoteDispatcher {
     }
 
     fn clear_pending_ack(&self, ack_id: u64) {
-        self.pending_remote_acks.remove(&ack_id);
+        self.registry.pending_acks.remove(&ack_id);
     }
 
     fn register_pending_relay_admission(
@@ -4787,12 +4808,14 @@ impl RemoteDispatcher {
         admission_id: u64,
     ) -> mpsc::UnboundedReceiver<RemoteAckOutcome> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        self.pending_relay_admissions.insert(admission_id, sender);
+        self.registry
+            .pending_relay_admissions
+            .insert(admission_id, sender);
         receiver
     }
 
     fn clear_pending_relay_admission(&self, admission_id: u64) {
-        self.pending_relay_admissions.remove(&admission_id);
+        self.registry.pending_relay_admissions.remove(&admission_id);
     }
 
     async fn dispatch_admitted_relay_payload(
@@ -5365,7 +5388,7 @@ impl RelayProcessorNode {
                 self.processor.as_str()
             ));
         };
-        let Some(execution) = runtime.executions.get(domain) else {
+        let Some(execution) = runtime.inner.executions.get(domain) else {
             return Some(format!(
                 "domain '{}' has no execution for processor refresh",
                 domain.as_str()
@@ -5630,6 +5653,7 @@ impl RelayProcessorNode {
                 materialized_stream_specs_for_graph(&branch.runtime, &branch.domain, graph);
             let current_branching = branch
                 .runtime
+                .inner
                 .executions
                 .get(&branch.domain)
                 .and_then(|execution| execution.relay_branchings.get(incoming_relay).cloned())
@@ -5638,12 +5662,14 @@ impl RelayProcessorNode {
                 relay_branch_schema_for_runtime(&branch.runtime, &branch.domain, incoming_relay);
             let available_lookups = branch
                 .runtime
+                .inner
                 .executions
                 .get(&branch.domain)
                 .map(|execution| execution.lookups.clone())
                 .unwrap_or_default();
             let udfs = branch
                 .runtime
+                .inner
                 .executions
                 .get(&branch.domain)
                 .map(|execution| execution.udfs.clone());
@@ -6624,6 +6650,7 @@ impl RelayProcessorNode {
                         materialized_stream_specs_for_graph(&branch.runtime, &branch.domain, graph);
                     let current_branching = branch
                         .runtime
+                        .inner
                         .executions
                         .get(&branch.domain)
                         .and_then(|execution| execution.relay_branchings.get(left_relay).cloned())
@@ -6635,12 +6662,14 @@ impl RelayProcessorNode {
                     );
                     let available_lookups = branch
                         .runtime
+                        .inner
                         .executions
                         .get(&branch.domain)
                         .map(|execution| execution.lookups.clone())
                         .unwrap_or_default();
                     let udfs = branch
                         .runtime
+                        .inner
                         .executions
                         .get(&branch.domain)
                         .map(|execution| execution.udfs.clone());
@@ -7890,7 +7919,7 @@ impl BranchInstanceTemplate {
             .iter()
             .filter(|relay| !runtime.relay_is_cluster_scheduled(domain, relay))
             .map(|relay| {
-                let execution = runtime.executions.get(domain).ok_or_else(|| {
+                let execution = runtime.inner.executions.get(domain).ok_or_else(|| {
                     format!(
                         "materialized relay '{}' is not instantiated in domain '{}'",
                         relay.as_str(),
@@ -7964,6 +7993,7 @@ impl BranchRuntime {
         }
         let desired_relays = self
             .runtime
+            .inner
             .executions
             .get(&self.domain)
             .map(|execution| {
@@ -7983,7 +8013,7 @@ impl BranchRuntime {
         self.materialized_states
             .retain(|identifier, _| desired_relays.contains(identifier));
         if desired_relays.contains(relay) && !self.materialized_states.contains_key(relay) {
-            let schema = if let Some(execution) = self.runtime.executions.get(&self.domain)
+            let schema = if let Some(execution) = self.runtime.inner.executions.get(&self.domain)
                 && let Some(spec) = execution.materialized_stream_specs.get(relay)
             {
                 spec.schema.clone()
@@ -8125,25 +8155,38 @@ impl BranchRuntime {
     async fn dispatch(&mut self, graph: &SharedActiveGraph, batch: RelayRecordBatch) {
         let root_relay = self.root_relay.clone();
         self.runtime
+            .inner
             .metrics
             .observe_global_node_sent(NodeBatchObservation {
                 domain: &self.domain,
                 kind: self.source_kind,
                 node: &ModelName::from(&self.source),
                 relay: &root_relay,
-                physical_node_id: self.runtime.local_node_id.read().as_ref(),
+                physical_node_id: self
+                    .runtime
+                    .inner
+                    .remote_dispatch
+                    .local_node_id
+                    .read()
+                    .as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
             });
-        self.runtime.metrics.observe_branch_node_sent(
+        self.runtime.inner.metrics.observe_branch_node_sent(
             branch_key_display(&self.key),
             NodeBatchObservation {
                 domain: &self.domain,
                 kind: self.source_kind,
                 node: &ModelName::from(&self.source),
                 relay: &root_relay,
-                physical_node_id: self.runtime.local_node_id.read().as_ref(),
+                physical_node_id: self
+                    .runtime
+                    .inner
+                    .remote_dispatch
+                    .local_node_id
+                    .read()
+                    .as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
@@ -8218,8 +8261,15 @@ impl BranchRuntime {
             return;
         };
         let delivery_observation = batch.delivery_observation(current_timestamp());
-        let physical_node_id = self.runtime.local_node_id.read().clone();
+        let physical_node_id = self
+            .runtime
+            .inner
+            .remote_dispatch
+            .local_node_id
+            .read()
+            .clone();
         self.runtime
+            .inner
             .metrics
             .observe_global_node_received(NodeBatchObservation {
                 domain: &self.domain,
@@ -8231,7 +8281,7 @@ impl BranchRuntime {
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: delivery_observation.domain_timestamp,
             });
-        self.runtime.metrics.observe_branch_node_received(
+        self.runtime.inner.metrics.observe_branch_node_received(
             branch_key_display(&self.key),
             NodeBatchObservation {
                 domain: &self.domain,
@@ -8251,6 +8301,7 @@ impl BranchRuntime {
         );
         for seconds in delivery_observation.latency_seconds {
             self.runtime
+                .inner
                 .metrics
                 .observe_global_delivery_latency_at_domain_time(NodeLatencyObservation {
                     domain: &self.domain,
@@ -8261,7 +8312,7 @@ impl BranchRuntime {
                     seconds,
                     domain_timestamp: delivery_observation.domain_timestamp,
                 });
-            self.runtime.metrics.observe_branch_delivery_latency(
+            self.runtime.inner.metrics.observe_branch_delivery_latency(
                 branch_key_display(&self.key),
                 NodeLatencyObservation {
                     domain: &self.domain,
@@ -8301,25 +8352,38 @@ impl BranchRuntime {
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.runtime
+            .inner
             .metrics
             .observe_global_node_sent(NodeBatchObservation {
                 domain: &self.domain,
                 kind: source_kind,
                 node: &ModelName::from(source),
                 relay: &output.relay,
-                physical_node_id: self.runtime.local_node_id.read().as_ref(),
+                physical_node_id: self
+                    .runtime
+                    .inner
+                    .remote_dispatch
+                    .local_node_id
+                    .read()
+                    .as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
             });
-        self.runtime.metrics.observe_branch_node_sent(
+        self.runtime.inner.metrics.observe_branch_node_sent(
             branch_key_display(&self.key),
             NodeBatchObservation {
                 domain: &self.domain,
                 kind: source_kind,
                 node: &ModelName::from(source),
                 relay: &output.relay,
-                physical_node_id: self.runtime.local_node_id.read().as_ref(),
+                physical_node_id: self
+                    .runtime
+                    .inner
+                    .remote_dispatch
+                    .local_node_id
+                    .read()
+                    .as_ref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
@@ -8450,6 +8514,7 @@ impl IngestorRouteTask {
                     continue;
                 };
                 self.runtime_handle
+                    .inner
                     .metrics
                     .observe_branch_node_without_stream_received(
                         branch_key_display(key),
@@ -8457,7 +8522,13 @@ impl IngestorRouteTask {
                             domain: &self.domain,
                             kind: self.template.branch.source_kind,
                             node: &ModelName::from(&self.template.branch.source),
-                            physical_node_id: self.runtime_handle.local_node_id.read().as_ref(),
+                            physical_node_id: self
+                                .runtime_handle
+                                .inner
+                                .remote_dispatch
+                                .local_node_id
+                                .read()
+                                .as_ref(),
                             messages: 1,
                             bytes: row_bytes,
                             domain_timestamp: Some(metadata.ingested_at_high_watermark()),
@@ -8683,8 +8754,11 @@ impl IngestorRouteRuntime {
 impl Runtime {
     fn register_branch_lifecycle_metrics(&self, domain: &DomainName, branch: Option<&BranchName>) {
         if let Some(branch) = branch {
-            self.metrics
-                .register_branch(domain, branch, self.local_node_id.read().as_ref());
+            self.inner.metrics.register_branch(
+                domain,
+                branch,
+                self.inner.remote_dispatch.local_node_id.read().as_ref(),
+            );
         }
     }
 
@@ -8695,10 +8769,10 @@ impl Runtime {
         key: &Option<BranchKey>,
     ) {
         if let Some(branch) = branch {
-            self.metrics.observe_branch_instance_created(
+            self.inner.metrics.observe_branch_instance_created(
                 domain,
                 branch,
-                self.local_node_id.read().as_ref(),
+                self.inner.remote_dispatch.local_node_id.read().as_ref(),
                 branch_key_display(key),
             );
         }
@@ -8714,9 +8788,9 @@ impl Runtime {
         let Some(branch) = branch else {
             return;
         };
-        let physical_node_id = self.local_node_id.read();
+        let physical_node_id = self.inner.remote_dispatch.local_node_id.read();
         if let Some(reason) = reason {
-            self.metrics.observe_branch_instance_removed(
+            self.inner.metrics.observe_branch_instance_removed(
                 domain,
                 branch,
                 physical_node_id.as_ref(),
@@ -8724,7 +8798,7 @@ impl Runtime {
                 reason,
             );
         } else {
-            self.metrics.observe_branch_instance_detached(
+            self.inner.metrics.observe_branch_instance_detached(
                 domain,
                 branch,
                 physical_node_id.as_ref(),
@@ -9209,7 +9283,7 @@ fn restore_branch_instance_lru_snapshot(
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Result<u64, String> {
-    let Some(store) = &runtime.state_store else {
+    let Some(store) = &runtime.inner.state_store else {
         return Ok(0);
     };
     let placement = branch_lru_placement(runtime, domain, template);
@@ -9235,7 +9309,7 @@ fn persist_branch_instance_lru_snapshot<V>(
     instances: &BranchInstanceRegistry<Option<BranchKey>, V>,
     last_persisted_lsm: &mut u64,
 ) -> Result<(), String> {
-    let Some(store) = &runtime.state_store else {
+    let Some(store) = &runtime.inner.state_store else {
         return Ok(());
     };
     let lsm = instances.version();
@@ -9288,7 +9362,7 @@ fn wall_duration_until_domain_deadline(
     now: Timestamp,
     deadline: Timestamp,
 ) -> Duration {
-    let Some(domain_state) = runtime.domains.get(domain) else {
+    let Some(domain_state) = runtime.inner.domains.get(domain) else {
         return wall_duration_until_timestamp(now, deadline);
     };
     if domain_state.config.pace != DomainPace::Paced {
@@ -10135,8 +10209,8 @@ async fn run_processor_branch_task(
             }
             _ = async {
                 tokio::select! {
-                    _ = runtime_handle.materialized_state_changed.notified() => {}
-                    _ = sleep(runtime_handle.state_replication_poll_interval) => {}
+                    _ = runtime_handle.inner.materialized_state_changed.notified() => {}
+                    _ = sleep(runtime_handle.inner.state_replication_poll_interval) => {}
                 }
             }, if has_pending_materialized => {
                 branch
@@ -10382,7 +10456,7 @@ fn restore_processor_branch_lru_snapshot(
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) -> Result<u64, String> {
-    let Some(store) = &runtime.state_store else {
+    let Some(store) = &runtime.inner.state_store else {
         return Ok(0);
     };
     let placement = branch_lru_placement(runtime, domain, template);
@@ -14394,6 +14468,7 @@ fn compile_processor_output_program(
         && let Some(execution) = context
             .branch
             .runtime
+            .inner
             .executions
             .get(&context.branch.domain)
         && let Some(branching) = execution.relay_branchings.get(relay)
@@ -14410,6 +14485,7 @@ fn compile_processor_output_program(
     let available_lookups = context
         .branch
         .runtime
+        .inner
         .executions
         .get(&context.branch.domain)
         .map(|execution| execution.lookups.clone())
@@ -14417,6 +14493,7 @@ fn compile_processor_output_program(
     let udfs = context
         .branch
         .runtime
+        .inner
         .executions
         .get(&context.branch.domain)
         .map(|execution| execution.udfs.clone());
@@ -18121,7 +18198,7 @@ fn relay_schema_for_runtime(
     domain: &DomainName,
     relay: &RelayName,
 ) -> Result<Arc<CompiledSchema>, String> {
-    let Some(execution) = runtime.executions.get(domain) else {
+    let Some(execution) = runtime.inner.executions.get(domain) else {
         return Err(format!("domain '{}' is not instantiated", domain.as_str()));
     };
     execution.relay_schemas.get(relay).cloned().ok_or_else(|| {
@@ -18139,6 +18216,7 @@ fn relay_branch_schema_for_runtime(
     relay: &RelayName,
 ) -> Option<StdArc<arrow_schema::Schema>> {
     runtime
+        .inner
         .executions
         .get(domain)
         .and_then(|execution| execution.relay_branching_schemas.get(relay).cloned())
@@ -18150,7 +18228,7 @@ fn materialized_stream_specs_for_graph(
     domain: &DomainName,
     _graph: &SharedActiveGraph,
 ) -> HashMap<RelayName, RuntimeMaterializedRelaySpec> {
-    let Some(execution) = runtime.executions.get(domain) else {
+    let Some(execution) = runtime.inner.executions.get(domain) else {
         return HashMap::default();
     };
     execution.materialized_stream_specs.clone()
@@ -18263,7 +18341,7 @@ async fn flush_branch_inferencer_output(
         .as_ref()
         .is_none_or(|loaded| loaded.version() != version)
     {
-        let Some(resource_store) = branch.runtime.resource_store.read().clone() else {
+        let Some(resource_store) = branch.runtime.inner.resource_store.read().clone() else {
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
                 node_kind,
@@ -18853,7 +18931,7 @@ impl Runtime {
         let processor = processor.into();
         let id = self.resolve_resource_id(domain, resource, resource_version, resource.as_str())?;
         let version = id.version;
-        let Some(resource_store) = self.resource_store.read().clone() else {
+        let Some(resource_store) = self.inner.resource_store.read().clone() else {
             return Err("resource store is not attached".to_string());
         };
         let path = resource_store
@@ -18870,6 +18948,7 @@ impl Runtime {
             )
         })?;
         let compiled = self
+            .inner
             .wasm_runtime
             .compile_processor(&wasm)
             .await
@@ -19810,6 +19889,7 @@ async fn dispatch_wasm_output_route(
         let current_branching = context
             .branch
             .runtime
+            .inner
             .executions
             .get(&context.branch.domain)
             .and_then(|execution| execution.relay_branchings.get(primary_input_relay).cloned())
@@ -19822,6 +19902,7 @@ async fn dispatch_wasm_output_route(
         let available_lookups = context
             .branch
             .runtime
+            .inner
             .executions
             .get(&context.branch.domain)
             .map(|execution| execution.lookups.clone())
@@ -19829,6 +19910,7 @@ async fn dispatch_wasm_output_route(
         let udfs = context
             .branch
             .runtime
+            .inner
             .executions
             .get(&context.branch.domain)
             .map(|execution| execution.udfs.clone());
@@ -19949,6 +20031,7 @@ async fn dispatch_wasm_output_route(
     let owner_nodes = context
         .branch
         .runtime
+        .inner
         .executions
         .get(&context.branch.domain)
         .map(|execution| execution.materialized_stream_owner_nodes.clone())

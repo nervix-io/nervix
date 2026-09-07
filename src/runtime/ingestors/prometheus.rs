@@ -35,7 +35,7 @@ impl PrometheusIngestor {
     ) -> Result<(), RuntimeError> {
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -101,7 +101,7 @@ impl PrometheusIngestor {
         let task_domain = domain.clone();
         let task_ingestor = ingestor.name.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_events = runtime.events.clone();
+        let task_events = runtime.events().clone();
         let task_client_mounts = resolved_client.mounts.clone();
         let task_quiesce = quiesce.clone();
         let task = tokio::spawn(async move {
@@ -126,7 +126,7 @@ impl PrometheusIngestor {
                 {
                     break;
                 }
-                if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                     continue;
                 }
                 let mut buffered_collector =
@@ -180,13 +180,18 @@ impl PrometheusIngestor {
                     continue;
                 }
                 let mut query_time = current_timestamp();
-                let paced_state = task_runtime.domains.get(&task_domain).map(|domain_state| {
-                    (
-                        domain_state.config.pace,
-                        domain_state.clock.clone(),
-                        domain_state.ticks.lock().back().cloned(),
-                    )
-                });
+                let paced_state =
+                    task_runtime
+                        .inner
+                        .domains
+                        .get(&task_domain)
+                        .map(|domain_state| {
+                            (
+                                domain_state.config.pace,
+                                domain_state.clock.clone(),
+                                domain_state.ticks.lock().back().cloned(),
+                            )
+                        });
                 let sleep_duration =
                     if let Some((DomainPace::Paced, clock, latest_tick)) = paced_state {
                         let Some(clock) = clock else {
@@ -270,7 +275,7 @@ impl PrometheusIngestor {
                         if task_quiesce.should_skip_poll() {
                             continue;
                         }
-                        let query_time = if let Some(domain_state) = task_runtime.domains.get(&task_domain) {
+                        let query_time = if let Some(domain_state) = task_runtime.inner.domains.get(&task_domain) {
                             if let DomainPace::Paced = domain_state.config.pace {
                                 Some(query_time)
                             } else {
@@ -375,7 +380,7 @@ impl PrometheusIngestor {
             );
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,

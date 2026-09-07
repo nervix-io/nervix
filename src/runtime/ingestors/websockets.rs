@@ -15,7 +15,6 @@ struct WebsocketDispatchContext<'a> {
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     codec: &'a Arc<CompiledCodec>,
-    events: &'a broadcast::Sender<RuntimeEvent>,
     quiesce: &'a Arc<IngestorQuiesceControl>,
 }
 
@@ -28,7 +27,7 @@ impl WebsocketsIngestor {
     ) -> Result<(), RuntimeError> {
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -100,7 +99,7 @@ impl WebsocketsIngestor {
         let task_ingestor = ingestor.name.clone();
         let task_signaling_protocol = signaling_protocol.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_events = runtime.events.clone();
+        let task_events = runtime.events().clone();
         let task_endpoint_requires_tls =
             match ServiceUrl::new(endpoint.as_str(), "WebSockets endpoint")
                 .scheme()
@@ -149,7 +148,6 @@ impl WebsocketsIngestor {
                 filter_where: filter_where.as_ref(),
                 branched_senders: &branched_senders,
                 codec: &codec,
-                events: &task_events,
                 quiesce: &quiesce,
             };
             let mut backoff = RuntimeReconnectBackoff::default();
@@ -179,7 +177,7 @@ impl WebsocketsIngestor {
                 {
                     break;
                 }
-                if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                     continue;
                 }
                 tokio::select! {
@@ -352,7 +350,7 @@ impl WebsocketsIngestor {
             );
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -386,7 +384,6 @@ impl WebsocketsIngestor {
             filter_where,
             branched_senders,
             codec,
-            events,
             quiesce: _,
         } = *context;
         let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, payload.len());
@@ -405,7 +402,7 @@ impl WebsocketsIngestor {
             })
             .await
         {
-            let _ = events.send(RuntimeEvent::Error(format!(
+            let _ = runtime.events().send(RuntimeEvent::Error(format!(
                 "failed to dispatch websocket payload for ingestor '{}' in domain '{}': {}",
                 ingestor.as_str(),
                 domain.as_str(),

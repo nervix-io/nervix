@@ -642,7 +642,7 @@ struct SessionSubscriptionTaskConfig {
     sensitivity: nervix_vm::SchemaSensitivity,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<f64>,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
     receiver: RelaySubscriptionReceiver<RelayRecordBatch>,
     tx: mpsc::Sender<Result<SessionResponse, Status>>,
@@ -1332,7 +1332,7 @@ fn is_websocket_upgrade_request(request: &HyperRequest<HyperIncoming>) -> bool {
 
 /// Ingests data frames that arrive on a server-side endpoint while its handshake is running.
 struct EndpointSignalingDataSink<'a> {
-    runtime: &'a Arc<Runtime>,
+    runtime: &'a Runtime,
     host: &'a str,
     path: &'a str,
     headers: &'a RetainedIngestHeaders,
@@ -1360,7 +1360,7 @@ impl IngestMessageHeaders for HyperRequestHeaders<'_> {
 }
 
 async fn handle_http_request(
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     request_tasks: TaskTracker,
     shutdown: CancellationToken,
     mut request: HyperRequest<HyperIncoming>,
@@ -1546,7 +1546,7 @@ async fn handle_http_request(
 }
 
 async fn serve_http(
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     request_tasks: TaskTracker,
     listener: TcpListener,
     shutdown: CancellationToken,
@@ -1596,7 +1596,7 @@ async fn serve_http(
 }
 
 async fn serve_https(
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     request_tasks: TaskTracker,
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     listener: TcpListener,
@@ -2003,10 +2003,10 @@ async fn handle_web_console_request(
             );
 
         let on_upgrade = upgrade::on(&mut request);
-        let service_tasks = service.service_tasks.clone();
+        let service_tasks = service.inner.service_tasks.clone();
         service_tasks.spawn(async move {
             let upgraded = tokio::select! {
-                _ = service.shutdown.cancelled() => return,
+                _ = service.inner.shutdown.cancelled() => return,
                 upgraded = on_upgrade => upgraded,
             };
             match upgraded {
@@ -2018,7 +2018,7 @@ async fn handle_web_console_request(
                     let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
                     let mut leadership_check = interval(WEB_CONSOLE_LEADERSHIP_CHECK_INTERVAL);
                     let mut graph_snapshot = interval(WEB_CONSOLE_GRAPH_SNAPSHOT_INTERVAL);
-                    let mut domains_rx = service.consensus.subscribe_domains();
+                    let mut domains_rx = service.inner.consensus.subscribe_domains();
                     leadership_check.tick().await;
                     graph_snapshot.tick().await;
                     let mut leader_connected = false;
@@ -2028,7 +2028,7 @@ async fn handle_web_console_request(
                     loop {
                         tokio::task::consume_budget().await;
                         tokio::select! {
-                            _ = service.shutdown.cancelled() => break,
+                            _ = service.inner.shutdown.cancelled() => break,
                             message = futures_util::StreamExt::next(&mut websocket) => {
                                 let Some(message) = message else {
                                     break;
@@ -3052,7 +3052,7 @@ pub enum Command {
     },
 }
 
-type PendingClusterCommands = Arc<DashMap<u64, PendingClusterCommand, RandomState>>;
+type PendingClusterCommands = DashMap<u64, PendingClusterCommand, RandomState>;
 
 enum PendingClusterCommand {
     DescribeRelay(oneshot::Sender<Result<bool, String>>),
@@ -3214,39 +3214,56 @@ struct PlannedOwnershipMove {
 
 type AuthRateLimiter = DefaultKeyedRateLimiter<String>;
 
+/// The handle every gRPC request, background reconciliation task, and HTTP server clones. It is
+/// one `Arc` over the server's state, so handing the service to a spawned task costs a single
+/// refcount rather than one per piece of state the server owns.
 #[derive(Clone)]
 struct SessionServiceImpl {
+    inner: Arc<SessionServiceInner>,
+}
+
+/// Everything one Nervix server owns for as long as it serves. These fields are reached only
+/// through a `SessionServiceImpl` handle and therefore hold their values directly. The ones that
+/// keep an `Arc` of their own have a second owner outside the service, and each names it.
+struct SessionServiceInner {
+    /// Started and shut down by the application, which outlives the service handle.
     cluster: Arc<cluster::ClusterHandle>,
+    /// Started and shut down by the application, which outlives the service handle.
     consensus: Arc<ConsensusHandle>,
+    /// Also held by the application and by the registry reconciliation tasks it spawns.
     registry: Arc<Registry>,
+    /// Also held by the application startup that opened it and by the cluster API server.
     resource_store: Arc<ResourceStore>,
+    /// Built by the application and shared with the cluster API server.
     cluster_api_clients: Arc<ClusterApiClients>,
+    /// Also held by the HTTPS server, which reads the current certificate on every accept.
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     replica_count: usize,
     #[cfg(feature = "testing")]
     scheduler_mode: SchedulerMode,
     shutdown: CancellationToken,
     events: broadcast::Sender<ServerEvent>,
-    subscription_interest_counts: Arc<DashMap<SubscriptionInterestKey, usize, RandomState>>,
-    interconnect: Arc<Transport>,
-    domain_clocks: Arc<DashMap<DomainName, DomainClockRuntimeState, RandomState>>,
-    domain_clock_reconciliations: Arc<DashMap<DomainName, DomainClockReconciliation, RandomState>>,
-    domain_clock_events: Arc<Notify>,
-    next_cluster_command_correlation_id: Arc<AtomicU64>,
+    subscription_interest_counts: DashMap<SubscriptionInterestKey, usize, RandomState>,
+    interconnect: Transport,
+    domain_clocks: DashMap<DomainName, DomainClockRuntimeState, RandomState>,
+    domain_clock_reconciliations: DashMap<DomainName, DomainClockReconciliation, RandomState>,
+    domain_clock_events: Notify,
+    next_cluster_command_correlation_id: AtomicU64,
     pending_cluster_commands: PendingClusterCommands,
     service_tasks: TaskTracker,
     configured_basic_auth: Option<BasicAuthCredentials>,
-    auth_rate_limiter: Arc<AuthRateLimiter>,
-    failed_auth_rate_limit_keys: Arc<DashMap<String, (), RandomState>>,
+    auth_rate_limiter: AuthRateLimiter,
+    failed_auth_rate_limit_keys: DashMap<String, (), RandomState>,
     transaction_idle_timeout: Duration,
     transaction_tombstone_retention: Duration,
     transaction_max_statements: usize,
     transaction_max_source_bytes: u64,
     transaction_max_open: usize,
-    transaction_bindings: Arc<DashMap<String, String, RandomState>>,
+    transaction_bindings: DashMap<String, String, RandomState>,
+    /// Also held by every outstanding `TransactionExecutionLease`, which clears its entry on drop.
     transaction_executions: Arc<DashMap<String, (), RandomState>>,
-    transaction_commit_execution: Arc<AsyncMutex<()>>,
+    transaction_commit_execution: AsyncMutex<()>,
 }
 
 struct TransactionExecutionLease {
@@ -3630,9 +3647,9 @@ struct ApplicationStartup {
     db: Database,
     resource_store: Arc<ResourceStore>,
     registry: Arc<Registry>,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     consensus: Option<Arc<ConsensusHandle>>,
-    interconnect: Option<Arc<Transport>>,
+    interconnect: Option<Transport>,
 }
 
 impl ApplicationStartup {
@@ -3880,14 +3897,14 @@ impl SessionService for SessionServiceImpl {
         let mut inbound = request.into_inner();
         let service = self.clone();
         let (tx, rx) = mpsc::channel(16);
-        let mut event_rx = self.events.subscribe();
-        let mut runtime_event_rx = self.runtime.subscribe_events();
+        let mut event_rx = self.inner.events.subscribe();
+        let mut runtime_event_rx = self.inner.runtime.subscribe_events();
 
-        let service_tasks = service.service_tasks.clone();
+        let service_tasks = service.inner.service_tasks.clone();
         service_tasks.spawn(async move {
             let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
             let mut clean_close = false;
-            let shutdown = service.shutdown.clone();
+            let shutdown = service.inner.shutdown.clone();
             loop {
                 tokio::task::consume_budget().await;
                 tokio::select! {
@@ -4038,10 +4055,11 @@ impl SessionService for SessionServiceImpl {
         request: Request<tonic::Streaming<UploadResourceRequest>>,
     ) -> Result<Response<UploadResourceResponse>, Status> {
         let _authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
-        let leader = self.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             let leader_grpc_uri = match leader.as_ref() {
                 Some(leader_id) => self
+                    .inner
                     .cluster
                     .gossip_state()
                     .await
@@ -4088,7 +4106,7 @@ impl SessionService for SessionServiceImpl {
             }
         };
 
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         if !resources.is_declared(&domain, &ResourceName::from(&identifier)) {
             return Ok(Response::new(UploadResourceResponse {
                 success: false,
@@ -4167,9 +4185,10 @@ impl SessionService for SessionServiceImpl {
                 leader_grpc_uri: String::new(),
             })),
             Err(message) => {
-                let leader = self.consensus.current_leader().await;
+                let leader = self.inner.consensus.current_leader().await;
                 let leader_grpc_uri = match leader.as_ref() {
-                    Some(leader_id) if leader_id != self.consensus.local_node_id() => self
+                    Some(leader_id) if leader_id != self.inner.consensus.local_node_id() => self
+                        .inner
                         .cluster
                         .gossip_state()
                         .await
@@ -4180,7 +4199,7 @@ impl SessionService for SessionServiceImpl {
                         .unwrap_or_default(),
                     _ => String::new(),
                 };
-                let kind = if leader.as_ref() != Some(self.consensus.local_node_id()) {
+                let kind = if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
                     CommandResultKind::NotLeader as i32
                 } else {
                     CommandResultKind::Error as i32
@@ -4255,20 +4274,20 @@ async fn apply_cluster_runtime_state(
 }
 
 impl SessionServiceImpl {
-    fn new_auth_rate_limiter() -> Arc<AuthRateLimiter> {
+    fn new_auth_rate_limiter() -> AuthRateLimiter {
         let quota = Quota::per_second(
             NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND)
                 .assured("AUTH_RATE_LIMIT_PER_SECOND is a positive constant"),
         );
-        Arc::new(RateLimiter::keyed(quota))
+        RateLimiter::keyed(quota)
     }
 
     async fn apply_current_cluster_state(&self) -> Result<(), crate::runtime::RuntimeError> {
-        let state = self.consensus.current_runtime_state().await;
+        let state = self.inner.consensus.current_runtime_state().await;
         apply_cluster_runtime_state(
-            &self.runtime,
-            &self.cluster,
-            self.consensus.local_node_id(),
+            &self.inner.runtime,
+            &self.inner.cluster,
+            self.inner.consensus.local_node_id(),
             state,
         )
         .await
@@ -4293,34 +4312,39 @@ impl SessionServiceImpl {
         let Ok(user_name) = UserName::parse(&credentials.username) else {
             return None;
         };
-        let user = self.consensus.current_user(&user_name).await?;
+        let user = self.inner.consensus.current_user(&user_name).await?;
         let auth_rate_limit_key = user_name.as_str().to_string();
         if self
+            .inner
             .failed_auth_rate_limit_keys
             .contains_key(&auth_rate_limit_key)
         {
-            self.auth_rate_limiter
+            self.inner
+                .auth_rate_limiter
                 .until_key_ready(&auth_rate_limit_key)
                 .await;
         }
         let verified = verify_password_hash(user.password_hash, credentials.password.clone()).await;
         if verified {
-            self.failed_auth_rate_limit_keys
+            self.inner
+                .failed_auth_rate_limit_keys
                 .remove(&auth_rate_limit_key);
         } else {
-            self.failed_auth_rate_limit_keys
+            self.inner
+                .failed_auth_rate_limit_keys
                 .insert(auth_rate_limit_key, ());
         }
         verified.then_some(user_name)
     }
 
     fn next_cluster_command_correlation_id(&self) -> u64 {
-        self.next_cluster_command_correlation_id
+        self.inner
+            .next_cluster_command_correlation_id
             .fetch_add(1, Ordering::Relaxed)
     }
 
     fn broadcast_error(&self, message: impl Into<String>) {
-        let _ = self.events.send(ServerEvent {
+        let _ = self.inner.events.send(ServerEvent {
             level: ServerEventLevel::Error as i32,
             message: message.into(),
         });
@@ -4411,7 +4435,8 @@ impl SessionServiceImpl {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        self.runtime
+        self.inner
+            .runtime
             .prepare_domain_udfs(domain_udfs)
             .await
             .map(Some)
@@ -4423,9 +4448,9 @@ impl SessionServiceImpl {
         domain: &DomainName,
         tls: &VhostTlsResource,
     ) -> Result<(), String> {
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         let id = resolve_resource_id(&resources, domain, &tls.resource, tls.version)?;
-        load_vhost_tls_materials(&self.resource_store, &id).await?;
+        load_vhost_tls_materials(&self.inner.resource_store, &id).await?;
         Ok(())
     }
 
@@ -4434,9 +4459,10 @@ impl SessionServiceImpl {
         domain: &DomainName,
         lookup: &CreateLookup,
     ) -> Result<(), String> {
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         let id = resolve_resource_id(&resources, domain, &lookup.resource, None)?;
         let path = self
+            .inner
             .resource_store
             .resolve_content_path(&id, &lookup.path)
             .map_err(|error| error.to_string())?;
@@ -4455,7 +4481,7 @@ impl SessionServiceImpl {
                 error
             )
         })?;
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         let id = resolve_resource_id(
             &resources,
             domain,
@@ -4463,6 +4489,7 @@ impl SessionServiceImpl {
             processor.resource_version,
         )?;
         let path = self
+            .inner
             .resource_store
             .resolve_content_path(&id, &processor.file)
             .map_err(|error| error.to_string())?;
@@ -4602,16 +4629,17 @@ impl SessionServiceImpl {
 
     async fn refresh_http_tls_server_config(&self) -> Result<(), String> {
         nervix_interconnect::install_rustls_crypto_provider();
-        let resources = self.consensus.current_resources().await;
-        let domains = self.consensus.current_domains().await;
+        let resources = self.inner.consensus.current_resources().await;
+        let domains = self.inner.consensus.current_domains().await;
         let mut resolver = ResolvesServerCertUsingSni::new();
         let mut configured_tls = false;
 
         for domain_id in domains.keys() {
             tokio::task::consume_budget().await;
-            let Ok(vhost_ids) = self
-                .registry
-                .list_identifiers(domain_id, ModelKind::Vhost, "")
+            let Ok(vhost_ids) =
+                self.inner
+                    .registry
+                    .list_identifiers(domain_id, ModelKind::Vhost, "")
             else {
                 continue;
             };
@@ -4619,7 +4647,9 @@ impl SessionServiceImpl {
             for vhost_id in vhost_ids {
                 tokio::task::consume_budget().await;
                 let Ok(Some(Model::Vhost(vhost))) =
-                    self.registry.get(domain_id, ModelKind::Vhost, &vhost_id)
+                    self.inner
+                        .registry
+                        .get(domain_id, ModelKind::Vhost, &vhost_id)
                 else {
                     continue;
                 };
@@ -4642,21 +4672,21 @@ impl SessionServiceImpl {
                         }
                     };
                 let version = id.version;
-                let certified_key = match load_vhost_tls_materials(&self.resource_store, &id).await
-                {
-                    Ok(materials) => materials.certified_key,
-                    Err(error) => {
-                        warn!(
-                            domain = domain_id.as_str(),
-                            vhost = vhost.name.as_str(),
-                            resource = tls.resource.as_str(),
-                            version,
-                            error,
-                            "failed to load VHOST TLS materials"
-                        );
-                        continue;
-                    }
-                };
+                let certified_key =
+                    match load_vhost_tls_materials(&self.inner.resource_store, &id).await {
+                        Ok(materials) => materials.certified_key,
+                        Err(error) => {
+                            warn!(
+                                domain = domain_id.as_str(),
+                                vhost = vhost.name.as_str(),
+                                resource = tls.resource.as_str(),
+                                version,
+                                error,
+                                "failed to load VHOST TLS materials"
+                            );
+                            continue;
+                        }
+                    };
 
                 let mut applied_hostname = false;
                 for hostname in &vhost.hostnames {
@@ -4678,7 +4708,7 @@ impl SessionServiceImpl {
             }
         }
 
-        let mut guard = self.http_tls_server_config.write();
+        let mut guard = self.inner.http_tls_server_config.write();
         if configured_tls {
             let config = ServerConfig::builder()
                 .with_no_client_auth()
@@ -4691,21 +4721,22 @@ impl SessionServiceImpl {
     }
 
     async fn publish_resource_replica(&self, replica: ResourceNodeStatus) -> Result<(), String> {
-        let Some(leader_id) = self.consensus.current_leader().await else {
+        let Some(leader_id) = self.inner.consensus.current_leader().await else {
             return Err(
                 "failed to publish resource replica: cluster leader is unknown".to_string(),
             );
         };
 
-        if leader_id == self.consensus.local_node_id().clone() {
+        if leader_id == self.inner.consensus.local_node_id().clone() {
             return self
+                .inner
                 .consensus
                 .put_resource_replica(replica)
                 .await
                 .map_err(|error| format!("failed to publish resource replica: {error}"));
         }
 
-        let gossip = self.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.gossip_state().await;
         let Some(leader_node) = gossip
             .live_nodes
             .into_iter()
@@ -4718,7 +4749,7 @@ impl SessionServiceImpl {
         };
 
         post_resource_replica(
-            self.cluster_api_clients.as_ref(),
+            self.inner.cluster_api_clients.as_ref(),
             &leader_node.cluster_api_advertise_addr,
             &replica,
         )
@@ -4726,9 +4757,9 @@ impl SessionServiceImpl {
     }
 
     async fn reconcile_resources_once(&self) {
-        let local_node_id = self.consensus.local_node_id().clone();
-        let resources = self.consensus.current_resources().await;
-        let live_nodes = self.cluster.gossip_state().await.live_nodes;
+        let local_node_id = self.inner.consensus.local_node_id().clone();
+        let resources = self.inner.consensus.current_resources().await;
+        let live_nodes = self.inner.cluster.gossip_state().await.live_nodes;
 
         // Replicas indexed by the resource version they hold and then by the node holding it. The
         // loop below asks about one resource on one node at a time, so both questions resolve by
@@ -4784,7 +4815,7 @@ impl SessionServiceImpl {
                 };
 
             let archive = match fetch_resource_archive(
-                self.cluster_api_clients.as_ref(),
+                self.inner.cluster_api_clients.as_ref(),
                 &source_node.cluster_api_advertise_addr,
                 &resource.id,
             )
@@ -4819,6 +4850,7 @@ impl SessionServiceImpl {
             }
 
             let manifest = match self
+                .inner
                 .resource_store
                 .install_from_archive_path(
                     resource.id.clone(),
@@ -4886,12 +4918,17 @@ impl SessionServiceImpl {
             relay: relay.clone(),
         };
         let first_interest = {
-            let mut entry = self.subscription_interest_counts.entry(key).or_insert(0);
+            let mut entry = self
+                .inner
+                .subscription_interest_counts
+                .entry(key)
+                .or_insert(0);
             *entry += 1;
             *entry == 1
         };
         if first_interest {
-            self.cluster
+            self.inner
+                .cluster
                 .set_local_subscription_interest(domain.as_str(), relay.as_str(), true)
                 .await;
         }
@@ -4910,8 +4947,9 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<(), String> {
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         let mut pending_nodes = self
+            .inner
             .cluster
             .live_node_ids()
             .await
@@ -4965,7 +5003,7 @@ impl SessionServiceImpl {
     ) -> Result<bool, String> {
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands.insert(
+        self.inner.pending_cluster_commands.insert(
             correlation_id,
             PendingClusterCommand::SubscriptionInterestVisibility(tx),
         );
@@ -4983,7 +5021,7 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         match tokio::time::timeout(SUBSCRIPTION_INTEREST_CHECK_TIMEOUT, rx).await {
@@ -4993,7 +5031,7 @@ impl SessionServiceImpl {
                 target_node_id
             )),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!(
                     "timed out checking subscription interest visibility on '{}'",
                     target_node_id
@@ -5007,6 +5045,7 @@ impl SessionServiceImpl {
         response: RemoteSubscriptionInterestVisibilityResponse,
     ) {
         if let Some((_, PendingClusterCommand::SubscriptionInterestVisibility(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -5020,7 +5059,7 @@ impl SessionServiceImpl {
             relay: relay.clone(),
         };
         let mut should_clear = false;
-        if let Some(mut entry) = self.subscription_interest_counts.get_mut(&key) {
+        if let Some(mut entry) = self.inner.subscription_interest_counts.get_mut(&key) {
             if *entry <= 1 {
                 should_clear = true;
             } else {
@@ -5028,8 +5067,9 @@ impl SessionServiceImpl {
             }
         }
         if should_clear {
-            self.subscription_interest_counts.remove(&key);
-            self.cluster
+            self.inner.subscription_interest_counts.remove(&key);
+            self.inner
+                .cluster
                 .set_local_subscription_interest(domain.as_str(), relay.as_str(), false)
                 .await;
         }
@@ -5040,7 +5080,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Vec<ClusterNodeName>, String> {
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(Vec::new());
         };
@@ -5057,6 +5097,7 @@ impl SessionServiceImpl {
             tokio::task::consume_budget().await;
             let result = async {
                 let target = self
+                    .inner
                     .cluster
                     .gossip_state()
                     .await
@@ -5075,6 +5116,7 @@ impl SessionServiceImpl {
                     _ => InterconnectTransportMode::Plain,
                 };
                 let connection = self
+                    .inner
                     .interconnect
                     .connection_for(addr, "localhost", mode)
                     .await
@@ -5122,7 +5164,7 @@ impl SessionServiceImpl {
         };
         for node_id in self.domain_tick_target_nodes(&domain_id).await {
             tokio::task::consume_budget().await;
-            if node_id == self.consensus.local_node_id().clone() {
+            if node_id == self.inner.consensus.local_node_id().clone() {
                 self.handle_domain_clock_start(start.clone());
                 continue;
             }
@@ -5136,14 +5178,15 @@ impl SessionServiceImpl {
     }
 
     async fn reconcile_domain_clocks_from_state(&self) {
-        let domains = self.consensus.current_domains().await;
+        let domains = self.inner.consensus.current_domains().await;
         let known_domains = domains.keys().cloned().collect::<HashSet<_>>();
-        self.domain_clock_reconciliations
+        self.inner
+            .domain_clock_reconciliations
             .retain(|domain, _| known_domains.contains(domain));
         for (domain_id, domain) in domains {
             tokio::task::consume_budget().await;
             if let DomainPace::Unpaced = domain.config.pace {
-                self.domain_clock_reconciliations.remove(&domain_id);
+                self.inner.domain_clock_reconciliations.remove(&domain_id);
                 continue;
             }
             let running = !matches!(domain.status, DomainStatus::Stopped);
@@ -5152,6 +5195,7 @@ impl SessionServiceImpl {
                 running,
             };
             if self
+                .inner
                 .domain_clock_reconciliations
                 .get(&domain_id)
                 .is_some_and(|current| *current.value() == observed)
@@ -5179,7 +5223,8 @@ impl SessionServiceImpl {
             };
             match result {
                 Ok(()) => {
-                    self.domain_clock_reconciliations
+                    self.inner
+                        .domain_clock_reconciliations
                         .insert(domain_id, observed);
                 }
                 Err(error) => {
@@ -5198,7 +5243,7 @@ impl SessionServiceImpl {
         };
         for node_id in self.domain_tick_target_nodes(domain_id).await {
             tokio::task::consume_budget().await;
-            if node_id == self.consensus.local_node_id().clone() {
+            if node_id == self.inner.consensus.local_node_id().clone() {
                 self.handle_domain_clock_stop(stop.clone());
                 continue;
             }
@@ -5213,17 +5258,17 @@ impl SessionServiceImpl {
 
     fn handle_domain_clock_start(&self, start: DomainClockStart) {
         let domain_id = start.domain_id.clone();
-        self.runtime.handle_domain_clock_start(
+        self.inner.runtime.handle_domain_clock_start(
             &domain_id,
             start.logical_start,
             start.wall_started_at,
             &start.time_rate,
         );
-        if start.owner_node_id != self.consensus.local_node_id().clone() {
-            self.domain_clock_events.notify_waiters();
+        if start.owner_node_id != self.inner.consensus.local_node_id().clone() {
+            self.inner.domain_clock_events.notify_waiters();
             return;
         }
-        self.domain_clocks.insert(
+        self.inner.domain_clocks.insert(
             domain_id.clone(),
             DomainClockRuntimeState {
                 wall_started_at: start.wall_started_at,
@@ -5233,24 +5278,26 @@ impl SessionServiceImpl {
             },
         );
         let service = self.clone();
-        self.service_tasks.spawn(async move {
+        self.inner.service_tasks.spawn(async move {
             emit_due_domain_ticks(&service, &domain_id).await;
         });
-        self.domain_clock_events.notify_waiters();
+        self.inner.domain_clock_events.notify_waiters();
     }
 
     fn handle_domain_clock_stop(&self, stop: DomainClockStop) {
-        self.runtime.handle_domain_clock_stop(&stop.domain_id);
-        self.domain_clocks.remove(&stop.domain_id);
-        self.domain_clock_events.notify_waiters();
+        self.inner.runtime.handle_domain_clock_stop(&stop.domain_id);
+        self.inner.domain_clocks.remove(&stop.domain_id);
+        self.inner.domain_clock_events.notify_waiters();
     }
 
     fn handle_domain_tick(&self, tick: DomainTickEnvelope) {
-        self.runtime.handle_domain_tick(&tick.domain_id, &tick.tick);
+        self.inner
+            .runtime
+            .handle_domain_tick(&tick.domain_id, &tick.tick);
     }
 
     async fn domain_clock_owner(&self, domain_id: &DomainName) -> Option<ClusterNodeName> {
-        let mut live_nodes = self.cluster.live_node_ids().await;
+        let mut live_nodes = self.inner.cluster.live_node_ids().await;
         live_nodes.sort();
         if live_nodes.is_empty() {
             return None;
@@ -5265,13 +5312,13 @@ impl SessionServiceImpl {
     }
 
     async fn domain_tick_target_nodes(&self, domain_id: &DomainName) -> Vec<ClusterNodeName> {
-        let Some(domain) = self.consensus.current_domain(domain_id).await else {
+        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
             return Vec::new();
         };
         if let DomainStatus::Stopped = domain.status {
             return Vec::new();
         }
-        let mut nodes = self.cluster.live_node_ids().await;
+        let mut nodes = self.inner.cluster.live_node_ids().await;
         nodes.sort();
         nodes.dedup();
         nodes
@@ -5319,7 +5366,7 @@ impl SessionServiceImpl {
             }
         };
 
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let scheduled_relay = if let Some(domain_schedule) = schedule.domain(domain) {
             domain_schedule.nodes.get(&NodeRef::new(
                 ModelKind::Relay,
@@ -5385,7 +5432,7 @@ impl SessionServiceImpl {
             }
         };
 
-        if let Some(domain_state) = self.consensus.current_domain(domain).await
+        if let Some(domain_state) = self.inner.consensus.current_domain(domain).await
             && let DomainStatus::Stopped = domain_state.status
         {
             return command_ok("not exists".to_string());
@@ -5411,10 +5458,11 @@ impl SessionServiceImpl {
             }
         };
 
-        let local_node_id = self.consensus.local_node_id().clone();
+        let local_node_id = self.inner.consensus.local_node_id().clone();
         let mut exists = false;
         if owner_nodes.is_empty() || owner_nodes.iter().any(|owner| owner == &local_node_id) {
             match self
+                .inner
                 .runtime
                 .describe_local_stream_exists(domain, &describe.relay, &key)
             {
@@ -5440,7 +5488,8 @@ impl SessionServiceImpl {
             }
             let correlation_id = self.next_cluster_command_correlation_id();
             let (tx, rx) = oneshot::channel();
-            self.pending_cluster_commands
+            self.inner
+                .pending_cluster_commands
                 .insert(correlation_id, PendingClusterCommand::DescribeRelay(tx));
             if let Err(message) = self
                 .dispatch_interconnect_control(
@@ -5454,7 +5503,7 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 return CommandResult {
                     success: false,
                     diagnostics: vec![Diagnostic {
@@ -5492,7 +5541,7 @@ impl SessionServiceImpl {
                     continue;
                 }
                 Err(_) => {
-                    self.pending_cluster_commands.remove(&correlation_id);
+                    self.inner.pending_cluster_commands.remove(&correlation_id);
                     warn!(
                         %owner,
                         domain = domain.as_str(),
@@ -5564,6 +5613,7 @@ impl SessionServiceImpl {
         )?;
         let key = branch_key_from_filter(&branching, &filter)?;
         match self
+            .inner
             .runtime
             .describe_local_stream_exists(&request.domain, &request.relay, &key)
         {
@@ -5575,6 +5625,7 @@ impl SessionServiceImpl {
 
     fn handle_describe_stream_response(&self, response: RemoteDescribeRelayResponse) {
         if let Some((_, PendingClusterCommand::DescribeRelay(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -5587,20 +5638,21 @@ impl SessionServiceImpl {
         domain: &DomainName,
         _describe: DescribeDomain,
     ) -> CommandResult {
-        let Some(domain_state) = self.consensus.current_domain(domain).await else {
+        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         let mut lines = vec![
             format!("domain: {}", domain.as_str()),
             format!("status: {:?}", domain_state.status).to_ascii_lowercase(),
         ];
-        lines.extend(self.runtime.describe_domain_statistics(domain));
+        lines.extend(self.inner.runtime.describe_domain_statistics(domain));
         lines.push("placement:".to_string());
         lines.push(format!(
             "  default policy: {}",
             domain_state.config.placement.as_ref()
         ));
         let placement_plan = self
+            .inner
             .registry
             .placement_plan(domain, domain_state.config.placement);
         lines.push(format!(
@@ -5608,7 +5660,7 @@ impl SessionServiceImpl {
             placement_plan.as_ref().map_or(0, |plan| plan.rules.len())
         ));
         if let Some(plan) = placement_plan {
-            let schedule = self.consensus.current_schedule().await;
+            let schedule = self.inner.consensus.current_schedule().await;
             let domain_schedule = schedule.domain(domain);
             for (index, group) in plan.require_groups.iter().enumerate() {
                 lines.push(format!("  group {}:", index + 1));
@@ -5635,10 +5687,11 @@ impl SessionServiceImpl {
     }
 
     async fn show_placements(&self, domain: &DomainName) -> CommandResult {
-        let Some(domain_state) = self.consensus.current_domain(domain).await else {
+        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         let Some(plan) = self
+            .inner
             .registry
             .placement_plan(domain, domain_state.config.placement)
         else {
@@ -5671,10 +5724,11 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribePlacement,
     ) -> CommandResult {
-        let Some(domain_state) = self.consensus.current_domain(domain).await else {
+        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         let Some(plan) = self
+            .inner
             .registry
             .placement_plan(domain, domain_state.config.placement)
         else {
@@ -5690,6 +5744,7 @@ impl SessionServiceImpl {
             return command_error(format!("placement '{}' not found", describe.name.as_str()));
         };
         let form = match self
+            .inner
             .registry
             .get(domain, ModelKind::Placement, &describe.name)
         {
@@ -5767,7 +5822,7 @@ impl SessionServiceImpl {
                 ));
             }
         }
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let domain_schedule = schedule.domain(domain);
         for group in placement_groups_claimed_by_rule(&plan, rule) {
             lines.push(format!(
@@ -5797,6 +5852,7 @@ impl SessionServiceImpl {
         describe: DescribeEndpoint,
     ) -> CommandResult {
         match self
+            .inner
             .registry
             .get(domain, ModelKind::Endpoint, &describe.name)
         {
@@ -5833,21 +5889,26 @@ impl SessionServiceImpl {
             Err(message) => return command_error(message),
         };
 
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         let summary = if ingestor_node.executes_on(local_node_id) {
-            self.runtime
+            self.inner
+                .runtime
                 .describe_local_ingestor(domain, &describe.ingestor)
                 .map(|summary| {
                     (
                         summary,
-                        self.runtime
-                            .describe_metrics_for(domain, "INGESTOR", &describe.ingestor),
+                        self.inner.runtime.describe_metrics_for(
+                            domain,
+                            "INGESTOR",
+                            &describe.ingestor,
+                        ),
                     )
                 })
         } else if let Some(owner) = ingestor_node.execution_node() {
             let correlation_id = self.next_cluster_command_correlation_id();
             let (tx, mut rx) = oneshot::channel();
-            self.pending_cluster_commands
+            self.inner
+                .pending_cluster_commands
                 .insert(correlation_id, PendingClusterCommand::DescribeIngestor(tx));
             let deadline = tokio::time::Instant::now() + REMOTE_DESCRIBE_INGESTOR_TIMEOUT;
             loop {
@@ -5874,7 +5935,7 @@ impl SessionServiceImpl {
                     }
                     Err(_) if tokio::time::Instant::now() < deadline => {}
                     Err(_) => {
-                        self.pending_cluster_commands.remove(&correlation_id);
+                        self.inner.pending_cluster_commands.remove(&correlation_id);
                         let error = match dispatch_result {
                             Err(error) => error,
                             Ok(()) => format!(
@@ -5893,13 +5954,17 @@ impl SessionServiceImpl {
                     ready: false,
                     quiesce_state: None,
                     quiesce_counters: Default::default(),
-                    memory_backpressure_paused: self.runtime.ingestors_paused_for_memory_pressure(),
+                    memory_backpressure_paused: self
+                        .inner
+                        .runtime
+                        .ingestors_paused_for_memory_pressure(),
                     transient_error: None,
                     reconnect_backoff: None,
                     reconnect_wait_millis: None,
                     kafka_domain_offsets: None,
                 },
-                self.runtime
+                self.inner
+                    .runtime
                     .describe_metrics_for(domain, "INGESTOR", &describe.ingestor),
             ))
         };
@@ -5925,16 +5990,19 @@ impl SessionServiceImpl {
         self.prepare_owner_control_request(&request.domain, ModelKind::Ingestor, &request.name)
             .await?;
         let summary = self
+            .inner
             .runtime
             .describe_local_ingestor(&request.domain, &request.name)?;
-        let metrics = self
-            .runtime
-            .describe_metrics_for(&request.domain, "INGESTOR", &request.name);
+        let metrics =
+            self.inner
+                .runtime
+                .describe_metrics_for(&request.domain, "INGESTOR", &request.name);
         Ok(runtime_ingestor_describe_to_envelope(summary, metrics))
     }
 
     fn handle_describe_ingestor_response(&self, response: RemoteDescribeIngestorResponse) {
         if let Some((_, PendingClusterCommand::DescribeIngestor(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -5973,7 +6041,7 @@ impl SessionServiceImpl {
         else {
             return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         };
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if node.executes_on(local_node_id) {
             return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         }
@@ -5982,7 +6050,7 @@ impl SessionServiceImpl {
         };
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands.insert(
+        self.inner.pending_cluster_commands.insert(
             correlation_id,
             PendingClusterCommand::DataflowNodeStatus(tx),
         );
@@ -5999,13 +6067,13 @@ impl SessionServiceImpl {
             .await
             .is_err()
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         }
         match tokio::time::timeout(Duration::from_secs(2), rx).await {
             Ok(Ok(Ok(status))) => status,
             _ => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 self.local_dataflow_node_status_envelope(domain, kind, identifier)
             }
         }
@@ -6019,9 +6087,11 @@ impl SessionServiceImpl {
     ) -> DataflowNodeStatusEnvelope {
         let identifier = identifier.into();
         let health = self
+            .inner
             .runtime
             .dataflow_node_status(domain, kind, identifier.clone());
         let transient = self
+            .inner
             .runtime
             .dataflow_node_transient_state(domain, kind, identifier);
         dataflow_node_status_to_envelope(
@@ -6041,12 +6111,12 @@ impl SessionServiceImpl {
     ) -> Result<DataflowNodeStatusEnvelope, String> {
         self.prepare_owner_control_request(&request.domain, request.kind, &request.name)
             .await?;
-        let health = self.runtime.dataflow_node_status(
+        let health = self.inner.runtime.dataflow_node_status(
             &request.domain,
             request.kind.as_str(),
             &request.name,
         );
-        let transient = self.runtime.dataflow_node_transient_state(
+        let transient = self.inner.runtime.dataflow_node_transient_state(
             &request.domain,
             request.kind.as_str(),
             &request.name,
@@ -6064,6 +6134,7 @@ impl SessionServiceImpl {
 
     fn handle_dataflow_node_status_response(&self, response: RemoteDataflowNodeStatusResponse) {
         if let Some((_, PendingClusterCommand::DataflowNodeStatus(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6072,7 +6143,7 @@ impl SessionServiceImpl {
     }
 
     fn local_domain_drain_status(&self, domain: &DomainName) -> DomainDrainStatusEnvelope {
-        let status = self.runtime.domain_drain_status(domain);
+        let status = self.inner.runtime.domain_drain_status(domain);
         let emitter_publishing = status
             .emitter_publishing
             .into_iter()
@@ -6092,13 +6163,14 @@ impl SessionServiceImpl {
         node_id: &ClusterNodeName,
         domain: &DomainName,
     ) -> Result<DomainDrainStatusEnvelope, String> {
-        if node_id == self.consensus.local_node_id() {
-            self.runtime.force_flush_domain_if_idle(domain);
+        if node_id == self.inner.consensus.local_node_id() {
+            self.inner.runtime.force_flush_domain_if_idle(domain);
             return Ok(self.local_domain_drain_status(domain));
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::DomainDrainStatus(tx));
         if let Err(error) = self
             .dispatch_interconnect_control(
@@ -6110,7 +6182,7 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         match tokio::time::timeout(Duration::from_secs(2), rx).await {
@@ -6120,7 +6192,7 @@ impl SessionServiceImpl {
                 node_id
             )),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!(
                     "node '{}' timed out reporting domain drain status",
                     node_id
@@ -6131,6 +6203,7 @@ impl SessionServiceImpl {
 
     fn handle_domain_drain_status_response(&self, response: RemoteDomainDrainStatusResponse) {
         if let Some((_, PendingClusterCommand::DomainDrainStatus(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6145,9 +6218,10 @@ impl SessionServiceImpl {
         affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
     ) -> EntityDrainStatusEnvelope {
-        let status = self
-            .runtime
-            .entity_drain_status(domain, relays, affected_entities, purpose);
+        let status =
+            self.inner
+                .runtime
+                .entity_drain_status(domain, relays, affected_entities, purpose);
         let emitter_publishing = status
             .emitter_publishing
             .into_iter()
@@ -6175,8 +6249,9 @@ impl SessionServiceImpl {
             deadline,
             reason,
         } = engagement;
-        if node_id == self.consensus.local_node_id() {
+        if node_id == self.inner.consensus.local_node_id() {
             return self
+                .inner
                 .runtime
                 .engage_entity_gate_operation(
                     operation_id,
@@ -6190,7 +6265,8 @@ impl SessionServiceImpl {
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::EntityGate(tx));
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
@@ -6210,14 +6286,14 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         match tokio::time::timeout(remaining.min(Duration::from_secs(2)), rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(format!("node '{node_id}' closed the entity gate request")),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!("node '{node_id}' timed out engaging entity gates"))
             }
         }
@@ -6232,19 +6308,20 @@ impl SessionServiceImpl {
         purpose: EntityGatePurpose,
         deadline: tokio::time::Instant,
     ) -> Result<EntityDrainStatusEnvelope, String> {
-        if node_id == self.consensus.local_node_id() {
+        if node_id == self.inner.consensus.local_node_id() {
             let status = self.local_entity_drain_status(domain, relays, affected_entities, purpose);
             if status.buffered_relay_batches != 0
                 || status.node_work_items != 0
                 || status.outstanding_acks != 0
             {
-                self.runtime.force_flush_domain_if_idle(domain);
+                self.inner.runtime.force_flush_domain_if_idle(domain);
             }
             return Ok(status);
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::EntityDrainStatus(tx));
         if let Err(error) = self
             .dispatch_interconnect_control(
@@ -6259,7 +6336,7 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -6269,7 +6346,7 @@ impl SessionServiceImpl {
                 "node '{node_id}' closed the entity drain status request"
             )),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!(
                     "node '{node_id}' timed out reporting entity drain status"
                 ))
@@ -6283,15 +6360,17 @@ impl SessionServiceImpl {
         operation_id: u64,
         domain: &DomainName,
     ) -> Result<(), String> {
-        if node_id == self.consensus.local_node_id() {
+        if node_id == self.inner.consensus.local_node_id() {
             return self
+                .inner
                 .runtime
                 .release_entity_gate_operation(operation_id, domain)
                 .await;
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::EntityGateRelease(tx));
         if let Err(error) = self
             .dispatch_interconnect_control(
@@ -6304,7 +6383,7 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         match tokio::time::timeout(Duration::from_secs(2), rx).await {
@@ -6313,7 +6392,7 @@ impl SessionServiceImpl {
                 "node '{node_id}' closed the entity gate release request"
             )),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!("node '{node_id}' timed out releasing entity gates"))
             }
         }
@@ -6321,6 +6400,7 @@ impl SessionServiceImpl {
 
     fn handle_entity_gate_response(&self, response: RemoteEntityGateResponse) {
         if let Some((_, PendingClusterCommand::EntityGate(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6330,6 +6410,7 @@ impl SessionServiceImpl {
 
     fn handle_entity_drain_status_response(&self, response: RemoteEntityDrainStatusResponse) {
         if let Some((_, PendingClusterCommand::EntityDrainStatus(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6339,6 +6420,7 @@ impl SessionServiceImpl {
 
     fn handle_entity_gate_release_response(&self, response: RemoteEntityGateReleaseResponse) {
         if let Some((_, PendingClusterCommand::EntityGateRelease(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6348,7 +6430,7 @@ impl SessionServiceImpl {
 
     fn schedule_cluster_entity_gate_release(&self, release: PendingClusterEntityGateRelease) {
         let service = self.clone();
-        self.service_tasks.spawn(async move {
+        self.inner.service_tasks.spawn(async move {
             service.retry_cluster_entity_gate_release(release).await;
         });
     }
@@ -6363,7 +6445,7 @@ impl SessionServiceImpl {
             for node in nodes {
                 tokio::task::consume_budget().await;
                 let result = tokio::select! {
-                    _ = self.shutdown.cancelled() => return,
+                    _ = self.inner.shutdown.cancelled() => return,
                     result = self.release_entity_gate_on_node(
                         &node,
                         release.operation_id,
@@ -6389,7 +6471,7 @@ impl SessionServiceImpl {
                 return;
             }
             tokio::select! {
-                _ = self.shutdown.cancelled() => return,
+                _ = self.inner.shutdown.cancelled() => return,
                 _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
             }
         }
@@ -6401,7 +6483,7 @@ impl SessionServiceImpl {
     /// A node marked unavailable cannot answer a gate request, and contacting it only spends the
     /// request deadline before the hold fails.
     async fn available_node_ids(&self) -> Vec<ClusterNodeName> {
-        let gossip = self.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.gossip_state().await;
         gossip
             .live_nodes
             .into_iter()
@@ -6421,9 +6503,9 @@ impl SessionServiceImpl {
         let mut nodes = self.available_node_ids().await;
         if !nodes
             .iter()
-            .any(|node| node == self.consensus.local_node_id())
+            .any(|node| node == self.inner.consensus.local_node_id())
         {
-            nodes.push(self.consensus.local_node_id().clone());
+            nodes.push(self.inner.consensus.local_node_id().clone());
         }
         nodes.sort();
         nodes.dedup();
@@ -6506,7 +6588,7 @@ impl SessionServiceImpl {
             .into_iter()
             .collect::<Vec<_>>();
         let started_at = tokio::time::Instant::now();
-        let deadline = started_at + self.runtime.entity_gate_deadline();
+        let deadline = started_at + self.inner.runtime.entity_gate_deadline();
         let gate = self
             .engage_cluster_entity_gates(
                 domain,
@@ -6517,7 +6599,7 @@ impl SessionServiceImpl {
             )
             .await?;
         #[cfg(feature = "testing")]
-        self.runtime.pause_entity_gate_if_armed(domain).await;
+        self.inner.runtime.pause_entity_gate_if_armed(domain).await;
         if let Err(error) = self
             .wait_for_cluster_entity_drain(
                 &gate,
@@ -6734,7 +6816,8 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
     ) -> Result<(), Report<DomainAlterError>> {
-        self.consensus
+        self.inner
+            .consensus
             .pause_domain(domain.clone())
             .await
             .map_err(|error| {
@@ -6766,17 +6849,17 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
     ) -> Result<(), Report<DomainAlterError>> {
-        let mut nodes = self.cluster.live_node_ids().await;
+        let mut nodes = self.inner.cluster.live_node_ids().await;
         if !nodes
             .iter()
-            .any(|node| node == self.consensus.local_node_id())
+            .any(|node| node == self.inner.consensus.local_node_id())
         {
-            nodes.push(self.consensus.local_node_id().clone());
+            nodes.push(self.inner.consensus.local_node_id().clone());
         }
         nodes.sort();
         nodes.dedup();
 
-        let deadline = tokio::time::Instant::now() + self.runtime.domain_drain_timeout();
+        let deadline = tokio::time::Instant::now() + self.inner.runtime.domain_drain_timeout();
         let mut polling = interval(Duration::from_millis(50));
         polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_pending = None::<(ClusterNodeName, DomainDrainStatusEnvelope)>;
@@ -6861,7 +6944,8 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
     ) -> Result<(), Report<DomainAlterError>> {
-        self.consensus
+        self.inner
+            .consensus
             .resume_domain(domain.clone())
             .await
             .map_err(|error| {
@@ -6887,12 +6971,16 @@ impl SessionServiceImpl {
         planned: crate::registry::PlannedMutations,
         classified_level: QuiesceLevel,
     ) -> Result<(), Report<DomainAlterError>> {
-        let runtime_changes = self.registry.rollback_committed(planned).map_err(|error| {
-            Report::new(DomainAlterError::Rollback {
-                domain: domain.clone(),
-                reason: format!("registry rollback failed: {error}"),
-            })
-        })?;
+        let runtime_changes = self
+            .inner
+            .registry
+            .rollback_committed(planned)
+            .map_err(|error| {
+                Report::new(DomainAlterError::Rollback {
+                    domain: domain.clone(),
+                    reason: format!("registry rollback failed: {error}"),
+                })
+            })?;
         self.publish_domain_schedule(domain, runtime_changes.graph)
             .await
             .map_err(|error| {
@@ -6933,7 +7021,7 @@ impl SessionServiceImpl {
         let Some(node) = scheduled_node else {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         };
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if node.executes_on(local_node_id) {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         }
@@ -6943,7 +7031,8 @@ impl SessionServiceImpl {
 
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::DescribeMetrics(tx));
         if let Err(message) = self
             .dispatch_interconnect_control(
@@ -6957,14 +7046,14 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(message);
         }
         match tokio::time::timeout(Duration::from_secs(5), rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("describe metrics response channel closed".to_string()),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!(
                     "timed out waiting for DESCRIBE {} metrics response from '{}'",
                     kind.as_str(),
@@ -6983,13 +7072,15 @@ impl SessionServiceImpl {
     ) -> RemoteDescribeMetricsEnvelope {
         let identifier = identifier.into();
         let state = if let ModelKind::WasmProcessor = kind {
-            self.runtime
+            self.inner
+                .runtime
                 .describe_wasm_processor_state_for(domain, identifier.clone())
         } else {
             Vec::new()
         };
         RemoteDescribeMetricsEnvelope {
             metrics: self
+                .inner
                 .runtime
                 .describe_metrics_for(domain, metric_kind, identifier),
             state,
@@ -7008,6 +7099,7 @@ impl SessionServiceImpl {
 
     fn handle_describe_metrics_response(&self, response: RemoteDescribeMetricsResponse) {
         if let Some((_, PendingClusterCommand::DescribeMetrics(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -7040,9 +7132,13 @@ impl SessionServiceImpl {
             ));
         };
 
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         let summary = if lookup_node.executes_on(local_node_id) {
-            match self.runtime.describe_local_lookup(domain, &describe.name) {
+            match self
+                .inner
+                .runtime
+                .describe_local_lookup(domain, &describe.name)
+            {
                 Ok(description) => Ok(LookupDescribeEnvelope {
                     resource: lookup.resource.clone(),
                     resource_version: description.resource_version,
@@ -7056,7 +7152,8 @@ impl SessionServiceImpl {
         } else if let Some(owner) = lookup_node.execution_node() {
             let correlation_id = self.next_cluster_command_correlation_id();
             let (tx, rx) = oneshot::channel();
-            self.pending_cluster_commands
+            self.inner
+                .pending_cluster_commands
                 .insert(correlation_id, PendingClusterCommand::DescribeLookup(tx));
             if let Err(message) = self
                 .dispatch_interconnect_control(
@@ -7069,14 +7166,14 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 return command_error(message);
             }
             match tokio::time::timeout(Duration::from_secs(5), rx).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(_)) => Err("describe lookup response channel closed".to_string()),
                 Err(_) => {
-                    self.pending_cluster_commands.remove(&correlation_id);
+                    self.inner.pending_cluster_commands.remove(&correlation_id);
                     Err(format!(
                         "timed out waiting for DESCRIBE HASH MAP response from '{}'",
                         owner
@@ -7121,6 +7218,7 @@ impl SessionServiceImpl {
         self.prepare_owner_control_request(&request.domain, ModelKind::Lookup, &request.name)
             .await?;
         let description = self
+            .inner
             .runtime
             .describe_local_lookup(&request.domain, &request.name)?;
         Ok(LookupDescribeEnvelope {
@@ -7135,6 +7233,7 @@ impl SessionServiceImpl {
 
     fn handle_describe_lookup_response(&self, response: RemoteDescribeLookupResponse) {
         if let Some((_, PendingClusterCommand::DescribeLookup(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -7151,6 +7250,7 @@ impl SessionServiceImpl {
             .scheduled_model_node(domain, ModelKind::Deduplicator, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Deduplicator, &describe.name)
         {
@@ -7212,6 +7312,7 @@ impl SessionServiceImpl {
             .scheduled_model_node(domain, ModelKind::Junction, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Junction, &describe.name)
         {
@@ -7269,6 +7370,7 @@ impl SessionServiceImpl {
             .scheduled_model_node(domain, ModelKind::Reingestor, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Reingestor, &describe.name)
         {
@@ -7326,6 +7428,7 @@ impl SessionServiceImpl {
             .scheduled_model_node(domain, ModelKind::Correlator, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Correlator, &describe.name)
         {
@@ -7383,6 +7486,7 @@ impl SessionServiceImpl {
             .scheduled_model_node(domain, ModelKind::Reorderer, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Reorderer, &describe.name)
         {
@@ -7440,6 +7544,7 @@ impl SessionServiceImpl {
             .scheduled_model_node(domain, ModelKind::Emitter, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Emitter, &describe.name)
         {
@@ -7505,26 +7610,28 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeWindowProcessor,
     ) -> CommandResult {
-        let model = match self
-            .registry
-            .get(domain, ModelKind::WindowProcessor, &describe.name)
-        {
-            Ok(Some(model)) => model,
-            Ok(None) => {
-                return command_error(format!(
-                    "window processor '{}' does not exist in domain '{}'",
-                    describe.name.as_str(),
-                    domain.as_str()
-                ));
-            }
-            Err(error) => {
-                return command_error(format!(
-                    "failed to read window processor '{}' in domain '{}': {error:?}",
-                    describe.name.as_str(),
-                    domain.as_str()
-                ));
-            }
-        };
+        let model =
+            match self
+                .inner
+                .registry
+                .get(domain, ModelKind::WindowProcessor, &describe.name)
+            {
+                Ok(Some(model)) => model,
+                Ok(None) => {
+                    return command_error(format!(
+                        "window processor '{}' does not exist in domain '{}'",
+                        describe.name.as_str(),
+                        domain.as_str()
+                    ));
+                }
+                Err(error) => {
+                    return command_error(format!(
+                        "failed to read window processor '{}' in domain '{}': {error:?}",
+                        describe.name.as_str(),
+                        domain.as_str()
+                    ));
+                }
+            };
         let Model::WindowProcessor(processor) = model else {
             return command_error(format!(
                 "model '{}' in domain '{}' is not a window processor",
@@ -7588,6 +7695,7 @@ impl SessionServiceImpl {
         describe: DescribeWasmProcessor,
     ) -> CommandResult {
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::WasmProcessor, &describe.name)
         {
@@ -7648,7 +7756,7 @@ impl SessionServiceImpl {
         identifier: impl Into<ModelName>,
     ) -> Option<ScheduledNode> {
         let identifier = identifier.into();
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let domain_schedule = schedule.domain(domain)?;
         domain_schedule
             .nodes
@@ -7675,7 +7783,7 @@ impl SessionServiceImpl {
                     domain.as_str()
                 )
             })?;
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if !node.executes_on(local_node_id) {
             return Err(format!(
                 "{} '{}' in domain '{}' is owned by '{}' but request reached '{}'",
@@ -7708,7 +7816,7 @@ impl SessionServiceImpl {
                     domain.as_str()
                 )
             })?;
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if !node.is_assigned_to(local_node_id) {
             return Err(format!(
                 "{} '{}' in domain '{}' is not assigned to '{}'",
@@ -7728,7 +7836,7 @@ impl SessionServiceImpl {
     ) -> Result<(), String> {
         self.prepare_control_request_domain(domain).await?;
         let owner_nodes = self.scheduled_stream_owner_nodes(domain, relay).await?;
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if !owner_nodes.iter().any(|owner| owner == local_node_id) {
             return Err(format!(
                 "stream '{}' in domain '{}' is not owned by '{}'",
@@ -7741,7 +7849,7 @@ impl SessionServiceImpl {
     }
 
     async fn prepare_control_request_domain(&self, domain: &DomainName) -> Result<(), String> {
-        if self.consensus.current_domain(domain).await.is_none() {
+        if self.inner.consensus.current_domain(domain).await.is_none() {
             return Err(format!("domain '{}' does not exist", domain.as_str()));
         }
         self.reconcile_running_domain_runtime(domain).await
@@ -7770,9 +7878,13 @@ impl SessionServiceImpl {
             Err(message) => return command_error(message),
         };
         let key = parsed.to_key_fragment();
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         let local_record = if lookup_node.is_assigned_to(local_node_id) {
-            Some(self.runtime.query_local_lookup(domain, &query.name, &key))
+            Some(
+                self.inner
+                    .runtime
+                    .query_local_lookup(domain, &query.name, &key),
+            )
         } else {
             None
         };
@@ -7846,7 +7958,8 @@ impl SessionServiceImpl {
         for target in targets {
             let correlation_id = self.next_cluster_command_correlation_id();
             let (tx, rx) = oneshot::channel();
-            self.pending_cluster_commands
+            self.inner
+                .pending_cluster_commands
                 .insert(correlation_id, PendingClusterCommand::LookupQuery(tx));
             if let Err(message) = self
                 .dispatch_interconnect_control(
@@ -7860,7 +7973,7 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 errors.push(message);
                 continue;
             }
@@ -7871,7 +7984,7 @@ impl SessionServiceImpl {
                 },
                 Ok(Err(_)) => errors.push("lookup response channel closed".to_string()),
                 Err(_) => {
-                    self.pending_cluster_commands.remove(&correlation_id);
+                    self.inner.pending_cluster_commands.remove(&correlation_id);
                     errors.push(format!(
                         "timed out waiting for LOOKUP response from '{}'",
                         target
@@ -7891,12 +8004,14 @@ impl SessionServiceImpl {
     ) -> Result<Option<runtime_schema::RuntimeRecordBatch>, String> {
         self.prepare_assigned_control_request(&request.domain, ModelKind::Lookup, &request.name)
             .await?;
-        self.runtime
+        self.inner
+            .runtime
             .query_local_lookup(&request.domain, &request.name, &request.key)
     }
 
     fn handle_lookup_response(&self, response: RemoteLookupResponse) {
         if let Some((_, PendingClusterCommand::LookupQuery(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -7929,7 +8044,7 @@ impl SessionServiceImpl {
         {
             return QueuedConfiguration::default();
         }
-        let Some(transaction) = self.consensus.current_transaction(id).await else {
+        let Some(transaction) = self.inner.consensus.current_transaction(id).await else {
             return QueuedConfiguration::default();
         };
         if &transaction.domain != domain {
@@ -7997,10 +8112,13 @@ impl SessionServiceImpl {
 
         for kind in &semantic_kinds {
             if let Some(domain) = &domain
-                && self.consensus.current_domain(domain).await.is_some()
-                && let Ok(ids) =
-                    self.registry
-                        .resulting_identifiers(domain, *kind, &prefix, &queued.models)
+                && self.inner.consensus.current_domain(domain).await.is_some()
+                && let Ok(ids) = self.inner.registry.resulting_identifiers(
+                    domain,
+                    *kind,
+                    &prefix,
+                    &queued.models,
+                )
             {
                 suggestions.extend(ids.into_iter().map(|id| id.to_string()));
             }
@@ -8012,10 +8130,10 @@ impl SessionServiceImpl {
 
         if expects_runtime_node_ref
             && let Some(domain) = &domain
-            && self.consensus.current_domain(domain).await.is_some()
+            && self.inner.consensus.current_domain(domain).await.is_some()
         {
             suggestions.extend(placement_runtime_node_ref_suggestions(
-                &self.registry,
+                &self.inner.registry,
                 domain,
                 &prefix,
                 &queued.models,
@@ -8025,7 +8143,7 @@ impl SessionServiceImpl {
         if let Some(domain) = &domain
             && (expects_resource_ref || requested_resource_versions.is_some())
         {
-            let resources = self.consensus.current_resources().await;
+            let resources = self.inner.consensus.current_resources().await;
             if expects_resource_ref {
                 suggestions.extend(resource_ref_suggestions(&resources, domain, &prefix));
                 suggestions.extend(queued.resource_suggestions(&prefix));
@@ -8046,7 +8164,7 @@ impl SessionServiceImpl {
                 && !expects_session_subscription_ref
                 && !expects_runtime_node_ref)
         {
-            let domains = self.consensus.current_domains().await;
+            let domains = self.inner.consensus.current_domains().await;
             for id in domains.into_keys() {
                 if prefix.is_empty() || id.as_str().starts_with(&prefix) {
                     suggestions.push(id.to_string());
@@ -8111,8 +8229,8 @@ impl SessionServiceImpl {
                 )
             });
         if is_transaction_request {
-            let leader = self.consensus.current_leader().await;
-            if leader.as_ref() != Some(self.consensus.local_node_id()) {
+            let leader = self.inner.consensus.current_leader().await;
+            if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
                 return self
                     .command_with_transaction_status(
                         self.not_leader_response(&req.query, leader).await,
@@ -8154,7 +8272,7 @@ impl SessionServiceImpl {
     ) -> CommandResult {
         if result.transaction.is_none()
             && let Some(id) = subscriptions.transaction_id()
-            && let Some(transaction) = self.consensus.current_transaction(id).await
+            && let Some(transaction) = self.inner.consensus.current_transaction(id).await
         {
             result.transaction = Some(transaction_status(&transaction));
         }
@@ -8166,10 +8284,11 @@ impl SessionServiceImpl {
     fn drop_transaction_bindings_if_armed(&self) {
         #[cfg(feature = "testing")]
         if self
+            .inner
             .runtime
-            .take_armed_transaction_binding_drop(self.consensus.local_node_id())
+            .take_armed_transaction_binding_drop(self.inner.consensus.local_node_id())
         {
-            self.transaction_bindings.clear();
+            self.inner.transaction_bindings.clear();
         }
     }
 
@@ -8180,7 +8299,7 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.transaction_id() else {
             return Err(SessionTransactionBindingError::Unbound);
         };
-        match self.transaction_bindings.get(id) {
+        match self.inner.transaction_bindings.get(id) {
             Some(binding) if binding.value() == &subscriptions.session_id => Ok(()),
             Some(_) => Err(SessionTransactionBindingError::TakenOver { id: id.to_string() }),
             None => Err(SessionTransactionBindingError::Detached { id: id.to_string() }),
@@ -8192,11 +8311,12 @@ impl SessionServiceImpl {
             return;
         };
         if self
+            .inner
             .transaction_bindings
             .get(&id)
             .is_some_and(|binding| binding.value() == &subscriptions.session_id)
         {
-            self.transaction_bindings.remove(&id);
+            self.inner.transaction_bindings.remove(&id);
         }
     }
 
@@ -8204,17 +8324,20 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return;
         };
-        if self.consensus.current_leader().await.as_ref() != Some(self.consensus.local_node_id())
+        if self.inner.consensus.current_leader().await.as_ref()
+            != Some(self.inner.consensus.local_node_id())
             || self
+                .inner
                 .transaction_bindings
                 .get(&id)
                 .is_none_or(|binding| binding.value() != &subscriptions.session_id)
         {
             return;
         }
-        if let Some(transaction) = self.consensus.current_transaction(&id).await
+        if let Some(transaction) = self.inner.consensus.current_transaction(&id).await
             && matches!(transaction.state, TransactionState::Open)
             && let Err(error) = self
+                .inner
                 .consensus
                 .revert_transaction(id.clone(), subscriptions.user.clone(), current_timestamp())
                 .await
@@ -8233,13 +8356,13 @@ impl SessionServiceImpl {
         request: proto::AttachTransactionRequest,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        let leader = self.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return self
                 .not_leader_response(&format!("ATTACH TRANSACTION {}", request.id), leader)
                 .await;
         }
-        let Some(transaction) = self.consensus.current_transaction(&request.id).await else {
+        let Some(transaction) = self.inner.consensus.current_transaction(&request.id).await else {
             return command_error(format!("transaction '{}' is unknown", request.id));
         };
         if transaction.owner != subscriptions.user {
@@ -8264,6 +8387,7 @@ impl SessionServiceImpl {
         }
 
         let transaction = match self
+            .inner
             .consensus
             .touch_transaction(
                 request.id.clone(),
@@ -8276,7 +8400,8 @@ impl SessionServiceImpl {
             Err(error) => return command_error(error.to_string()),
         };
         self.release_session_transaction_binding(subscriptions);
-        self.transaction_bindings
+        self.inner
+            .transaction_bindings
             .insert(request.id.clone(), subscriptions.session_id.clone());
         subscriptions.bind_transaction(request.id.clone());
         let mut result = command_ok(format!("attached transaction '{}'", request.id));
@@ -8308,12 +8433,14 @@ impl SessionServiceImpl {
                                 current_timestamp(),
                             );
                             match self
+                                .inner
                                 .consensus
-                                .open_transaction(transaction, self.transaction_max_open)
+                                .open_transaction(transaction, self.inner.transaction_max_open)
                                 .await
                             {
                                 Ok(transaction) => {
-                                    self.transaction_bindings
+                                    self.inner
+                                        .transaction_bindings
                                         .insert(id.clone(), subscriptions.session_id.clone());
                                     subscriptions.bind_transaction(id.clone());
                                     let mut result =
@@ -8382,7 +8509,7 @@ impl SessionServiceImpl {
             }
             Err(RequestDomainError::Invalid) => return Err("invalid domain".to_string()),
         };
-        if self.consensus.current_domain(&domain).await.is_none() {
+        if self.inner.consensus.current_domain(&domain).await.is_none() {
             return Err(format!("domain '{}' does not exist", domain.as_str()));
         }
         Ok(domain)
@@ -8425,12 +8552,12 @@ impl SessionServiceImpl {
             source: command.source,
             statement,
         };
-        let Some(transaction) = self.consensus.current_transaction(id).await else {
+        let Some(transaction) = self.inner.consensus.current_transaction(id).await else {
             return command_error(format!("transaction '{id}' is unknown"));
         };
         let limits = TransactionQueueLimits {
-            max_statements: self.transaction_max_statements,
-            max_source_bytes: self.transaction_max_source_bytes,
+            max_statements: self.inner.transaction_max_statements,
+            max_source_bytes: self.inner.transaction_max_source_bytes,
         };
         if let Err(error) =
             transaction.validate_queue_admission(&subscriptions.user, &domain, &queued, limits)
@@ -8445,6 +8572,7 @@ impl SessionServiceImpl {
             Err(error) => return command_error(error),
         };
         match self
+            .inner
             .consensus
             .queue_transaction_statement(
                 id.to_string(),
@@ -8472,8 +8600,8 @@ impl SessionServiceImpl {
         candidate: &TransactionStatement,
     ) -> Result<Option<QuiesceLevel>, String> {
         let (mut domains, resources) = tokio::join!(
-            self.consensus.current_domains(),
-            self.consensus.current_resources(),
+            self.inner.consensus.current_domains(),
+            self.inner.consensus.current_resources(),
         );
         let mut resource_names = resources
             .next_version_by_resource
@@ -8563,6 +8691,7 @@ impl SessionServiceImpl {
                     if let Statement::Create(create) = statement
                         && create.if_not_exists
                         && self
+                            .inner
                             .registry
                             .get(domain_id, create.body.kind(), create.body.name())
                             .map_err(|error| error.to_string())?
@@ -8586,6 +8715,7 @@ impl SessionServiceImpl {
         }
         tokio::task::consume_budget().await;
         let preflight = self
+            .inner
             .registry
             .preflight_transaction_mutations(domain_id, &model_mutations)
             .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
@@ -8650,8 +8780,9 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return command_error("REVERT requires an active transaction".to_string());
         };
-        let previous = self.consensus.current_transaction(&id).await;
+        let previous = self.inner.consensus.current_transaction(&id).await;
         match self
+            .inner
             .consensus
             .revert_transaction(id.clone(), subscriptions.user.clone(), current_timestamp())
             .await
@@ -8681,6 +8812,7 @@ impl SessionServiceImpl {
             return command_error("COMMIT requires an active transaction".to_string());
         };
         let started = match self
+            .inner
             .consensus
             .start_transaction_commit(id.clone(), subscriptions.user.clone(), current_timestamp())
             .await
@@ -8689,7 +8821,8 @@ impl SessionServiceImpl {
             Err(error) => return command_error(error.to_string()),
         };
         let finished = if started.statements.is_empty() {
-            self.consensus
+            self.inner
+                .consensus
                 .finish_empty_transaction_commit(id.clone(), current_timestamp())
                 .await
                 .map_err(|error| error.to_string())
@@ -8717,7 +8850,7 @@ impl SessionServiceImpl {
                     "transaction '{id}' commit remains in progress after an execution error: \
                      {error}"
                 ));
-                if let Some(transaction) = self.consensus.current_transaction(&id).await {
+                if let Some(transaction) = self.inner.consensus.current_transaction(&id).await {
                     result.transaction = Some(transaction_status(&transaction));
                 }
                 result
@@ -8726,20 +8859,20 @@ impl SessionServiceImpl {
     }
 
     async fn execute_replicated_commit(&self, id: &str) -> Result<ReplicatedTransaction, String> {
-        let _commit_execution = self.transaction_commit_execution.lock().await;
+        let _commit_execution = self.inner.transaction_commit_execution.lock().await;
         let mut wait = interval(Duration::from_millis(100));
         let lease = loop {
             tokio::task::consume_budget().await;
-            match self.transaction_executions.entry(id.to_string()) {
+            match self.inner.transaction_executions.entry(id.to_string()) {
                 dashmap::mapref::entry::Entry::Vacant(entry) => {
                     entry.insert(());
                     break TransactionExecutionLease {
-                        executions: self.transaction_executions.clone(),
+                        executions: self.inner.transaction_executions.clone(),
                         id: id.to_string(),
                     };
                 }
                 dashmap::mapref::entry::Entry::Occupied(_) => {
-                    if let Some(transaction) = self.consensus.current_transaction(id).await
+                    if let Some(transaction) = self.inner.consensus.current_transaction(id).await
                         && matches!(transaction.state, TransactionState::Finished(_))
                     {
                         return Ok(transaction);
@@ -8755,8 +8888,9 @@ impl SessionServiceImpl {
     }
 
     async fn run_replicated_commit(&self, id: &str) -> Result<ReplicatedTransaction, String> {
-        self.registry
-            .synchronize_cluster_schedule(&self.consensus.current_schedule().await)
+        self.inner
+            .registry
+            .synchronize_cluster_schedule(&self.inner.consensus.current_schedule().await)
             .map_err(|error| {
                 format!(
                     "failed to synchronize registry before resuming transaction '{id}': {error}"
@@ -8764,12 +8898,13 @@ impl SessionServiceImpl {
             })?;
         loop {
             tokio::task::consume_budget().await;
-            if self.consensus.current_leader().await.as_ref()
-                != Some(self.consensus.local_node_id())
+            if self.inner.consensus.current_leader().await.as_ref()
+                != Some(self.inner.consensus.local_node_id())
             {
                 return Err("leadership changed while executing the commit".to_string());
             }
             let transaction = self
+                .inner
                 .consensus
                 .current_transaction(id)
                 .await
@@ -8784,6 +8919,7 @@ impl SessionServiceImpl {
             let first_statement = progress.next_statement;
             let Some(first) = transaction.statements.get(first_statement) else {
                 return self
+                    .inner
                     .consensus
                     .finish_empty_transaction_commit(id.to_string(), current_timestamp())
                     .await
@@ -8859,9 +8995,10 @@ impl SessionServiceImpl {
     async fn pause_transaction_commit_if_armed(&self, _transaction: &ReplicatedTransaction) {
         #[cfg(feature = "testing")]
         if let TransactionState::Committing(_) = _transaction.state {
-            self.runtime
+            self.inner
+                .runtime
                 .pause_transaction_commit_after_progress_if_armed(
-                    self.consensus.local_node_id(),
+                    self.inner.consensus.local_node_id(),
                     _transaction.completed_statement_count(),
                 )
                 .await;
@@ -8909,7 +9046,7 @@ impl SessionServiceImpl {
             return Ok(());
         }
         let domain = &transaction.domain;
-        let Some(state) = self.consensus.current_domain(domain).await else {
+        let Some(state) = self.inner.consensus.current_domain(domain).await else {
             return Ok(());
         };
         if let DomainStatus::Paused = state.status {
@@ -8971,7 +9108,8 @@ impl SessionServiceImpl {
             }
             _ => None,
         };
-        self.consensus
+        self.inner
+            .consensus
             .advance_transaction_commit(TransactionCommitAdvance {
                 id: transaction.id.clone(),
                 expected_next_statement: first_statement,
@@ -9006,7 +9144,7 @@ impl SessionServiceImpl {
         let mut step_quiesce_level = None;
         let domain_id = &transaction.domain;
         let _alter_guard = if let Statement::AlterDomain(_) = &queued.statement {
-            let Some(guard) = self.runtime.try_begin_domain_alter(domain_id) else {
+            let Some(guard) = self.inner.runtime.try_begin_domain_alter(domain_id) else {
                 return self
                     .record_transaction_step(
                         transaction,
@@ -9029,7 +9167,7 @@ impl SessionServiceImpl {
         };
         let (result, effect) = match &queued.statement {
             Statement::AlterDomain(alter) => {
-                let Some(previous) = self.consensus.current_domain(domain_id).await else {
+                let Some(previous) = self.inner.consensus.current_domain(domain_id).await else {
                     return self
                         .record_transaction_step(
                             transaction,
@@ -9064,8 +9202,9 @@ impl SessionServiceImpl {
                         None,
                     )
                 } else {
-                    let graph = self.registry.active_graph(domain_id);
+                    let graph = self.inner.registry.active_graph(domain_id);
                     let expected_schedule = self
+                        .inner
                         .consensus
                         .current_schedule()
                         .await
@@ -9122,7 +9261,7 @@ impl SessionServiceImpl {
                 }
             }
             Statement::CreateResource(create) => {
-                let resources = self.consensus.current_resources().await;
+                let resources = self.inner.consensus.current_resources().await;
                 if resources.is_declared(domain_id, &create.identifier) {
                     if create.if_not_exists {
                         (
@@ -9151,7 +9290,7 @@ impl SessionServiceImpl {
                 }
             }
             Statement::StartDomain(start) => {
-                let Some(domain) = self.consensus.current_domain(domain_id).await else {
+                let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
                     return self
                         .record_transaction_step(
                             transaction,
@@ -9190,7 +9329,7 @@ impl SessionServiceImpl {
                             if let DomainPace::Paced = domain.config.pace
                                 && let DomainStartPoint::Resume = &start.start
                                 && let Ok(Some(resume_at)) =
-                                    self.runtime.current_paced_domain_time(domain_id)
+                                    self.inner.runtime.current_paced_domain_time(domain_id)
                             {
                                 logical_start = resume_at;
                             }
@@ -9236,7 +9375,7 @@ impl SessionServiceImpl {
                 }
             }
             Statement::StopDomain(_) => {
-                let Some(domain) = self.consensus.current_domain(domain_id).await else {
+                let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
                     return self
                         .record_transaction_step(
                             transaction,
@@ -9328,7 +9467,7 @@ impl SessionServiceImpl {
                 start_version,
             }) = start_clock
             {
-                self.runtime.handle_domain_clock_start(
+                self.inner.runtime.handle_domain_clock_start(
                     &domain_id,
                     logical_start,
                     wall_started_at,
@@ -9345,7 +9484,7 @@ impl SessionServiceImpl {
                 {
                     self.broadcast_error(error);
                 } else {
-                    self.domain_clock_reconciliations.insert(
+                    self.inner.domain_clock_reconciliations.insert(
                         domain_id,
                         DomainClockReconciliation {
                             start_version,
@@ -9358,7 +9497,7 @@ impl SessionServiceImpl {
                 if let Err(error) = self.stop_domain_clock(&domain_id).await {
                     self.broadcast_error(error);
                 } else {
-                    self.domain_clock_reconciliations.insert(
+                    self.inner.domain_clock_reconciliations.insert(
                         domain_id.clone(),
                         DomainClockReconciliation {
                             start_version,
@@ -9366,7 +9505,7 @@ impl SessionServiceImpl {
                         },
                     );
                 }
-                self.runtime.handle_domain_clock_stop(&domain_id);
+                self.inner.runtime.handle_domain_clock_stop(&domain_id);
             }
         }
         if let Some(handoff) = ownership_handoff {
@@ -9376,23 +9515,29 @@ impl SessionServiceImpl {
     }
 
     async fn reconcile_transactions_once(&self) {
-        if self.consensus.current_leader().await.as_ref() != Some(self.consensus.local_node_id()) {
+        if self.inner.consensus.current_leader().await.as_ref()
+            != Some(self.inner.consensus.local_node_id())
+        {
             return;
         }
         let now = current_timestamp();
-        let idle_before = subtract_timestamp_duration(now, self.transaction_idle_timeout);
+        let idle_before = subtract_timestamp_duration(now, self.inner.transaction_idle_timeout);
         let finished_before =
-            subtract_timestamp_duration(now, self.transaction_tombstone_retention);
-        let transactions = self.consensus.current_transactions().await;
+            subtract_timestamp_duration(now, self.inner.transaction_tombstone_retention);
+        let transactions = self.inner.consensus.current_transactions().await;
 
         for transaction in transactions.values() {
             tokio::task::consume_budget().await;
             match &transaction.state {
                 TransactionState::Open
-                    if !self.transaction_bindings.contains_key(&transaction.id)
+                    if !self
+                        .inner
+                        .transaction_bindings
+                        .contains_key(&transaction.id)
                         && transaction.last_activity_at <= idle_before =>
                 {
                     match self
+                        .inner
                         .consensus
                         .expire_transaction(transaction.id.clone(), now, idle_before)
                         .await
@@ -9403,7 +9548,7 @@ impl SessionServiceImpl {
                                 Some(TransactionOutcome::Expired)
                             ) =>
                         {
-                            self.transaction_bindings.remove(&transaction.id);
+                            self.inner.transaction_bindings.remove(&transaction.id);
                             info!(
                                 transaction_id = transaction.id,
                                 owner = transaction.owner.as_str(),
@@ -9429,12 +9574,13 @@ impl SessionServiceImpl {
                     }
                 }
                 TransactionState::Finished(_) => {
-                    self.transaction_bindings.remove(&transaction.id);
+                    self.inner.transaction_bindings.remove(&transaction.id);
                 }
                 TransactionState::Open => {}
             }
         }
         if let Err(error) = self
+            .inner
             .consensus
             .remove_finished_transactions(finished_before)
             .await
@@ -9555,12 +9701,12 @@ impl SessionServiceImpl {
             }
         };
 
-        let leader = self.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return self.not_leader_response(query, leader).await;
         }
 
-        let _alter_guard = match self.runtime.try_begin_domain_alter(&domain) {
+        let _alter_guard = match self.inner.runtime.try_begin_domain_alter(&domain) {
             Some(guard) => guard,
             None => {
                 return command_error(
@@ -9571,7 +9717,7 @@ impl SessionServiceImpl {
                 );
             }
         };
-        let Some(domain_state) = self.consensus.current_domain(&domain).await else {
+        let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         let adopted_domain_pause =
@@ -9600,7 +9746,7 @@ impl SessionServiceImpl {
                     let model = create.body;
                     let model_id = model.name();
                     let model_kind = model.kind();
-                    if let Ok(Some(_)) = self.registry.get(&domain, model_kind, &model_id)
+                    if let Ok(Some(_)) = self.inner.registry.get(&domain, model_kind, &model_id)
                         && if_not_exists
                     {
                         results[index] = Some(command_ok_already_existed(format!(
@@ -9814,7 +9960,7 @@ impl SessionServiceImpl {
                 .verified(
                     "every arm that records a mutation records an applied model in the same step",
                 );
-            let planned = match self.registry.plan_mutations(&domain, &mutations) {
+            let planned = match self.inner.registry.plan_mutations(&domain, &mutations) {
                 Ok(planned) => planned,
                 Err(err) => {
                     warn!(
@@ -9850,7 +9996,11 @@ impl SessionServiceImpl {
                 planned_relocations,
             } = if !is_noop {
                 #[cfg(feature = "testing")]
-                if self.runtime.take_armed_schedule_publication_fault(&domain) {
+                if self
+                    .inner
+                    .runtime
+                    .take_armed_schedule_publication_fault(&domain)
+                {
                     let error = format!(
                         "injected schedule publication fault for domain '{}'",
                         domain.as_str()
@@ -9871,6 +10021,7 @@ impl SessionServiceImpl {
                     };
                 }
                 let expected_schedule = self
+                    .inner
                     .consensus
                     .current_schedule()
                     .await
@@ -9922,9 +10073,11 @@ impl SessionServiceImpl {
             }
             if !is_noop && base_classified_level.requires_entity_pause() {
                 let relays = self
+                    .inner
                     .runtime
                     .entity_pause_relays(&domain, &affected_entities);
-                let deadline = tokio::time::Instant::now() + self.runtime.entity_gate_deadline();
+                let deadline =
+                    tokio::time::Instant::now() + self.inner.runtime.entity_gate_deadline();
                 let gate = match self
                     .engage_cluster_entity_gates(
                         &domain,
@@ -9939,7 +10092,7 @@ impl SessionServiceImpl {
                     Err(error) => return command_error(error.to_string()),
                 };
                 #[cfg(feature = "testing")]
-                self.runtime.pause_entity_gate_if_armed(&domain).await;
+                self.inner.runtime.pause_entity_gate_if_armed(&domain).await;
                 if let Err(error) = self
                     .wait_for_cluster_entity_drain(
                         &gate,
@@ -9980,7 +10133,7 @@ impl SessionServiceImpl {
 
             if !is_noop {
                 let mut rollback_plan = Some(planned.clone());
-                let _runtime_changes = match self.registry.commit_planned(planned) {
+                let _runtime_changes = match self.inner.registry.commit_planned(planned) {
                     Ok(changes) => changes,
                     Err(err) => {
                         if let Some(handoff) = ownership_handoff.take() {
@@ -10016,7 +10169,8 @@ impl SessionServiceImpl {
                     }
                 };
                 if let Some(prepared_udfs) = prepared_udfs {
-                    self.runtime
+                    self.inner
+                        .runtime
                         .install_prepared_domain_udfs(&domain, prepared_udfs);
                 }
 
@@ -10087,7 +10241,7 @@ impl SessionServiceImpl {
                                 self.release_cluster_entity_gates(gate).await;
                             }
                             let rollback_error = if let Some(plan) = rollback_plan.take() {
-                                match self.registry.rollback_committed(plan) {
+                                match self.inner.registry.rollback_committed(plan) {
                                     Ok(_) => None,
                                     Err(rollback) => Some(rollback.to_string()),
                                 }
@@ -10113,6 +10267,7 @@ impl SessionServiceImpl {
                     }
                 } else {
                     if let Err(error) = self
+                        .inner
                         .consensus
                         .replace_domain_schedule(domain.clone(), prepared_schedule.clone())
                         .await
@@ -10309,7 +10464,7 @@ impl SessionServiceImpl {
                         return command_error("invalid domain".to_string());
                     }
                 };
-                if self.consensus.current_domain(&domain).await.is_none() {
+                if self.inner.consensus.current_domain(&domain).await.is_none() {
                     return command_error(format!("domain '{}' does not exist", domain.as_str()));
                 }
                 if let Err(error) = self.reconcile_running_domain_runtime(&domain).await {
@@ -10359,8 +10514,8 @@ impl SessionServiceImpl {
         };
 
         if requires_leader(&statement) {
-            let leader = self.consensus.current_leader().await;
-            if leader.as_ref() != Some(self.consensus.local_node_id()) {
+            let leader = self.inner.consensus.current_leader().await;
+            if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
                 return self.not_leader_response(query, leader).await;
             }
         }
@@ -10369,7 +10524,7 @@ impl SessionServiceImpl {
             let domain = domain
                 .as_ref()
                 .verified("this statement requires a request domain, which was resolved above");
-            if self.consensus.current_domain(domain).await.is_none() {
+            if self.inner.consensus.current_domain(domain).await.is_none() {
                 return command_error(format!("domain '{}' does not exist", domain.as_str()));
             }
         }
@@ -10561,7 +10716,7 @@ impl SessionServiceImpl {
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");
                 let name_span = find_identifier_span(query, &show.name).unwrap_or(0..0);
-                let model = match self.registry.get(domain, show.kind, &show.name) {
+                let model = match self.inner.registry.get(domain, show.kind, &show.name) {
                     Ok(Some(model)) => model,
                     Ok(None) => {
                         return CommandResult {
@@ -10647,7 +10802,7 @@ impl SessionServiceImpl {
             }
             Statement::ShowClusterStatus(_) => CommandResult {
                 success: true,
-                message: render_cluster_status(&self.cluster, &self.consensus).await,
+                message: render_cluster_status(&self.inner.cluster, &self.inner.consensus).await,
                 diagnostics: Vec::new(),
                 kind: CommandResultKind::Ok as i32,
                 ..Default::default()
@@ -10658,7 +10813,7 @@ impl SessionServiceImpl {
 
     async fn show_transactions(&self) -> CommandResult {
         let now = current_timestamp();
-        let transactions = self.consensus.current_transactions().await;
+        let transactions = self.inner.consensus.current_transactions().await;
         let message = if transactions.is_empty() {
             "no transactions".to_string()
         } else {
@@ -10729,14 +10884,14 @@ impl SessionServiceImpl {
                 );
             }
         };
-        let leader = self.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return web_console_upload_text_response(
                 StatusCode::CONFLICT,
                 "resource uploads must be sent to the cluster leader",
             );
         }
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         if !resources.is_declared(&domain, &identifier) {
             return web_console_upload_text_response(
                 StatusCode::NOT_FOUND,
@@ -10918,7 +11073,7 @@ impl SessionServiceImpl {
             Ok(domain) => domain,
             Err(_) => return Err(ActiveDomainError::Invalid),
         };
-        if self.consensus.current_domain(&domain).await.is_none() {
+        if self.inner.consensus.current_domain(&domain).await.is_none() {
             return Err(ActiveDomainError::NotFound { domain });
         }
         *active_domain = Some(domain.clone());
@@ -10958,16 +11113,17 @@ impl SessionServiceImpl {
     }
 
     async fn reconcile_running_domain_runtime(&self, domain: &DomainName) -> Result<(), String> {
-        let state = self.consensus.current_runtime_state().await;
+        let state = self.inner.consensus.current_runtime_state().await;
         let Some(domain_state) = state.domains.get(domain) else {
             return Ok(());
         };
         if !matches!(domain_state.status, DomainStatus::Running) {
             return Ok(());
         }
-        self.runtime
+        self.inner
+            .runtime
             .apply_cluster_state(
-                self.consensus.local_node_id(),
+                self.inner.consensus.local_node_id(),
                 state.revision,
                 &state.domains,
                 &state.schedule,
@@ -10979,7 +11135,8 @@ impl SessionServiceImpl {
                     domain.as_str()
                 )
             })?;
-        self.runtime
+        self.inner
+            .runtime
             .start_running_domain_ingestors()
             .await
             .map_err(|error| {
@@ -10991,7 +11148,13 @@ impl SessionServiceImpl {
     }
 
     async fn create_domain(&self, create: CreateStatement<CreateDomain>) -> CommandResult {
-        if self.consensus.current_domain(&create.id).await.is_some() {
+        if self
+            .inner
+            .consensus
+            .current_domain(&create.id)
+            .await
+            .is_some()
+        {
             if create.if_not_exists {
                 return command_ok_already_existed(format!(
                     "domain '{}' already exists",
@@ -11012,7 +11175,7 @@ impl SessionServiceImpl {
             last_start: DomainStartPoint::Resume,
             clock: None,
         };
-        match self.consensus.put_domain(state).await {
+        match self.inner.consensus.put_domain(state).await {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     self.broadcast_error(format!(
@@ -11030,7 +11193,7 @@ impl SessionServiceImpl {
     }
 
     async fn alter_domain(&self, domain: &DomainName, alter: AlterDomain) -> CommandResult {
-        let _alter_guard = match self.runtime.try_begin_domain_alter(domain) {
+        let _alter_guard = match self.inner.runtime.try_begin_domain_alter(domain) {
             Some(guard) => guard,
             None => {
                 return command_error(
@@ -11041,7 +11204,7 @@ impl SessionServiceImpl {
                 );
             }
         };
-        let Some(previous_state) = self.consensus.current_domain(domain).await else {
+        let Some(previous_state) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         if let DomainStatus::Paused = previous_state.status {
@@ -11059,26 +11222,35 @@ impl SessionServiceImpl {
             ));
         }
 
-        let current_schedule = self.consensus.current_schedule().await;
+        let current_schedule = self.inner.consensus.current_schedule().await;
         let previous_schedule = current_schedule.domain(domain).cloned();
-        let live_node_ids = self.cluster.live_node_ids().await;
-        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+        let live_node_ids = self.inner.cluster.live_node_ids().await;
+        let live_voters = self
+            .inner
+            .consensus
+            .live_voter_ids(live_node_ids.clone())
+            .await;
         let cluster_nodes = self
+            .inner
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
-        let next_schedule = self.registry.active_graph(domain).map(|graph| {
+        let next_schedule = self.inner.registry.active_graph(domain).map(|graph| {
             #[cfg(feature = "testing")]
             let mut schedule = graph.schedule_for_domain_with_mode(
                 domain,
                 &cluster_nodes,
-                self.replica_count,
+                self.inner.replica_count,
                 alter.policy,
-                self.scheduler_mode,
+                self.inner.scheduler_mode,
             );
             #[cfg(not(feature = "testing"))]
-            let mut schedule =
-                graph.schedule_for_domain(domain, &cluster_nodes, self.replica_count, alter.policy);
+            let mut schedule = graph.schedule_for_domain(
+                domain,
+                &cluster_nodes,
+                self.inner.replica_count,
+                alter.policy,
+            );
             Self::merge_existing_schedule_data(
                 &mut schedule,
                 previous_schedule.as_ref(),
@@ -11098,7 +11270,11 @@ impl SessionServiceImpl {
         next_state.config.placement = alter.policy;
 
         #[cfg(feature = "testing")]
-        if self.runtime.take_armed_schedule_publication_fault(domain) {
+        if self
+            .inner
+            .runtime
+            .take_armed_schedule_publication_fault(domain)
+        {
             return command_error(format!(
                 "injected schedule publication fault for domain '{}'",
                 domain.as_str()
@@ -11121,6 +11297,7 @@ impl SessionServiceImpl {
             Err(error) => return command_error(error.to_string()),
         };
         if let Err(error) = self
+            .inner
             .consensus
             .put_domain_and_schedule(next_state, next_schedule)
             .await
@@ -11159,7 +11336,13 @@ impl SessionServiceImpl {
     async fn create_user(&self, create: CreateStatement<CreateUser>) -> CommandResult {
         let if_not_exists = create.if_not_exists;
         let create = create.body;
-        if self.consensus.current_user(&create.name).await.is_some() {
+        if self
+            .inner
+            .consensus
+            .current_user(&create.name)
+            .await
+            .is_some()
+        {
             if if_not_exists {
                 return command_ok_already_existed(format!(
                     "user '{}' already exists",
@@ -11177,7 +11360,7 @@ impl SessionServiceImpl {
                 ));
             }
         };
-        match self.consensus.create_user(user).await {
+        match self.inner.consensus.create_user(user).await {
             Ok(()) => command_ok(format!("created user '{}'", create.name.as_str())),
             Err(error) => command_error(format!(
                 "failed to create user '{}': {error}",
@@ -11191,7 +11374,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         create: CreateStatement<CreateResource>,
     ) -> CommandResult {
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         if resources.is_declared(domain, &create.identifier) {
             if create.if_not_exists {
                 return command_ok_already_existed(format!(
@@ -11205,6 +11388,7 @@ impl SessionServiceImpl {
             ));
         }
         match self
+            .inner
             .consensus
             .create_resource_catalog(domain, &create.identifier)
             .await
@@ -11235,6 +11419,7 @@ impl SessionServiceImpl {
     ) -> Result<u64, String> {
         let created_at = current_timestamp();
         let version = match self
+            .inner
             .consensus
             .allocate_resource_version(domain, &ResourceName::from(&identifier))
             .await
@@ -11250,12 +11435,13 @@ impl SessionServiceImpl {
         let id = ResourceId::new(domain.clone(), ResourceName::from(&identifier), version);
 
         let manifest = match self
+            .inner
             .resource_store
             .install_from_archive_path(
                 id.clone(),
                 archive_path,
                 root_checksum,
-                self.consensus.local_node_id().clone(),
+                self.inner.consensus.local_node_id().clone(),
                 created_at,
             )
             .await
@@ -11271,11 +11457,16 @@ impl SessionServiceImpl {
         };
 
         if let Err(error) = self
+            .inner
             .consensus
             .put_resource_version(manifest.resource.clone())
             .await
         {
-            let cleanup_suffix = match self.resource_store.remove_version(&manifest.resource.id) {
+            let cleanup_suffix = match self
+                .inner
+                .resource_store
+                .remove_version(&manifest.resource.id)
+            {
                 Ok(()) => String::new(),
                 Err(cleanup_error) => {
                     format!("; local cleanup also failed: {cleanup_error}")
@@ -11289,18 +11480,19 @@ impl SessionServiceImpl {
         }
 
         if let Err(error) = self
+            .inner
             .consensus
             .put_resource_replica(ResourceNodeStatus {
                 key: ResourceReplicaKey::new(
                     manifest.resource.id.domain.clone(),
                     manifest.resource.id.identifier.clone(),
                     manifest.resource.id.version,
-                    self.consensus.local_node_id().clone(),
+                    self.inner.consensus.local_node_id().clone(),
                 ),
                 state: ResourceNodeState::Ready,
                 root_checksum: Some(manifest.resource.root_checksum.clone()),
                 last_verified_at: Some(created_at),
-                source_node_id: Some(self.consensus.local_node_id().clone()),
+                source_node_id: Some(self.inner.consensus.local_node_id().clone()),
                 error: None,
             })
             .await
@@ -11314,8 +11506,9 @@ impl SessionServiceImpl {
 
         self.wait_for_resource_cluster_ready(&manifest.resource.id)
             .await?;
-        self.runtime
-            .sync_resource_versions(&self.consensus.current_resources().await);
+        self.inner
+            .runtime
+            .sync_resource_versions(&self.inner.consensus.current_resources().await);
         if let Err(error) = self.refresh_http_tls_server_config().await {
             self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
         }
@@ -11323,7 +11516,7 @@ impl SessionServiceImpl {
     }
 
     async fn start_domain(&self, domain_id: &DomainName, start: StartDomain) -> CommandResult {
-        let Some(domain) = self.consensus.current_domain(domain_id).await else {
+        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
             return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
         };
         if let Err(message) = validate_domain_config(&domain.config) {
@@ -11347,7 +11540,7 @@ impl SessionServiceImpl {
         };
         if let DomainPace::Paced = domain.config.pace
             && let DomainStartPoint::Resume = &start.start
-            && let Ok(Some(resume_at)) = self.runtime.current_paced_domain_time(domain_id)
+            && let Ok(Some(resume_at)) = self.inner.runtime.current_paced_domain_time(domain_id)
         {
             logical_start = resume_at;
         }
@@ -11361,6 +11554,7 @@ impl SessionServiceImpl {
             DomainStartPoint::At { .. } => start.start.clone(),
         };
         match self
+            .inner
             .consensus
             .start_domain(
                 domain_id.clone(),
@@ -11375,7 +11569,7 @@ impl SessionServiceImpl {
         {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
-                    let _ = self.consensus.stop_domain(domain_id.clone()).await;
+                    let _ = self.inner.consensus.stop_domain(domain_id.clone()).await;
                     let _ = self.apply_current_cluster_state().await;
                     return command_error(format!(
                         "failed to start domain '{}': {error}",
@@ -11383,7 +11577,7 @@ impl SessionServiceImpl {
                     ));
                 }
                 if let DomainPace::Paced = domain.config.pace {
-                    self.runtime.handle_domain_clock_start(
+                    self.inner.runtime.handle_domain_clock_start(
                         domain_id,
                         logical_start,
                         wall_started_at,
@@ -11400,11 +11594,11 @@ impl SessionServiceImpl {
                         )
                         .await
                 {
-                    let _ = self.consensus.stop_domain(domain_id.clone()).await;
+                    let _ = self.inner.consensus.stop_domain(domain_id.clone()).await;
                     return command_error(message);
                 }
                 if let DomainPace::Paced = domain.config.pace {
-                    self.domain_clock_reconciliations.insert(
+                    self.inner.domain_clock_reconciliations.insert(
                         domain_id.clone(),
                         DomainClockReconciliation {
                             start_version: domain.start_version.checked_add(1).assured(
@@ -11425,7 +11619,7 @@ impl SessionServiceImpl {
     }
 
     async fn stop_domain(&self, domain_id: &DomainName, _stop: StopDomain) -> CommandResult {
-        let Some(domain) = self.consensus.current_domain(domain_id).await else {
+        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
             return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
         };
         if let DomainStatus::Stopped = domain.status {
@@ -11440,8 +11634,8 @@ impl SessionServiceImpl {
             return command_error(message);
         }
         if let DomainPace::Paced = domain.config.pace {
-            self.runtime.handle_domain_clock_stop(domain_id);
-            self.domain_clock_reconciliations.insert(
+            self.inner.runtime.handle_domain_clock_stop(domain_id);
+            self.inner.domain_clock_reconciliations.insert(
                 domain_id.clone(),
                 DomainClockReconciliation {
                     start_version: domain.start_version,
@@ -11449,7 +11643,7 @@ impl SessionServiceImpl {
                 },
             );
         }
-        match self.consensus.stop_domain(domain_id.clone()).await {
+        match self.inner.consensus.stop_domain(domain_id.clone()).await {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     self.broadcast_error(format!(
@@ -11471,7 +11665,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         show: ShowRelayMaterializedState,
     ) -> CommandResult {
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return command_error(format!(
                 "domain '{}' has no active schedule",
@@ -11496,13 +11690,15 @@ impl SessionServiceImpl {
         };
 
         let entries = match self
+            .inner
             .runtime
             .local_materialized_stream_state(domain, &show.relay)
         {
             Ok(entries) if !entries.is_empty() => entries,
-            Ok(_) if !relay_node.executes_on(self.consensus.local_node_id()) => {
+            Ok(_) if !relay_node.executes_on(self.inner.consensus.local_node_id()) => {
                 if let Some(primary_node) = relay_node.primary_node() {
                     match self
+                        .inner
                         .runtime
                         .remote_materialized_stream_state(primary_node, domain, &show.relay)
                         .await
@@ -11544,7 +11740,11 @@ impl SessionServiceImpl {
     }
 
     fn describe_udf(&self, domain: &DomainName, describe: DescribeUdf) -> CommandResult {
-        let model = match self.registry.get(domain, ModelKind::Udf, &describe.name) {
+        let model = match self
+            .inner
+            .registry
+            .get(domain, ModelKind::Udf, &describe.name)
+        {
             Ok(Some(Model::Udf(udf))) => udf,
             Ok(Some(_)) => unreachable!("UDF registry keys only contain UDF models"),
             Ok(None) => {
@@ -11571,7 +11771,7 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let references = if let Some(graph) = self.registry.active_graph(domain) {
+        let references = if let Some(graph) = self.inner.registry.active_graph(domain) {
             let mut references = Vec::new();
             for edge in graph.edges() {
                 if edge.kind == crate::registry::EdgeKind::RequiredBy
@@ -11611,7 +11811,11 @@ impl SessionServiceImpl {
     }
 
     fn show_udfs(&self, domain: &DomainName) -> CommandResult {
-        match self.registry.list_identifiers(domain, ModelKind::Udf, "") {
+        match self
+            .inner
+            .registry
+            .list_identifiers(domain, ModelKind::Udf, "")
+        {
             Ok(identifiers) if identifiers.is_empty() => command_ok("(none)".to_string()),
             Ok(identifiers) => command_ok(
                 identifiers
@@ -11630,7 +11834,7 @@ impl SessionServiceImpl {
         describe: DescribeResource,
     ) -> CommandResult {
         if describe.version.is_none() {
-            let resources = self.consensus.current_resources().await;
+            let resources = self.inner.consensus.current_resources().await;
             if !resources.is_declared(domain, &describe.identifier) {
                 return command_error(format!(
                     "resource '{}' does not exist",
@@ -11677,7 +11881,7 @@ impl SessionServiceImpl {
             .version
             .verified("the branch above returned for the absent case");
         let id = ResourceId::new(domain.clone(), describe.identifier.clone(), version);
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         let Some(resource) = resources
             .versions
             .iter()
@@ -11697,7 +11901,7 @@ impl SessionServiceImpl {
             .filter(|replica| replica.key.version_key().resource_id() == id)
             .cloned()
             .collect::<Vec<_>>();
-        let gossip = self.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.gossip_state().await;
         let live_node_ids = gossip
             .live_nodes
             .iter()
@@ -11705,7 +11909,7 @@ impl SessionServiceImpl {
             .collect::<BTreeSet<_>>();
         let mut live_node_ids = live_node_ids;
         if live_node_ids.is_empty() {
-            live_node_ids.insert(self.consensus.local_node_id().clone());
+            live_node_ids.insert(self.inner.consensus.local_node_id().clone());
         }
         let dead_node_ids = gossip.dead_node_ids;
         let node_ids = live_node_ids
@@ -11842,7 +12046,7 @@ impl SessionServiceImpl {
         &self,
         resource: &nervix_models::ResourceVersion,
     ) -> Vec<String> {
-        match self.resource_store.read_manifest(&resource.id) {
+        match self.inner.resource_store.read_manifest(&resource.id) {
             Ok(manifest) if manifest.entries.is_empty() => vec!["  - none".to_string()],
             Ok(manifest) => manifest
                 .entries
@@ -11873,13 +12077,13 @@ impl SessionServiceImpl {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             tokio::task::consume_budget().await;
-            let resources = self.consensus.current_resources().await;
+            let resources = self.inner.consensus.current_resources().await;
             let replicas = resources
                 .replicas
                 .iter()
                 .filter(|replica| replica.key.version_key().resource_id() == *id)
                 .collect::<Vec<_>>();
-            let gossip = self.cluster.gossip_state().await;
+            let gossip = self.inner.cluster.gossip_state().await;
             let live_node_ids = gossip
                 .live_nodes
                 .iter()
@@ -11912,13 +12116,18 @@ impl SessionServiceImpl {
         graph: Option<ActiveGraph>,
     ) -> Result<usize, String> {
         #[cfg(feature = "testing")]
-        if self.runtime.take_armed_schedule_publication_fault(domain) {
+        if self
+            .inner
+            .runtime
+            .take_armed_schedule_publication_fault(domain)
+        {
             return Err(format!(
                 "injected schedule publication fault for domain '{}'",
                 domain.as_str()
             ));
         }
         let default_policy = self
+            .inner
             .consensus
             .current_domain(domain)
             .await
@@ -11931,7 +12140,8 @@ impl SessionServiceImpl {
         } = self
             .prepare_domain_schedule(domain, graph, default_policy)
             .await?;
-        self.consensus
+        self.inner
+            .consensus
             .replace_domain_schedule(domain.clone(), schedule)
             .await
             .map_err(|error| error.to_string())?;
@@ -11950,28 +12160,33 @@ impl SessionServiceImpl {
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
     ) -> Result<PreparedDomainSchedule, String> {
-        let live_node_ids = self.cluster.live_node_ids().await;
-        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+        let live_node_ids = self.inner.cluster.live_node_ids().await;
+        let live_voters = self
+            .inner
+            .consensus
+            .live_voter_ids(live_node_ids.clone())
+            .await;
         let cluster_nodes = self
+            .inner
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
-        let current = self.consensus.current_schedule().await;
+        let current = self.inner.consensus.current_schedule().await;
         let schedule = match graph {
             Some(graph) => {
                 #[cfg(feature = "testing")]
                 let mut schedule = graph.schedule_for_domain_with_mode(
                     domain,
                     &cluster_nodes,
-                    self.replica_count,
+                    self.inner.replica_count,
                     placement,
-                    self.scheduler_mode,
+                    self.inner.scheduler_mode,
                 );
                 #[cfg(not(feature = "testing"))]
                 let mut schedule = graph.schedule_for_domain(
                     domain,
                     &cluster_nodes,
-                    self.replica_count,
+                    self.inner.replica_count,
                     placement,
                 );
                 Self::merge_existing_schedule_data(
@@ -11996,7 +12211,7 @@ impl SessionServiceImpl {
     }
 
     async fn drop_node(&self, node_id: ClusterNodeName) -> CommandResult {
-        let gossip = self.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.gossip_state().await;
         let is_live = gossip
             .live_nodes
             .iter()
@@ -12007,9 +12222,9 @@ impl SessionServiceImpl {
             ));
         }
 
-        let membership_nodes = self.consensus.membership_nodes().await;
+        let membership_nodes = self.inner.consensus.membership_nodes().await;
         if membership_nodes.contains_key(&node_id) {
-            let voters = self.consensus.membership_voter_ids().await;
+            let voters = self.inner.consensus.membership_voter_ids().await;
             let live_node_ids = gossip
                 .live_nodes
                 .iter()
@@ -12021,39 +12236,44 @@ impl SessionServiceImpl {
             }
         }
 
-        let current_schedule = self.consensus.current_schedule().await;
-        match self.consensus.drop_node(&node_id).await {
+        let current_schedule = self.inner.consensus.current_schedule().await;
+        match self.inner.consensus.drop_node(&node_id).await {
             Ok(()) => {}
             Err(error) => {
                 return command_error(format!("failed to drop node '{node_id}': {error}"));
             }
         }
 
-        let live_node_ids = self.cluster.live_node_ids().await;
-        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+        let live_node_ids = self.inner.cluster.live_node_ids().await;
+        let live_voters = self
+            .inner
+            .consensus
+            .live_voter_ids(live_node_ids.clone())
+            .await;
         let schedulable_nodes = self
+            .inner
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
         let (cluster_nodes, preservable_nodes) =
             Self::drop_node_schedule_node_sets(&live_voters, &schedulable_nodes);
-        for (domain, graph) in self.registry.active_graphs() {
-            let Some(domain_state) = self.consensus.current_domain(&domain).await else {
+        for (domain, graph) in self.inner.registry.active_graphs() {
+            let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
                 continue;
             };
             #[cfg(feature = "testing")]
             let mut schedule = graph.schedule_for_domain_with_mode(
                 &domain,
                 cluster_nodes,
-                self.replica_count,
+                self.inner.replica_count,
                 domain_state.config.placement,
-                self.scheduler_mode,
+                self.inner.scheduler_mode,
             );
             #[cfg(not(feature = "testing"))]
             let mut schedule = graph.schedule_for_domain(
                 &domain,
                 cluster_nodes,
-                self.replica_count,
+                self.inner.replica_count,
                 domain_state.config.placement,
             );
             Self::merge_existing_schedule_data(
@@ -12062,6 +12282,7 @@ impl SessionServiceImpl {
                 preservable_nodes,
             );
             if let Err(error) = self
+                .inner
                 .consensus
                 .replace_domain_schedule(domain.clone(), Some(schedule))
                 .await
@@ -12115,12 +12336,13 @@ impl SessionServiceImpl {
     }
 
     async fn set_node_cordoned(&self, node_id: ClusterNodeName, cordoned: bool) -> CommandResult {
-        let membership = self.consensus.membership_nodes().await;
+        let membership = self.inner.consensus.membership_nodes().await;
         if !membership.contains_key(&node_id) {
             return command_error(format!("node '{node_id}' is not a raft member"));
         }
 
         if let Err(error) = self
+            .inner
             .consensus
             .set_node_cordoned(node_id.clone(), cordoned)
             .await
@@ -12134,12 +12356,13 @@ impl SessionServiceImpl {
     }
 
     async fn drain_node(&self, node_id: ClusterNodeName) -> CommandResult {
-        let membership = self.consensus.membership_nodes().await;
+        let membership = self.inner.consensus.membership_nodes().await;
         if !membership.contains_key(&node_id) {
             return command_error(format!("node '{node_id}' is not a raft member"));
         }
 
         if let Err(error) = self
+            .inner
             .consensus
             .set_node_cordoned(node_id.clone(), true)
             .await
@@ -12149,7 +12372,7 @@ impl SessionServiceImpl {
             ));
         }
 
-        let initial_schedule = self.consensus.current_schedule().await;
+        let initial_schedule = self.inner.consensus.current_schedule().await;
         let total = initial_schedule
             .domains
             .values()
@@ -12162,9 +12385,14 @@ impl SessionServiceImpl {
         let mut failed_units = BTreeSet::<(DomainName, String)>::new();
         let mut failed_domains = BTreeSet::<DomainName>::new();
         loop {
-            let live_node_ids = self.cluster.live_node_ids().await;
-            let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+            let live_node_ids = self.inner.cluster.live_node_ids().await;
+            let live_voters = self
+                .inner
+                .consensus
+                .live_voter_ids(live_node_ids.clone())
+                .await;
             let replacement_nodes = self
+                .inner
                 .consensus
                 .schedulable_live_voter_ids(live_node_ids)
                 .await;
@@ -12179,11 +12407,11 @@ impl SessionServiceImpl {
             let replacement_node_set = replacement_nodes.iter().cloned().collect::<BTreeSet<_>>();
             let mut handled_this_iteration = false;
 
-            for (domain, graph) in self.registry.active_graphs() {
+            for (domain, graph) in self.inner.registry.active_graphs() {
                 if failed_domains.contains(&domain) {
                     continue;
                 }
-                let Some(_alter_guard) = self.runtime.try_begin_domain_alter(&domain) else {
+                let Some(_alter_guard) = self.inner.runtime.try_begin_domain_alter(&domain) else {
                     failed = true;
                     failed_domains.insert(domain.clone());
                     outcomes.push(format!(
@@ -12193,27 +12421,28 @@ impl SessionServiceImpl {
                     ));
                     continue;
                 };
-                let Some(domain_state) = self.consensus.current_domain(&domain).await else {
+                let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
                     continue;
                 };
-                let current_schedule = self.consensus.current_schedule().await;
+                let current_schedule = self.inner.consensus.current_schedule().await;
                 #[cfg(feature = "testing")]
                 let desired = graph.schedule_for_domain_with_mode(
                     &domain,
                     &replacement_nodes,
-                    self.replica_count,
+                    self.inner.replica_count,
                     domain_state.config.placement,
-                    self.scheduler_mode,
+                    self.inner.scheduler_mode,
                 );
                 #[cfg(not(feature = "testing"))]
                 let desired = graph.schedule_for_domain(
                     &domain,
                     &replacement_nodes,
-                    self.replica_count,
+                    self.inner.replica_count,
                     domain_state.config.placement,
                 );
                 let Some(current_domain) = current_schedule.domain(&domain) else {
                     if let Err(error) = self
+                        .inner
                         .consensus
                         .replace_domain_schedule(domain.clone(), Some(desired))
                         .await
@@ -12288,6 +12517,7 @@ impl SessionServiceImpl {
                     }
                 };
                 if let Err(error) = self
+                    .inner
                     .consensus
                     .replace_domain_schedule(domain.clone(), Some(next))
                     .await
@@ -12366,9 +12596,10 @@ impl SessionServiceImpl {
     }
 
     async fn drain_local_node_before_shutdown(&self) {
-        let local_node_id = self.consensus.local_node_id().clone();
-        let live_node_ids = self.cluster.live_node_ids().await;
+        let local_node_id = self.inner.consensus.local_node_id().clone();
+        let live_node_ids = self.inner.cluster.live_node_ids().await;
         let drain_targets = self
+            .inner
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
@@ -12382,7 +12613,7 @@ impl SessionServiceImpl {
             );
             return;
         }
-        let leader = self.consensus.current_leader().await;
+        let leader = self.inner.consensus.current_leader().await;
         match leader.as_ref() {
             Some(leader_id) if *leader_id == local_node_id => {
                 let result = self.drain_node(local_node_id.clone()).await;
@@ -12419,7 +12650,7 @@ impl SessionServiceImpl {
                     "default",
                     grpc_client_connect_options(
                         &leader_grpc_uri,
-                        self.configured_basic_auth.as_ref(),
+                        self.inner.configured_basic_auth.as_ref(),
                     ),
                 )
                 .await
@@ -12487,6 +12718,7 @@ impl SessionServiceImpl {
 
     async fn uncordon_local_node_after_shutdown_drain(&self, local_node_id: &ClusterNodeName) {
         match self
+            .inner
             .consensus
             .set_node_cordoned(local_node_id.clone(), false)
             .await
@@ -12545,7 +12777,8 @@ impl SessionServiceImpl {
     }
 
     async fn leader_grpc_uri(&self, leader_id: &ClusterNodeName) -> Option<String> {
-        self.cluster
+        self.inner
+            .cluster
             .gossip_state()
             .await
             .live_nodes
@@ -13208,12 +13441,12 @@ impl SessionServiceImpl {
         instances: NonZeroU64,
         observed_partitions: Vec<i32>,
     ) -> Result<(), String> {
-        let leader = self.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return Ok(());
         }
 
-        let current = self.consensus.current_schedule().await;
+        let current = self.inner.consensus.current_schedule().await;
         let Some(existing_domain_schedule) = current.domain(domain) else {
             return Ok(());
         };
@@ -13254,7 +13487,8 @@ impl SessionServiceImpl {
                 .assured("a cluster cannot observe 2^64 partition rebalances");
         }
         ingestor_node.kafka_partition_schedule = Some(next_schedule);
-        self.consensus
+        self.inner
+            .consensus
             .replace_domain_schedule(domain.clone(), Some(next_domain_schedule))
             .await
             .map_err(|error| error.to_string())
@@ -13265,8 +13499,8 @@ impl SessionServiceImpl {
         schedule: &nervix_models::ClusterSchedule,
         tasks: &mut HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask>,
     ) {
-        let leader = self.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             for (_, watcher) in tasks.drain() {
                 watcher.task.stop().await;
             }
@@ -13308,7 +13542,7 @@ impl SessionServiceImpl {
             let service = self.clone();
             let spec_for_task = spec.clone();
             let handle = tokio::spawn(async move {
-                let resolved = match service.runtime.resolve_client_config(
+                let resolved = match service.inner.runtime.resolve_client_config(
                     &spec_for_task.domain,
                     spec_for_task.client.mount.as_ref(),
                     &spec_for_task.client.config,
@@ -13370,7 +13604,7 @@ impl SessionServiceImpl {
                                 error
                             ));
                             tokio::select! {
-                                _ = service.shutdown.cancelled() => break,
+                                _ = service.inner.shutdown.cancelled() => break,
                                 _ = cancel_child.cancelled() => break,
                                 _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
                             }
@@ -13400,7 +13634,7 @@ impl SessionServiceImpl {
                         }
                     }
                     tokio::select! {
-                        _ = service.shutdown.cancelled() => break,
+                        _ = service.inner.shutdown.cancelled() => break,
                         _ = cancel_child.cancelled() => break,
                         _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}
                     }
@@ -13421,7 +13655,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Option<SubscriptionTarget>, String> {
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
@@ -13459,9 +13693,10 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Option<nervix_models::CreateSchema>, String> {
-        match self.registry.get(domain, ModelKind::Relay, relay) {
+        match self.inner.registry.get(domain, ModelKind::Relay, relay) {
             Ok(Some(Model::Relay(ack_model))) => {
                 match self
+                    .inner
                     .registry
                     .get(domain, ModelKind::Schema, &ack_model.schema)
                 {
@@ -13500,12 +13735,16 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Option<StdArc<arrow_schema::Schema>>, String> {
-        match self.registry.get(domain, ModelKind::Relay, relay) {
+        match self.inner.registry.get(domain, ModelKind::Relay, relay) {
             Ok(Some(Model::Relay(relay_model))) => {
                 let Some(branch_ref) = relay_model.branching.branch() else {
                     return Ok(None);
                 };
-                let branch = match self.registry.get(domain, ModelKind::Branch, branch_ref) {
+                let branch = match self
+                    .inner
+                    .registry
+                    .get(domain, ModelKind::Branch, branch_ref)
+                {
                     Ok(Some(Model::Branch(branch))) => branch,
                     Ok(Some(_)) => {
                         return Err(format!(
@@ -13529,7 +13768,11 @@ impl SessionServiceImpl {
                         ));
                     }
                 };
-                match self.registry.get(domain, ModelKind::Schema, &branch.schema) {
+                match self
+                    .inner
+                    .registry
+                    .get(domain, ModelKind::Schema, &branch.schema)
+                {
                     Ok(Some(Model::Schema(schema))) => {
                         Ok(Some(runtime_schema::compile_schema(&schema).arrow_schema()))
                     }
@@ -13567,7 +13810,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Option<StdArc<arrow_schema::Schema>>, String> {
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
@@ -13666,7 +13909,7 @@ impl SessionServiceImpl {
         ),
         String,
     > {
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok((HashMap::default(), HashMap::default()));
         };
@@ -13718,7 +13961,7 @@ impl SessionServiceImpl {
         name: impl Into<ModelName>,
     ) -> Result<Option<LookupTarget>, String> {
         let name = name.into();
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
@@ -13782,7 +14025,7 @@ impl SessionServiceImpl {
         name: impl Into<ModelName>,
     ) -> Result<Option<(CreateIngestor, ScheduledNode)>, String> {
         let name = name.into();
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
@@ -13847,6 +14090,7 @@ impl SessionServiceImpl {
             };
 
         match self
+            .inner
             .registry
             .get(domain, ModelKind::Relay, &subscription.relay)
         {
@@ -13959,7 +14203,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(Some(schema)) => {
-                let udfs = self.runtime.udf_executor(domain);
+                let udfs = self.inner.runtime.udf_executor(domain);
                 let schema = runtime_schema::compile_schema(&schema);
                 let input_sensitivity = schema.vm_sensitivity();
                 let filter_map = match compile_session_filter_map_program(
@@ -14037,7 +14281,7 @@ impl SessionServiceImpl {
         };
 
         let relay = subscription.relay.clone();
-        let receiver = match self.runtime.subscribe_stream(domain, &relay).await {
+        let receiver = match self.inner.runtime.subscribe_stream(domain, &relay).await {
             Ok(receiver) => receiver,
             Err(err) => {
                 return CommandResult {
@@ -14073,7 +14317,7 @@ impl SessionServiceImpl {
                 sensitivity: subscription_sensitivity,
                 delivery_behavior: subscription.delivery_behavior,
                 batch_sample_rate,
-                runtime: self.runtime.clone(),
+                runtime: self.inner.runtime.clone(),
                 materialized_stream_owner_nodes,
                 receiver,
                 tx: tx.clone(),
@@ -16190,8 +16434,8 @@ impl SessionServiceImpl {
         &self,
         already_connected_to_leader: bool,
     ) -> Option<SessionResponse> {
-        let leader = self.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             let result = self.not_leader_response("", leader).await;
             return Some(SessionResponse {
                 event: Some(proto::session_response::Event::Result(result)),
@@ -16205,13 +16449,17 @@ impl SessionServiceImpl {
         Some(SessionResponse {
             event: Some(proto::session_response::Event::Server(ServerEvent {
                 level: ServerEventLevel::Info as i32,
-                message: format!("connected to leader '{}'", self.consensus.local_node_id()),
+                message: format!(
+                    "connected to leader '{}'",
+                    self.inner.consensus.local_node_id()
+                ),
             })),
         })
     }
 
     async fn domain_list_response(&self, response_to_request: bool) -> SessionResponse {
         let domains = self
+            .inner
             .consensus
             .current_domains()
             .await
@@ -16232,13 +16480,14 @@ impl SessionServiceImpl {
 
     async fn web_console_cluster_summary_response(&self) -> SessionResponse {
         let running_domains = self
+            .inner
             .consensus
             .current_domains()
             .await
             .into_values()
             .filter(|domain| domain.status == DomainStatus::Running)
             .count();
-        let (nodes, relays) = self.registry.active_graphs().into_iter().fold(
+        let (nodes, relays) = self.inner.registry.active_graphs().into_iter().fold(
             (0_usize, 0_usize),
             |(nodes, relays), (_, graph)| {
                 let counts = graph.dataflow_graph_counts();
@@ -16258,8 +16507,8 @@ impl SessionServiceImpl {
         &self,
         active_domain: Option<&DomainName>,
     ) -> Vec<SessionResponse> {
-        let resources = self.consensus.current_resources().await;
-        let domains = self.consensus.current_domains().await;
+        let resources = self.inner.consensus.current_resources().await;
+        let domains = self.inner.consensus.current_domains().await;
         let resource_entities = resources
             .next_version_by_resource
             .iter()
@@ -16275,6 +16524,7 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>();
         let active_graphs = self
+            .inner
             .registry
             .active_graphs()
             .into_iter()
@@ -16326,7 +16576,7 @@ impl SessionServiceImpl {
         mut dataflow_graph: DataflowGraph,
         resource_entities: &[DomainEntitySnapshot],
     ) -> Option<SessionResponse> {
-        dataflow_graph.statistics = self.runtime.dataflow_domain_statistics(&domain);
+        dataflow_graph.statistics = self.inner.runtime.dataflow_domain_statistics(&domain);
         for node in &mut dataflow_graph.nodes {
             let Some((kind, identifier)) = dataflow_metric_target(&node.id) else {
                 continue;
@@ -16339,6 +16589,7 @@ impl SessionServiceImpl {
             node.reconnect_wait_millis = health.reconnect_wait_millis;
             if kind == "RELAY" {
                 node.statistics = self
+                    .inner
                     .runtime
                     .dataflow_relay_buffer_statistics(&domain, &RelayName::from(&identifier));
                 let existing = node
@@ -16347,7 +16598,8 @@ impl SessionServiceImpl {
                     .map(|branch| branch.branch.clone())
                     .collect::<BTreeSet<_>>();
                 node.branches.extend(
-                    self.runtime
+                    self.inner
+                        .runtime
                         .dataflow_relay_branch_statistics(&domain, &RelayName::from(&identifier))
                         .into_iter()
                         .filter(|branch| !existing.contains(&branch.branch)),
@@ -16358,8 +16610,9 @@ impl SessionServiceImpl {
             let Some(metric) = edge.metric.as_ref() else {
                 continue;
             };
-            edge.statistics = self.runtime.dataflow_edge_statistics(&domain, metric);
+            edge.statistics = self.inner.runtime.dataflow_edge_statistics(&domain, metric);
             edge.branches = self
+                .inner
                 .runtime
                 .dataflow_edge_branch_statistics(&domain, metric);
         }
@@ -16369,6 +16622,7 @@ impl SessionServiceImpl {
                     domain: domain.as_str().to_string(),
                     dataflow_graph: graph_bytes.into(),
                     entities: self
+                        .inner
                         .registry
                         .active_domain_entities(&domain)
                         .into_iter()
@@ -16399,6 +16653,7 @@ impl SessionServiceImpl {
     ) -> CommandResult {
         let leader_node = match leader.as_ref() {
             Some(leader_id) => self
+                .inner
                 .cluster
                 .gossip_state()
                 .await
@@ -17069,12 +17324,12 @@ async fn reconcile_domain_clock_tasks(
     shutdown: &CancellationToken,
     tasks: &mut HashMap<DomainName, BackgroundTask>,
 ) {
-    let domains = service.consensus.current_domains().await;
+    let domains = service.inner.consensus.current_domains().await;
     let desired = domains
         .iter()
         .filter(|(domain_id, domain)| {
             if let DomainStatus::Running = domain.status {
-                service.domain_clocks.contains_key(*domain_id)
+                service.inner.domain_clocks.contains_key(*domain_id)
             } else {
                 false
             }
@@ -17122,13 +17377,14 @@ async fn run_domain_clock(
         if shutdown.is_cancelled() {
             break;
         }
-        let Some(domain) = service.consensus.current_domain(&domain_id).await else {
+        let Some(domain) = service.inner.consensus.current_domain(&domain_id).await else {
             break;
         };
         if let DomainStatus::Stopped = domain.status {
             break;
         }
         let Some(mut clock) = service
+            .inner
             .domain_clocks
             .get(&domain_id)
             .map(|state| state.clone())
@@ -17203,13 +17459,14 @@ async fn run_domain_clock(
 async fn emit_due_domain_ticks(service: &SessionServiceImpl, domain_id: &DomainName) {
     loop {
         tokio::task::consume_budget().await;
-        let Some(domain) = service.consensus.current_domain(domain_id).await else {
+        let Some(domain) = service.inner.consensus.current_domain(domain_id).await else {
             break;
         };
         if let DomainStatus::Stopped = domain.status {
             break;
         }
         let Some(mut clock) = service
+            .inner
             .domain_clocks
             .get(domain_id)
             .map(|state| state.clone())
@@ -17288,11 +17545,12 @@ async fn emit_domain_tick(
         .checked_add(1)
         .assured("a domain clock cannot emit 2^64 ticks in the lifetime of a cluster");
     service
+        .inner
         .domain_clocks
         .insert(domain_id.clone(), clock.clone());
     let target_nodes = service.domain_tick_target_nodes(domain_id).await;
     for node_id in target_nodes {
-        if node_id == service.consensus.local_node_id().clone() {
+        if node_id == service.inner.consensus.local_node_id().clone() {
             service.handle_domain_tick(DomainTickEnvelope {
                 domain_id: domain_id.clone(),
                 tick: tick.clone(),
@@ -17697,18 +17955,16 @@ impl Application {
                 }
             },
         );
-        let runtime = Arc::new(
-            Runtime::with_persistence_and_temp_dir(
-                Some(db.clone()),
-                state_snapshot_interval,
-                runtime_test_hooks.clone(),
-                temp_dir.clone(),
-            )
-            .map_err(|error| {
-                error!(error = %error, "failed to initialize runtime persistence");
-                Report::new(AppError::OpenRuntimeState)
-            })?,
-        );
+        let runtime = Runtime::with_persistence_and_temp_dir(
+            Some(db.clone()),
+            state_snapshot_interval,
+            runtime_test_hooks.clone(),
+            temp_dir.clone(),
+        )
+        .map_err(|error| {
+            error!(error = %error, "failed to initialize runtime persistence");
+            Report::new(AppError::OpenRuntimeState)
+        })?;
         let mut startup = ApplicationStartup {
             db,
             resource_store,
@@ -17809,7 +18065,7 @@ impl Application {
                 return Err(error);
             }
         };
-        startup.interconnect = Some(Arc::new(interconnect));
+        startup.interconnect = Some(interconnect);
 
         let cluster_transport = match cluster::bind_gossip_transport(cluster_listen_addr)
             .await
@@ -17872,7 +18128,7 @@ impl Application {
         let reconcile_shutdown = shutdown.clone();
         let mut background_tasks = Vec::new();
         if let Some(controller) = memory_pressure_controller {
-            let memory_runtime = runtime.as_ref().clone();
+            let memory_runtime = runtime.clone();
             let memory_shutdown = shutdown.clone();
             background_tasks.push(tokio::spawn(async move {
                 controller.run(memory_runtime, memory_shutdown).await;
@@ -18366,37 +18622,39 @@ impl Application {
         }));
         let (events, _) = broadcast::channel(256);
         let service = SessionServiceImpl {
-            cluster: cluster.clone(),
-            consensus: consensus.clone(),
-            registry,
-            resource_store,
-            cluster_api_clients: cluster_api_clients.clone(),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: runtime.clone(),
-            replica_count,
-            #[cfg(feature = "testing")]
-            scheduler_mode,
-            shutdown: shutdown.clone(),
-            events: events.clone(),
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
-            interconnect: interconnect.clone(),
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout,
-            transaction_tombstone_retention,
-            transaction_max_statements,
-            transaction_max_source_bytes,
-            transaction_max_open,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
+            inner: Arc::new(SessionServiceInner {
+                cluster: cluster.clone(),
+                consensus: consensus.clone(),
+                registry,
+                resource_store,
+                cluster_api_clients: cluster_api_clients.clone(),
+                http_tls_server_config: Arc::new(RwLock::new(None)),
+                runtime: runtime.clone(),
+                replica_count,
+                #[cfg(feature = "testing")]
+                scheduler_mode,
+                shutdown: shutdown.clone(),
+                events: events.clone(),
+                subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
+                interconnect: interconnect.clone(),
+                domain_clocks: DashMap::with_hasher(RandomState::new()),
+                domain_clock_reconciliations: DashMap::with_hasher(RandomState::new()),
+                domain_clock_events: Notify::new(),
+                next_cluster_command_correlation_id: AtomicU64::new(1),
+                pending_cluster_commands: DashMap::default(),
+                service_tasks: TaskTracker::new(),
+                configured_basic_auth,
+                auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
+                failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
+                transaction_idle_timeout,
+                transaction_tombstone_retention,
+                transaction_max_statements,
+                transaction_max_source_bytes,
+                transaction_max_open,
+                transaction_bindings: DashMap::with_hasher(RandomState::new()),
+                transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+                transaction_commit_execution: AsyncMutex::new(()),
+            }),
         };
 
         let transaction_service = service.clone();
@@ -18406,16 +18664,21 @@ impl Application {
             loop {
                 tokio::task::consume_budget().await;
                 let is_leader = transaction_service
+                    .inner
                     .consensus
                     .current_leader()
                     .await
                     .as_ref()
-                    == Some(transaction_service.consensus.local_node_id());
+                    == Some(transaction_service.inner.consensus.local_node_id());
                 if observed_leadership != Some(is_leader) {
-                    transaction_service.transaction_bindings.clear();
-                    transaction_service.domain_clock_reconciliations.clear();
-                    let schedule = transaction_service.consensus.current_schedule().await;
+                    transaction_service.inner.transaction_bindings.clear();
+                    transaction_service
+                        .inner
+                        .domain_clock_reconciliations
+                        .clear();
+                    let schedule = transaction_service.inner.consensus.current_schedule().await;
                     match transaction_service
+                        .inner
                         .registry
                         .synchronize_cluster_schedule(&schedule)
                     {
@@ -18458,12 +18721,12 @@ impl Application {
                     received = runtime_event_rx.recv() => match received {
                         Ok(RuntimeEvent::Error(message)) => {
                             let mut node_ids =
-                                runtime_event_service.cluster.live_node_ids().await;
+                                runtime_event_service.inner.cluster.live_node_ids().await;
                             node_ids.sort();
                             node_ids.dedup();
                             for node_id in node_ids {
                                 tokio::task::consume_budget().await;
-                                if node_id == runtime_event_service.consensus.local_node_id().clone() {
+                                if node_id == runtime_event_service.inner.consensus.local_node_id().clone() {
                                     continue;
                                 }
                                 if let Err(error) = runtime_event_service
@@ -18515,7 +18778,7 @@ impl Application {
         let domain_service = service.clone();
         let domain_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
-            let mut domains_rx = domain_service.consensus.subscribe_domains();
+            let mut domains_rx = domain_service.inner.consensus.subscribe_domains();
             let mut tasks: HashMap<DomainName, BackgroundTask> = HashMap::new();
             if let Err(error) = domain_service.apply_current_cluster_state().await {
                 warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
@@ -18524,7 +18787,7 @@ impl Application {
             loop {
                 tokio::task::consume_budget().await;
                 reconcile_domain_clock_tasks(&domain_service, &domain_shutdown, &mut tasks).await;
-                let domain_clock_event = domain_service.domain_clock_events.notified();
+                let domain_clock_event = domain_service.inner.domain_clock_events.notified();
                 tokio::select! {
                     _ = domain_shutdown.cancelled() => break,
                     changed = domains_rx.changed() => {
@@ -18547,7 +18810,7 @@ impl Application {
         let kafka_schedule_service = service.clone();
         let kafka_schedule_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
-            let mut schedule_rx = kafka_schedule_service.consensus.subscribe_schedule();
+            let mut schedule_rx = kafka_schedule_service.inner.consensus.subscribe_schedule();
             let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> =
                 HashMap::new();
 
@@ -18644,7 +18907,7 @@ impl Application {
                                 ) {
                                     Ok(placement) => {
                                         service_for_interconnect
-                                            .runtime
+                                            .inner.runtime
                                             .handle_state_sync_request(
                                                 &placement,
                                                 request.after_lsm,
@@ -18675,7 +18938,7 @@ impl Application {
                                 }
                             }
                             Envelope::Control(ControlEnvelope::StateSyncResponse(response)) => {
-                                service_for_interconnect.runtime.handle_state_sync_response(
+                                service_for_interconnect.inner.runtime.handle_state_sync_response(
                                     response.correlation_id,
                                     response.result.map(|snapshot| {
                                         snapshot.map(|snapshot| crate::runtime::PersistedRuntimeStateEntry {
@@ -18696,7 +18959,7 @@ impl Application {
                                         continue;
                                     }
                                 };
-                                service_for_interconnect.runtime.handle_state_replication_ack(
+                                service_for_interconnect.inner.runtime.handle_state_replication_ack(
                                     &message.peer_node_id,
                                     crate::runtime::StateSyncAck {
                                         placement,
@@ -18729,7 +18992,7 @@ impl Application {
                             Envelope::Control(ControlEnvelope::DescribeIngestorRequest(request)) => {
                                 let request_service = service_for_interconnect.clone();
                                 let peer_node_id = message.peer_node_id.clone();
-                                service_for_interconnect.service_tasks.spawn(async move {
+                                service_for_interconnect.inner.service_tasks.spawn(async move {
                                     let result = request_service
                                         .handle_describe_ingestor_request(request.clone())
                                         .await;
@@ -18781,7 +19044,7 @@ impl Application {
                                     .map_err(|error| error.to_string())
                                     .map(|()| {
                                         service_for_interconnect
-                                            .runtime
+                                            .inner.runtime
                                             .force_flush_domain_if_idle(&request.domain);
                                         service_for_interconnect
                                             .local_domain_drain_status(&request.domain)
@@ -18806,7 +19069,7 @@ impl Application {
                             }
                             Envelope::Control(ControlEnvelope::EntityGateRequest(request)) => {
                                 let result = service_for_interconnect
-                                    .runtime
+                                    .inner.runtime
                                     .engage_entity_gate_operation(
                                         request.operation_id,
                                         &request.domain,
@@ -18850,7 +19113,7 @@ impl Application {
                                     || status.outstanding_acks != 0
                                 {
                                     service_for_interconnect
-                                        .runtime
+                                        .inner.runtime
                                         .force_flush_domain_if_idle(&request.domain);
                                 }
                                 let result: Result<EntityDrainStatusEnvelope, String> = Ok(status);
@@ -18874,7 +19137,7 @@ impl Application {
                             }
                             Envelope::Control(ControlEnvelope::EntityGateReleaseRequest(request)) => {
                                 let result = service_for_interconnect
-                                    .runtime
+                                    .inner.runtime
                                     .release_entity_gate_operation(
                                         request.operation_id,
                                         &request.domain,
@@ -18970,7 +19233,7 @@ impl Application {
                                 ControlEnvelope::SubscriptionInterestVisibilityRequest(request),
                             ) => {
                                 let visible = service_for_interconnect
-                                    .cluster
+                                    .inner.cluster
                                     .nodes_with_subscription_interest(
                                         request.domain.as_str(),
                                         request.relay.as_str(),
@@ -19062,7 +19325,7 @@ impl Application {
             info!(addr = %addr, "nervix web console TLS server listening");
         }
 
-        let cluster_api_resource_store = service.resource_store.clone();
+        let cluster_api_resource_store = service.inner.resource_store.clone();
         let grpc_service = service.clone();
         let grpc_shutdown = shutdown.clone();
         let api_server = async move {
@@ -19115,20 +19378,20 @@ impl Application {
         };
         let http_server = serve_http(
             runtime.clone(),
-            service.service_tasks.clone(),
+            service.inner.service_tasks.clone(),
             http_listener,
             shutdown.clone(),
         );
         let https_server = serve_https(
             runtime.clone(),
-            service.service_tasks.clone(),
-            service.http_tls_server_config.clone(),
+            service.inner.service_tasks.clone(),
+            service.inner.http_tls_server_config.clone(),
             https_listener,
             shutdown.clone(),
         );
         let observability_server = serve_observability_http(
             consensus.clone(),
-            runtime.as_ref().clone(),
+            runtime.clone(),
             observability_listener,
             shutdown.clone(),
         );
@@ -19196,8 +19459,8 @@ impl Application {
         for task in background_tasks {
             await_background_task_shutdown(task, "application background task").await;
         }
-        service.service_tasks.close();
-        service.service_tasks.wait().await;
+        service.inner.service_tasks.close();
+        service.inner.service_tasks.wait().await;
         runtime.shutdown().await;
         consensus.shutdown().await;
         let cluster_shutdown_result = cluster
@@ -19559,7 +19822,56 @@ mod tests {
             .expect("test node names satisfy the name grammar")
     }
 
-    async fn test_interconnect(node_id: &ClusterNodeName) -> Arc<Transport> {
+    /// Builds the service the way `run` does, with test defaults for everything the caller does
+    /// not supply. Every scenario in this module needs the same shape, so they share one builder
+    /// rather than repeating the field list.
+    fn test_session_service(
+        cluster: Arc<cluster::ClusterHandle>,
+        consensus: Arc<ConsensusHandle>,
+        registry: Arc<Registry>,
+        resource_store: Arc<ResourceStore>,
+        interconnect: Transport,
+    ) -> SessionServiceImpl {
+        SessionServiceImpl {
+            inner: Arc::new(SessionServiceInner {
+                cluster,
+                consensus,
+                registry,
+                resource_store,
+                cluster_api_clients: Arc::new(
+                    ClusterApiClients::build().expect("test cluster api clients should build"),
+                ),
+                http_tls_server_config: Arc::new(RwLock::new(None)),
+                runtime: Runtime::new(),
+                replica_count: 0,
+                #[cfg(feature = "testing")]
+                scheduler_mode: SchedulerMode::Sticky,
+                shutdown: CancellationToken::new(),
+                events: broadcast::channel(16).0,
+                subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
+                interconnect,
+                domain_clocks: DashMap::with_hasher(RandomState::new()),
+                domain_clock_reconciliations: DashMap::with_hasher(RandomState::new()),
+                domain_clock_events: Notify::new(),
+                next_cluster_command_correlation_id: AtomicU64::new(1),
+                pending_cluster_commands: DashMap::default(),
+                service_tasks: TaskTracker::new(),
+                configured_basic_auth: None,
+                auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
+                failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
+                transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+                transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
+                transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
+                transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
+                transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
+                transaction_bindings: DashMap::with_hasher(RandomState::new()),
+                transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+                transaction_commit_execution: AsyncMutex::new(()),
+            }),
+        }
+    }
+
+    async fn test_interconnect(node_id: &ClusterNodeName) -> Transport {
         ensure_dev_tls_assets();
         let tls = TlsConfigBundle::from_pem_files(
             "tls/dev/ca.pem",
@@ -19582,7 +19894,7 @@ mod tests {
         )
         .await
         .expect("test transport should bind");
-        Arc::new(transport)
+        transport
     }
 
     fn schema_with_fields(fields: Vec<SchemaField>) -> CreateSchema {
@@ -19742,43 +20054,15 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
+        let service = test_session_service(
             cluster,
             consensus,
-            registry: registry.clone(),
-            resource_store: Arc::new(
+            registry.clone(),
+            Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
             ),
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
+        );
         TestService {
             service,
             registry,
@@ -19796,6 +20080,7 @@ mod tests {
         let domain = DomainName::parse("default").expect("valid domain");
         let operation_id = 41;
         service
+            .inner
             .runtime
             .engage_entity_gate_operation(
                 operation_id,
@@ -19812,16 +20097,18 @@ mod tests {
             .expect("local gate hold should engage");
         assert!(
             service
+                .inner
                 .runtime
                 .entity_gate_operation_is_held(operation_id, &domain)
         );
 
         let mut gate = ClusterEntityGate::new(&service, operation_id, &domain);
-        gate.record_attempt(service.consensus.local_node_id().clone());
+        gate.record_attempt(service.inner.consensus.local_node_id().clone());
         drop(gate);
 
         tokio::time::timeout(Duration::from_secs(2), async {
             while service
+                .inner
                 .runtime
                 .entity_gate_operation_is_held(operation_id, &domain)
             {
@@ -19832,9 +20119,9 @@ mod tests {
         .await
         .expect("dropped coordinator guard should release its local durable hold");
 
-        service.shutdown.cancel();
-        service.service_tasks.close();
-        service.service_tasks.wait().await;
+        service.inner.shutdown.cancel();
+        service.inner.service_tasks.close();
+        service.inner.service_tasks.wait().await;
         let _ = std::fs::remove_dir_all(path);
     }
 
@@ -21445,7 +21732,7 @@ mod tests {
                 sensitivity: nervix_vm::SchemaSensitivity::default(),
                 delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
                 batch_sample_rate: None,
-                runtime: Arc::new(Runtime::default()),
+                runtime: Runtime::default(),
                 materialized_stream_owner_nodes: HashMap::default(),
                 receiver: events_rx,
                 tx,
@@ -21487,7 +21774,7 @@ mod tests {
                 sensitivity: nervix_vm::SchemaSensitivity::default(),
                 delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
                 batch_sample_rate: None,
-                runtime: Arc::new(Runtime::default()),
+                runtime: Runtime::default(),
                 materialized_stream_owner_nodes: HashMap::default(),
                 receiver: events.new_receiver(),
                 tx,
@@ -21573,7 +21860,7 @@ mod tests {
             path,
         } = build_test_service(true).await;
         let default = DomainName::parse("default").expect("valid domain");
-        create_test_domain(&service.consensus, "other").await;
+        create_test_domain(&service.inner.consensus, "other").await;
         let other = DomainName::parse("other").expect("valid domain");
 
         let first = service
@@ -21729,7 +22016,7 @@ mod tests {
             registry,
             path,
         } = build_test_service(false).await;
-        create_test_domain(&service.consensus, "prod").await;
+        create_test_domain(&service.inner.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21929,7 +22216,7 @@ mod tests {
             registry,
             path,
         } = build_test_service(false).await;
-        create_test_domain(&service.consensus, "prod").await;
+        create_test_domain(&service.inner.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21965,6 +22252,7 @@ mod tests {
             "queue preflight failure must not execute the admitted prefix"
         );
         let transaction = service
+            .inner
             .consensus
             .current_transaction(
                 subscriptions
@@ -22030,6 +22318,7 @@ mod tests {
 
         assert!(
             service
+                .inner
                 .consensus
                 .current_domain(&DomainName::parse("alpha").expect("valid domain"))
                 .await
@@ -22090,7 +22379,7 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        create_test_domain(&service.consensus, "other").await;
+        create_test_domain(&service.inner.consensus, "other").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -22130,6 +22419,7 @@ mod tests {
             foreign.message
         );
         let transaction = service
+            .inner
             .consensus
             .current_transaction(
                 subscriptions
@@ -22151,7 +22441,7 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(false).await;
-        create_test_domain(&service.consensus, "attach_results").await;
+        create_test_domain(&service.inner.consensus, "attach_results").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut owner = SessionSubscriptions::new();
 
@@ -22209,7 +22499,7 @@ mod tests {
             registry,
             path,
         } = build_test_service(false).await;
-        create_test_domain(&service.consensus, "prod").await;
+        create_test_domain(&service.inner.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -22616,7 +22906,7 @@ mod tests {
 
         // A leadership change leaves the replicated transaction intact while the leader-local
         // binding is gone, which is what the session observes until it attaches again.
-        service.transaction_bindings.remove(&transaction_id);
+        service.inner.transaction_bindings.remove(&transaction_id);
 
         let detached =
             suggestion_values(&service, &subscriptions, "CREATE RELAY orders SCHEMA ").await;
@@ -22880,43 +23170,15 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
+        let service = test_session_service(
             cluster,
             consensus,
-            registry: registry.clone(),
-            resource_store: Arc::new(
+            registry.clone(),
+            Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
             ),
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
+        );
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let commands = [
@@ -23078,43 +23340,15 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
+        let service = test_session_service(
             cluster,
             consensus,
-            registry: registry.clone(),
-            resource_store: Arc::new(
+            registry.clone(),
+            Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
             ),
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
+        );
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
@@ -23270,43 +23504,15 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
+        let service = test_session_service(
             cluster,
             consensus,
-            registry: registry.clone(),
-            resource_store: Arc::new(
+            registry.clone(),
+            Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
             ),
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
+        );
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
@@ -23547,41 +23753,8 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
-            cluster,
-            consensus,
-            registry,
-            resource_store,
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
-            interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
+        let service =
+            test_session_service(cluster, consensus, registry, resource_store, interconnect);
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 

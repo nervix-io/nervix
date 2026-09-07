@@ -58,7 +58,10 @@ impl MongoDbEmitter {
         ) {
             Ok(program) => Some(program),
             Err(error) => {
-                let _ = context.events.send(RuntimeEvent::Error(error.to_string()));
+                let _ = context
+                    .runtime
+                    .events()
+                    .send(RuntimeEvent::Error(error.to_string()));
                 warn!(
                     domain = context.domain.as_str(),
                     emitter = context.emitter.as_str(),

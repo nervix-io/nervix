@@ -36,10 +36,7 @@ use nervix_server::SchedulerMode;
 use nervix_server::{
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
-    runtime::{
-        DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks,
-        SchedulePublicationFaultInjector,
-    },
+    runtime::{DEFAULT_TEMP_DIR, RuntimeTestHooks},
 };
 use parking_lot::Mutex;
 use proto::{
@@ -1801,14 +1798,14 @@ impl Drop for Cluster {
     }
 }
 
+/// One node in a test cluster. The fault injectors are reached through `runtime_test_hooks`
+/// rather than copied in beside it, so arming a fault and the node that observes it can never
+/// drift apart.
 #[derive(Debug)]
 struct NodeHandle {
     spec: NodeSpec,
     runtime_test_hooks: RuntimeTestHooks,
     config: TestClusterConfig,
-    emitter_faults: Arc<EmitterFaultInjector>,
-    ingestor_faults: Arc<IngestorFaultInjector>,
-    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     failure: Arc<Mutex<Option<String>>>,
     task: Option<JoinHandle<()>>,
     shutdown: Option<CancellationToken>,
@@ -1820,16 +1817,10 @@ impl NodeHandle {
         runtime_test_hooks: RuntimeTestHooks,
         config: TestClusterConfig,
     ) -> Self {
-        let emitter_faults = runtime_test_hooks.emitter_faults.clone();
-        let ingestor_faults = runtime_test_hooks.ingestor_faults.clone();
-        let schedule_publication_faults = runtime_test_hooks.schedule_publication_faults.clone();
         Self {
             spec,
             runtime_test_hooks,
             config,
-            emitter_faults,
-            ingestor_faults,
-            schedule_publication_faults,
             failure: Arc::new(Mutex::new(None)),
             task: None,
             shutdown: None,
@@ -2023,27 +2014,36 @@ impl NodeHandle {
     }
 
     fn fail_emitter(&self, emitter: &str) {
-        self.emitter_faults.fail_emitter(emitter);
+        self.runtime_test_hooks.emitter_faults.fail_emitter(emitter);
     }
 
     fn stall_emitter(&self, emitter: &str) {
-        self.emitter_faults.stall_emitter(emitter);
+        self.runtime_test_hooks
+            .emitter_faults
+            .stall_emitter(emitter);
     }
 
     fn clear_emitter_fault(&self, emitter: &str) {
-        self.emitter_faults.clear_emitter(emitter);
+        self.runtime_test_hooks
+            .emitter_faults
+            .clear_emitter(emitter);
     }
 
     fn fail_ingestor(&self, ingestor: &str) {
-        self.ingestor_faults.fail_ingestor(ingestor);
+        self.runtime_test_hooks
+            .ingestor_faults
+            .fail_ingestor(ingestor);
     }
 
     fn clear_ingestor_fault(&self, ingestor: &str) {
-        self.ingestor_faults.clear_ingestor(ingestor);
+        self.runtime_test_hooks
+            .ingestor_faults
+            .clear_ingestor(ingestor);
     }
 
     fn fail_next_schedule_publication(&self, domain: &str) {
-        self.schedule_publication_faults
+        self.runtime_test_hooks
+            .schedule_publication_faults
             .fail_next_publication(domain);
     }
 }
